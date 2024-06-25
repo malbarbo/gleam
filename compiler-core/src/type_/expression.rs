@@ -77,6 +77,7 @@ impl FunctionDefinition {
         match target {
             Target::Erlang => self.has_erlang_external,
             Target::JavaScript => self.has_javascript_external,
+            Target::Wasm => todo!(),
         }
     }
 }
@@ -148,6 +149,7 @@ impl Implementations {
             || match target {
                 Target::Erlang => self.can_run_on_erlang,
                 Target::JavaScript => self.can_run_on_javascript,
+                Target::Wasm => todo!(),
             }
     }
 }

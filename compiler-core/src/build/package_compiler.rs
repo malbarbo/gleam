@@ -306,6 +306,7 @@ where
             TargetCodegenConfiguration::Erlang { app_file } => {
                 self.perform_erlang_codegen(modules, app_file.as_ref())
             }
+            TargetCodegenConfiguration::Wasm => self.perform_wasm_codegen(modules),
         }
     }
 
@@ -379,6 +380,10 @@ where
         }
 
         Ok(())
+    }
+
+    fn perform_wasm_codegen(&mut self, modules: &[Module]) -> Result<(), Error> {
+        todo!();
     }
 
     fn render_erlang_entrypoint_module(

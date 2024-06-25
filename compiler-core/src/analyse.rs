@@ -1228,6 +1228,7 @@ fn target_function_implementation<'a>(
     match target {
         Target::Erlang => external_erlang,
         Target::JavaScript => external_javascript,
+        Target::Wasm => todo!(),
     }
 }
 

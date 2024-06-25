@@ -60,6 +60,9 @@ pub enum Target {
     #[strum(serialize = "javascript", serialize = "js")]
     #[serde(rename = "javascript", alias = "js")]
     JavaScript,
+    #[strum(serialize = "wasm")]
+    #[serde(rename = "wasm")]
+    Wasm,
 }
 
 impl Target {
@@ -131,6 +134,7 @@ pub enum TargetCodegenConfiguration {
     Erlang {
         app_file: Option<ErlangAppCodegenConfiguration>,
     },
+    Wasm,
 }
 
 impl TargetCodegenConfiguration {
@@ -138,6 +142,7 @@ impl TargetCodegenConfiguration {
         match self {
             Self::JavaScript { .. } => Target::JavaScript,
             Self::Erlang { .. } => Target::Erlang,
+            Self::Wasm => Target::Wasm,
         }
     }
 }
