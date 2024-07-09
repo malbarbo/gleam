@@ -1,0 +1,111 @@
+# MAIN COMPILATION PATH
+
+build/project_compiler.rs:      ProjectCompiler::new,
+                                ProjectCompiler::compile ->
+                                ProjectCompiler::compile_root_package ->
+                                ProjectCompiler::compile_gleam_package ->
+build/package_compiler.rs:      PackageCompiler::new,
+                                PackageCompiler::compile ->
+                                analyse,
+                                PackageCompiler::perform_codegen
+
+# STEP-BY-STEP
+
+0. CLI stuff
+    build options are parsed into a struct and packages are fetched
+    (build::download_dependencies); everything is passed to build:main
+
+        - a ProjectPaths is built for the current project (containing cwd)
+        - dependencies::download is called with project path
+        - a manifest is generated from local and remote packages are downloaded
+          from Hex (manifests are a set of requirements and a list of packages)
+        - packages contain their names, versions
+    
+    build::main takes the package manifest and build options and:
+        1. constructs a ProjectIO to save files onto
+        2. compiles all packages by constructing a ProjectCompiler
+           with the package's toml; build options; depended packages; paths and io;
+           calls ::compile().
+
+1. ProjectCompiler::new
+    maps the list of ManifestPackage into (name, manifestpackage) pairs.
+    generates empty:
+        importable_modules, defined_modules, stale_modules, incomplete_modules, ids.
+
+2. ProjectCompiler::compile
+    cleans up residual state;
+    writes JS prelude module to mjs file so it can be linked afterwards (if needed);
+        prelude is just copied from another file (it's already prepared)
+    compiles dependencies (we're skipping analysing this for now)
+    compiles root package (::compile_root_package)
+        wraps up the result in a Package
+    returns result.
+
+        NOTE!! the result of compiling a package is a Vec<Module>.
+        (a Package is a vec of modules + configurations)
+            NOTE: erlang entrypoint name stored here
+        a Module is a buncha stuff:
+            name, gleam src code, ast, dependencies, ...
+        an Ast is a TypedModule, which is an alias of ast::Module, which has:
+            a name, docs, typing information and a vec of definitions (stmts)
+
+            TODO: fill this out
+
+3. ProjectCompiler::compile_gleam_package
+    generates build dir for package (out_path) and build dir for target (lib_path)
+    constructs codegen settings
+        ex: for erlang, overrides all package names to their otp package name
+        ex: for js, sets up some constants and options from earlier for codegen
+    instantiates and configures a PackageCompiler::new
+
+4. PackageCompiler::compile
+    ** skipping some details from cached modules **
+    NOW'S THE MEAT OF THE THING!
+
+    1. a PackageLoader is created with lots of data
+    2. PackageLoader::run() loads and *parses* modules into memory
+        - loads sources and caches, invalidating old caches
+        - adds any non-compiled modules to a list (UncompiledModule)
+            UncompiledModules are like Module, except they're... uncompiled
+        PARSING is done via ModuleLoader (and further by module_loader::read_source)
+    3. any parsed, non-compiled modules are then compiled.
+        - semantic analysis done with analyse() (includes typechecking and targeting)
+        - then, code is generated via perform_codegen
+        - then, they're cached via encode_and_write_metadata
+
+5. analyse 
+    ** skipping type-checking details, (note that target is given to the typechecker) **
+        target is given to an Environment struct (contains declared names etc)
+    annotates the ast with types; turns UncompiledModules into Modules
+
+6. PackageCompiler::perform_codegen
+    jumps to function which does the actual codegen
+
+7.
+    perform_erlang_codegen:
+        Erlang::new (build dir, include dir) .render (io, modules)
+        just writes it all.
+        erlang code proper is emitted and beautified
+    perform_javascript_codegen:
+        JavaScript::new(output, is_ts, prelude, enforce target support).render(io, modules)
+        javascript code is emitted and beautified
+
+PLANS:
+    WASM BACKEND:
+    - create new codegen function for WASM
+    - modify analyse so WASM info can be propagated
+    - propagate WASM options upwards the call stack as well
+    FILE COMPILER:
+    - PackageCompiler needs to be split into a PackageCompiler and a ModuleCompiler
+    - PackageCompiler would depend on ModuleCompiler
+    - ModuleCompiler would still need global type info and etc
+    - may be easier to just create a new Package with a single module
+
+SIZE OF TASK:
+    renderers:
+        erlang: ~2.2k lines
+        js: ~766 lines
+    expression and etc:
+        1568 lines
+    
+    maybe maybe maybe 5k lines total to write wasm?
