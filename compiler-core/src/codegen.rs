@@ -247,3 +247,23 @@ impl<'a> JavaScript<'a> {
         writer.write(&path, &output?)
     }
 }
+
+#[derive(Debug)]
+pub struct Wasm;
+
+impl Wasm {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn render(&self, writer: &impl FileSystemWriter, modules: &[Module]) -> Result<()> {
+        for module in modules {
+            self.wasm_module(writer, module)?
+        }
+        Ok(())
+    }
+
+    fn wasm_module(&self, writer: &impl FileSystemWriter, module: &Module) -> Result<()> {
+        todo!()
+    }
+}

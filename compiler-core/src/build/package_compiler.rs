@@ -1,4 +1,5 @@
 use crate::analyse::{ModuleAnalyzerConstructor, TargetSupport};
+use crate::codegen::Wasm;
 use crate::line_numbers::{self, LineNumbers};
 use crate::type_::PRELUDE_MODULE_NAME;
 use crate::{
@@ -383,7 +384,8 @@ where
     }
 
     fn perform_wasm_codegen(&mut self, modules: &[Module]) -> Result<(), Error> {
-        todo!();
+        Wasm::new().render(&self.io, modules)?;
+        Ok(())
     }
 
     fn render_erlang_entrypoint_module(
