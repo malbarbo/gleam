@@ -178,7 +178,7 @@ pub mod property { /* Value */
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 0, pointers: 2 };
-    pub const TYPE_ID: u64 = 0xc89a_765d_c97e_1d6a;
+    pub const TYPE_ID: u64 = 0x9386_274d_f712_47d4;
   }
 }
 
@@ -365,7 +365,7 @@ pub mod option { /* Value */
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 1 };
-    pub const TYPE_ID: u64 = 0xeedd_8aba_d955_cbfd;
+    pub const TYPE_ID: u64 = 0xdeb1_536b_a49a_681e;
   }
   pub enum Which<A0> {
     None(()),
@@ -727,7 +727,7 @@ pub mod module {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 9 };
-    pub const TYPE_ID: u64 = 0x9a52_9544_50db_0581;
+    pub const TYPE_ID: u64 = 0x9757_4165_823f_a789;
   }
 }
 
@@ -888,7 +888,7 @@ pub mod types_variant_constructors {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 0, pointers: 2 };
-    pub const TYPE_ID: u64 = 0xc7bb_8449_be19_75f2;
+    pub const TYPE_ID: u64 = 0xdb78_9d3e_3a5d_7c3b;
   }
 }
 
@@ -1049,7 +1049,7 @@ pub mod type_value_constructor {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 0, pointers: 2 };
-    pub const TYPE_ID: u64 = 0xe806_f2e0_ad63_55db;
+    pub const TYPE_ID: u64 = 0xa197_7a7d_f9e7_c8b2;
   }
 }
 
@@ -1189,7 +1189,7 @@ pub mod type_value_constructor_parameter {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 0, pointers: 1 };
-    pub const TYPE_ID: u64 = 0xa195_30b0_13c1_53ea;
+    pub const TYPE_ID: u64 = 0xd678_96d2_8834_3a5f;
   }
 }
 
@@ -1464,7 +1464,7 @@ pub mod type_constructor {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 6 };
-    pub const TYPE_ID: u64 = 0xb1fb_6d62_e00b_6d7a;
+    pub const TYPE_ID: u64 = 0xdf07_a599_63c7_8da3;
   }
 }
 
@@ -1628,7 +1628,7 @@ pub mod accessors_map {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 0, pointers: 2 };
-    pub const TYPE_ID: u64 = 0x8423_3b98_8d44_678f;
+    pub const TYPE_ID: u64 = 0xe006_4836_8cca_cbd5;
   }
 }
 
@@ -1804,7 +1804,7 @@ pub mod record_accessor {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 2 };
-    pub const TYPE_ID: u64 = 0xae5a_01ad_db56_c89e;
+    pub const TYPE_ID: u64 = 0xc90c_2cd0_8993_e27c;
   }
 }
 
@@ -1999,7 +1999,7 @@ pub mod type_ {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 2, pointers: 4 };
-    pub const TYPE_ID: u64 = 0x82f6_802e_4097_0700;
+    pub const TYPE_ID: u64 = 0x9a0c_8c1d_b423_3fe5;
   }
   pub enum Which<A0,A1,A2,A3> {
     App(A0),
@@ -2215,7 +2215,7 @@ pub mod type_ {
     mod _private {
       use capnp::private::layout;
       pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 2, pointers: 4 };
-      pub const TYPE_ID: u64 = 0xd41c_0e5a_6b35_9470;
+      pub const TYPE_ID: u64 = 0xe66d_ba2d_4200_3b29;
     }
   }
 
@@ -2379,7 +2379,7 @@ pub mod type_ {
     mod _private {
       use capnp::private::layout;
       pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 2, pointers: 4 };
-      pub const TYPE_ID: u64 = 0x82f2_798c_7760_b76b;
+      pub const TYPE_ID: u64 = 0xd003_e82d_23bf_1c67;
     }
   }
 
@@ -2504,7 +2504,7 @@ pub mod type_ {
     mod _private {
       use capnp::private::layout;
       pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 2, pointers: 4 };
-      pub const TYPE_ID: u64 = 0xccda_0e73_1fe2_8436;
+      pub const TYPE_ID: u64 = 0xcf4d_fb68_d990_5f09;
     }
   }
 
@@ -2641,7 +2641,7 @@ pub mod type_ {
     mod _private {
       use capnp::private::layout;
       pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 2, pointers: 4 };
-      pub const TYPE_ID: u64 = 0x8c17_e20c_8015_d83d;
+      pub const TYPE_ID: u64 = 0x969b_8a32_0f2e_175d;
     }
   }
 }
@@ -2845,7 +2845,7 @@ pub mod value_constructor {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 3 };
-    pub const TYPE_ID: u64 = 0xd4c6_d8f1_a8fb_051c;
+    pub const TYPE_ID: u64 = 0xb3bf_bc09_4a55_5d38;
   }
 }
 
@@ -2873,7 +2873,7 @@ impl ::capnp::traits::ToU16 for Publicity {
 }
 impl ::capnp::traits::HasTypeId for Publicity {
   #[inline]
-  fn type_id() -> u64 { 0xc549_d3c8_21e9_1c66u64 }
+  fn type_id() -> u64 { 0xbe80_81c0_db68_b427u64 }
 }
 
 pub mod implementations {
@@ -2935,12 +2935,20 @@ pub mod implementations {
       self.reader.get_bool_field(2)
     }
     #[inline]
-    pub fn get_can_run_on_erlang(self) -> bool {
+    pub fn get_uses_wasm_externals(self) -> bool {
       self.reader.get_bool_field(3)
     }
     #[inline]
-    pub fn get_can_run_on_javascript(self) -> bool {
+    pub fn get_can_run_on_erlang(self) -> bool {
       self.reader.get_bool_field(4)
+    }
+    #[inline]
+    pub fn get_can_run_on_javascript(self) -> bool {
+      self.reader.get_bool_field(5)
+    }
+    #[inline]
+    pub fn get_can_run_on_wasm(self) -> bool {
+      self.reader.get_bool_field(6)
     }
   }
 
@@ -3017,20 +3025,36 @@ pub mod implementations {
       self.builder.set_bool_field(2, value);
     }
     #[inline]
-    pub fn get_can_run_on_erlang(self) -> bool {
+    pub fn get_uses_wasm_externals(self) -> bool {
       self.builder.get_bool_field(3)
     }
     #[inline]
-    pub fn set_can_run_on_erlang(&mut self, value: bool)  {
+    pub fn set_uses_wasm_externals(&mut self, value: bool)  {
       self.builder.set_bool_field(3, value);
     }
     #[inline]
-    pub fn get_can_run_on_javascript(self) -> bool {
+    pub fn get_can_run_on_erlang(self) -> bool {
       self.builder.get_bool_field(4)
     }
     #[inline]
-    pub fn set_can_run_on_javascript(&mut self, value: bool)  {
+    pub fn set_can_run_on_erlang(&mut self, value: bool)  {
       self.builder.set_bool_field(4, value);
+    }
+    #[inline]
+    pub fn get_can_run_on_javascript(self) -> bool {
+      self.builder.get_bool_field(5)
+    }
+    #[inline]
+    pub fn set_can_run_on_javascript(&mut self, value: bool)  {
+      self.builder.set_bool_field(5, value);
+    }
+    #[inline]
+    pub fn get_can_run_on_wasm(self) -> bool {
+      self.builder.get_bool_field(6)
+    }
+    #[inline]
+    pub fn set_can_run_on_wasm(&mut self, value: bool)  {
+      self.builder.set_bool_field(6, value);
     }
   }
 
@@ -3045,7 +3069,7 @@ pub mod implementations {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 0 };
-    pub const TYPE_ID: u64 = 0x9b1d_9ffc_763a_a0df;
+    pub const TYPE_ID: u64 = 0xc88a_5127_ce94_c603;
   }
 }
 
@@ -3237,7 +3261,7 @@ pub mod value_constructor_variant {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 6 };
-    pub const TYPE_ID: u64 = 0xe14c_79e9_2bd0_a81a;
+    pub const TYPE_ID: u64 = 0xed0d_74f7_0f2f_d70a;
   }
   pub enum Which<A0,A1,A2> {
     ModuleConstant(A0),
@@ -3485,7 +3509,7 @@ pub mod value_constructor_variant {
     mod _private {
       use capnp::private::layout;
       pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 6 };
-      pub const TYPE_ID: u64 = 0x9579_9d69_8196_fbd0;
+      pub const TYPE_ID: u64 = 0x8c32_dc79_e2fe_b78a;
     }
   }
 
@@ -3763,7 +3787,7 @@ pub mod value_constructor_variant {
     mod _private {
       use capnp::private::layout;
       pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 6 };
-      pub const TYPE_ID: u64 = 0xaea6_15c5_9871_3779;
+      pub const TYPE_ID: u64 = 0x9c58_aab2_bec2_8d10;
     }
   }
 
@@ -4038,7 +4062,7 @@ pub mod value_constructor_variant {
     mod _private {
       use capnp::private::layout;
       pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 6 };
-      pub const TYPE_ID: u64 = 0xf00b_1526_e923_3dd5;
+      pub const TYPE_ID: u64 = 0xe174_3beb_b841_b0f9;
     }
   }
 }
@@ -4176,7 +4200,7 @@ pub mod src_span {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 0 };
-    pub const TYPE_ID: u64 = 0xe63b_9348_5377_7ab0;
+    pub const TYPE_ID: u64 = 0xa96e_407a_cc90_b1db;
   }
 }
 
@@ -4301,7 +4325,7 @@ pub mod boxed_u_int16 {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 0 };
-    pub const TYPE_ID: u64 = 0xbf79_4a73_70d5_bcce;
+    pub const TYPE_ID: u64 = 0xa1e1_55ad_3abf_24e5;
   }
 }
 
@@ -4426,7 +4450,7 @@ pub mod boxed_u_int32 {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 0 };
-    pub const TYPE_ID: u64 = 0x882d_57d2_f133_7de5;
+    pub const TYPE_ID: u64 = 0xb5c2_eaa2_90d6_b207;
   }
 }
 
@@ -4575,7 +4599,7 @@ pub mod field_map {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 1 };
-    pub const TYPE_ID: u64 = 0xd7a6_f318_fa0c_eb45;
+    pub const TYPE_ID: u64 = 0x8432_d880_6d18_a987;
   }
 }
 
@@ -4906,7 +4930,7 @@ pub mod constant {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 4 };
-    pub const TYPE_ID: u64 = 0xe6ea_dc6f_e66d_526a;
+    pub const TYPE_ID: u64 = 0x9d4e_7fa7_9c5c_e963;
   }
   pub enum Which<A0,A1,A2,A3,A4,A5,A6,A7> {
     Int(A0),
@@ -5081,7 +5105,7 @@ pub mod constant {
     mod _private {
       use capnp::private::layout;
       pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 4 };
-      pub const TYPE_ID: u64 = 0xe8fe_3c65_95aa_1abb;
+      pub const TYPE_ID: u64 = 0xc81f_256e_4866_019e;
     }
   }
 
@@ -5269,7 +5293,7 @@ pub mod constant {
     mod _private {
       use capnp::private::layout;
       pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 4 };
-      pub const TYPE_ID: u64 = 0xe6b5_727b_a6fc_9f1c;
+      pub const TYPE_ID: u64 = 0xc749_8215_b9ee_1dd3;
     }
   }
 
@@ -5484,7 +5508,7 @@ pub mod constant {
     mod _private {
       use capnp::private::layout;
       pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 4 };
-      pub const TYPE_ID: u64 = 0xcb0a_e954_2cff_02a7;
+      pub const TYPE_ID: u64 = 0xacd0_88b2_c0fd_999f;
     }
   }
 }
@@ -5676,7 +5700,7 @@ pub mod bit_array_segment {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 0, pointers: 3 };
-    pub const TYPE_ID: u64 = 0xc541_c7f6_d9b6_2ab5;
+    pub const TYPE_ID: u64 = 0xe41b_ca28_baf6_d53a;
   }
 }
 
@@ -6047,7 +6071,7 @@ pub mod bit_array_segment_option {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 1 };
-    pub const TYPE_ID: u64 = 0xb0f5_1f3f_5295_0454;
+    pub const TYPE_ID: u64 = 0xa90e_037d_81b0_7b83;
   }
   pub enum Which<A0,A1> {
     Bytes(()),
@@ -6219,7 +6243,7 @@ pub mod bit_array_segment_option {
     mod _private {
       use capnp::private::layout;
       pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 1 };
-      pub const TYPE_ID: u64 = 0x9202_da8f_e347_b814;
+      pub const TYPE_ID: u64 = 0xd099_7a2a_afe0_556c;
     }
   }
 
@@ -6356,7 +6380,7 @@ pub mod bit_array_segment_option {
     mod _private {
       use capnp::private::layout;
       pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 1 };
-      pub const TYPE_ID: u64 = 0xcf7d_fddd_a3be_0c5e;
+      pub const TYPE_ID: u64 = 0x9d11_388f_da68_a0a5;
     }
   }
 }
@@ -6506,6 +6530,6 @@ pub mod line_numbers {
   mod _private {
     use capnp::private::layout;
     pub const STRUCT_SIZE: layout::StructSize = layout::StructSize { data: 1, pointers: 1 };
-    pub const TYPE_ID: u64 = 0xebf6_0b4e_3e31_2165;
+    pub const TYPE_ID: u64 = 0x819d_ae6b_bfbc_1fd0;
   }
 }

@@ -351,6 +351,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             has_body: true,
             has_erlang_external: false,
             has_javascript_external: false,
+            has_wasm_external: false,
         };
         let mut expr_typer = ExprTyper::new(environment, definition, &mut self.errors);
         let typed_expr = expr_typer.infer_const(&annotation, *value);
@@ -416,6 +417,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             deprecation,
             external_erlang,
             external_javascript,
+            external_wasm,
             return_type: (),
             implementations: _,
         } = f;
@@ -435,8 +437,12 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
         self.assert_valid_javascript_external(&name, external_javascript.as_ref(), location);
 
         // Find the external implementation for the current target, if one has been given.
-        let external =
-            target_function_implementation(target, &external_erlang, &external_javascript);
+        let external = target_function_implementation(
+            target,
+            &external_erlang,
+            &external_javascript,
+            &external_wasm,
+        );
         let (impl_module, impl_function) = implementation_names(external, &self.module_name, &name);
 
         // The function must have at least one implementation somewhere.
@@ -460,6 +466,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             has_body,
             has_erlang_external: external_erlang.is_some(),
             has_javascript_external: external_javascript.is_some(),
+            has_wasm_external: external_wasm.is_some(),
         };
 
         let typed_args = arguments
@@ -564,6 +571,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             body,
             external_erlang,
             external_javascript,
+            external_wasm,
             implementations,
         })
     }
@@ -1112,6 +1120,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             documentation,
             external_erlang,
             external_javascript,
+            external_wasm,
             deprecation,
             end_position: _,
             body: _,
@@ -1127,7 +1136,9 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
 
         // When external implementations are present then the type annotations
         // must be given in full, so we disallow holes in the annotations.
-        hydrator.permit_holes(external_erlang.is_none() && external_javascript.is_none());
+        hydrator.permit_holes(
+            external_erlang.is_none() && external_javascript.is_none() && external_wasm.is_none(),
+        );
 
         let arg_types = args
             .iter()
@@ -1141,6 +1152,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             environment.target,
             external_erlang,
             external_javascript,
+            external_wasm,
         );
         let (impl_module, impl_function) = implementation_names(external, &self.module_name, name);
         let variant = ValueConstructorVariant::ModuleFn {
@@ -1224,11 +1236,12 @@ fn target_function_implementation<'a>(
     target: Target,
     external_erlang: &'a Option<(EcoString, EcoString)>,
     external_javascript: &'a Option<(EcoString, EcoString)>,
+    external_wasm: &'a Option<(EcoString, EcoString)>,
 ) -> &'a Option<(EcoString, EcoString)> {
     match target {
         Target::Erlang => external_erlang,
         Target::JavaScript => external_javascript,
-        Target::Wasm => todo!(),
+        Target::Wasm => external_wasm,
     }
 }
 
@@ -1402,6 +1415,7 @@ fn generalise_function(
         return_type,
         external_erlang,
         external_javascript,
+        external_wasm,
         implementations,
     } = function;
 
@@ -1415,8 +1429,12 @@ fn generalise_function(
     let type_ = type_::generalise(typ);
 
     // Insert the function into the module's interface
-    let external =
-        target_function_implementation(environment.target, &external_erlang, &external_javascript);
+    let external = target_function_implementation(
+        environment.target,
+        &external_erlang,
+        &external_javascript,
+        &external_wasm,
+    );
     let (impl_module, impl_function) = implementation_names(external, module_name, &name);
 
     let variant = ValueConstructorVariant::ModuleFn {
@@ -1458,6 +1476,7 @@ fn generalise_function(
         body,
         external_erlang,
         external_javascript,
+        external_wasm,
         implementations,
     })
 }

@@ -3358,9 +3358,10 @@ but you are using v{gleam_version}.",
                         "You can not set a runtime for Erlang. Did you mean to target JavaScript?"
                             .into(),
                     ),
-                    Target::Wasm => {
-                        todo!()
-                    }
+                    Target::Wasm => Some(
+                        "You can not set a runtime for Wasm. Did you mean to target JavaScript?"
+                            .into(),
+                    )
                 };
 
                 vec![Diagnostic {

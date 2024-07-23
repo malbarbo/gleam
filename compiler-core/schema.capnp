@@ -1,4 +1,4 @@
-@0xb533a99cfdbcedbe;
+@0xbefb29bf64c158c1;
 
 # This Cap'n Proto schema is compiled into Rust code for use in the compiler.
 #
@@ -112,8 +112,10 @@ struct Implementations {
   gleam @0 :Bool;
   usesErlangExternals @1 :Bool;
   usesJavascriptExternals @2 :Bool;
-  canRunOnErlang @3 :Bool;
-  canRunOnJavascript @4 :Bool;
+  usesWasmExternals @3 :Bool;
+  canRunOnErlang @4 :Bool;
+  canRunOnJavascript @5 :Bool;
+  canRunOnWasm @6 :Bool;
 }
 
 struct ValueConstructorVariant {
