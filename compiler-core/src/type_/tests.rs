@@ -265,6 +265,7 @@ fn compile_statement_sequence(
             has_body: true,
             has_erlang_external: false,
             has_javascript_external: false,
+            has_wasm_external: false,
         },
         errors,
     )
@@ -2073,8 +2074,10 @@ fn assert_suitable_main_function_not_module_function() {
                 gleam: true,
                 uses_erlang_externals: false,
                 uses_javascript_externals: false,
+                uses_wasm_externals: false,
                 can_run_on_erlang: true,
                 can_run_on_javascript: true,
+                can_run_on_wasm: true,
             },
         },
     };
@@ -2098,8 +2101,10 @@ fn assert_suitable_main_function_wrong_arity() {
                 gleam: true,
                 uses_erlang_externals: false,
                 uses_javascript_externals: false,
+                uses_wasm_externals: false,
                 can_run_on_erlang: true,
                 can_run_on_javascript: true,
+                can_run_on_wasm: true,
             },
         },
     };
@@ -2123,8 +2128,10 @@ fn assert_suitable_main_function_ok() {
                 gleam: true,
                 uses_erlang_externals: false,
                 uses_javascript_externals: false,
+                uses_wasm_externals: false,
                 can_run_on_erlang: true,
                 can_run_on_javascript: true,
+                can_run_on_wasm: true,
             },
         },
     };
@@ -2148,8 +2155,10 @@ fn assert_suitable_main_function_erlang_not_supported() {
                 gleam: false,
                 uses_erlang_externals: true,
                 uses_javascript_externals: true,
+                uses_wasm_externals: true,
                 can_run_on_erlang: false,
                 can_run_on_javascript: true,
+                can_run_on_wasm: true,
             },
         },
     };
@@ -2173,8 +2182,10 @@ fn assert_suitable_main_function_javascript_not_supported() {
                 gleam: false,
                 uses_erlang_externals: true,
                 uses_javascript_externals: true,
+                uses_wasm_externals: true,
                 can_run_on_erlang: true,
                 can_run_on_javascript: false,
+                can_run_on_wasm: true,
             },
         },
     };

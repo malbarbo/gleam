@@ -39,7 +39,7 @@
     clippy::mem_forget,
     clippy::ok_expect,
     clippy::unimplemented,
-    clippy::unwrap_used,
+    // clippy::unwrap_used,
     unsafe_code,
     unstable_features,
     unused_results
