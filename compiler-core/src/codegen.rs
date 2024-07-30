@@ -1,17 +1,9 @@
-use crate::{
-    analyse::TargetSupport,
-    build::{ErlangAppCodegenConfiguration, Module},
-    config::PackageConfig,
-    erlang,
-    io::FileSystemWriter,
-    javascript,
-    line_numbers::LineNumbers,
-    Result,
-};
-use itertools::Itertools;
 use std::fmt::Debug;
 
 use camino::Utf8Path;
+use itertools::Itertools;
+
+use crate::{analyse::TargetSupport, build::{ErlangAppCodegenConfiguration, Module}, config::PackageConfig, erlang, io::FileSystemWriter, javascript, line_numbers::LineNumbers, Result, wasm};
 
 /// A code generator that creates a .erl Erlang module and record header files
 /// for each Gleam module in the package.
@@ -264,6 +256,7 @@ impl Wasm {
     }
 
     fn wasm_module(&self, writer: &impl FileSystemWriter, module: &Module) -> Result<()> {
-        todo!()
+        wasm::module(writer, &module.ast);
+        Ok(())
     }
 }

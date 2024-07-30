@@ -40,6 +40,8 @@ pubgrub = "0"
 pathdiff = { version = "0", features = ["camino"] }
 # Memory arena using ids rather than references
 id-arena = "2"
+# Used for encoding Wasm
+wasm-encoder = "0"
 async-trait.workspace = true
 base16.workspace = true
 bytes.workspace = true

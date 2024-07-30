@@ -37,7 +37,7 @@
     clippy::mem_forget,
     clippy::ok_expect,
     clippy::unimplemented,
-    clippy::unwrap_used,
+// clippy::unwrap_used,
     unsafe_code,
     unstable_features,
     unused_results
@@ -47,6 +47,28 @@
 #[cfg(test)]
 #[macro_use]
 extern crate pretty_assertions;
+
+use std::str::FromStr;
+
+use camino::Utf8PathBuf;
+use clap::{
+    Args,
+    builder::{PossibleValuesParser, Styles, styling, TypedValueParser}, Parser, Subcommand,
+};
+use strum::VariantNames;
+
+use config::root_config;
+use dependencies::UseManifest;
+use fs::{get_current_directory, get_project_root};
+use gleam_core::{
+    analyse::TargetSupport,
+    build::{Codegen, Mode, Options, Runtime, Target},
+    hex::RetirementReason,
+    paths::ProjectPaths,
+    version::COMPILER_VERSION,
+};
+pub use gleam_core::error::{Error, Result};
+use hex::ApiKeyCommand as _;
 
 mod add;
 mod build;
@@ -70,29 +92,6 @@ mod remove;
 mod run;
 mod shell;
 
-use config::root_config;
-use dependencies::UseManifest;
-use fs::{get_current_directory, get_project_root};
-pub use gleam_core::error::{Error, Result};
-
-use gleam_core::{
-    analyse::TargetSupport,
-    build::{Codegen, Mode, Options, Runtime, Target},
-    hex::RetirementReason,
-    paths::ProjectPaths,
-    version::COMPILER_VERSION,
-};
-use hex::ApiKeyCommand as _;
-use std::str::FromStr;
-
-use camino::Utf8PathBuf;
-
-use clap::{
-    builder::{styling, PossibleValuesParser, Styles, TypedValueParser},
-    Args, Parser, Subcommand,
-};
-use strum::VariantNames;
-
 #[derive(Parser, Debug)]
 #[command(
     version,
@@ -104,11 +103,10 @@ use strum::VariantNames;
 
 {all-args}{after-help}",
     styles = Styles::styled()
-        .header(styling::AnsiColor::Yellow.on_default())
-        .usage(styling::AnsiColor::Yellow.on_default())
-        .literal(styling::AnsiColor::Green.on_default())
+    .header(styling::AnsiColor::Yellow.on_default())
+    .usage(styling::AnsiColor::Yellow.on_default())
+    .literal(styling::AnsiColor::Green.on_default())
 )]
-
 enum Command {
     /// Build the project
     Build {
@@ -353,7 +351,9 @@ enum Hex {
 
         version: String,
 
-        #[arg(value_parser = PossibleValuesParser::new(RetirementReason::VARIANTS).map(|s| RetirementReason::from_str(&s).unwrap()))]
+        #[arg(
+            value_parser = PossibleValuesParser::new(RetirementReason::VARIANTS).map(| s | RetirementReason::from_str(& s).unwrap())
+        )]
         reason: RetirementReason,
 
         message: Option<String>,
@@ -480,11 +480,11 @@ fn main() {
         Command::PrintConfig => print_config(),
 
         Command::Hex(Hex::Retire {
-            package,
-            version,
-            reason,
-            message,
-        }) => hex::RetireCommand::new(package, version, reason, message).run(),
+                         package,
+                         version,
+                         reason,
+                         message,
+                     }) => hex::RetireCommand::new(package, version, reason, message).run(),
 
         Command::Hex(Hex::Unretire { package, version }) => {
             hex::UnretireCommand::new(package, version).run()

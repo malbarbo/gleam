@@ -3,8 +3,8 @@
     clippy::dbg_macro,
     clippy::todo,
     clippy::mem_forget,
-    // TODO: enable once the false positive bug is solved
-    // clippy::use_self,
+// TODO: enable once the false positive bug is solved
+// clippy::use_self,
     clippy::filter_map_next,
     clippy::needless_continue,
     clippy::needless_borrow,
@@ -39,7 +39,7 @@
     clippy::mem_forget,
     clippy::ok_expect,
     clippy::unimplemented,
-    // clippy::unwrap_used,
+// clippy::unwrap_used,
     unsafe_code,
     unstable_features,
     unused_results
@@ -49,13 +49,16 @@
     clippy::match_single_binding,
     clippy::match_like_matches_macro,
     clippy::inconsistent_struct_constructor,
-    // TODO: fix
+// TODO: fix
     clippy::arc_with_non_send_sync,
 )]
 
 #[cfg(test)]
 #[macro_use]
 extern crate pretty_assertions;
+
+pub use error::{Error, Result};
+pub use warning::Warning;
 
 pub mod analyse;
 pub mod ast;
@@ -87,15 +90,13 @@ pub mod type_;
 pub mod uid;
 pub mod version;
 pub mod warning;
+pub mod wasm;
 
 pub(crate) mod ast_folder;
 mod call_graph;
 mod dep_tree;
 mod exhaustiveness;
 pub(crate) mod graph;
-
-pub use error::{Error, Result};
-pub use warning::Warning;
 
 const GLEAM_CORE_PACKAGE_NAME: &str = "";
 const STDLIB_PACKAGE_NAME: &str = "gleam_stdlib";
