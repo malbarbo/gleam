@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use ecow::EcoString;
-use wasm_encoder::{CodeSection, FunctionSection, Instruction, TypeSection, ValType};
+use wasm_encoder::{CodeSection, FunctionSection, IndirectNameMap, Instruction, NameMap, NameSection, TypeSection, ValType};
 
-use crate::ast::{BinOp, Function, Statement, TypedDefinition, TypedExpr, TypedModule};
+use crate::ast::{ArgNames, BinOp, Function, Statement, TypedDefinition, TypedExpr, TypedModule};
 use crate::io::FileSystemWriter;
 use crate::type_::Type;
 
@@ -18,6 +18,8 @@ pub fn module(writer: &impl FileSystemWriter, ast: &TypedModule) {
 
 #[derive(Debug, Default, Clone)]
 struct WasmFunction<'a> {
+    name: EcoString,
+    parameter_names: Vec<EcoString>,
     parameters: Vec<ValType>,
     returns: Option<ValType>,
     instructions: Vec<Instruction<'a>>,
@@ -66,6 +68,25 @@ impl<'a> ModuleEmitter<'a> {
         }
         let _ = module.section(&codes);
 
+        // names
+        let mut names = NameSection::new();
+        let mut function_names = NameMap::new();
+        let mut type_names = NameMap::new();
+        let mut all_function_param_names = IndirectNameMap::new();
+        for (i, func) in self.functions.iter().enumerate() {
+            let _ = function_names.append(i as _, &func.name);
+            let _ = type_names.append(i as _, &format!("{}.type", func.name));
+            let mut function_param_names = NameMap::new();
+            for (i, param) in func.parameter_names.iter().enumerate() {
+                let _ = function_param_names.append(i as _, &param);
+            }
+            let _ = all_function_param_names.append(i as _, &function_param_names);
+        }
+        let _ = names.functions(&function_names);
+        let _ = names.locals(&all_function_param_names);
+        let _ = names.types(&type_names);
+        let _ = module.section(&names);
+
         module.finish()
     }
 
@@ -76,6 +97,7 @@ impl<'a> ModuleEmitter<'a> {
                 let func = self.function(f);
                 self.functions.push(func);
             }
+
             _ => todo!(),
         }
     }
@@ -83,7 +105,8 @@ impl<'a> ModuleEmitter<'a> {
     fn function(&mut self, func: &Function<Arc<Type>, TypedExpr>) -> WasmFunction<'a> {
         // arguments must be all integers for now
         let mut params = vec![];
-        for argument in &func.arguments {
+        let mut param_names = vec![];
+        for (i, argument) in func.arguments.iter().enumerate() {
             if argument.type_.is_int() {
                 params.push(ValType::I32);
             } else if argument.type_.is_float() {
@@ -91,6 +114,12 @@ impl<'a> ModuleEmitter<'a> {
             } else {
                 todo!("Only integer and floating-point arguments");
             }
+            param_names.push(match &argument.names {
+                ArgNames::Discard { name } => format!("{}@{}", name, i).into(),
+                ArgNames::LabelledDiscard { name, .. } => format!("{}@{}", name, i).into(),
+                ArgNames::Named { name } => format!("{}@{}", name, i).into(),
+                ArgNames::NamedLabelled { name, .. } => format!("{}@{}", name, i).into(),
+            })
         }
 
         // return type must be a single integer or nothing
@@ -114,10 +143,15 @@ impl<'a> ModuleEmitter<'a> {
 
         instrs.push(Instruction::End);
 
+        // function name
+        let name = func.name.clone();
+
         WasmFunction {
+            name,
             returns: return_type,
             instructions: instrs,
             parameters: params,
+            parameter_names: param_names,
         }
     }
 
