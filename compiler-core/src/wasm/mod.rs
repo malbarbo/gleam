@@ -1,327 +1,440 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use ecow::EcoString;
-use wasm_encoder::{CodeSection, FunctionSection, IndirectNameMap, Instruction, NameMap, NameSection, TypeSection, ValType};
+use itertools::Itertools;
+use wasm_encoder::{CodeSection, FunctionSection, TypeSection};
 
-use crate::ast::{ArgNames, BinOp, Function, Statement, TypedDefinition, TypedExpr, TypedModule};
-use crate::io::FileSystemWriter;
-use crate::type_::Type;
+use crate::{
+    ast::{Arg, Assignment, BinOp, Function, Pattern, Statement, TypedExpr, TypedModule},
+    io::FileSystemWriter,
+    type_::Type,
+};
+
+#[derive(Clone, Default, Debug)]
+pub struct Environment {
+    bindings: HashMap<EcoString, (u32, Arc<Type>)>,
+    enclosing: Option<Arc<Environment>>,
+}
+
+impl Environment {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            bindings: HashMap::new(),
+            enclosing: None,
+        })
+    }
+
+    fn new_enclosing(enclosing: Arc<Self>) -> Arc<Self> {
+        Arc::new(Self {
+            bindings: HashMap::new(),
+            enclosing: Some(enclosing),
+        })
+    }
+
+    fn set(&self, name: &str, binding: u32, type_: Arc<Type>) -> Arc<Self> {
+        let mut new_env = self.clone();
+        let _ = new_env.bindings.insert(name.into(), (binding, type_));
+        Arc::new(new_env)
+    }
+
+    fn get(&self, name: &str) -> Option<u32> {
+        if let Some(val) = self.bindings.get(name) {
+            Some(val.0)
+        } else if let Some(enclosing) = &self.enclosing {
+            enclosing.get(name)
+        } else {
+            None
+        }
+    }
+
+    fn len(&self) -> u32 {
+        self.bindings.len() as u32 + self.enclosing.as_ref().map_or(0, |e| e.len())
+    }
+}
+
+#[derive(Clone, Default, Debug)]
+struct LocalGenerator {
+    locals: Vec<Arc<Type>>,
+    offset: u32,
+}
+
+impl LocalGenerator {
+    fn new() -> Self {
+        Self {
+            locals: vec![],
+            offset: 0,
+        }
+    }
+
+    fn with_offset(offset: u32) -> Self {
+        Self {
+            locals: vec![],
+            offset,
+        }
+    }
+
+    fn new_local(&mut self, type_: Arc<Type>) -> u32 {
+        let l = self.locals.len() as u32;
+        self.locals.push(type_);
+        l
+    }
+}
 
 pub fn module(writer: &impl FileSystemWriter, ast: &TypedModule) {
-    let mut compiler = ModuleEmitter::new();
-    for def in &ast.definitions {
-        compiler.definition(def);
-    }
-    let bytes = compiler.to_wasm_bytecode();
+    dbg!(&ast);
+    let module = construct_module(ast);
+    let bytes = emit(module);
     writer.write_bytes("out.wasm".into(), &bytes[..]).unwrap();
 }
 
-#[derive(Debug, Default, Clone)]
-struct WasmFunction<'a> {
-    name: EcoString,
-    parameter_names: Vec<EcoString>,
-    parameters: Vec<ValType>,
-    returns: Option<ValType>,
-    instructions: Vec<Instruction<'a>>,
+fn emit(wasm_module: WasmModule) -> Vec<u8> {
+    let mut module = wasm_encoder::Module::new();
+
+    // types
+    let mut types = TypeSection::new();
+    for func in wasm_module.functions.iter() {
+        let _ = types.function(
+            func.parameters.iter().copied().map(WasmType::to_val_type),
+            std::iter::once(func.returns.to_val_type()),
+        );
+    }
+    let _ = module.section(&types);
+
+    // functions
+    let mut functions = FunctionSection::new();
+    for i in 0..wasm_module.functions.len() {
+        let _ = functions.function(i as _);
+    }
+    let _ = module.section(&functions);
+
+    // code
+    let mut codes = CodeSection::new();
+    for func in wasm_module.functions.iter() {
+        let locals = func
+            .locals
+            .iter()
+            .copied()
+            .map(|typ| (1, typ.to_val_type()));
+        let mut f = wasm_encoder::Function::new(locals);
+        for inst in &func.instructions.lst {
+            let _ = f.instruction(inst);
+        }
+        let _ = codes.function(&f);
+    }
+    let _ = module.section(&codes);
+
+    module.finish()
 }
 
-#[derive(Debug, Default, Clone)]
-struct ModuleEmitter<'a> {
-    functions: Vec<WasmFunction<'a>>,
+struct WasmModule {
+    functions: Vec<WasmFunction>,
 }
 
-impl<'a> ModuleEmitter<'a> {
-    // Util
-    fn new() -> Self {
-        Self { functions: vec![] }
-    }
+fn construct_module(ast: &TypedModule) -> WasmModule {
+    use crate::ast::TypedDefinition;
 
-    fn to_wasm_bytecode(self) -> Vec<u8> {
-        let mut module = wasm_encoder::Module::new();
+    let mut functions = vec![];
 
-        // types
-        let mut types = TypeSection::new();
-        for func in self.functions.iter() {
-            let _ = types.function(
-                func.parameters.clone(),
-                func.returns.map_or_else(|| vec![], |x| vec![x]),
-            );
-        }
-        let _ = module.section(&types);
-
-        // functions
-        let mut functions = FunctionSection::new();
-        for i in 0..self.functions.iter().len() {
-            let _ = functions.function(i as _);
-        }
-        let _ = module.section(&functions);
-
-        // code
-        let mut codes = CodeSection::new();
-        for func in self.functions.iter() {
-            let locals = vec![];
-            let mut f = wasm_encoder::Function::new(locals);
-            for inst in &func.instructions {
-                let _ = f.instruction(inst);
-            }
-            let _ = codes.function(&f);
-        }
-        let _ = module.section(&codes);
-
-        // names
-        let mut names = NameSection::new();
-        let mut function_names = NameMap::new();
-        let mut type_names = NameMap::new();
-        let mut all_function_param_names = IndirectNameMap::new();
-        for (i, func) in self.functions.iter().enumerate() {
-            let _ = function_names.append(i as _, &func.name);
-            let _ = type_names.append(i as _, &format!("{}.type", func.name));
-            let mut function_param_names = NameMap::new();
-            for (i, param) in func.parameter_names.iter().enumerate() {
-                let _ = function_param_names.append(i as _, &param);
-            }
-            let _ = all_function_param_names.append(i as _, &function_param_names);
-        }
-        let _ = names.functions(&function_names);
-        let _ = names.locals(&all_function_param_names);
-        let _ = names.types(&type_names);
-        let _ = module.section(&names);
-
-        module.finish()
-    }
-
-    // Recursive codegen
-    fn definition(&mut self, def: &TypedDefinition) {
+    for def in &ast.definitions {
         match def {
-            TypedDefinition::Function(f) => {
-                let func = self.function(f);
-                self.functions.push(func);
-            }
-
-            _ => todo!(),
-        }
-    }
-
-    fn function(&mut self, func: &Function<Arc<Type>, TypedExpr>) -> WasmFunction<'a> {
-        // arguments must be all integers for now
-        let mut params = vec![];
-        let mut param_names = vec![];
-        for (i, argument) in func.arguments.iter().enumerate() {
-            if argument.type_.is_int() {
-                params.push(ValType::I32);
-            } else if argument.type_.is_float() {
-                params.push(ValType::F64);
-            } else {
-                todo!("Only integer and floating-point arguments");
-            }
-            param_names.push(match &argument.names {
-                ArgNames::Discard { name } => format!("{}@{}", name, i).into(),
-                ArgNames::LabelledDiscard { name, .. } => format!("{}@{}", name, i).into(),
-                ArgNames::Named { name } => format!("{}@{}", name, i).into(),
-                ArgNames::NamedLabelled { name, .. } => format!("{}@{}", name, i).into(),
-            })
-        }
-
-        // return type must be a single integer or nothing
-        let return_type = if func.return_type.is_int() {
-            Some(ValType::I32)
-        } else if func.return_type.is_float() {
-            Some(ValType::F64)
-        } else if func.return_type.is_nil() {
-            None
-        } else {
-            todo!("Only integer/floating-point return types or nil");
-        };
-
-        // get statements
-        let mut instrs = vec![];
-        for stmt in &func.body[..func.body.len() - 1] {
-            instrs.extend(self.statement(stmt));
-            instrs.push(Instruction::Drop);
-        }
-        instrs.extend(self.statement(func.body.last()));
-
-        instrs.push(Instruction::End);
-
-        // function name
-        let name = func.name.clone();
-
-        WasmFunction {
-            name,
-            returns: return_type,
-            instructions: instrs,
-            parameters: params,
-            parameter_names: param_names,
-        }
-    }
-
-    fn statement(&mut self, stmt: &Statement<Arc<Type>, TypedExpr>) -> Vec<Instruction<'a>> {
-        match stmt {
-            Statement::Expression(e) => self.expression(&e),
-            _ => todo!(),
-        }
-    }
-
-    fn expression(&mut self, expr: &TypedExpr) -> Vec<Instruction<'a>> {
-        match expr {
-            TypedExpr::Int {
-                value,
-                ..
-            } => Self::emit_integer(value),
-            TypedExpr::Float {
-                value,
-                ..
-            } => Self::emit_float(value),
-            TypedExpr::BinOp {
+            TypedDefinition::Function(Function {
                 name,
-                left,
-                right,
+                arguments,
+                body,
+                return_type,
                 ..
-            } => self.bin_op(left, *name, right),
-            TypedExpr::NegateInt { value, .. } => self.negate_int(value),
-            TypedExpr::Block { statements, .. } => {
-                let mut insts = vec![];
-                for stmt in &statements[..(statements.len() - 1)] {
-                    insts.extend(self.statement(stmt));
-                    insts.push(Instruction::Drop);
+            }) => {
+                functions.push(emit_function(name, arguments, body, return_type));
+            }
+            _ => todo!("Only functions"),
+        }
+    }
+
+    WasmModule { functions }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum WasmType {
+    Int,
+}
+
+impl WasmType {
+    fn to_val_type(self) -> wasm_encoder::ValType {
+        match self {
+            WasmType::Int => wasm_encoder::ValType::I64,
+        }
+    }
+}
+
+struct WasmInstructions {
+    lst: Vec<wasm_encoder::Instruction<'static>>,
+}
+
+struct WasmFunction {
+    parameters: Vec<WasmType>,
+    instructions: WasmInstructions,
+    returns: WasmType,
+    locals: Vec<WasmType>,
+}
+
+fn emit_function(
+    name: &str,
+    arguments: &[Arg<Arc<Type>>],
+    body: &[Statement<Arc<Type>, TypedExpr>],
+    return_type: &Arc<Type>,
+) -> WasmFunction {
+    let mut env = Environment::new();
+    let mut locals = LocalGenerator::new();
+
+    let mut parameters = vec![];
+    for arg in arguments {
+        // get a variable number
+        let idx = locals.new_local(Arc::clone(&arg.type_));
+        // add arguments to the environment
+        env = env.set(
+            &arg.names
+                .get_variable_name()
+                .cloned()
+                .unwrap_or_else(|| format!("#{idx}").into()),
+            idx,
+            Arc::clone(&arg.type_),
+        );
+        // add argument types to the parameters
+        parameters.push(if arg.type_.is_int() {
+            WasmType::Int
+        } else {
+            todo!("Only int parameters")
+        });
+    }
+
+    let n_params = parameters.len();
+    let (env, locals, mut instructions) = emit_statement_list(env, locals, body);
+    instructions.lst.push(wasm_encoder::Instruction::End);
+
+    WasmFunction {
+        parameters,
+        instructions,
+        locals: locals
+            .locals
+            .into_iter()
+            .skip(n_params)
+            .map(|x| {
+                if x.is_int() {
+                    WasmType::Int
+                } else {
+                    todo!("Only int return types")
                 }
-                insts.extend(self.statement(statements.last()));
-                insts
-            }
-            _ => todo!(),
-        }
-    }
-
-    fn negate_int(&mut self, intexpr: &TypedExpr) -> Vec<Instruction<'a>> {
-        let mut insts = vec![];
-        insts.push(Instruction::I32Const(0));
-        insts.extend(self.expression(intexpr));
-        insts.push(Instruction::I32Sub);
-        insts
-    }
-
-    fn bin_op(&mut self, lhs: &TypedExpr, op: BinOp, rhs: &TypedExpr) -> Vec<Instruction<'a>> {
-        match op {
-            BinOp::AddInt => {
-                // emit lhs (integer, supposedly)
-                let mut insts = self.expression(lhs);
-                // emit rhs
-                insts.extend(self.expression(rhs));
-                // emit summation
-                insts.push(Instruction::I32Add);
-                insts
-            }
-            BinOp::SubInt => {
-                // emit lhs (integer, supposedly)
-                let mut insts = self.expression(lhs);
-                // emit rhs
-                insts.extend(self.expression(rhs));
-                // emit subtraction
-                insts.push(Instruction::I32Sub);
-                insts
-            }
-            BinOp::MultInt => {
-                // emit lhs (integer, supposedly)
-                let mut insts = self.expression(lhs);
-                // emit rhs
-                insts.extend(self.expression(rhs));
-                // emit multiplication
-                insts.push(Instruction::I32Mul);
-                insts
-            }
-            BinOp::DivInt => {
-                // emit lhs (integer, supposedly)
-                let mut insts = self.expression(lhs);
-                // emit rhs
-                insts.extend(self.expression(rhs));
-                // emit division
-                // TODO: add special case for division by 0
-                insts.push(Instruction::I32DivS);
-                insts
-            }
-            BinOp::RemainderInt => {
-                // emit lhs (integer, supposedly)
-                let mut insts = self.expression(lhs);
-                // emit rhs
-                insts.extend(self.expression(rhs));
-                // emit remainder
-                // TODO: add special case for division by 0
-                insts.push(Instruction::I32RemS);
-                insts
-            }
-            BinOp::AddFloat => {
-                // emit lhs (integer, supposedly)
-                let mut insts = self.expression(lhs);
-                // emit rhs
-                insts.extend(self.expression(rhs));
-                // emit summation
-                insts.push(Instruction::F64Add);
-                insts
-            }
-            BinOp::SubFloat => {
-                // emit lhs (integer, supposedly)
-                let mut insts = self.expression(lhs);
-                // emit rhs
-                insts.extend(self.expression(rhs));
-                // emit subtraction
-                insts.push(Instruction::F64Sub);
-                insts
-            }
-            BinOp::MultFloat => {
-                // emit lhs (integer, supposedly)
-                let mut insts = self.expression(lhs);
-                // emit rhs
-                insts.extend(self.expression(rhs));
-                // emit multiplication
-                insts.push(Instruction::F64Mul);
-                insts
-            }
-            BinOp::DivFloat => {
-                // emit lhs (integer, supposedly)
-                let mut insts = self.expression(lhs);
-                // emit rhs
-                insts.extend(self.expression(rhs));
-                // emit division
-                // TODO: add special case for division by 0
-                insts.push(Instruction::F64Div);
-                insts
-            }
-            _ => todo!(),
-        }
-    }
-
-    fn emit_integer(value: &EcoString) -> Vec<Instruction<'a>> {
-        let val = value.replace("_", "");
-
-        // TODO: support integers other than i32
-        // why do i have do this at codegen?
-        let int = if val.starts_with("0b") {
-            // base 2 literal
-            i32::from_str_radix(&val[2..], 2).expect("it to be a valid binary integer")
-        } else if val.starts_with("0o") {
-            // base 8 literal
-            i32::from_str_radix(&val[2..], 8).expect("it to be a valid octal integer")
-        } else if val.starts_with("0x") {
-            // base 16 literal
-            i32::from_str_radix(&val[2..], 16).expect("it to be a valid hexadecimal integer")
+            })
+            .collect_vec(),
+        returns: if return_type.is_int() {
+            WasmType::Int
         } else {
-            // base 10 literal
-            i32::from_str_radix(&val, 10).expect("it to be a valid decimal integer")
-        };
+            todo!("Only int return types")
+        },
+    }
+}
 
-        vec![Instruction::I32Const(int)]
+fn emit_statement_list(
+    env: Arc<Environment>,
+    locals: LocalGenerator,
+    statements: &[Statement<Arc<Type>, TypedExpr>],
+) -> (Arc<Environment>, LocalGenerator, WasmInstructions) {
+    let mut instructions = WasmInstructions { lst: vec![] };
+    let mut env = env;
+    let mut locals = locals;
+
+    for statement in statements.into_iter().dropping_back(1) {
+        let (new_env, new_locals, new_insts) = emit_statement(statement, env, locals);
+        env = new_env;
+        locals = new_locals;
+        instructions.lst.extend(new_insts.lst);
+        instructions.lst.push(wasm_encoder::Instruction::Drop);
+    }
+    if let Some(statement) = statements.last() {
+        let (new_env, new_locals, new_insts) = emit_statement(statement, env, locals);
+        env = new_env;
+        locals = new_locals;
+        instructions.lst.extend(new_insts.lst);
     }
 
-    fn emit_float(value: &str) -> Vec<Instruction<'a>> {
-        let sign = if value.starts_with('-') {
-            -1.0
-        } else {
-            1.0
-        };
+    (env, locals, instructions)
+}
 
-        let value = value.trim_start_matches(['+', '-'].as_ref());
-        let value: f64 = value.parse().expect("it to be a valid floating-point constant");
-
-        vec![Instruction::F64Const(value * sign)]
+fn emit_statement(
+    statement: &Statement<Arc<Type>, TypedExpr>,
+    env: Arc<Environment>,
+    locals: LocalGenerator,
+) -> (Arc<Environment>, LocalGenerator, WasmInstructions) {
+    match statement {
+        Statement::Expression(expression) => emit_expression(expression, env, locals),
+        Statement::Assignment(assignment) => emit_assignment(assignment, env, locals),
+        _ => todo!("Only expressions and assignments"),
     }
+}
+
+fn emit_assignment(
+    assignment: &Assignment<Arc<Type>, TypedExpr>,
+    env: Arc<Environment>,
+    locals: LocalGenerator,
+) -> (Arc<Environment>, LocalGenerator, WasmInstructions) {
+    // only non-assertions
+    if assignment.kind.is_assert() {
+        todo!("Only non-assertions");
+    }
+
+    // only support simple assignments for now
+    match assignment.pattern {
+        Pattern::Variable {
+            ref name,
+            ref type_,
+            ..
+        } => {
+            // emit value
+            let (env, mut locals, mut insts) = emit_expression(&assignment.value, env, locals);
+            // add variable to the environment
+            let id = locals.new_local(Arc::clone(type_));
+            let env = env.set(&name, id, Arc::clone(type_));
+            // create local
+            insts
+                .lst
+                .push(wasm_encoder::Instruction::LocalTee(env.get(name).unwrap()));
+
+            (env, locals, insts)
+        }
+        _ => todo!("Only simple assignments"),
+    }
+}
+
+fn emit_expression(
+    expression: &TypedExpr,
+    env: Arc<Environment>,
+    locals: LocalGenerator,
+) -> (Arc<Environment>, LocalGenerator, WasmInstructions) {
+    match expression {
+        TypedExpr::Int { typ, value, .. } => {
+            let val = parse_integer(value);
+            (
+                env,
+                locals,
+                WasmInstructions {
+                    lst: vec![wasm_encoder::Instruction::I64Const(val)],
+                },
+            )
+        }
+        TypedExpr::NegateInt { value, .. } => {
+            let (env, locals, mut insts) = emit_expression(value, env, locals);
+            insts.lst.push(wasm_encoder::Instruction::I64Const(-1));
+            insts.lst.push(wasm_encoder::Instruction::I64Mul);
+            (env, locals, insts)
+        }
+        TypedExpr::Block { statements, .. } => {
+            // create new scope
+            // TODO: fix environment pop
+            // maybe use a block instruction?
+            let (_, locals, statements) = emit_statement_list(Environment::new_enclosing(Arc::clone(&env)), locals, statements);
+            (env, locals, statements)
+        },
+        TypedExpr::BinOp {
+            typ,
+            name,
+            left,
+            right,
+            ..
+        } => emit_binary_operation(env, locals, typ, *name, left, right),
+        TypedExpr::Var {
+            constructor, name, ..
+        } => {
+            if !constructor.is_local_variable() {
+                todo!("Only local variables");
+            }
+
+            dbg!(&env);
+            let index = env.get(name).unwrap();
+            (
+                env,
+                locals,
+                WasmInstructions {
+                    lst: vec![wasm_encoder::Instruction::LocalGet(index)],
+                },
+            )
+        },
+        TypedExpr::Case {
+            typ,
+            subjects,
+            clauses,
+            ..
+        } => todo!("case todo"),
+        _ => todo!("Only integer constants, integer negation, blocks, binary operations, case and variable accesses"),
+    }
+}
+
+fn emit_binary_operation(
+    env: Arc<Environment>,
+    locals: LocalGenerator,
+    // only used to disambiguate equals
+    typ: &Type,
+    name: BinOp,
+    left: &TypedExpr,
+    right: &TypedExpr,
+) -> (Arc<Environment>, LocalGenerator, WasmInstructions) {
+    match name {
+        BinOp::AddInt => {
+            let (env, locals, mut insts) = emit_expression(left, env, locals);
+            let (env, locals, right_insts) = emit_expression(right, env, locals);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::I64Add);
+            (env, locals, insts)
+        }
+        BinOp::SubInt => {
+            let (env, locals, mut insts) = emit_expression(left, env, locals);
+            let (env, locals, right_insts) = emit_expression(right, env, locals);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::I64Sub);
+            (env, locals, insts)
+        }
+        BinOp::MultInt => {
+            let (env, locals, mut insts) = emit_expression(left, env, locals);
+            let (env, locals, right_insts) = emit_expression(right, env, locals);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::I64Mul);
+            (env, locals, insts)
+        }
+        BinOp::DivInt => {
+            let (env, locals, mut insts) = emit_expression(left, env, locals);
+            let (env, locals, right_insts) = emit_expression(right, env, locals);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::I64DivS);
+            (env, locals, insts)
+        }
+        BinOp::RemainderInt => {
+            let (env, locals, mut insts) = emit_expression(left, env, locals);
+            let (env, locals, right_insts) = emit_expression(right, env, locals);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::I64RemS);
+            (env, locals, insts)
+        }
+        _ => todo!("Only integer arithmetic"),
+    }
+}
+
+fn parse_integer(value: &str) -> i64 {
+    let val = value.replace("_", "");
+
+    // TODO: support integers other than i64
+    // why do i have do this at codegen?
+    let int = if val.starts_with("0b") {
+        // base 2 literal
+        i64::from_str_radix(&val[2..], 2).expect("expected int to be a valid binary integer")
+    } else if val.starts_with("0o") {
+        // base 8 literal
+        i64::from_str_radix(&val[2..], 8).expect("expected int to be a valid octal integer")
+    } else if val.starts_with("0x") {
+        // base 16 literal
+        i64::from_str_radix(&val[2..], 16).expect("expected int to be a valid hexadecimal integer")
+    } else {
+        // base 10 literal
+        i64::from_str_radix(&val, 10).expect("expected int to be a valid decimal integer")
+    };
+
+    int
 }
