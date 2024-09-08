@@ -11,7 +11,7 @@ use scope::Scope;
 use crate::{
     ast::{
         BinOp, CustomType, Function, Pattern, Statement, TypedArg, TypedAssignment, TypedExpr,
-        TypedFunction, TypedModule, TypedStatement,
+        TypedFunction, TypedModule, TypedRecordConstructor, TypedStatement,
     },
     io::FileSystemWriter,
     type_::Type,
@@ -21,6 +21,11 @@ enum WasmType {
     FunctionType {
         parameters: Vec<WasmPrimitive>,
         returns: WasmPrimitive,
+    },
+    SumType,
+    ProductType {
+        supertype_index: TypeIndex,
+        fields: Vec<WasmPrimitive>,
     },
 }
 
@@ -45,6 +50,41 @@ impl WasmType {
         WasmType::FunctionType {
             parameters,
             returns,
+        }
+    }
+
+    fn from_product_type(variant: &TypedRecordConstructor, supertype_index: TypeIndex) -> Self {
+        let mut fields = vec![];
+        for arg in &variant.arguments {
+            if arg.type_.is_int() {
+                fields.push(WasmPrimitive::Int);
+            } else {
+                todo!("Only int fields")
+            }
+        }
+
+        WasmType::ProductType {
+            supertype_index,
+            fields,
+        }
+    }
+
+    fn from_product_type_constructor(
+        variant: &TypedRecordConstructor,
+        product_type_index: TypeIndex,
+    ) -> Self {
+        let mut fields = vec![];
+        for arg in &variant.arguments {
+            if arg.type_.is_int() {
+                fields.push(WasmPrimitive::Int);
+            } else {
+                todo!("Only int fields")
+            }
+        }
+
+        WasmType::FunctionType {
+            parameters: fields,
+            returns: WasmPrimitive::StructRef(product_type_index),
         }
     }
 }
@@ -73,12 +113,29 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
     use crate::ast::TypedDefinition;
 
     // FIRST PASS: generate indices for all functions and types in the top-level module
+
+    // Function indices generator.
     let mut function_index_generator = FunctionIndexGenerator::new();
+
+    // Type indices generator.
     let mut type_index_generator = TypeIndexGenerator::new();
-    let mut function_type_map = HashMap::new();
+
+    // Maps function indices to their respective type indices.
+    let mut function_to_type = HashMap::new();
+
+    // Maps constructor function indices to their respective product type indices.
+    let mut constructor_to_variant = HashMap::new();
+
     let mut root_environment = Scope::new();
 
-    // TODO: handle custom types
+    // generate prelude types
+    generate_prelude_types(
+        &mut function_index_generator,
+        &mut type_index_generator,
+        &mut root_environment,
+        &mut function_to_type,
+    );
+
     // TODO: handle local function/type definitions
     for definition in &ast.definitions {
         match definition {
@@ -87,19 +144,50 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                 root_environment = root_environment.set(&f.name, function_index);
                 let function_type_index =
                     type_index_generator.new_index(WasmType::from_function(f));
-                let _ = function_type_map.insert(function_index, function_type_index);
+                let _ = function_to_type.insert(function_index, function_type_index);
+            }
+            TypedDefinition::CustomType(t) => {
+                if !t.parameters.is_empty() {
+                    todo!("Only concrete types");
+                }
+
+                // for each custom type, we:
+                // 1. declare a new type for the actual sum type
+                let sum_type_index = type_index_generator.new_index(WasmType::SumType);
+
+                // for each variant of the custom type, we:
+                for variant in &t.constructors {
+                    // 2. declare a new product type, subtypes of the sum type
+                    let product_type_index = type_index_generator
+                        .new_index(WasmType::from_product_type(variant, sum_type_index));
+
+                    // 3. declare the type of each constructor and which variant it constructs
+                    let constructor_function_index = function_index_generator.new_index(());
+                    let constructor_type =
+                        WasmType::from_product_type_constructor(variant, product_type_index);
+                    let constructor_type_index = type_index_generator.new_index(constructor_type);
+
+                    let _ = constructor_to_variant
+                        .insert(constructor_function_index, product_type_index);
+                    let _ =
+                        function_to_type.insert(constructor_function_index, constructor_type_index);
+
+                    // 4. declare a constructor for each variant in the environment
+                    root_environment =
+                        root_environment.set(&variant.name, constructor_function_index);
+                }
             }
             _ => {}
         }
     }
 
-    // SECOND PASS: generate the actual function bodies
+    // SECOND PASS: generate the actual function bodies and types
     let mut functions = vec![];
     for definition in &ast.definitions {
         match definition {
             TypedDefinition::Function(f) => {
                 let function_index = root_environment.get(&f.name).unwrap();
-                let function_type_index = *function_type_map.get(&function_index).unwrap();
+                let function_type_index = *function_to_type.get(&function_index).unwrap();
                 let function = emit_function(
                     f,
                     &type_index_generator,
@@ -108,6 +196,24 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     Arc::clone(&root_environment),
                 );
                 functions.push(function);
+            }
+            TypedDefinition::CustomType(c) => {
+                // generate the type constructors
+                for variant in &c.constructors {
+                    let constructor_function_index = root_environment.get(&variant.name).unwrap();
+                    let constructor_type_index =
+                        *function_to_type.get(&constructor_function_index).unwrap();
+                    let product_type_index = *constructor_to_variant
+                        .get(&constructor_function_index)
+                        .unwrap();
+                    let constructor_function = emit_variant_constructor(
+                        variant,
+                        product_type_index,
+                        constructor_function_index,
+                        constructor_type_index,
+                    );
+                    functions.push(constructor_function);
+                }
             }
             _ => todo!("unimplemented"),
         }
@@ -119,15 +225,42 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
     }
 }
 
+fn generate_prelude_types(
+    function_index_generator: &mut FunctionIndexGenerator,
+    type_index_generator: &mut TypeIndexGenerator,
+    root_environment: &mut Arc<Scope>,
+    function_type_map: &mut FunctionTypeMap,
+) -> () {
+    // Implementing these is not necessary:
+    // - PreludeType::Float
+    // - PreludeType::Int
+
+    // Implemented:
+    // - PreludeType::Nil
+    // - PreludeType::Bool
+    // - PreludeType::String
+
+    // To be implemented:
+    // - PreludeType::BitArray
+    // - PreludeType::List
+    // - PreludeType::Result
+    // - PreludeType::UtfCodepoint
+}
+
 #[derive(Copy, Clone, Debug)]
 enum WasmPrimitive {
     Int,
+    StructRef(TypeIndex),
 }
 
 impl WasmPrimitive {
     fn to_val_type(self) -> wasm_encoder::ValType {
         match self {
             WasmPrimitive::Int => wasm_encoder::ValType::I32,
+            WasmPrimitive::StructRef(typ) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
+                nullable: false,
+                heap_type: wasm_encoder::HeapType::Concrete(typ),
+            }),
         }
     }
 }
@@ -141,6 +274,26 @@ struct WasmFunction {
     instructions: WasmInstructions,
     locals: Vec<WasmPrimitive>,
     function_index: FunctionIndex,
+}
+
+fn emit_variant_constructor(
+    constructor: &TypedRecordConstructor,
+    variant_type_index: TypeIndex,
+    constructor_function_index: FunctionIndex,
+    constructor_function_type_index: TypeIndex,
+) -> WasmFunction {
+    let mut instructions = (0..constructor.arguments.len())
+        .map(|i| wasm_encoder::Instruction::LocalGet(i as u32))
+        .collect_vec();
+    instructions.push(wasm_encoder::Instruction::StructNew(variant_type_index));
+    instructions.push(wasm_encoder::Instruction::End);
+
+    WasmFunction {
+        function_index: constructor_function_index,
+        type_index: constructor_function_type_index,
+        instructions: WasmInstructions { lst: instructions },
+        locals: vec![],
+    }
 }
 
 fn emit_function(

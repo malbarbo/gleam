@@ -28,6 +28,41 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
                 let returns = [returns.to_val_type()];
                 let _ = types.function(parameters, returns);
             }
+            WasmType::SumType => {
+                let _ = types.subtype(&wasm_encoder::SubType {
+                    is_final: false,
+                    supertype_idx: None,
+                    composite_type: wasm_encoder::CompositeType {
+                        inner: wasm_encoder::CompositeInnerType::Struct(wasm_encoder::StructType {
+                            fields: Box::new([]),
+                        }),
+                        shared: false,
+                    },
+                });
+            }
+            WasmType::ProductType {
+                supertype_index,
+                fields,
+            } => {
+                let mut field_list = vec![];
+                for field in fields {
+                    field_list.push(wasm_encoder::FieldType {
+                        element_type: wasm_encoder::StorageType::Val(field.to_val_type()),
+                        mutable: false,
+                    });
+                }
+
+                let _ = types.subtype(&wasm_encoder::SubType {
+                    is_final: true,
+                    supertype_idx: Some(*supertype_index),
+                    composite_type: wasm_encoder::CompositeType {
+                        inner: wasm_encoder::CompositeInnerType::Struct(wasm_encoder::StructType {
+                            fields: field_list.into_boxed_slice(),
+                        }),
+                        shared: false,
+                    },
+                });
+            }
         }
     }
     let _ = module.section(&types);
