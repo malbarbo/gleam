@@ -1,76 +1,27 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
-use ecow::EcoString;
 use itertools::Itertools;
-use wasm_encoder::{CodeSection, FunctionSection, TypeSection};
 
 use crate::{
-    ast::{Arg, Assignment, BinOp, Function, Pattern, Statement, TypedExpr, TypedModule},
+    ast::{
+        BinOp, CustomType, Function, Pattern, Statement, TypedArg, TypedAssignment, TypedExpr,
+        TypedModule, TypedStatement,
+    },
     io::FileSystemWriter,
     type_::Type,
 };
 
-#[derive(Clone, Default, Debug)]
-pub struct Environment {
-    bindings: HashMap<EcoString, (u32, Arc<Type>)>,
-    enclosing: Option<Arc<Environment>>,
-}
-
-impl Environment {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            bindings: HashMap::new(),
-            enclosing: None,
-        })
-    }
-
-    fn new_enclosing(enclosing: Arc<Self>) -> Arc<Self> {
-        Arc::new(Self {
-            bindings: HashMap::new(),
-            enclosing: Some(enclosing),
-        })
-    }
-
-    fn set(&self, name: &str, binding: u32, type_: Arc<Type>) -> Arc<Self> {
-        let mut new_env = self.clone();
-        let _ = new_env.bindings.insert(name.into(), (binding, type_));
-        Arc::new(new_env)
-    }
-
-    fn get(&self, name: &str) -> Option<u32> {
-        if let Some(val) = self.bindings.get(name) {
-            Some(val.0)
-        } else if let Some(enclosing) = &self.enclosing {
-            enclosing.get(name)
-        } else {
-            None
-        }
-    }
-
-    fn len(&self) -> u32 {
-        self.bindings.len() as u32 + self.enclosing.as_ref().map_or(0, |e| e.len())
-    }
-}
+mod encoder;
+mod environment;
 
 #[derive(Clone, Default, Debug)]
 struct LocalGenerator {
     locals: Vec<Arc<Type>>,
-    offset: u32,
 }
 
 impl LocalGenerator {
     fn new() -> Self {
-        Self {
-            locals: vec![],
-            offset: 0,
-        }
-    }
-
-    fn with_offset(offset: u32) -> Self {
-        Self {
-            locals: vec![],
-            offset,
-        }
+        Self { locals: vec![] }
     }
 
     fn new_local(&mut self, type_: Arc<Type>) -> u32 {
@@ -83,47 +34,8 @@ impl LocalGenerator {
 pub fn module(writer: &impl FileSystemWriter, ast: &TypedModule) {
     dbg!(&ast);
     let module = construct_module(ast);
-    let bytes = emit(module);
+    let bytes = encoder::emit(module);
     writer.write_bytes("out.wasm".into(), &bytes[..]).unwrap();
-}
-
-fn emit(wasm_module: WasmModule) -> Vec<u8> {
-    let mut module = wasm_encoder::Module::new();
-
-    // types
-    let mut types = TypeSection::new();
-    for func in wasm_module.functions.iter() {
-        let _ = types.function(
-            func.parameters.iter().copied().map(WasmType::to_val_type),
-            std::iter::once(func.returns.to_val_type()),
-        );
-    }
-    let _ = module.section(&types);
-
-    // functions
-    let mut functions = FunctionSection::new();
-    for i in 0..wasm_module.functions.len() {
-        let _ = functions.function(i as _);
-    }
-    let _ = module.section(&functions);
-
-    // code
-    let mut codes = CodeSection::new();
-    for func in wasm_module.functions.iter() {
-        let locals = func
-            .locals
-            .iter()
-            .copied()
-            .map(|typ| (1, typ.to_val_type()));
-        let mut f = wasm_encoder::Function::new(locals);
-        for inst in &func.instructions.lst {
-            let _ = f.instruction(inst);
-        }
-        let _ = codes.function(&f);
-    }
-    let _ = module.section(&codes);
-
-    module.finish()
 }
 
 struct WasmModule {
@@ -135,6 +47,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
 
     let mut functions = vec![];
 
+    // populate functions
     for def in &ast.definitions {
         match def {
             TypedDefinition::Function(Function {
@@ -146,6 +59,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
             }) => {
                 functions.push(emit_function(name, arguments, body, return_type));
             }
+            TypedDefinition::CustomType(CustomType { .. }) => {} // we handle this elsewhere
             _ => todo!("Only functions"),
         }
     }
@@ -154,14 +68,14 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
 }
 
 #[derive(Copy, Clone, Debug)]
-enum WasmType {
+enum WasmPrimitive {
     Int,
 }
 
-impl WasmType {
+impl WasmPrimitive {
     fn to_val_type(self) -> wasm_encoder::ValType {
         match self {
-            WasmType::Int => wasm_encoder::ValType::I64,
+            WasmPrimitive::Int => wasm_encoder::ValType::I32,
         }
     }
 }
@@ -171,19 +85,19 @@ struct WasmInstructions {
 }
 
 struct WasmFunction {
-    parameters: Vec<WasmType>,
+    parameters: Vec<WasmPrimitive>,
     instructions: WasmInstructions,
-    returns: WasmType,
-    locals: Vec<WasmType>,
+    returns: WasmPrimitive,
+    locals: Vec<WasmPrimitive>,
 }
 
 fn emit_function(
-    name: &str,
-    arguments: &[Arg<Arc<Type>>],
-    body: &[Statement<Arc<Type>, TypedExpr>],
+    _name: &str,
+    arguments: &[TypedArg],
+    body: &[TypedStatement],
     return_type: &Arc<Type>,
 ) -> WasmFunction {
-    let mut env = Environment::new();
+    let mut env = environment::Environment::new();
     let mut locals = LocalGenerator::new();
 
     let mut parameters = vec![];
@@ -201,14 +115,14 @@ fn emit_function(
         );
         // add argument types to the parameters
         parameters.push(if arg.type_.is_int() {
-            WasmType::Int
+            WasmPrimitive::Int
         } else {
             todo!("Only int parameters")
         });
     }
 
     let n_params = parameters.len();
-    let (env, locals, mut instructions) = emit_statement_list(env, locals, body);
+    let (_, locals, mut instructions) = emit_statement_list(env, locals, body);
     instructions.lst.push(wasm_encoder::Instruction::End);
 
     WasmFunction {
@@ -220,14 +134,14 @@ fn emit_function(
             .skip(n_params)
             .map(|x| {
                 if x.is_int() {
-                    WasmType::Int
+                    WasmPrimitive::Int
                 } else {
                     todo!("Only int return types")
                 }
             })
             .collect_vec(),
         returns: if return_type.is_int() {
-            WasmType::Int
+            WasmPrimitive::Int
         } else {
             todo!("Only int return types")
         },
@@ -235,10 +149,14 @@ fn emit_function(
 }
 
 fn emit_statement_list(
-    env: Arc<Environment>,
+    env: Arc<environment::Environment>,
     locals: LocalGenerator,
-    statements: &[Statement<Arc<Type>, TypedExpr>],
-) -> (Arc<Environment>, LocalGenerator, WasmInstructions) {
+    statements: &[TypedStatement],
+) -> (
+    Arc<environment::Environment>,
+    LocalGenerator,
+    WasmInstructions,
+) {
     let mut instructions = WasmInstructions { lst: vec![] };
     let mut env = env;
     let mut locals = locals;
@@ -261,10 +179,14 @@ fn emit_statement_list(
 }
 
 fn emit_statement(
-    statement: &Statement<Arc<Type>, TypedExpr>,
-    env: Arc<Environment>,
+    statement: &TypedStatement,
+    env: Arc<environment::Environment>,
     locals: LocalGenerator,
-) -> (Arc<Environment>, LocalGenerator, WasmInstructions) {
+) -> (
+    Arc<environment::Environment>,
+    LocalGenerator,
+    WasmInstructions,
+) {
     match statement {
         Statement::Expression(expression) => emit_expression(expression, env, locals),
         Statement::Assignment(assignment) => emit_assignment(assignment, env, locals),
@@ -273,10 +195,14 @@ fn emit_statement(
 }
 
 fn emit_assignment(
-    assignment: &Assignment<Arc<Type>, TypedExpr>,
-    env: Arc<Environment>,
+    assignment: &TypedAssignment,
+    env: Arc<environment::Environment>,
     locals: LocalGenerator,
-) -> (Arc<Environment>, LocalGenerator, WasmInstructions) {
+) -> (
+    Arc<environment::Environment>,
+    LocalGenerator,
+    WasmInstructions,
+) {
     // only non-assertions
     if assignment.kind.is_assert() {
         todo!("Only non-assertions");
@@ -307,11 +233,15 @@ fn emit_assignment(
 
 fn emit_expression(
     expression: &TypedExpr,
-    env: Arc<Environment>,
+    env: Arc<environment::Environment>,
     locals: LocalGenerator,
-) -> (Arc<Environment>, LocalGenerator, WasmInstructions) {
+) -> (
+    Arc<environment::Environment>,
+    LocalGenerator,
+    WasmInstructions,
+) {
     match expression {
-        TypedExpr::Int { typ, value, .. } => {
+        TypedExpr::Int { value, .. } => {
             let val = parse_integer(value);
             (
                 env,
@@ -331,7 +261,7 @@ fn emit_expression(
             // create new scope
             // TODO: fix environment pop
             // maybe use a block instruction?
-            let (_, locals, statements) = emit_statement_list(Environment::new_enclosing(Arc::clone(&env)), locals, statements);
+            let (_, locals, statements) = emit_statement_list(environment::Environment::new_enclosing(Arc::clone(&env)), locals, statements);
             (env, locals, statements)
         },
         TypedExpr::BinOp {
@@ -358,25 +288,23 @@ fn emit_expression(
                 },
             )
         },
-        TypedExpr::Case {
-            typ,
-            subjects,
-            clauses,
-            ..
-        } => todo!("case todo"),
         _ => todo!("Only integer constants, integer negation, blocks, binary operations, case and variable accesses"),
     }
 }
 
 fn emit_binary_operation(
-    env: Arc<Environment>,
+    env: Arc<environment::Environment>,
     locals: LocalGenerator,
     // only used to disambiguate equals
-    typ: &Type,
+    _typ: &Type,
     name: BinOp,
     left: &TypedExpr,
     right: &TypedExpr,
-) -> (Arc<Environment>, LocalGenerator, WasmInstructions) {
+) -> (
+    Arc<environment::Environment>,
+    LocalGenerator,
+    WasmInstructions,
+) {
     match name {
         BinOp::AddInt => {
             let (env, locals, mut insts) = emit_expression(left, env, locals);
