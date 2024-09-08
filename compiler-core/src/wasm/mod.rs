@@ -1,35 +1,61 @@
-use std::sync::Arc;
+mod encoder;
+mod index_generator;
+mod scope;
 
+use std::{collections::HashMap, sync::Arc};
+
+use index_generator::IndexGenerator;
 use itertools::Itertools;
+use scope::Scope;
 
 use crate::{
     ast::{
         BinOp, CustomType, Function, Pattern, Statement, TypedArg, TypedAssignment, TypedExpr,
-        TypedModule, TypedStatement,
+        TypedFunction, TypedModule, TypedStatement,
     },
     io::FileSystemWriter,
     type_::Type,
 };
 
-mod encoder;
-mod environment;
-
-#[derive(Clone, Default, Debug)]
-struct LocalGenerator {
-    locals: Vec<Arc<Type>>,
+enum WasmType {
+    FunctionType {
+        parameters: Vec<WasmPrimitive>,
+        returns: WasmPrimitive,
+    },
 }
 
-impl LocalGenerator {
-    fn new() -> Self {
-        Self { locals: vec![] }
-    }
+impl WasmType {
+    fn from_function(f: &TypedFunction) -> Self {
+        let mut parameters = vec![];
 
-    fn new_local(&mut self, type_: Arc<Type>) -> u32 {
-        let l = self.locals.len() as u32;
-        self.locals.push(type_);
-        l
+        for arg in &f.arguments {
+            if arg.type_.is_int() {
+                parameters.push(WasmPrimitive::Int);
+            } else {
+                todo!("Only int parameters")
+            }
+        }
+
+        let returns = if f.return_type.is_int() {
+            WasmPrimitive::Int
+        } else {
+            todo!("Only int return types")
+        };
+
+        WasmType::FunctionType {
+            parameters,
+            returns,
+        }
     }
 }
+
+type LocalIndexGenerator = IndexGenerator<Arc<Type>>;
+type TypeIndexGenerator = IndexGenerator<WasmType>;
+type FunctionIndexGenerator = IndexGenerator<()>;
+
+type FunctionIndex = u32;
+type TypeIndex = u32;
+type FunctionTypeMap = HashMap<FunctionIndex, TypeIndex>;
 
 pub fn module(writer: &impl FileSystemWriter, ast: &TypedModule) {
     dbg!(&ast);
@@ -40,31 +66,57 @@ pub fn module(writer: &impl FileSystemWriter, ast: &TypedModule) {
 
 struct WasmModule {
     functions: Vec<WasmFunction>,
+    types: Vec<WasmType>,
 }
 
 fn construct_module(ast: &TypedModule) -> WasmModule {
     use crate::ast::TypedDefinition;
 
-    let mut functions = vec![];
+    // FIRST PASS: generate indices for all functions and types in the top-level module
+    let mut function_index_generator = FunctionIndexGenerator::new();
+    let mut type_index_generator = TypeIndexGenerator::new();
+    let mut function_type_map = HashMap::new();
+    let mut root_environment = Scope::new();
 
-    // populate functions
-    for def in &ast.definitions {
-        match def {
-            TypedDefinition::Function(Function {
-                name,
-                arguments,
-                body,
-                return_type,
-                ..
-            }) => {
-                functions.push(emit_function(name, arguments, body, return_type));
+    // TODO: handle custom types
+    // TODO: handle local function/type definitions
+    for definition in &ast.definitions {
+        match definition {
+            TypedDefinition::Function(f) => {
+                let function_index = function_index_generator.new_index(());
+                root_environment = root_environment.set(&f.name, function_index);
+                let function_type_index =
+                    type_index_generator.new_index(WasmType::from_function(f));
+                let _ = function_type_map.insert(function_index, function_type_index);
             }
-            TypedDefinition::CustomType(CustomType { .. }) => {} // we handle this elsewhere
-            _ => todo!("Only functions"),
+            _ => {}
         }
     }
 
-    WasmModule { functions }
+    // SECOND PASS: generate the actual function bodies
+    let mut functions = vec![];
+    for definition in &ast.definitions {
+        match definition {
+            TypedDefinition::Function(f) => {
+                let function_index = root_environment.get(&f.name).unwrap();
+                let function_type_index = *function_type_map.get(&function_index).unwrap();
+                let function = emit_function(
+                    f,
+                    &type_index_generator,
+                    function_type_index,
+                    function_index,
+                    Arc::clone(&root_environment),
+                );
+                functions.push(function);
+            }
+            _ => todo!("unimplemented"),
+        }
+    }
+
+    WasmModule {
+        functions,
+        types: type_index_generator.items,
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -85,25 +137,30 @@ struct WasmInstructions {
 }
 
 struct WasmFunction {
-    parameters: Vec<WasmPrimitive>,
+    type_index: TypeIndex,
     instructions: WasmInstructions,
-    returns: WasmPrimitive,
     locals: Vec<WasmPrimitive>,
+    function_index: FunctionIndex,
 }
 
 fn emit_function(
-    _name: &str,
-    arguments: &[TypedArg],
-    body: &[TypedStatement],
-    return_type: &Arc<Type>,
+    function: &TypedFunction,
+    type_map: &TypeIndexGenerator,
+    type_index: u32,
+    function_index: u32,
+    top_level_env: Arc<Scope>,
 ) -> WasmFunction {
-    let mut env = environment::Environment::new();
-    let mut locals = LocalGenerator::new();
+    let mut env = Scope::new_enclosing(top_level_env);
+    let mut locals = LocalIndexGenerator::new();
+    let function_type = type_map.get(type_index).unwrap();
+    let n_params = match function_type {
+        WasmType::FunctionType { parameters, .. } => parameters.len(),
+        _ => unreachable!(),
+    };
 
-    let mut parameters = vec![];
-    for arg in arguments {
+    for arg in &function.arguments {
         // get a variable number
-        let idx = locals.new_local(Arc::clone(&arg.type_));
+        let idx = locals.new_index(Arc::clone(&arg.type_));
         // add arguments to the environment
         env = env.set(
             &arg.names
@@ -111,25 +168,18 @@ fn emit_function(
                 .cloned()
                 .unwrap_or_else(|| format!("#{idx}").into()),
             idx,
-            Arc::clone(&arg.type_),
         );
-        // add argument types to the parameters
-        parameters.push(if arg.type_.is_int() {
-            WasmPrimitive::Int
-        } else {
-            todo!("Only int parameters")
-        });
     }
 
-    let n_params = parameters.len();
-    let (_, locals, mut instructions) = emit_statement_list(env, locals, body);
+    let (_, locals, mut instructions) = emit_statement_list(env, locals, &function.body);
     instructions.lst.push(wasm_encoder::Instruction::End);
 
     WasmFunction {
-        parameters,
+        function_index,
+        type_index,
         instructions,
         locals: locals
-            .locals
+            .items
             .into_iter()
             .skip(n_params)
             .map(|x| {
@@ -140,23 +190,14 @@ fn emit_function(
                 }
             })
             .collect_vec(),
-        returns: if return_type.is_int() {
-            WasmPrimitive::Int
-        } else {
-            todo!("Only int return types")
-        },
     }
 }
 
 fn emit_statement_list(
-    env: Arc<environment::Environment>,
-    locals: LocalGenerator,
+    env: Arc<Scope>,
+    locals: LocalIndexGenerator,
     statements: &[TypedStatement],
-) -> (
-    Arc<environment::Environment>,
-    LocalGenerator,
-    WasmInstructions,
-) {
+) -> (Arc<Scope>, LocalIndexGenerator, WasmInstructions) {
     let mut instructions = WasmInstructions { lst: vec![] };
     let mut env = env;
     let mut locals = locals;
@@ -180,13 +221,9 @@ fn emit_statement_list(
 
 fn emit_statement(
     statement: &TypedStatement,
-    env: Arc<environment::Environment>,
-    locals: LocalGenerator,
-) -> (
-    Arc<environment::Environment>,
-    LocalGenerator,
-    WasmInstructions,
-) {
+    env: Arc<Scope>,
+    locals: LocalIndexGenerator,
+) -> (Arc<Scope>, LocalIndexGenerator, WasmInstructions) {
     match statement {
         Statement::Expression(expression) => emit_expression(expression, env, locals),
         Statement::Assignment(assignment) => emit_assignment(assignment, env, locals),
@@ -196,13 +233,9 @@ fn emit_statement(
 
 fn emit_assignment(
     assignment: &TypedAssignment,
-    env: Arc<environment::Environment>,
-    locals: LocalGenerator,
-) -> (
-    Arc<environment::Environment>,
-    LocalGenerator,
-    WasmInstructions,
-) {
+    env: Arc<Scope>,
+    locals: LocalIndexGenerator,
+) -> (Arc<Scope>, LocalIndexGenerator, WasmInstructions) {
     // only non-assertions
     if assignment.kind.is_assert() {
         todo!("Only non-assertions");
@@ -218,8 +251,8 @@ fn emit_assignment(
             // emit value
             let (env, mut locals, mut insts) = emit_expression(&assignment.value, env, locals);
             // add variable to the environment
-            let id = locals.new_local(Arc::clone(type_));
-            let env = env.set(&name, id, Arc::clone(type_));
+            let id = locals.new_index(Arc::clone(type_));
+            let env = env.set(&name, id);
             // create local
             insts
                 .lst
@@ -233,13 +266,9 @@ fn emit_assignment(
 
 fn emit_expression(
     expression: &TypedExpr,
-    env: Arc<environment::Environment>,
-    locals: LocalGenerator,
-) -> (
-    Arc<environment::Environment>,
-    LocalGenerator,
-    WasmInstructions,
-) {
+    env: Arc<Scope>,
+    locals: LocalIndexGenerator,
+) -> (Arc<Scope>, LocalIndexGenerator, WasmInstructions) {
     match expression {
         TypedExpr::Int { value, .. } => {
             let val = parse_integer(value);
@@ -247,21 +276,21 @@ fn emit_expression(
                 env,
                 locals,
                 WasmInstructions {
-                    lst: vec![wasm_encoder::Instruction::I64Const(val)],
+                    lst: vec![wasm_encoder::Instruction::I32Const(val)],
                 },
             )
         }
         TypedExpr::NegateInt { value, .. } => {
             let (env, locals, mut insts) = emit_expression(value, env, locals);
-            insts.lst.push(wasm_encoder::Instruction::I64Const(-1));
-            insts.lst.push(wasm_encoder::Instruction::I64Mul);
+            insts.lst.push(wasm_encoder::Instruction::I32Const(-1));
+            insts.lst.push(wasm_encoder::Instruction::I32Mul);
             (env, locals, insts)
         }
         TypedExpr::Block { statements, .. } => {
             // create new scope
             // TODO: fix environment pop
             // maybe use a block instruction?
-            let (_, locals, statements) = emit_statement_list(environment::Environment::new_enclosing(Arc::clone(&env)), locals, statements);
+            let (_, locals, statements) = emit_statement_list(Scope::new_enclosing(Arc::clone(&env)), locals, statements);
             (env, locals, statements)
         },
         TypedExpr::BinOp {
@@ -293,75 +322,71 @@ fn emit_expression(
 }
 
 fn emit_binary_operation(
-    env: Arc<environment::Environment>,
-    locals: LocalGenerator,
+    env: Arc<Scope>,
+    locals: LocalIndexGenerator,
     // only used to disambiguate equals
     _typ: &Type,
     name: BinOp,
     left: &TypedExpr,
     right: &TypedExpr,
-) -> (
-    Arc<environment::Environment>,
-    LocalGenerator,
-    WasmInstructions,
-) {
+) -> (Arc<Scope>, LocalIndexGenerator, WasmInstructions) {
     match name {
         BinOp::AddInt => {
             let (env, locals, mut insts) = emit_expression(left, env, locals);
             let (env, locals, right_insts) = emit_expression(right, env, locals);
             insts.lst.extend(right_insts.lst);
-            insts.lst.push(wasm_encoder::Instruction::I64Add);
+            insts.lst.push(wasm_encoder::Instruction::I32Add);
             (env, locals, insts)
         }
         BinOp::SubInt => {
             let (env, locals, mut insts) = emit_expression(left, env, locals);
             let (env, locals, right_insts) = emit_expression(right, env, locals);
             insts.lst.extend(right_insts.lst);
-            insts.lst.push(wasm_encoder::Instruction::I64Sub);
+            insts.lst.push(wasm_encoder::Instruction::I32Sub);
             (env, locals, insts)
         }
         BinOp::MultInt => {
             let (env, locals, mut insts) = emit_expression(left, env, locals);
             let (env, locals, right_insts) = emit_expression(right, env, locals);
             insts.lst.extend(right_insts.lst);
-            insts.lst.push(wasm_encoder::Instruction::I64Mul);
+            insts.lst.push(wasm_encoder::Instruction::I32Mul);
             (env, locals, insts)
         }
         BinOp::DivInt => {
             let (env, locals, mut insts) = emit_expression(left, env, locals);
             let (env, locals, right_insts) = emit_expression(right, env, locals);
             insts.lst.extend(right_insts.lst);
-            insts.lst.push(wasm_encoder::Instruction::I64DivS);
+            insts.lst.push(wasm_encoder::Instruction::I32DivS);
             (env, locals, insts)
         }
         BinOp::RemainderInt => {
             let (env, locals, mut insts) = emit_expression(left, env, locals);
             let (env, locals, right_insts) = emit_expression(right, env, locals);
             insts.lst.extend(right_insts.lst);
-            insts.lst.push(wasm_encoder::Instruction::I64RemS);
+            insts.lst.push(wasm_encoder::Instruction::I32RemS);
             (env, locals, insts)
         }
         _ => todo!("Only integer arithmetic"),
     }
 }
 
-fn parse_integer(value: &str) -> i64 {
+fn parse_integer(value: &str) -> i32 {
     let val = value.replace("_", "");
 
-    // TODO: support integers other than i64
+    // TODO: support integers other than i32
     // why do i have do this at codegen?
     let int = if val.starts_with("0b") {
         // base 2 literal
-        i64::from_str_radix(&val[2..], 2).expect("expected int to be a valid binary integer")
+        i32::from_str_radix(&val[2..], 2).expect("expected int to be a valid binary integer")
     } else if val.starts_with("0o") {
         // base 8 literal
-        i64::from_str_radix(&val[2..], 8).expect("expected int to be a valid octal integer")
+        i32::from_str_radix(&val[2..], 8).expect("expected int to be a valid octal integer")
     } else if val.starts_with("0x") {
         // base 16 literal
-        i64::from_str_radix(&val[2..], 16).expect("expected int to be a valid hexadecimal integer")
+        i32::from_str_radix(&val[2..], 16).expect("expected int to be a valid hexadecimal integer")
     } else {
         // base 10 literal
-        i64::from_str_radix(&val, 10).expect("expected int to be a valid decimal integer")
+        i32::from_str_radix(&val, 10).expect("expected int to be a valid decimal integer")
     };
 
     int

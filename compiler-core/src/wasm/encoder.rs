@@ -3,6 +3,7 @@ use wasm_encoder::CodeSection;
 use wasm_encoder::FunctionSection;
 
 use super::WasmPrimitive;
+use super::WasmType;
 
 use wasm_encoder::TypeSection;
 
@@ -13,26 +14,28 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
 
     // types
     let mut types = TypeSection::new();
-    let mut type_idx = 0;
-
-    let function_offset = type_idx;
-    // function types
-    for func in wasm_module.functions.iter() {
-        let _ = types.function(
-            func.parameters
-                .iter()
-                .copied()
-                .map(WasmPrimitive::to_val_type),
-            std::iter::once(func.returns.to_val_type()),
-        );
-        type_idx += 1;
+    for type_ in &wasm_module.types {
+        match type_ {
+            WasmType::FunctionType {
+                parameters,
+                returns,
+            } => {
+                let parameters: Vec<_> = parameters
+                    .into_iter()
+                    .copied()
+                    .map(WasmPrimitive::to_val_type)
+                    .collect();
+                let returns = [returns.to_val_type()];
+                let _ = types.function(parameters, returns);
+            }
+        }
     }
     let _ = module.section(&types);
 
     // functions
     let mut functions = FunctionSection::new();
-    for i in 0..wasm_module.functions.len() {
-        let _ = functions.function((function_offset as usize + i) as _);
+    for func in &wasm_module.functions {
+        let _ = functions.function(func.type_index);
     }
     let _ = module.section(&functions);
 
