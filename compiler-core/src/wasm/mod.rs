@@ -1,17 +1,17 @@
 mod encoder;
-mod index_generator;
 mod scope;
+mod table;
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
-use index_generator::IndexGenerator;
 use itertools::Itertools;
 use scope::Scope;
+use table::SymbolTable;
 
 use crate::{
     ast::{
-        BinOp, CustomType, Function, Pattern, Statement, TypedArg, TypedAssignment, TypedExpr,
-        TypedFunction, TypedModule, TypedRecordConstructor, TypedStatement,
+        BinOp, Pattern, Statement, TypedAssignment, TypedExpr, TypedFunction, TypedModule,
+        TypedRecordConstructor, TypedStatement,
     },
     io::FileSystemWriter,
     type_::{Type, ValueConstructor, ValueConstructorVariant},
@@ -25,7 +25,7 @@ enum WasmType {
     },
     SumType,
     ProductType {
-        supertype_index: TypeIndex,
+        supertype_index: u32,
         fields: Vec<WasmPrimitive>,
     },
 }
@@ -54,7 +54,7 @@ impl WasmType {
         }
     }
 
-    fn from_product_type(variant: &TypedRecordConstructor, supertype_index: TypeIndex) -> Self {
+    fn from_product_type(variant: &TypedRecordConstructor, supertype_index: u32) -> Self {
         let mut fields = vec![];
         for arg in &variant.arguments {
             if arg.type_.is_int() {
@@ -72,7 +72,7 @@ impl WasmType {
 
     fn from_product_type_constructor(
         variant: &TypedRecordConstructor,
-        product_type_index: TypeIndex,
+        product_type_index: u32,
     ) -> Self {
         let mut fields = vec![];
         for arg in &variant.arguments {
@@ -89,14 +89,6 @@ impl WasmType {
         }
     }
 }
-
-type LocalIndexGenerator = IndexGenerator<Arc<Type>>;
-type TypeIndexGenerator = IndexGenerator<WasmType>;
-type FunctionIndexGenerator = IndexGenerator<()>;
-
-type FunctionIndex = u32;
-type TypeIndex = u32;
-type FunctionTypeMap = HashMap<WasmType, TypeIndex>;
 
 pub fn module(writer: &impl FileSystemWriter, ast: &TypedModule) {
     dbg!(&ast);
@@ -116,79 +108,129 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
     // FIRST PASS: generate indices for all functions and types in the top-level module
 
     // Function indices generator.
-    let mut function_index_generator = FunctionIndexGenerator::new();
+    //let mut function_index_generator = FunctionIndexGenerator::new();
 
     // Type indices generator.
-    let mut type_index_generator = TypeIndexGenerator::new();
+    //let mut type_index_generator = TypeIndexGenerator::new();
 
     // Maps function types to their respective type indices.
-    let mut function_type_to_index = HashMap::new();
+    //let mut function_type_to_index = HashMap::new();
 
     // Maps constructor function indices to their respective product type indices.
-    let mut constructor_to_variant = HashMap::new();
+    //let mut constructor_to_variant = HashMap::new();
 
     // Maps function indices to their type indices.
-    let mut function_to_function_type = HashMap::new();
+    //let mut function_to_function_type = HashMap::new();
 
     // Maps constructor function indices to their sum type indices.
-    let mut constructor_to_sum = HashMap::new();
+    //let mut constructor_to_sum = HashMap::new();
+
+    let mut table = SymbolTable::new();
 
     let mut root_environment = Scope::new();
 
     // generate prelude types
-    generate_prelude_types(
-        &mut function_index_generator,
-        &mut type_index_generator,
-        &mut root_environment,
-        &mut function_type_to_index,
-    );
+    generate_prelude_types(&mut table);
 
     // TODO: handle local function/type definitions
     for definition in &ast.definitions {
         match definition {
             TypedDefinition::Function(f) => {
-                let function_index = function_index_generator.new_index(());
-                root_environment = root_environment.set(&f.name, function_index);
-                let function_type_index =
-                    type_index_generator.new_index(WasmType::from_function(f));
-                _ = function_type_to_index.insert(WasmType::from_function(f), function_type_index);
-                _ = function_to_function_type.insert(function_index, function_type_index);
+                let function_type_id = table.types.new_id();
+                let function_type = table::Type {
+                    id: function_type_id,
+                    name: format!("type@function@{}", f.name).into(),
+                    definition: WasmType::from_function(f),
+                };
+                table.types.insert(function_type_id, function_type);
+
+                let function_id = table.functions.new_id();
+                let function = table::Function {
+                    id: function_id,
+                    signature: function_type_id,
+                    name: f.name.clone(),
+                    arity: f.arguments.len() as u32,
+                };
+                table.functions.insert(function_id, function);
+
+                root_environment = root_environment.set(&f.name, function_id.id());
             }
             TypedDefinition::CustomType(t) => {
                 if !t.parameters.is_empty() {
                     todo!("Only concrete types");
                 }
 
-                // for each custom type, we:
-                // 1. declare a new type for the actual sum type
-                let sum_type_index = type_index_generator.new_index(WasmType::SumType);
+                let sum_id = table.sums.new_id();
 
-                // for each variant of the custom type, we:
+                let sum_type_index = table.types.new_id();
+                let sum_type = table::Type {
+                    id: sum_type_index,
+                    name: format!("type@sum@{}", t.name).into(),
+                    definition: WasmType::SumType,
+                };
+                table.types.insert(sum_type_index, sum_type);
+
+                let mut product_ids = vec![];
                 for variant in &t.constructors {
-                    // 2. declare a new product type, subtypes of the sum type
-                    let product_type_index = type_index_generator
-                        .new_index(WasmType::from_product_type(variant, sum_type_index));
+                    if variant.arguments.is_empty() {
+                        todo!("Only types with arguments");
+                    } else {
+                        // type
+                        let product_type_id = table.types.new_id();
+                        let product_type = table::Type {
+                            id: product_type_id,
+                            name: format!("type@product@{}@{}", t.name, variant.name).into(),
+                            definition: WasmType::from_product_type(variant, sum_type_index.id()),
+                        };
+                        table.types.insert(product_type_id, product_type);
 
-                    // 3. declare the type of each constructor and which variant it constructs
-                    let constructor_function_index = function_index_generator.new_index(());
-                    let constructor_type =
-                        WasmType::from_product_type_constructor(variant, product_type_index);
-                    let constructor_type_index =
-                        type_index_generator.new_index(constructor_type.clone());
+                        // constructor signature
+                        let constructor_sig_id = table.types.new_id();
+                        let constructor_sig = table::Type {
+                            id: constructor_sig_id,
+                            name: format!("type@constructor@{}@{}", t.name, variant.name).into(),
+                            definition: WasmType::from_product_type_constructor(
+                                variant,
+                                product_type_id.id(),
+                            ),
+                        };
+                        table.types.insert(constructor_sig_id, constructor_sig);
 
-                    _ = constructor_to_variant
-                        .insert(constructor_function_index, product_type_index);
-                    _ = function_type_to_index.insert(constructor_type, constructor_type_index);
-                    _ = function_to_function_type
-                        .insert(constructor_function_index, constructor_type_index);
+                        // constructor
+                        let constructor_id = table.functions.new_id();
+                        let constructor = table::Function {
+                            id: constructor_id,
+                            signature: constructor_sig_id,
+                            name: variant.name.clone(),
+                            arity: variant.arguments.len() as u32,
+                        };
+                        table.functions.insert(constructor_id, constructor);
 
-                    // 4. declare a constructor for each variant in the environment
-                    root_environment =
-                        root_environment.set(&variant.name, constructor_function_index);
+                        // product
+                        let product_id = table.products.new_id();
+                        let product = table::Product {
+                            id: product_id,
+                            name: format!("product@{}@{}", t.name, variant.name).into(),
+                            type_: product_type_id,
+                            parent: sum_id,
+                            kind: table::ProductKind::Composite {
+                                constructor: constructor_id,
+                            },
+                        };
+                        table.products.insert(product_id, product);
+                        product_ids.push(product_id);
 
-                    // 5. Store reference to parent type
-                    _ = constructor_to_sum.insert(constructor_function_index, sum_type_index);
+                        root_environment = root_environment.set(&variant.name, constructor_id.id());
+                    }
                 }
+
+                let sum = table::Sum {
+                    id: sum_id,
+                    name: t.name.clone(),
+                    type_: sum_type_index,
+                    variants: product_ids,
+                };
+                table.sums.insert(sum_id, sum);
             }
             _ => {}
         }
@@ -200,40 +242,22 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
         match definition {
             TypedDefinition::Function(f) => {
                 let function_index = root_environment.get(&f.name).unwrap();
-                let function_type_index = *function_type_to_index
-                    .get(&WasmType::from_function(f))
-                    .unwrap();
-                let function = emit_function(
-                    f,
-                    &type_index_generator,
-                    function_type_index,
-                    function_index,
-                    Arc::clone(&root_environment),
-                );
+                let function_data = table.functions.get_from_id(function_index).unwrap();
+                let function =
+                    emit_function(f, function_data.id, &table, Arc::clone(&root_environment));
                 functions.push(function);
             }
             TypedDefinition::CustomType(c) => {
                 // generate the type constructors
                 for variant in &c.constructors {
-                    let constructor_function_index = root_environment.get(&variant.name).unwrap();
-                    let product_type_index = *constructor_to_variant
-                        .get(&constructor_function_index)
-                        .unwrap();
-                    let constructor_function_type =
-                        WasmType::from_product_type_constructor(variant, product_type_index);
-                    let constructor_function_type_index = *function_type_to_index
-                        .get(&constructor_function_type)
-                        .unwrap();
-
-                    // constructor_type_index
-                    // product_type_index
-                    let constructor_function = emit_variant_constructor(
-                        variant,
-                        product_type_index,
-                        constructor_function_index,
-                        constructor_function_type_index,
-                    );
-                    functions.push(constructor_function);
+                    if variant.arguments.len() == 0 {
+                        todo!("Only types with arguments");
+                    } else {
+                        let product_id = root_environment.get(&variant.name).unwrap();
+                        let product = table.products.get_from_id(product_id).unwrap();
+                        let function = emit_variant_constructor(variant, &product, &table);
+                        functions.push(function);
+                    }
                 }
             }
             _ => todo!("unimplemented"),
@@ -242,16 +266,16 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
 
     WasmModule {
         functions,
-        types: type_index_generator.items,
+        types: table
+            .types
+            .as_list()
+            .into_iter()
+            .map(|x| x.definition)
+            .collect(),
     }
 }
 
-fn generate_prelude_types(
-    function_index_generator: &mut FunctionIndexGenerator,
-    type_index_generator: &mut TypeIndexGenerator,
-    root_environment: &mut Arc<Scope>,
-    function_type_map: &mut FunctionTypeMap,
-) -> () {
+fn generate_prelude_types(table: &mut SymbolTable) -> () {
     // Implementing these is not necessary:
     // - PreludeType::Float
     // - PreludeType::Int
@@ -271,7 +295,7 @@ fn generate_prelude_types(
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 enum WasmPrimitive {
     Int,
-    StructRef(TypeIndex),
+    StructRef(u32),
 }
 
 impl WasmPrimitive {
@@ -291,71 +315,81 @@ struct WasmInstructions {
 }
 
 struct WasmFunction {
-    type_index: TypeIndex,
+    type_index: u32,
     instructions: WasmInstructions,
     locals: Vec<WasmPrimitive>,
-    function_index: FunctionIndex,
+    function_index: u32,
 }
 
 fn emit_variant_constructor(
     constructor: &TypedRecordConstructor,
-    variant_type_index: TypeIndex,
-    constructor_function_index: FunctionIndex,
-    constructor_function_type_index: TypeIndex,
+    variant_data: &table::Product,
+    table: &SymbolTable,
 ) -> WasmFunction {
     let mut instructions = (0..constructor.arguments.len())
         .map(|i| wasm_encoder::Instruction::LocalGet(i as u32))
         .collect_vec();
-    instructions.push(wasm_encoder::Instruction::StructNew(variant_type_index));
+    instructions.push(wasm_encoder::Instruction::StructNew(
+        variant_data.type_.id(),
+    ));
     instructions.push(wasm_encoder::Instruction::End);
 
+    let function_index = match variant_data.kind {
+        table::ProductKind::Composite { constructor } => constructor,
+        _ => unreachable!(),
+    };
+    let function = table.functions.get(function_index).unwrap();
+
     WasmFunction {
-        function_index: constructor_function_index,
-        type_index: constructor_function_type_index,
+        function_index: function_index.id(),
+        type_index: function.signature.id(),
         instructions: WasmInstructions { lst: instructions },
         locals: vec![],
     }
 }
 
+type LocalStore = table::Store<Arc<Type>>;
+
 fn emit_function(
     function: &TypedFunction,
-    type_map: &TypeIndexGenerator,
-    type_index: u32,
-    function_index: u32,
+    function_id: table::FunctionId,
+    table: &SymbolTable,
     top_level_env: Arc<Scope>,
 ) -> WasmFunction {
     let mut env = Scope::new_enclosing(top_level_env);
-    let mut locals = LocalIndexGenerator::new();
-    let function_type = type_map.get(type_index).unwrap();
-    let n_params = match function_type {
-        WasmType::FunctionType { parameters, .. } => parameters.len(),
-        _ => unreachable!(),
-    };
+    let mut locals = LocalStore::new();
+
+    let function_data = table
+        .functions
+        .get(function_id)
+        .expect("The function exists");
 
     for arg in &function.arguments {
         // get a variable number
-        let idx = locals.new_index(Arc::clone(&arg.type_));
+        let idx = locals.new_id();
+        locals.insert(idx, Arc::clone(&arg.type_));
+
+        let name = arg
+            .names
+            .get_variable_name()
+            .cloned()
+            .unwrap_or_else(|| "#{idx}".into());
+
         // add arguments to the environment
-        env = env.set(
-            &arg.names
-                .get_variable_name()
-                .cloned()
-                .unwrap_or_else(|| format!("#{idx}").into()),
-            idx,
-        );
+        env = env.set(&name, idx.id());
     }
 
-    let (_, locals, mut instructions) = emit_statement_list(env, locals, &function.body);
+    let (_, mut instructions) = emit_statement_list(env, &mut locals, &function.body);
     instructions.lst.push(wasm_encoder::Instruction::End);
 
     WasmFunction {
-        function_index,
-        type_index,
+        function_index: function_data.id.id(),
+        type_index: function_data.signature.id(),
         instructions,
         locals: locals
-            .items
+            .as_list()
             .into_iter()
-            .skip(n_params)
+            .skip(function_data.arity as _)
             .map(|x| {
                 if x.is_int() {
                     WasmPrimitive::Int
@@ -369,35 +403,32 @@ fn emit_function(
 
 fn emit_statement_list(
     env: Arc<Scope>,
-    locals: LocalIndexGenerator,
+    locals: &mut LocalStore,
     statements: &[TypedStatement],
-) -> (Arc<Scope>, LocalIndexGenerator, WasmInstructions) {
+) -> (Arc<Scope>, WasmInstructions) {
     let mut instructions = WasmInstructions { lst: vec![] };
     let mut env = env;
-    let mut locals = locals;
 
     for statement in statements.into_iter().dropping_back(1) {
-        let (new_env, new_locals, new_insts) = emit_statement(statement, env, locals);
+        let (new_env, new_insts) = emit_statement(statement, env, locals);
         env = new_env;
-        locals = new_locals;
         instructions.lst.extend(new_insts.lst);
         instructions.lst.push(wasm_encoder::Instruction::Drop);
     }
     if let Some(statement) = statements.last() {
-        let (new_env, new_locals, new_insts) = emit_statement(statement, env, locals);
+        let (new_env, new_insts) = emit_statement(statement, env, locals);
         env = new_env;
-        locals = new_locals;
         instructions.lst.extend(new_insts.lst);
     }
 
-    (env, locals, instructions)
+    (env, instructions)
 }
 
 fn emit_statement(
     statement: &TypedStatement,
     env: Arc<Scope>,
-    locals: LocalIndexGenerator,
-) -> (Arc<Scope>, LocalIndexGenerator, WasmInstructions) {
+    locals: &mut LocalStore,
+) -> (Arc<Scope>, WasmInstructions) {
     match statement {
         Statement::Expression(expression) => emit_expression(expression, env, locals),
         Statement::Assignment(assignment) => emit_assignment(assignment, env, locals),
@@ -408,8 +439,8 @@ fn emit_statement(
 fn emit_assignment(
     assignment: &TypedAssignment,
     env: Arc<Scope>,
-    locals: LocalIndexGenerator,
-) -> (Arc<Scope>, LocalIndexGenerator, WasmInstructions) {
+    locals: &mut LocalStore,
+) -> (Arc<Scope>, WasmInstructions) {
     // only non-assertions
     if assignment.kind.is_assert() {
         todo!("Only non-assertions");
@@ -423,16 +454,17 @@ fn emit_assignment(
             ..
         } => {
             // emit value
-            let (env, mut locals, mut insts) = emit_expression(&assignment.value, env, locals);
+            let (env, mut insts) = emit_expression(&assignment.value, env, locals);
             // add variable to the environment
-            let id = locals.new_index(Arc::clone(type_));
-            let env = env.set(&name, id);
+            let id = locals.new_id();
+            locals.insert(id, Arc::clone(type_));
+            let env = env.set(&name, id.id());
             // create local
             insts
                 .lst
                 .push(wasm_encoder::Instruction::LocalTee(env.get(name).unwrap()));
 
-            (env, locals, insts)
+            (env, insts)
         }
         _ => todo!("Only simple assignments"),
     }
@@ -441,31 +473,30 @@ fn emit_assignment(
 fn emit_expression(
     expression: &TypedExpr,
     env: Arc<Scope>,
-    locals: LocalIndexGenerator,
-) -> (Arc<Scope>, LocalIndexGenerator, WasmInstructions) {
+    locals: &mut LocalStore,
+) -> (Arc<Scope>, WasmInstructions) {
     match expression {
         TypedExpr::Int { value, .. } => {
             let val = parse_integer(value);
             (
                 env,
-                locals,
                 WasmInstructions {
                     lst: vec![wasm_encoder::Instruction::I32Const(val)],
                 },
             )
         }
         TypedExpr::NegateInt { value, .. } => {
-            let (env, locals, mut insts) = emit_expression(value, env, locals);
+            let (env, mut insts) = emit_expression(value, env, locals);
             insts.lst.push(wasm_encoder::Instruction::I32Const(-1));
             insts.lst.push(wasm_encoder::Instruction::I32Mul);
-            (env, locals, insts)
+            (env, insts)
         }
         TypedExpr::Block { statements, .. } => {
             // create new scope
             // TODO: fix environment pop
             // maybe use a block instruction?
-            let (_, locals, statements) = emit_statement_list(Scope::new_enclosing(Arc::clone(&env)), locals, statements);
-            (env, locals, statements)
+            let (_, statements) = emit_statement_list(Scope::new_enclosing(Arc::clone(&env)), locals, statements);
+            (env, statements)
         },
         TypedExpr::BinOp {
             typ,
@@ -482,7 +513,6 @@ fn emit_expression(
                     let index = env.get(name).unwrap();
                     (
                         env,
-                        locals,
                         WasmInstructions {
                             lst: vec![wasm_encoder::Instruction::LocalGet(index)],
                         },
@@ -492,7 +522,6 @@ fn emit_expression(
                     let function_index = env.get(name).unwrap();
                     (
                         env,
-                        locals,
                         WasmInstructions {
                             lst: vec![wasm_encoder::Instruction::RefFunc(function_index)],
                         },
@@ -502,18 +531,17 @@ fn emit_expression(
             }
         },
         TypedExpr::Call { fun, args, .. } => {
-            let (mut env, mut locals, mut insts) = (env, locals, WasmInstructions { lst: vec![] });
+            let (mut env, mut insts) = (env, WasmInstructions { lst: vec![] });
             for arg in args {
-                let (new_env, new_locals, new_insts) = emit_expression(&arg.value, env, locals);
+                let (new_env, new_insts) = emit_expression(&arg.value, env, locals);
                 env = new_env;
-                locals = new_locals;
                 insts.lst.extend(new_insts.lst);
             }
             match fun.as_ref() {
                 TypedExpr::Var { constructor: ValueConstructor { variant: ValueConstructorVariant::ModuleFn { name, .. }, .. }, ..} => {
                     let function_index = env.get(name).unwrap();
                     insts.lst.push(wasm_encoder::Instruction::Call(function_index));
-                    (env, locals, insts)
+                    (env, insts)
                 }
                 _ => todo!("Only simple function calls"),
             }
@@ -524,48 +552,48 @@ fn emit_expression(
 
 fn emit_binary_operation(
     env: Arc<Scope>,
-    locals: LocalIndexGenerator,
+    locals: &mut LocalStore,
     // only used to disambiguate equals
     _typ: &Type,
     name: BinOp,
     left: &TypedExpr,
     right: &TypedExpr,
-) -> (Arc<Scope>, LocalIndexGenerator, WasmInstructions) {
+) -> (Arc<Scope>, WasmInstructions) {
     match name {
         BinOp::AddInt => {
-            let (env, locals, mut insts) = emit_expression(left, env, locals);
-            let (env, locals, right_insts) = emit_expression(right, env, locals);
+            let (env, mut insts) = emit_expression(left, env, locals);
+            let (env, right_insts) = emit_expression(right, env, locals);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::I32Add);
-            (env, locals, insts)
+            (env, insts)
         }
         BinOp::SubInt => {
-            let (env, locals, mut insts) = emit_expression(left, env, locals);
-            let (env, locals, right_insts) = emit_expression(right, env, locals);
+            let (env, mut insts) = emit_expression(left, env, locals);
+            let (env, right_insts) = emit_expression(right, env, locals);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::I32Sub);
-            (env, locals, insts)
+            (env, insts)
         }
         BinOp::MultInt => {
-            let (env, locals, mut insts) = emit_expression(left, env, locals);
-            let (env, locals, right_insts) = emit_expression(right, env, locals);
+            let (env, mut insts) = emit_expression(left, env, locals);
+            let (env, right_insts) = emit_expression(right, env, locals);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::I32Mul);
-            (env, locals, insts)
+            (env, insts)
         }
         BinOp::DivInt => {
-            let (env, locals, mut insts) = emit_expression(left, env, locals);
-            let (env, locals, right_insts) = emit_expression(right, env, locals);
+            let (env, mut insts) = emit_expression(left, env, locals);
+            let (env, right_insts) = emit_expression(right, env, locals);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::I32DivS);
-            (env, locals, insts)
+            (env, insts)
         }
         BinOp::RemainderInt => {
-            let (env, locals, mut insts) = emit_expression(left, env, locals);
-            let (env, locals, right_insts) = emit_expression(right, env, locals);
+            let (env, mut insts) = emit_expression(left, env, locals);
+            let (env, right_insts) = emit_expression(right, env, locals);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::I32RemS);
-            (env, locals, insts)
+            (env, insts)
         }
         _ => todo!("Only integer arithmetic"),
     }

@@ -1,0 +1,41 @@
+Type
+- id: TypeId
+- name: String
+- definition: TypeDefinition
+
+
+Function
+- id: FunctionId
+- name: String
+- signature: Type
+
+
+Sum
+- id: SumId
+- name: String
+- type: Type
+- products: List(Product)
+
+
+Product
+- id: ProductId
+- name: String
+- type: Type
+- parent: Sum
+- kind: ProductKind
+
+
+ProductKind = ProductSimple + ProductComposite
+
+
+ProductSimple
+- instance: Constant
+
+
+ProductComposite
+- constructor: Function
+
+
+Constant:
+- id: Identifier
+- type: Type
