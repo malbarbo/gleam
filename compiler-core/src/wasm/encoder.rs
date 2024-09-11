@@ -1,10 +1,16 @@
+#![allow(clippy::let_unit_value)]
+
 use wasm_encoder::CodeSection;
 
 use wasm_encoder::ElementSection;
 use wasm_encoder::FunctionSection;
+use wasm_encoder::IndirectNameMap;
+use wasm_encoder::NameMap;
+use wasm_encoder::NameSection;
 
 use super::WasmPrimitive;
 use super::WasmType;
+use super::WasmTypeDefinition;
 
 use wasm_encoder::TypeSection;
 
@@ -16,8 +22,11 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
     // types
     let mut types = TypeSection::new();
     for type_ in &wasm_module.types {
+        let WasmType {
+            definition: type_, ..
+        } = type_;
         match type_ {
-            WasmType::FunctionType {
+            WasmTypeDefinition::Function {
                 parameters,
                 returns,
             } => {
@@ -29,7 +38,7 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
                 let returns = [returns.to_val_type()];
                 _ = types.function(parameters, returns);
             }
-            WasmType::SumType => {
+            WasmTypeDefinition::Sum => {
                 _ = types.subtype(&wasm_encoder::SubType {
                     is_final: false,
                     supertype_idx: None,
@@ -41,7 +50,7 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
                     },
                 });
             }
-            WasmType::ProductType {
+            WasmTypeDefinition::Product {
                 supertype_index,
                 fields,
             } => {
@@ -77,10 +86,7 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
 
     // elems
     let mut elems = ElementSection::new();
-    // emit references to functions
-    let indices: Vec<_> = (0..(wasm_module.functions.len() as u32))
-        .into_iter()
-        .collect();
+    let indices: Vec<_> = (0..(wasm_module.functions.len() as u32)).collect();
     _ = elems.segment(wasm_encoder::ElementSegment {
         mode: wasm_encoder::ElementMode::Declared,
         elements: wasm_encoder::Elements::Functions(&indices[..]),
@@ -93,6 +99,7 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
         let locals = func
             .locals
             .iter()
+            .map(|(_, typ)| typ)
             .copied()
             .map(|typ| (1, typ.to_val_type()));
         let mut f = wasm_encoder::Function::new(locals);
@@ -102,6 +109,47 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
         _ = codes.function(&f);
     }
     _ = module.section(&codes);
+
+    // names
+    let mut names = NameSection::new();
+
+    // modules, functions, locals, types
+
+    // functions
+    let mut function_names = NameMap::new();
+    for func in wasm_module.functions.iter() {
+        _ = function_names.append(func.function_index, &func.name);
+    }
+    _ = names.functions(&function_names);
+
+    // locals
+    let mut local_names = IndirectNameMap::new();
+    for func in wasm_module.functions.iter() {
+        let mut locals = NameMap::new();
+        // first the arguments
+        for (i, name) in func
+            .argument_names
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| name.is_some())
+        {
+            _ = locals.append(i as u32, name.as_ref().map(|s| s.as_str()).unwrap());
+        }
+        for (i, (name, _)) in func.locals.iter().enumerate() {
+            _ = locals.append((i + func.argument_names.len()) as u32, name);
+        }
+        _ = local_names.append(func.function_index, &locals);
+    }
+    _ = names.locals(&local_names);
+
+    // types
+    let mut type_names = NameMap::new();
+    for type_ in wasm_module.types.iter() {
+        _ = type_names.append(type_.id, &type_.name);
+    }
+    _ = names.types(&type_names);
+
+    _ = module.section(&names);
 
     module.finish()
 }
