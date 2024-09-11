@@ -14,9 +14,10 @@ use crate::{
         TypedFunction, TypedModule, TypedRecordConstructor, TypedStatement,
     },
     io::FileSystemWriter,
-    type_::Type,
+    type_::{Type, ValueConstructor, ValueConstructorVariant},
 };
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 enum WasmType {
     FunctionType {
         parameters: Vec<WasmPrimitive>,
@@ -95,7 +96,7 @@ type FunctionIndexGenerator = IndexGenerator<()>;
 
 type FunctionIndex = u32;
 type TypeIndex = u32;
-type FunctionTypeMap = HashMap<FunctionIndex, TypeIndex>;
+type FunctionTypeMap = HashMap<WasmType, TypeIndex>;
 
 pub fn module(writer: &impl FileSystemWriter, ast: &TypedModule) {
     dbg!(&ast);
@@ -120,11 +121,17 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
     // Type indices generator.
     let mut type_index_generator = TypeIndexGenerator::new();
 
-    // Maps function indices to their respective type indices.
-    let mut function_to_type = HashMap::new();
+    // Maps function types to their respective type indices.
+    let mut function_type_to_index = HashMap::new();
 
     // Maps constructor function indices to their respective product type indices.
     let mut constructor_to_variant = HashMap::new();
+
+    // Maps function indices to their type indices.
+    let mut function_to_function_type = HashMap::new();
+
+    // Maps constructor function indices to their sum type indices.
+    let mut constructor_to_sum = HashMap::new();
 
     let mut root_environment = Scope::new();
 
@@ -133,7 +140,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
         &mut function_index_generator,
         &mut type_index_generator,
         &mut root_environment,
-        &mut function_to_type,
+        &mut function_type_to_index,
     );
 
     // TODO: handle local function/type definitions
@@ -144,7 +151,8 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                 root_environment = root_environment.set(&f.name, function_index);
                 let function_type_index =
                     type_index_generator.new_index(WasmType::from_function(f));
-                let _ = function_to_type.insert(function_index, function_type_index);
+                _ = function_type_to_index.insert(WasmType::from_function(f), function_type_index);
+                _ = function_to_function_type.insert(function_index, function_type_index);
             }
             TypedDefinition::CustomType(t) => {
                 if !t.parameters.is_empty() {
@@ -165,16 +173,21 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     let constructor_function_index = function_index_generator.new_index(());
                     let constructor_type =
                         WasmType::from_product_type_constructor(variant, product_type_index);
-                    let constructor_type_index = type_index_generator.new_index(constructor_type);
+                    let constructor_type_index =
+                        type_index_generator.new_index(constructor_type.clone());
 
-                    let _ = constructor_to_variant
+                    _ = constructor_to_variant
                         .insert(constructor_function_index, product_type_index);
-                    let _ =
-                        function_to_type.insert(constructor_function_index, constructor_type_index);
+                    _ = function_type_to_index.insert(constructor_type, constructor_type_index);
+                    _ = function_to_function_type
+                        .insert(constructor_function_index, constructor_type_index);
 
                     // 4. declare a constructor for each variant in the environment
                     root_environment =
                         root_environment.set(&variant.name, constructor_function_index);
+
+                    // 5. Store reference to parent type
+                    _ = constructor_to_sum.insert(constructor_function_index, sum_type_index);
                 }
             }
             _ => {}
@@ -187,7 +200,9 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
         match definition {
             TypedDefinition::Function(f) => {
                 let function_index = root_environment.get(&f.name).unwrap();
-                let function_type_index = *function_to_type.get(&function_index).unwrap();
+                let function_type_index = *function_type_to_index
+                    .get(&WasmType::from_function(f))
+                    .unwrap();
                 let function = emit_function(
                     f,
                     &type_index_generator,
@@ -201,16 +216,22 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                 // generate the type constructors
                 for variant in &c.constructors {
                     let constructor_function_index = root_environment.get(&variant.name).unwrap();
-                    let constructor_type_index =
-                        *function_to_type.get(&constructor_function_index).unwrap();
                     let product_type_index = *constructor_to_variant
                         .get(&constructor_function_index)
                         .unwrap();
+                    let constructor_function_type =
+                        WasmType::from_product_type_constructor(variant, product_type_index);
+                    let constructor_function_type_index = *function_type_to_index
+                        .get(&constructor_function_type)
+                        .unwrap();
+
+                    // constructor_type_index
+                    // product_type_index
                     let constructor_function = emit_variant_constructor(
                         variant,
                         product_type_index,
                         constructor_function_index,
-                        constructor_type_index,
+                        constructor_function_type_index,
                     );
                     functions.push(constructor_function);
                 }
@@ -247,7 +268,7 @@ fn generate_prelude_types(
     // - PreludeType::UtfCodepoint
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 enum WasmPrimitive {
     Int,
     StructRef(TypeIndex),
@@ -456,20 +477,47 @@ fn emit_expression(
         TypedExpr::Var {
             constructor, name, ..
         } => {
-            if !constructor.is_local_variable() {
-                todo!("Only local variables");
-            }
-
-            dbg!(&env);
-            let index = env.get(name).unwrap();
-            (
-                env,
-                locals,
-                WasmInstructions {
-                    lst: vec![wasm_encoder::Instruction::LocalGet(index)],
+            match &constructor.variant {
+                ValueConstructorVariant::LocalVariable { .. } => {
+                    let index = env.get(name).unwrap();
+                    (
+                        env,
+                        locals,
+                        WasmInstructions {
+                            lst: vec![wasm_encoder::Instruction::LocalGet(index)],
+                        },
+                    )
                 },
-            )
+                ValueConstructorVariant::ModuleFn { name, .. } => {
+                    let function_index = env.get(name).unwrap();
+                    (
+                        env,
+                        locals,
+                        WasmInstructions {
+                            lst: vec![wasm_encoder::Instruction::RefFunc(function_index)],
+                        },
+                    )
+                }
+                _ => todo!("Only local variables and records"),
+            }
         },
+        TypedExpr::Call { fun, args, .. } => {
+            let (mut env, mut locals, mut insts) = (env, locals, WasmInstructions { lst: vec![] });
+            for arg in args {
+                let (new_env, new_locals, new_insts) = emit_expression(&arg.value, env, locals);
+                env = new_env;
+                locals = new_locals;
+                insts.lst.extend(new_insts.lst);
+            }
+            match fun.as_ref() {
+                TypedExpr::Var { constructor: ValueConstructor { variant: ValueConstructorVariant::ModuleFn { name, .. }, .. }, ..} => {
+                    let function_index = env.get(name).unwrap();
+                    insts.lst.push(wasm_encoder::Instruction::Call(function_index));
+                    (env, locals, insts)
+                }
+                _ => todo!("Only simple function calls"),
+            }
+        }
         _ => todo!("Only integer constants, integer negation, blocks, binary operations, case and variable accesses"),
     }
 }

@@ -1,5 +1,6 @@
 use wasm_encoder::CodeSection;
 
+use wasm_encoder::ElementSection;
 use wasm_encoder::FunctionSection;
 
 use super::WasmPrimitive;
@@ -26,10 +27,10 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
                     .map(WasmPrimitive::to_val_type)
                     .collect();
                 let returns = [returns.to_val_type()];
-                let _ = types.function(parameters, returns);
+                _ = types.function(parameters, returns);
             }
             WasmType::SumType => {
-                let _ = types.subtype(&wasm_encoder::SubType {
+                _ = types.subtype(&wasm_encoder::SubType {
                     is_final: false,
                     supertype_idx: None,
                     composite_type: wasm_encoder::CompositeType {
@@ -52,7 +53,7 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
                     });
                 }
 
-                let _ = types.subtype(&wasm_encoder::SubType {
+                _ = types.subtype(&wasm_encoder::SubType {
                     is_final: true,
                     supertype_idx: Some(*supertype_index),
                     composite_type: wasm_encoder::CompositeType {
@@ -65,14 +66,26 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
             }
         }
     }
-    let _ = module.section(&types);
+    _ = module.section(&types);
 
     // functions
     let mut functions = FunctionSection::new();
     for func in &wasm_module.functions {
-        let _ = functions.function(func.type_index);
+        _ = functions.function(func.type_index);
     }
-    let _ = module.section(&functions);
+    _ = module.section(&functions);
+
+    // elems
+    let mut elems = ElementSection::new();
+    // emit references to functions
+    let indices: Vec<_> = (0..(wasm_module.functions.len() as u32))
+        .into_iter()
+        .collect();
+    _ = elems.segment(wasm_encoder::ElementSegment {
+        mode: wasm_encoder::ElementMode::Declared,
+        elements: wasm_encoder::Elements::Functions(&indices[..]),
+    });
+    _ = module.section(&elems);
 
     // code
     let mut codes = CodeSection::new();
@@ -84,11 +97,11 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
             .map(|typ| (1, typ.to_val_type()));
         let mut f = wasm_encoder::Function::new(locals);
         for inst in &func.instructions.lst {
-            let _ = f.instruction(inst);
+            _ = f.instruction(inst);
         }
-        let _ = codes.function(&f);
+        _ = codes.function(&f);
     }
-    let _ = module.section(&codes);
+    _ = module.section(&codes);
 
     module.finish()
 }
