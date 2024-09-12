@@ -1,5 +1,6 @@
 #![allow(clippy::let_unit_value)]
 
+use ecow::EcoString;
 use wasm_encoder::CodeSection;
 
 use wasm_encoder::ElementSection;
@@ -9,16 +10,157 @@ use wasm_encoder::IndirectNameMap;
 use wasm_encoder::NameMap;
 use wasm_encoder::NameSection;
 use wasm_encoder::StartSection;
-
-use super::WasmPrimitive;
-use super::WasmType;
-use super::WasmTypeDefinition;
-
 use wasm_encoder::TypeSection;
 
-use super::WasmModule;
+use crate::ast::TypedFunction;
+use crate::ast::TypedRecordConstructor;
 
-pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
+pub struct WasmModule {
+    pub functions: Vec<WasmFunction>,
+    pub constants: Vec<WasmGlobal>,
+    pub types: Vec<WasmType>,
+}
+
+pub struct WasmGlobal {
+    pub name: EcoString,
+    pub global_index: u32,
+    pub type_index: u32,
+    pub initializer: WasmInstructions,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct WasmType {
+    pub name: EcoString,
+    pub id: u32,
+    pub definition: WasmTypeDefinition,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub enum WasmTypeDefinition {
+    Function {
+        parameters: Vec<WasmPrimitive>,
+        returns: WasmPrimitive,
+    },
+    Sum,
+    Product {
+        supertype_index: u32,
+        fields: Vec<WasmPrimitive>,
+    },
+}
+
+impl WasmType {
+    pub fn from_function(f: &TypedFunction, name: &str, id: u32) -> Self {
+        let mut parameters = vec![];
+
+        for arg in &f.arguments {
+            if arg.type_.is_int() {
+                parameters.push(WasmPrimitive::Int);
+            } else {
+                todo!("Only int parameters")
+            }
+        }
+
+        let returns = if f.return_type.is_int() {
+            WasmPrimitive::Int
+        } else {
+            todo!("Only int return types")
+        };
+
+        WasmType {
+            name: name.into(),
+            id,
+            definition: WasmTypeDefinition::Function {
+                parameters,
+                returns,
+            },
+        }
+    }
+
+    pub fn from_product_type(
+        variant: &TypedRecordConstructor,
+        name: &str,
+        type_id: u32,
+        supertype_index: u32,
+    ) -> Self {
+        let mut fields = vec![];
+        for arg in &variant.arguments {
+            if arg.type_.is_int() {
+                fields.push(WasmPrimitive::Int);
+            } else {
+                todo!("Only int fields")
+            }
+        }
+
+        WasmType {
+            name: name.into(),
+            id: type_id,
+            definition: WasmTypeDefinition::Product {
+                supertype_index,
+                fields,
+            },
+        }
+    }
+
+    pub fn from_product_type_constructor(
+        variant: &TypedRecordConstructor,
+        name: &str,
+        product_type_index: u32,
+        constructor_type_index: u32,
+    ) -> Self {
+        let mut fields = vec![];
+        for arg in &variant.arguments {
+            if arg.type_.is_int() {
+                fields.push(WasmPrimitive::Int);
+            } else {
+                todo!("Only int fields")
+            }
+        }
+
+        WasmType {
+            name: name.into(),
+            id: constructor_type_index,
+            definition: WasmTypeDefinition::Function {
+                parameters: fields,
+                returns: WasmPrimitive::StructRef(product_type_index),
+            },
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum WasmPrimitive {
+    Int,
+    StructRef(u32),
+}
+
+impl WasmPrimitive {
+    pub fn to_val_type(self) -> wasm_encoder::ValType {
+        match self {
+            WasmPrimitive::Int => wasm_encoder::ValType::I32,
+            WasmPrimitive::StructRef(typ) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
+                nullable: false,
+                heap_type: wasm_encoder::HeapType::Concrete(typ),
+            }),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct WasmInstructions {
+    pub lst: Vec<wasm_encoder::Instruction<'static>>,
+}
+
+#[derive(Debug)]
+pub struct WasmFunction {
+    pub name: EcoString,
+    pub type_index: u32,
+    pub instructions: WasmInstructions,
+    pub locals: Vec<(EcoString, WasmPrimitive)>,
+    pub argument_names: Vec<Option<EcoString>>,
+    pub function_index: u32,
+}
+
+pub fn emit(wasm_module: WasmModule) -> Vec<u8> {
     let mut module = wasm_encoder::Module::new();
 
     // types

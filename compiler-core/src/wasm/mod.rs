@@ -7,9 +7,13 @@ mod table;
 use std::sync::Arc;
 
 use ecow::EcoString;
+use encoder::{
+    WasmFunction, WasmGlobal, WasmInstructions, WasmModule, WasmPrimitive, WasmType,
+    WasmTypeDefinition,
+};
 use itertools::Itertools;
-use scope::Scope;
-use table::{Id, Local, LocalStore, SymbolTable};
+use scope::{Binding, Scope};
+use table::{Local, LocalStore, SymbolTable};
 
 use crate::{
     ast::{
@@ -19,151 +23,6 @@ use crate::{
     io::FileSystemWriter,
     type_::{Type, ValueConstructor, ValueConstructorVariant},
 };
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct WasmType {
-    name: EcoString,
-    id: u32,
-    definition: WasmTypeDefinition,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-enum WasmTypeDefinition {
-    Function {
-        parameters: Vec<WasmPrimitive>,
-        returns: WasmPrimitive,
-    },
-    Sum,
-    Product {
-        supertype_index: u32,
-        fields: Vec<WasmPrimitive>,
-    },
-}
-
-impl WasmType {
-    fn from_function(f: &TypedFunction, name: &str, id: u32) -> Self {
-        let mut parameters = vec![];
-
-        for arg in &f.arguments {
-            if arg.type_.is_int() {
-                parameters.push(WasmPrimitive::Int);
-            } else {
-                todo!("Only int parameters")
-            }
-        }
-
-        let returns = if f.return_type.is_int() {
-            WasmPrimitive::Int
-        } else {
-            todo!("Only int return types")
-        };
-
-        WasmType {
-            name: name.into(),
-            id,
-            definition: WasmTypeDefinition::Function {
-                parameters,
-                returns,
-            },
-        }
-    }
-
-    fn from_product_type(
-        variant: &TypedRecordConstructor,
-        name: &str,
-        type_id: u32,
-        supertype_index: u32,
-    ) -> Self {
-        let mut fields = vec![];
-        for arg in &variant.arguments {
-            if arg.type_.is_int() {
-                fields.push(WasmPrimitive::Int);
-            } else {
-                todo!("Only int fields")
-            }
-        }
-
-        WasmType {
-            name: name.into(),
-            id: type_id,
-            definition: WasmTypeDefinition::Product {
-                supertype_index,
-                fields,
-            },
-        }
-    }
-
-    fn from_product_type_constructor(
-        variant: &TypedRecordConstructor,
-        name: &str,
-        product_type_index: u32,
-        constructor_type_index: u32,
-    ) -> Self {
-        let mut fields = vec![];
-        for arg in &variant.arguments {
-            if arg.type_.is_int() {
-                fields.push(WasmPrimitive::Int);
-            } else {
-                todo!("Only int fields")
-            }
-        }
-
-        WasmType {
-            name: name.into(),
-            id: constructor_type_index,
-            definition: WasmTypeDefinition::Function {
-                parameters: fields,
-                returns: WasmPrimitive::StructRef(product_type_index),
-            },
-        }
-    }
-}
-
-struct WasmModule {
-    functions: Vec<WasmFunction>,
-    constants: Vec<WasmGlobal>,
-    types: Vec<WasmType>,
-}
-
-struct WasmGlobal {
-    name: EcoString,
-    global_index: u32,
-    type_index: u32,
-    initializer: WasmInstructions,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-enum WasmPrimitive {
-    Int,
-    StructRef(u32),
-}
-
-impl WasmPrimitive {
-    fn to_val_type(self) -> wasm_encoder::ValType {
-        match self {
-            WasmPrimitive::Int => wasm_encoder::ValType::I32,
-            WasmPrimitive::StructRef(typ) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
-                nullable: false,
-                heap_type: wasm_encoder::HeapType::Concrete(typ),
-            }),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct WasmInstructions {
-    lst: Vec<wasm_encoder::Instruction<'static>>,
-}
-
-#[derive(Debug)]
-struct WasmFunction {
-    name: EcoString,
-    type_index: u32,
-    instructions: WasmInstructions,
-    locals: Vec<(EcoString, WasmPrimitive)>,
-    argument_names: Vec<Option<EcoString>>,
-    function_index: u32,
-}
 
 pub fn module(writer: &impl FileSystemWriter, ast: &TypedModule) {
     dbg!(&ast);
@@ -212,7 +71,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                 };
                 table.functions.insert(function_id, function);
 
-                root_environment = root_environment.set(&f.name, function_id.id());
+                root_environment = root_environment.set(&f.name, Binding::Function(function_id));
             }
             TypedDefinition::CustomType(t) => {
                 if !t.parameters.is_empty() {
@@ -303,9 +162,6 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                             },
                         });
 
-                        // add global variable to the environment
-                        root_environment = root_environment.set(&variant.name, global_id.id());
-
                         table::Product {
                             id: product_id,
                             name: format!("product@{}.{}", t.name, variant.name).into(),
@@ -318,8 +174,6 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                         }
                     } else {
                         // add constructor to the environment
-                        root_environment = root_environment.set(&variant.name, constructor_id.id());
-
                         table::Product {
                             id: product_id,
                             name: format!("product@{}.{}", t.name, variant.name).into(),
@@ -329,9 +183,11 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                             kind: table::ProductKind::Composite,
                         }
                     };
-
                     table.products.insert(product_id, product);
                     product_ids.push(product_id);
+
+                    root_environment =
+                        root_environment.set(&variant.name, Binding::Product(product_id));
                 }
 
                 let sum = table::Sum {
@@ -350,23 +206,32 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
     for definition in &ast.definitions {
         match definition {
             TypedDefinition::Function(f) => {
-                let function_index = root_environment.get(&f.name).unwrap();
-                let function_data = table.functions.get_from_id(function_index).unwrap();
-                let function =
-                    emit_function(f, function_data.id, &table, Arc::clone(&root_environment));
-                functions.push(function);
+                let function_id = root_environment.get(&f.name).unwrap();
+                match function_id {
+                    Binding::Function(id) => {
+                        let function_data = table.functions.get(id).unwrap();
+                        let function = emit_function(
+                            f,
+                            function_data.id,
+                            &table,
+                            Arc::clone(&root_environment),
+                        );
+                        functions.push(function);
+                    }
+                    _ => unreachable!("Expected function binding in environment"),
+                }
             }
             TypedDefinition::CustomType(c) => {
                 // generate the type constructors
                 for variant in &c.constructors {
-                    // we need to iterate over the products because the type constructor is shadowed by the global
-                    // in the environment
-                    for product in table.products.as_list().into_iter() {
-                        if product.name == format!("product@{}.{}", c.name, variant.name) {
-                            let function = emit_variant_constructor(variant, &product, &table);
+                    let product_id = root_environment.get(&variant.name).unwrap();
+                    match product_id {
+                        Binding::Product(id) => {
+                            let table_product = table.products.get(id).unwrap();
+                            let function = emit_variant_constructor(variant, table_product, &table);
                             functions.push(function);
-                            break;
                         }
+                        _ => unreachable!("Expected product binding in environment"),
                     }
                 }
             }
@@ -463,10 +328,10 @@ fn emit_function(
         );
 
         // add arguments to the environment
-        env = env.set(&name, idx.id());
+        env = env.set(&name, Binding::Local(idx));
     }
 
-    let (_, mut instructions) = emit_statement_list(env, &mut locals, &function.body);
+    let (_, mut instructions) = emit_statement_list(env, &mut locals, &function.body, table);
     instructions.lst.push(wasm_encoder::Instruction::End);
 
     WasmFunction {
@@ -499,18 +364,19 @@ fn emit_statement_list(
     env: Arc<Scope>,
     locals: &mut LocalStore,
     statements: &[TypedStatement],
+    table: &SymbolTable,
 ) -> (Arc<Scope>, WasmInstructions) {
     let mut instructions = WasmInstructions { lst: vec![] };
     let mut env = env;
 
     for statement in statements.iter().dropping_back(1) {
-        let (new_env, new_insts) = emit_statement(statement, env, locals);
+        let (new_env, new_insts) = emit_statement(statement, env, locals, table);
         env = new_env;
         instructions.lst.extend(new_insts.lst);
         instructions.lst.push(wasm_encoder::Instruction::Drop);
     }
     if let Some(statement) = statements.last() {
-        let (new_env, new_insts) = emit_statement(statement, env, locals);
+        let (new_env, new_insts) = emit_statement(statement, env, locals, table);
         env = new_env;
         instructions.lst.extend(new_insts.lst);
     }
@@ -522,10 +388,11 @@ fn emit_statement(
     statement: &TypedStatement,
     env: Arc<Scope>,
     locals: &mut LocalStore,
+    table: &SymbolTable,
 ) -> (Arc<Scope>, WasmInstructions) {
     match statement {
-        Statement::Expression(expression) => emit_expression(expression, env, locals),
-        Statement::Assignment(assignment) => emit_assignment(assignment, env, locals),
+        Statement::Expression(expression) => emit_expression(expression, env, locals, table),
+        Statement::Assignment(assignment) => emit_assignment(assignment, env, locals, table),
         Statement::Use(_) => todo!("Only expressions and assignments"),
     }
 }
@@ -534,6 +401,7 @@ fn emit_assignment(
     assignment: &TypedAssignment,
     env: Arc<Scope>,
     locals: &mut LocalStore,
+    table: &SymbolTable,
 ) -> (Arc<Scope>, WasmInstructions) {
     // only non-assertions
     if assignment.kind.is_assert() {
@@ -548,7 +416,7 @@ fn emit_assignment(
             ..
         } => {
             // emit value
-            let (env, mut insts) = emit_expression(&assignment.value, env, locals);
+            let (env, mut insts) = emit_expression(&assignment.value, env, locals, table);
             // add variable to the environment
             let id = locals.new_id();
             locals.insert(
@@ -559,11 +427,9 @@ fn emit_assignment(
                     gleam_type: Arc::clone(type_),
                 },
             );
-            let env = env.set(name, id.id());
+            let env = env.set(name, Binding::Local(id));
             // create local
-            insts
-                .lst
-                .push(wasm_encoder::Instruction::LocalTee(env.get(name).unwrap()));
+            insts.lst.push(wasm_encoder::Instruction::LocalTee(id.id()));
 
             (env, insts)
         }
@@ -575,6 +441,7 @@ fn emit_expression(
     expression: &TypedExpr,
     env: Arc<Scope>,
     locals: &mut LocalStore,
+    table: &SymbolTable,
 ) -> (Arc<Scope>, WasmInstructions) {
     match expression {
         TypedExpr::Int { value, .. } => {
@@ -587,7 +454,7 @@ fn emit_expression(
             )
         }
         TypedExpr::NegateInt { value, .. } => {
-            let (env, mut insts) = emit_expression(value, env, locals);
+            let (env, mut insts) = emit_expression(value, env, locals, table);
             insts.lst.push(wasm_encoder::Instruction::I32Const(-1));
             insts.lst.push(wasm_encoder::Instruction::I32Mul);
             (env, insts)
@@ -596,7 +463,7 @@ fn emit_expression(
             // create new scope
             // TODO: fix environment pop
             // maybe use a block instruction?
-            let (_, statements) = emit_statement_list(Scope::new_enclosing(Arc::clone(&env)), locals, statements);
+            let (_, statements) = emit_statement_list(Scope::new_enclosing(Arc::clone(&env)), locals, statements, table);
             (env, statements)
         },
         TypedExpr::BinOp {
@@ -605,28 +472,51 @@ fn emit_expression(
             left,
             right,
             ..
-        } => emit_binary_operation(env, locals, typ, *name, left, right),
+        } => emit_binary_operation(env, locals, table, typ, *name, left, right),
         TypedExpr::Var {
             constructor, name, ..
         } => {
             match &constructor.variant {
                 ValueConstructorVariant::LocalVariable { .. } => {
-                    let index = env.get(name).unwrap();
-                    (
-                        env,
-                        WasmInstructions {
-                            lst: vec![wasm_encoder::Instruction::LocalGet(index)],
-                        },
-                    )
+                    match env.get(name).unwrap() {
+                        Binding::Local(id) => (
+                            env,
+                            WasmInstructions {
+                                lst: vec![wasm_encoder::Instruction::LocalGet(id.id())],
+                            },
+                        ),
+                        _ => todo!("Expected local variable binding"),
+                    }
                 },
                 ValueConstructorVariant::ModuleFn { name, .. } => {
-                    let function_index = env.get(name).unwrap();
-                    (
-                        env,
-                        WasmInstructions {
-                            lst: vec![wasm_encoder::Instruction::RefFunc(function_index)],
-                        },
-                    )
+                    match env.get(name).unwrap() {
+                        Binding::Function(id) => (
+                            env,
+                            WasmInstructions {
+                                lst: vec![wasm_encoder::Instruction::Call(id.id())],
+                            },
+                        ),
+                        _ => todo!("Expected function binding"),
+                    }
+                }
+                ValueConstructorVariant::Record { name, arity: 0, .. } => {
+                    match env.get(name).unwrap() {
+                        Binding::Product(id) => {
+                            let product = table.products.get(id).unwrap();
+                            match product {
+                                table::Product { kind: table::ProductKind::Simple { instance }, .. } => {
+                                    (
+                                        env,
+                                        WasmInstructions {
+                                            lst: vec![wasm_encoder::Instruction::GlobalGet(instance.id())],
+                                        }
+                                    )
+                                }
+                                _ => todo!("Expected simple product"),
+                            }
+                        }
+                        _ => todo!("Expected product binding"),
+                    }
                 }
                 _ => todo!("Only local variables and records"),
             }
@@ -634,21 +524,30 @@ fn emit_expression(
         TypedExpr::Call { fun, args, .. } => {
             let (mut env, mut insts) = (env, WasmInstructions { lst: vec![] });
             for arg in args {
-                let (new_env, new_insts) = emit_expression(&arg.value, env, locals);
+                let (new_env, new_insts) = emit_expression(&arg.value, env, locals, table);
                 env = new_env;
                 insts.lst.extend(new_insts.lst);
             }
             // TODO: check this field map thing to see if it's constructing it in the right order.
             match fun.as_ref() {
                 TypedExpr::Var { constructor: ValueConstructor { variant: ValueConstructorVariant::ModuleFn { name, .. }, .. }, ..} => {
-                    let function_index = env.get(name).unwrap();
-                    insts.lst.push(wasm_encoder::Instruction::Call(function_index));
-                    (env, insts)
+                    match env.get(name).unwrap() {
+                        Binding::Function(id) => {
+                            insts.lst.push(wasm_encoder::Instruction::Call(id.id()));
+                            (env, insts)
+                        }
+                        _ => todo!("Expected function binding"),
+                    }
                 }
                 TypedExpr::Var { constructor: ValueConstructor { variant: ValueConstructorVariant::Record { name, .. }, ..}, ..} => {
-                    let constructor_index = env.get(name).unwrap();
-                    insts.lst.push(wasm_encoder::Instruction::Call(constructor_index));
-                    (env, insts)
+                    match env.get(name).unwrap() {
+                        Binding::Product(id) => {
+                            let product = table.products.get(id).unwrap();
+                            insts.lst.push(wasm_encoder::Instruction::Call(product.constructor.id()));
+                            (env, insts)
+                        }
+                        _ => todo!("Expected product binding"),
+                    }
                 }
                 _ => todo!("Only simple function calls and type constructors"),
             }
@@ -660,6 +559,7 @@ fn emit_expression(
 fn emit_binary_operation(
     env: Arc<Scope>,
     locals: &mut LocalStore,
+    table: &SymbolTable,
     // only used to disambiguate equals
     _typ: &Type,
     name: BinOp,
@@ -668,36 +568,36 @@ fn emit_binary_operation(
 ) -> (Arc<Scope>, WasmInstructions) {
     match name {
         BinOp::AddInt => {
-            let (env, mut insts) = emit_expression(left, env, locals);
-            let (env, right_insts) = emit_expression(right, env, locals);
+            let (env, mut insts) = emit_expression(left, env, locals, table);
+            let (env, right_insts) = emit_expression(right, env, locals, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::I32Add);
             (env, insts)
         }
         BinOp::SubInt => {
-            let (env, mut insts) = emit_expression(left, env, locals);
-            let (env, right_insts) = emit_expression(right, env, locals);
+            let (env, mut insts) = emit_expression(left, env, locals, table);
+            let (env, right_insts) = emit_expression(right, env, locals, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::I32Sub);
             (env, insts)
         }
         BinOp::MultInt => {
-            let (env, mut insts) = emit_expression(left, env, locals);
-            let (env, right_insts) = emit_expression(right, env, locals);
+            let (env, mut insts) = emit_expression(left, env, locals, table);
+            let (env, right_insts) = emit_expression(right, env, locals, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::I32Mul);
             (env, insts)
         }
         BinOp::DivInt => {
-            let (env, mut insts) = emit_expression(left, env, locals);
-            let (env, right_insts) = emit_expression(right, env, locals);
+            let (env, mut insts) = emit_expression(left, env, locals, table);
+            let (env, right_insts) = emit_expression(right, env, locals, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::I32DivS);
             (env, insts)
         }
         BinOp::RemainderInt => {
-            let (env, mut insts) = emit_expression(left, env, locals);
-            let (env, right_insts) = emit_expression(right, env, locals);
+            let (env, mut insts) = emit_expression(left, env, locals, table);
+            let (env, right_insts) = emit_expression(right, env, locals, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::I32RemS);
             (env, insts)
