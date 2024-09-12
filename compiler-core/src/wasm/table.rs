@@ -143,6 +143,9 @@ pub struct Product {
     /// Whether the product type is a simple product (has no fields, has a singleton instance),
     /// or a composite product (has fields, has a constructor).
     pub kind: ProductKind,
+
+    /// The constructor function index.
+    pub constructor: FunctionId,
 }
 
 /// The kind of a product type.
@@ -154,11 +157,8 @@ pub enum ProductKind {
         instance: ConstantId,
     },
 
-    /// A composite product type. This product type has fields and a constructor function.
-    Composite {
-        /// The constructor function of the product type.
-        constructor: FunctionId,
-    },
+    /// A composite product type.
+    Composite,
 }
 
 /// Represents a constant in the constant table.
@@ -166,6 +166,9 @@ pub enum ProductKind {
 pub struct Constant {
     /// The unique identifier of the constant.
     pub id: ConstantId,
+
+    /// The name of the constant, for debugging purposes.
+    pub name: EcoString,
 
     /// The constant's type.
     pub type_: TypeId,

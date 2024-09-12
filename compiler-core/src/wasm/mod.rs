@@ -121,7 +121,15 @@ impl WasmType {
 
 struct WasmModule {
     functions: Vec<WasmFunction>,
+    constants: Vec<WasmGlobal>,
     types: Vec<WasmType>,
+}
+
+struct WasmGlobal {
+    name: EcoString,
+    global_index: u32,
+    type_index: u32,
+    initializer: WasmInstructions,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -142,10 +150,12 @@ impl WasmPrimitive {
     }
 }
 
+#[derive(Debug)]
 struct WasmInstructions {
     lst: Vec<wasm_encoder::Instruction<'static>>,
 }
 
+#[derive(Debug)]
 struct WasmFunction {
     name: EcoString,
     type_index: u32,
@@ -169,6 +179,9 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
     let mut table = SymbolTable::new();
 
     let mut root_environment = Scope::new();
+
+    let mut functions = vec![];
+    let mut constants = vec![];
 
     // generate prelude types
     generate_prelude_types(&mut table);
@@ -223,67 +236,102 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
 
                 let mut product_ids = vec![];
                 for variant in &t.constructors {
-                    if variant.arguments.is_empty() {
-                        todo!("Only types with arguments");
-                    } else {
-                        // type
-                        let product_type_id = table.types.new_id();
-                        let product_type_name: EcoString =
-                            format!("typ@{}.{}", t.name, variant.name).into();
-                        let product_type = table::Type {
-                            id: product_type_id,
-                            name: product_type_name.clone(),
-                            definition: WasmType::from_product_type(
-                                variant,
-                                &product_type_name,
-                                product_type_id.id(),
-                                sum_type_id.id(),
-                            ),
-                        };
-                        table.types.insert(product_type_id, product_type);
+                    // type
+                    let product_type_id = table.types.new_id();
+                    let product_type_name: EcoString =
+                        format!("typ@{}.{}", t.name, variant.name).into();
+                    let product_type = table::Type {
+                        id: product_type_id,
+                        name: product_type_name.clone(),
+                        definition: WasmType::from_product_type(
+                            variant,
+                            &product_type_name,
+                            product_type_id.id(),
+                            sum_type_id.id(),
+                        ),
+                    };
+                    table.types.insert(product_type_id, product_type);
 
-                        // constructor signature
-                        let constructor_sig_id = table.types.new_id();
-                        let constructor_sig_name: EcoString =
-                            format!("new@{}.{}", t.name, variant.name).into();
-                        let constructor_sig = table::Type {
-                            id: constructor_sig_id,
-                            name: constructor_sig_name.clone(),
-                            definition: WasmType::from_product_type_constructor(
-                                variant,
-                                &constructor_sig_name,
-                                product_type_id.id(),
-                                constructor_sig_id.id(),
-                            ),
-                        };
-                        table.types.insert(constructor_sig_id, constructor_sig);
+                    // constructor signature
+                    let constructor_sig_id = table.types.new_id();
+                    let constructor_sig_name: EcoString =
+                        format!("new@{}.{}", t.name, variant.name).into();
+                    let constructor_sig = table::Type {
+                        id: constructor_sig_id,
+                        name: constructor_sig_name.clone(),
+                        definition: WasmType::from_product_type_constructor(
+                            variant,
+                            &constructor_sig_name,
+                            product_type_id.id(),
+                            constructor_sig_id.id(),
+                        ),
+                    };
+                    table.types.insert(constructor_sig_id, constructor_sig);
 
-                        // constructor
-                        let constructor_id = table.functions.new_id();
-                        let constructor = table::Function {
-                            id: constructor_id,
-                            signature: constructor_sig_id,
-                            name: variant.name.clone(),
-                            arity: variant.arguments.len() as u32,
-                        };
-                        table.functions.insert(constructor_id, constructor);
+                    // constructor
+                    let constructor_id = table.functions.new_id();
+                    let constructor = table::Function {
+                        id: constructor_id,
+                        signature: constructor_sig_id,
+                        name: variant.name.clone(),
+                        arity: variant.arguments.len() as u32,
+                    };
+                    table.functions.insert(constructor_id, constructor);
 
-                        // product
-                        let product_id = table.products.new_id();
-                        let product = table::Product {
+                    // product
+                    let product_id = table.products.new_id();
+
+                    let product = if variant.arguments.is_empty() {
+                        let global_name = format!("global@{}.{}", t.name, variant.name);
+
+                        // add a global to the symbol table
+                        let global_id = table.constants.new_id();
+                        let global = table::Constant {
+                            id: global_id,
+                            name: global_name.clone().into(),
+                            type_: product_type_id,
+                        };
+                        table.constants.insert(global_id, global);
+
+                        // add global
+                        constants.push(WasmGlobal {
+                            name: global_name.into(),
+                            type_index: product_type_id.id(),
+                            global_index: global_id.id(),
+                            initializer: WasmInstructions {
+                                lst: vec![wasm_encoder::Instruction::Call(constructor_id.id())],
+                            },
+                        });
+
+                        // add global variable to the environment
+                        root_environment = root_environment.set(&variant.name, global_id.id());
+
+                        table::Product {
                             id: product_id,
                             name: format!("product@{}.{}", t.name, variant.name).into(),
                             type_: product_type_id,
                             parent: sum_id,
-                            kind: table::ProductKind::Composite {
-                                constructor: constructor_id,
+                            constructor: constructor_id,
+                            kind: table::ProductKind::Simple {
+                                instance: global_id,
                             },
-                        };
-                        table.products.insert(product_id, product);
-                        product_ids.push(product_id);
-
+                        }
+                    } else {
+                        // add constructor to the environment
                         root_environment = root_environment.set(&variant.name, constructor_id.id());
-                    }
+
+                        table::Product {
+                            id: product_id,
+                            name: format!("product@{}.{}", t.name, variant.name).into(),
+                            type_: product_type_id,
+                            parent: sum_id,
+                            constructor: constructor_id,
+                            kind: table::ProductKind::Composite,
+                        }
+                    };
+
+                    table.products.insert(product_id, product);
+                    product_ids.push(product_id);
                 }
 
                 let sum = table::Sum {
@@ -299,7 +347,6 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
     }
 
     // SECOND PASS: generate the actual function bodies and types
-    let mut functions = vec![];
     for definition in &ast.definitions {
         match definition {
             TypedDefinition::Function(f) => {
@@ -312,13 +359,14 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
             TypedDefinition::CustomType(c) => {
                 // generate the type constructors
                 for variant in &c.constructors {
-                    if variant.arguments.is_empty() {
-                        todo!("Only types with arguments");
-                    } else {
-                        let product_id = root_environment.get(&variant.name).unwrap();
-                        let product = table.products.get_from_id(product_id).unwrap();
-                        let function = emit_variant_constructor(variant, &product, &table);
-                        functions.push(function);
+                    // we need to iterate over the products because the type constructor is shadowed by the global
+                    // in the environment
+                    for product in table.products.as_list().into_iter() {
+                        if product.name == format!("product@{}.{}", c.name, variant.name) {
+                            let function = emit_variant_constructor(variant, &product, &table);
+                            functions.push(function);
+                            break;
+                        }
                     }
                 }
             }
@@ -328,6 +376,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
 
     WasmModule {
         functions,
+        constants,
         types: table
             .types
             .as_list()
@@ -367,10 +416,7 @@ fn emit_variant_constructor(
     ));
     instructions.push(wasm_encoder::Instruction::End);
 
-    let function_index = match variant_data.kind {
-        table::ProductKind::Composite { constructor } => constructor,
-        table::ProductKind::Simple { .. } => unreachable!(),
-    };
+    let function_index = variant_data.constructor;
     let function = table.functions.get(function_index).unwrap();
 
     WasmFunction {
@@ -580,13 +626,19 @@ fn emit_expression(
                 env = new_env;
                 insts.lst.extend(new_insts.lst);
             }
+            // TODO: check this field map thing to see if it's constructing it in the right order.
             match fun.as_ref() {
                 TypedExpr::Var { constructor: ValueConstructor { variant: ValueConstructorVariant::ModuleFn { name, .. }, .. }, ..} => {
                     let function_index = env.get(name).unwrap();
                     insts.lst.push(wasm_encoder::Instruction::Call(function_index));
                     (env, insts)
                 }
-                _ => todo!("Only simple function calls"),
+                TypedExpr::Var { constructor: ValueConstructor { variant: ValueConstructorVariant::Record { name, .. }, ..}, ..} => {
+                    let constructor_index = env.get(name).unwrap();
+                    insts.lst.push(wasm_encoder::Instruction::Call(constructor_index));
+                    (env, insts)
+                }
+                _ => todo!("Only simple function calls and type constructors"),
             }
         }
         _ => todo!("Only integer constants, integer negation, blocks, binary operations, case and variable accesses"),

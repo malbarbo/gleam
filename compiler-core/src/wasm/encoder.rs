@@ -4,9 +4,11 @@ use wasm_encoder::CodeSection;
 
 use wasm_encoder::ElementSection;
 use wasm_encoder::FunctionSection;
+use wasm_encoder::GlobalSection;
 use wasm_encoder::IndirectNameMap;
 use wasm_encoder::NameMap;
 use wasm_encoder::NameSection;
+use wasm_encoder::StartSection;
 
 use super::WasmPrimitive;
 use super::WasmType;
@@ -75,6 +77,9 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
             }
         }
     }
+    // also declare the start function type
+    let init_function_type_idx = wasm_module.types.len() as u32;
+    _ = types.function(vec![], vec![]);
     _ = module.section(&types);
 
     // functions
@@ -82,7 +87,35 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
     for func in &wasm_module.functions {
         _ = functions.function(func.type_index);
     }
+
+    // create start function as well
+    let init_function_idx = wasm_module.functions.len() as u32;
+    _ = functions.function(init_function_type_idx);
     _ = module.section(&functions);
+
+    // globals
+    let mut globals = GlobalSection::new();
+    for global in &wasm_module.constants {
+        let heap_type = wasm_encoder::HeapType::Concrete(global.type_index);
+        _ = globals.global(
+            wasm_encoder::GlobalType {
+                val_type: wasm_encoder::ValType::Ref(wasm_encoder::RefType {
+                    nullable: true, // this is so we can initialize it later
+                    heap_type: heap_type.clone(),
+                }),
+                mutable: true, // this is so we can initialize it later
+                shared: false,
+            },
+            &wasm_encoder::ConstExpr::ref_null(heap_type),
+        );
+    }
+    _ = module.section(&globals);
+
+    // declare a start function
+    let start = StartSection {
+        function_index: init_function_idx,
+    };
+    _ = module.section(&start);
 
     // elems
     let mut elems = ElementSection::new();
@@ -108,6 +141,22 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
         }
         _ = codes.function(&f);
     }
+    // for the start function as well
+    {
+        let mut instructions = vec![];
+        for global in wasm_module.constants.iter() {
+            for inst in global.initializer.lst.iter() {
+                instructions.push(inst.clone());
+            }
+            instructions.push(wasm_encoder::Instruction::GlobalSet(global.global_index));
+        }
+        instructions.push(wasm_encoder::Instruction::End);
+        let mut f = wasm_encoder::Function::new(vec![]);
+        for inst in instructions {
+            _ = f.instruction(&inst);
+        }
+        _ = codes.function(&f);
+    }
     _ = module.section(&codes);
 
     // names
@@ -120,6 +169,7 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
     for func in wasm_module.functions.iter() {
         _ = function_names.append(func.function_index, &func.name);
     }
+    _ = function_names.append(init_function_idx, "init@");
     _ = names.functions(&function_names);
 
     // locals
@@ -140,6 +190,7 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
         }
         _ = local_names.append(func.function_index, &locals);
     }
+    _ = local_names.append(init_function_idx, &NameMap::new());
     _ = names.locals(&local_names);
 
     // types
@@ -147,6 +198,7 @@ pub(crate) fn emit(wasm_module: WasmModule) -> Vec<u8> {
     for type_ in wasm_module.types.iter() {
         _ = type_names.append(type_.id, &type_.name);
     }
+    _ = type_names.append(init_function_type_idx, "typ@init");
     _ = names.types(&type_names);
 
     _ = module.section(&names);
