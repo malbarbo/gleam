@@ -9,7 +9,7 @@ use std::sync::Arc;
 use ecow::EcoString;
 use itertools::Itertools;
 use scope::Scope;
-use table::SymbolTable;
+use table::{Id, Local, LocalStore, SymbolTable};
 
 use crate::{
     ast::{
@@ -429,8 +429,6 @@ fn emit_variant_constructor(
     }
 }
 
-type LocalStore = table::Store<(EcoString, Arc<Type>)>;
-
 fn emit_function(
     function: &TypedFunction,
     function_id: table::FunctionId,
@@ -455,7 +453,14 @@ fn emit_function(
             .cloned()
             .unwrap_or_else(|| "#{idx}".into());
 
-        locals.insert(idx, (name.clone(), Arc::clone(&arg.type_)));
+        locals.insert(
+            idx,
+            Local {
+                id: idx,
+                name: name.clone(),
+                gleam_type: Arc::clone(&arg.type_),
+            },
+        );
 
         // add arguments to the environment
         env = env.set(&name, idx.id());
@@ -473,15 +478,15 @@ fn emit_function(
             .as_list()
             .into_iter()
             .take(function_data.arity as _)
-            .map(|(n, _)| Some(n))
+            .map(|local| Some(local.name))
             .collect_vec(),
         locals: locals
             .as_list()
             .into_iter()
             .skip(function_data.arity as _)
-            .map(|(n, x)| {
-                if x.is_int() {
-                    (n, WasmPrimitive::Int)
+            .map(|local| {
+                if local.gleam_type.is_int() {
+                    (local.name, WasmPrimitive::Int)
                 } else {
                     todo!("Only int return types")
                 }
@@ -546,7 +551,14 @@ fn emit_assignment(
             let (env, mut insts) = emit_expression(&assignment.value, env, locals);
             // add variable to the environment
             let id = locals.new_id();
-            locals.insert(id, (name.clone(), Arc::clone(type_)));
+            locals.insert(
+                id,
+                Local {
+                    id,
+                    name: name.clone(),
+                    gleam_type: Arc::clone(type_),
+                },
+            );
             let env = env.set(name, id.id());
             // create local
             insts

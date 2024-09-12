@@ -1,7 +1,12 @@
 use ecow::EcoString;
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
+
+use crate::type_;
+
+type GleamType = type_::Type;
 
 /// A unique identifier parameterized by a type.
 pub struct Id<T> {
@@ -76,6 +81,9 @@ pub type ProductId = Id<Product>;
 
 /// Constant identifier.
 pub type ConstantId = Id<Constant>;
+
+/// Local identifier
+pub type LocalId = Id<Local>;
 
 // bring over WasmType later.
 pub type TypeDefinition = super::WasmType;
@@ -174,6 +182,19 @@ pub struct Constant {
     pub type_: TypeId,
 }
 
+/// Represents a local variable in the local table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Local {
+    /// The unique identifier of the local variable.
+    pub id: LocalId,
+
+    /// The name of the local variable, for debugging purposes.
+    pub name: EcoString,
+
+    /// The gleam type of the local variable.
+    pub gleam_type: Arc<GleamType>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Store<T: Clone + Debug> {
     items: HashMap<Id<T>, T>,
@@ -239,3 +260,6 @@ impl SymbolTable {
         }
     }
 }
+
+/// A store for allocating local variables.
+pub type LocalStore = Store<Local>;
