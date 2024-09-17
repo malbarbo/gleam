@@ -8,7 +8,7 @@ use crate::ast::{Pattern, TypedExpr, TypedPattern};
 
 use super::{
     parse_float, parse_integer,
-    scope::Binding,
+    scope::{Binding, Scope},
     table::{Local, LocalId, LocalStore, SymbolTable},
 };
 
@@ -31,6 +31,7 @@ pub fn compile_pattern(
     subject: LocalId,
     pat: &TypedPattern,
     table: &SymbolTable,
+    env: Arc<Scope>,
     locals: &mut LocalStore,
 ) -> CompiledPattern {
     match pat {
@@ -79,7 +80,20 @@ pub fn compile_pattern(
             checks: vec![],
             assignments: vec![],
         },
-        Pattern::Constructor { .. } => todo!("Not supported yet"),
+        Pattern::Constructor {
+            name,
+            arguments,
+            constructor,
+            ..
+        } => {
+            let type_ = match env.get(&name) {
+                Some(Binding::Product(type_id)) => table.products.get(type_id).unwrap(),
+                _ => unreachable!("Constructor must be a product"),
+            };
+
+            // brb, gonna implement tags
+            todo!()
+        }
         Pattern::String { .. } => todo!("Strings not implemented yet"),
         Pattern::StringPrefix { .. } => todo!("Strings not implemented yet"),
         Pattern::BitArray { .. } => todo!("BitArrays not implemented yet"),

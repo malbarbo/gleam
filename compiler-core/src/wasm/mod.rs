@@ -95,7 +95,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                 table.types.insert(sum_type_id, sum_type);
 
                 let mut product_ids = vec![];
-                for variant in &t.constructors {
+                for (tag, variant) in t.constructors.iter().enumerate() {
                     // type
                     let product_type_id = table.types.new_id();
                     let product_type_name: EcoString =
@@ -107,6 +107,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                             variant,
                             &product_type_name,
                             product_type_id.id(),
+                            tag as u32,
                             sum_type_id.id(),
                         ),
                     };
@@ -168,6 +169,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                             name: format!("product@{}.{}", t.name, variant.name).into(),
                             type_: product_type_id,
                             parent: sum_id,
+                            tag: tag as u32,
                             constructor: constructor_id,
                             kind: table::ProductKind::Simple {
                                 instance: global_id,
@@ -180,6 +182,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                             name: format!("product@{}.{}", t.name, variant.name).into(),
                             type_: product_type_id,
                             parent: sum_id,
+                            tag: tag as u32,
                             constructor: constructor_id,
                             kind: table::ProductKind::Composite,
                         }
@@ -274,9 +277,11 @@ fn emit_variant_constructor(
     variant_data: &table::Product,
     table: &SymbolTable,
 ) -> WasmFunction {
-    let mut instructions = (0..constructor.arguments.len())
-        .map(|i| wasm_encoder::Instruction::LocalGet(i as u32))
-        .collect_vec();
+    let mut instructions = vec![];
+    instructions.push(wasm_encoder::Instruction::I32Const(variant_data.tag as i32));
+    instructions.extend(
+        (0..constructor.arguments.len()).map(|i| wasm_encoder::Instruction::LocalGet(i as u32)),
+    );
     instructions.push(wasm_encoder::Instruction::StructNew(
         variant_data.type_.id(),
     ));
@@ -624,7 +629,8 @@ fn emit_case_expression(
 
         let mut first = true;
         for (pattern, subject_id) in clause.pattern.iter().zip(&ids) {
-            let compiled = pattern::compile_pattern(*subject_id, pattern, table, locals);
+            let compiled =
+                pattern::compile_pattern(*subject_id, pattern, table, Arc::clone(&env), locals);
             let translated = pattern::translate_pattern(compiled, locals);
             conditions.extend(translated.condition);
             assignments.extend(translated.assignments);

@@ -44,6 +44,7 @@ pub enum WasmTypeDefinition {
     Sum,
     Product {
         supertype_index: u32,
+        tag: u32,
         fields: Vec<WasmPrimitive>,
     },
 }
@@ -80,6 +81,7 @@ impl WasmType {
         variant: &TypedRecordConstructor,
         name: &str,
         type_id: u32,
+        tag: u32,
         supertype_index: u32,
     ) -> Self {
         let mut fields = vec![];
@@ -96,6 +98,7 @@ impl WasmType {
             id: type_id,
             definition: WasmTypeDefinition::Product {
                 supertype_index,
+                tag,
                 fields,
             },
         }
@@ -163,6 +166,11 @@ pub struct WasmFunction {
 pub fn emit(wasm_module: WasmModule) -> Vec<u8> {
     let mut module = wasm_encoder::Module::new();
 
+    let tag_field = wasm_encoder::FieldType {
+        element_type: wasm_encoder::StorageType::Val(wasm_encoder::ValType::I32),
+        mutable: false,
+    };
+
     // types
     let mut types = TypeSection::new();
     for type_ in &wasm_module.types {
@@ -188,7 +196,7 @@ pub fn emit(wasm_module: WasmModule) -> Vec<u8> {
                     supertype_idx: None,
                     composite_type: wasm_encoder::CompositeType {
                         inner: wasm_encoder::CompositeInnerType::Struct(wasm_encoder::StructType {
-                            fields: Box::new([]),
+                            fields: vec![tag_field.clone()].into_boxed_slice(),
                         }),
                         shared: false,
                     },
@@ -197,8 +205,9 @@ pub fn emit(wasm_module: WasmModule) -> Vec<u8> {
             WasmTypeDefinition::Product {
                 supertype_index,
                 fields,
+                tag: _,
             } => {
-                let mut field_list = vec![];
+                let mut field_list = vec![tag_field.clone()];
                 for field in fields {
                     field_list.push(wasm_encoder::FieldType {
                         element_type: wasm_encoder::StorageType::Val(field.to_val_type()),

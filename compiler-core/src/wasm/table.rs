@@ -139,6 +139,9 @@ pub struct Product {
     /// The unique identifier of the product type.
     pub id: ProductId,
 
+    /// The variant's tag.
+    pub tag: u32,
+
     /// The name of the product type, for debugging purposes.
     pub name: EcoString,
 
