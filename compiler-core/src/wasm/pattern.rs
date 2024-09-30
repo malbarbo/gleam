@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use ecow::EcoString;
-use itertools::Itertools;
 use wasm_encoder::Instruction;
 
-use crate::ast::{Pattern, TypedExpr, TypedPattern};
+use crate::ast::{Pattern, TypedPattern};
 
 use super::{
+    encoder::WasmTypeImpl,
+    environment::Environment,
     parse_float, parse_integer,
-    scope::{Binding, Scope},
     table::{Local, LocalId, LocalStore, SymbolTable},
 };
 
@@ -31,7 +31,7 @@ pub fn compile_pattern(
     subject: LocalId,
     pat: &TypedPattern,
     table: &SymbolTable,
-    env: Arc<Scope>,
+    env: &Environment<'_>,
     locals: &mut LocalStore,
 ) -> CompiledPattern {
     match pat {
@@ -63,7 +63,7 @@ pub fn compile_pattern(
                 Local {
                     id: local_id,
                     name: name.clone(),
-                    gleam_type: Arc::clone(type_),
+                    wasm_type: WasmTypeImpl::from_gleam_type(Arc::clone(&type_), env, table),
                 },
             );
 
@@ -80,18 +80,7 @@ pub fn compile_pattern(
             checks: vec![],
             assignments: vec![],
         },
-        Pattern::Constructor {
-            name,
-            arguments,
-            constructor,
-            ..
-        } => {
-            let type_ = match env.get(&name) {
-                Some(Binding::Product(type_id)) => table.products.get(type_id).unwrap(),
-                _ => unreachable!("Constructor must be a product"),
-            };
-
-            // brb, gonna implement tags
+        Pattern::Constructor { .. } => {
             todo!()
         }
         Pattern::String { .. } => todo!("Strings not implemented yet"),

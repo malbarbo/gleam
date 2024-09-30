@@ -1,12 +1,9 @@
 use ecow::EcoString;
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
 
-use crate::type_;
-
-type GleamType = type_::Type;
+use super::encoder::WasmTypeImpl;
 
 /// A unique identifier parameterized by a type.
 pub struct Id<T> {
@@ -194,8 +191,8 @@ pub struct Local {
     /// The name of the local variable, for debugging purposes.
     pub name: EcoString,
 
-    /// The gleam type of the local variable.
-    pub gleam_type: Arc<GleamType>,
+    /// Wasm type.
+    pub wasm_type: WasmTypeImpl,
 }
 
 #[derive(Debug, Clone)]
@@ -224,11 +221,6 @@ impl<T: Clone + Debug> Store<T> {
 
     pub fn get(&self, id: Id<T>) -> Option<&T> {
         self.items.get(&id)
-    }
-
-    #[deprecated]
-    pub fn get_from_id(&self, id: u32) -> Option<&T> {
-        self.items.get(&Id::new(id))
     }
 
     pub fn as_list(&self) -> Vec<T> {

@@ -1,5 +1,7 @@
 #![allow(clippy::let_unit_value)]
 
+use std::sync::Arc;
+
 use ecow::EcoString;
 use wasm_encoder::CodeSection;
 
@@ -14,6 +16,11 @@ use wasm_encoder::TypeSection;
 
 use crate::ast::TypedFunction;
 use crate::ast::TypedRecordConstructor;
+use crate::type_::Type;
+
+use super::environment::Binding;
+use super::environment::Environment;
+use super::table::SymbolTable;
 
 pub struct WasmModule {
     pub functions: Vec<WasmFunction>,
@@ -38,34 +45,36 @@ pub struct WasmType {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum WasmTypeDefinition {
     Function {
-        parameters: Vec<WasmPrimitive>,
-        returns: WasmPrimitive,
+        parameters: Vec<WasmTypeImpl>,
+        returns: WasmTypeImpl,
     },
     Sum,
     Product {
         supertype_index: u32,
         tag: u32,
-        fields: Vec<WasmPrimitive>,
+        fields: Vec<WasmTypeImpl>,
     },
 }
 
 impl WasmType {
-    pub fn from_function(f: &TypedFunction, name: &str, id: u32) -> Self {
+    pub fn from_function(
+        f: &TypedFunction,
+        name: &str,
+        id: u32,
+        table: &SymbolTable,
+        env: &Environment<'_>,
+    ) -> Self {
         let mut parameters = vec![];
 
         for arg in &f.arguments {
-            if arg.type_.is_int() {
-                parameters.push(WasmPrimitive::Int);
-            } else {
-                todo!("Only int parameters")
-            }
+            parameters.push(WasmTypeImpl::from_gleam_type(
+                Arc::clone(&arg.type_),
+                env,
+                table,
+            ));
         }
 
-        let returns = if f.return_type.is_int() {
-            WasmPrimitive::Int
-        } else {
-            todo!("Only int return types")
-        };
+        let returns = WasmTypeImpl::from_gleam_type(Arc::clone(&f.return_type), env, table);
 
         WasmType {
             name: name.into(),
@@ -83,14 +92,16 @@ impl WasmType {
         type_id: u32,
         tag: u32,
         supertype_index: u32,
+        table: &SymbolTable,
+        env: &Environment<'_>,
     ) -> Self {
         let mut fields = vec![];
         for arg in &variant.arguments {
-            if arg.type_.is_int() {
-                fields.push(WasmPrimitive::Int);
-            } else {
-                todo!("Only int fields")
-            }
+            fields.push(WasmTypeImpl::from_gleam_type(
+                Arc::clone(&arg.type_),
+                env,
+                table,
+            ));
         }
 
         WasmType {
@@ -109,14 +120,16 @@ impl WasmType {
         name: &str,
         product_type_index: u32,
         constructor_type_index: u32,
+        table: &SymbolTable,
+        env: &Environment<'_>,
     ) -> Self {
         let mut fields = vec![];
         for arg in &variant.arguments {
-            if arg.type_.is_int() {
-                fields.push(WasmPrimitive::Int);
-            } else {
-                todo!("Only int fields")
-            }
+            fields.push(WasmTypeImpl::from_gleam_type(
+                Arc::clone(&arg.type_),
+                env,
+                table,
+            ));
         }
 
         WasmType {
@@ -124,26 +137,51 @@ impl WasmType {
             id: constructor_type_index,
             definition: WasmTypeDefinition::Function {
                 parameters: fields,
-                returns: WasmPrimitive::StructRef(product_type_index),
+                returns: WasmTypeImpl::StructRef(product_type_index),
             },
         }
     }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum WasmPrimitive {
+pub enum WasmTypeImpl {
     Int,
     StructRef(u32),
 }
 
-impl WasmPrimitive {
+impl WasmTypeImpl {
     pub fn to_val_type(self) -> wasm_encoder::ValType {
         match self {
-            WasmPrimitive::Int => wasm_encoder::ValType::I32,
-            WasmPrimitive::StructRef(typ) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
+            WasmTypeImpl::Int => wasm_encoder::ValType::I32,
+            WasmTypeImpl::StructRef(typ) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
                 nullable: false,
                 heap_type: wasm_encoder::HeapType::Concrete(typ),
             }),
+        }
+    }
+
+    pub fn from_gleam_type(type_: Arc<Type>, env: &Environment<'_>, table: &SymbolTable) -> Self {
+        if type_.is_int() {
+            Self::Int
+        } else {
+            match type_.as_ref() {
+                Type::Named { name, .. } => {
+                    // TODO: assuming only module-level names
+                    if let Some(binding) = env.get(name) {
+                        match binding {
+                            Binding::Product(id) => {
+                                let product = table.products.get(id).unwrap();
+                                let type_ = table.types.get(product.type_).unwrap();
+                                Self::StructRef(type_.definition.id)
+                            }
+                            _ => todo!("unsupported type: {binding:?}"),
+                        }
+                    } else {
+                        unreachable!("used a named type that wasn't in the environment")
+                    }
+                }
+                _ => unreachable!("only named types"),
+            }
         }
     }
 }
@@ -158,7 +196,7 @@ pub struct WasmFunction {
     pub name: EcoString,
     pub type_index: u32,
     pub instructions: WasmInstructions,
-    pub locals: Vec<(EcoString, WasmPrimitive)>,
+    pub locals: Vec<(EcoString, WasmTypeImpl)>,
     pub argument_names: Vec<Option<EcoString>>,
     pub function_index: u32,
 }
@@ -185,7 +223,7 @@ pub fn emit(wasm_module: WasmModule) -> Vec<u8> {
                 let parameters: Vec<_> = parameters
                     .into_iter()
                     .copied()
-                    .map(WasmPrimitive::to_val_type)
+                    .map(WasmTypeImpl::to_val_type)
                     .collect();
                 let returns = [returns.to_val_type()];
                 _ = types.function(parameters, returns);
@@ -351,6 +389,13 @@ pub fn emit(wasm_module: WasmModule) -> Vec<u8> {
     }
     _ = type_names.append(init_function_type_idx, "typ@init");
     _ = names.types(&type_names);
+
+    // globals
+    let mut global_names = NameMap::new();
+    for global in wasm_module.constants.iter() {
+        _ = global_names.append(global.global_index, &global.name);
+    }
+    _ = names.globals(&global_names);
 
     _ = module.section(&names);
 
