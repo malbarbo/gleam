@@ -131,7 +131,7 @@ pub struct Sum {
 }
 
 /// Represents a product type in the type table.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Product {
     /// The unique identifier of the product type.
     pub id: ProductId,
@@ -154,6 +154,17 @@ pub struct Product {
 
     /// The constructor function index.
     pub constructor: FunctionId,
+
+    /// Map from field names to field indices.
+    pub fields: Vec<ProductField>,
+}
+
+/// Represents a field in a product type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProductField {
+    pub name: EcoString,
+    pub type_: WasmTypeImpl,
+    pub index: usize,
 }
 
 /// The kind of a product type.

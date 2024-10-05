@@ -47,7 +47,8 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
     generate_prelude_types(&mut table);
 
     // TODO: handle local function/type definitions
-    // TODO: this doesn't work for out-of-order type definitions
+    // TODO: this doesn't work for out-of-order type definitions (indirect recursion)
+    // TODO: pre-register all types before generating them
     for definition in &ast.definitions {
         match definition {
             TypedDefinition::Function(f) => {
@@ -96,6 +97,9 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     },
                 };
                 table.types.insert(sum_type_id, sum_type);
+
+                // add sum type to environment
+                root_environment.set(t.name.clone(), Binding::Sum(sum_id));
 
                 let mut product_ids = vec![];
                 for (tag, variant) in t.constructors.iter().enumerate() {
@@ -181,9 +185,30 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                             kind: table::ProductKind::Simple {
                                 instance: global_id,
                             },
+                            fields: vec![],
                         }
                     } else {
                         // add constructor to the environment
+                        let mut fields = vec![];
+
+                        for (i, arg) in variant.arguments.iter().enumerate() {
+                            if arg.label.is_none() {
+                                todo!("Only labeled arguments");
+                            }
+
+                            let label = arg.label.as_ref().unwrap();
+
+                            fields.push(table::ProductField {
+                                name: label.clone(),
+                                index: i,
+                                type_: WasmTypeImpl::from_gleam_type(
+                                    Arc::clone(&arg.type_),
+                                    &root_environment,
+                                    &table,
+                                ),
+                            });
+                        }
+
                         table::Product {
                             id: product_id,
                             name: format!("product@{}.{}", t.name, variant.name).into(),
@@ -192,6 +217,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                             tag: tag as u32,
                             constructor: constructor_id,
                             kind: table::ProductKind::Composite,
+                            fields,
                         }
                     };
                     table.products.insert(product_id, product);
@@ -482,40 +508,55 @@ fn emit_expression(
                 },
                 _ => todo!("Expected local variable binding"),
             },
-            ValueConstructorVariant::ModuleFn { name, .. } => match env.get(name).unwrap() {
+            // TODO: handle module
+            // TODO: handle field_map
+            ValueConstructorVariant::ModuleFn {
+                name,
+                module,
+                field_map,
+                ..
+            } => match env.get(name).unwrap() {
                 Binding::Function(id) => WasmInstructions {
                     lst: vec![wasm_encoder::Instruction::Call(id.id())],
                 },
 
                 _ => todo!("Expected function binding"),
             },
-            ValueConstructorVariant::Record { name, arity: 0, .. } => {
-                match env.get(name).unwrap() {
-                    Binding::Product(id) => {
-                        let product = table.products.get(id).unwrap();
-                        match product {
-                            table::Product {
-                                kind: table::ProductKind::Simple { instance },
-                                ..
-                            } => WasmInstructions {
-                                lst: vec![wasm_encoder::Instruction::GlobalGet(instance.id())],
-                            },
+            // TODO: handle module
+            ValueConstructorVariant::Record {
+                name,
+                module,
+                arity: 0,
+                ..
+            } => match env.get(name).unwrap() {
+                Binding::Product(id) => {
+                    let product = table.products.get(id).unwrap();
+                    match product {
+                        table::Product {
+                            kind: table::ProductKind::Simple { instance },
+                            ..
+                        } => WasmInstructions {
+                            lst: vec![
+                                wasm_encoder::Instruction::GlobalGet(instance.id()),
+                                wasm_encoder::Instruction::RefAsNonNull, // safe because we initialize all globals before running
+                            ],
+                        },
 
-                            _ => todo!("Expected simple product"),
-                        }
+                        _ => todo!("Expected simple product"),
                     }
-                    _ => todo!("Expected product binding"),
                 }
-            }
+                _ => todo!("Expected product binding"),
+            },
+            ValueConstructorVariant::Record { .. } => todo!("Only simple records with 0 fields"),
             _ => todo!("Only local variables and records"),
         },
         TypedExpr::Call { fun, args, .. } => {
             let mut insts = WasmInstructions { lst: vec![] };
+            // TODO: implement out-of-declared-order parameter function calls
             for arg in args {
                 let new_insts = emit_expression(&arg.value, env, locals, table);
                 insts.lst.extend(new_insts.lst);
             }
-            // TODO: check this field map thing to see if it's constructing it in the right order.
             match fun.as_ref() {
                 TypedExpr::Var {
                     constructor:
@@ -561,6 +602,70 @@ fn emit_expression(
     }
 }
 
+/*
+p1 { cond1, attr1, next: p2 }
+p2 { cond2, attr2, next: p3 }
+p3 { cond3, attr3, next: na }
+
+p4 { cond4, attr4, next: na }
+
+{
+    l1:
+    if (cond1) {
+        attr1
+        if (cond2) {
+            attr2
+            if (cond3) {
+                attr3
+                code3
+                break 'l1
+            }
+        }
+    }
+
+    l4:
+    if (cond4) {
+        attr4
+        code4
+        break 'l4
+    }
+}
+
+to wasm:
+
+(block $case_expr (result $result_type)
+    (block $clause_1 (result $result_type)
+        $cond1
+        (not)
+        (br_if $clause_1)
+
+        $attr1
+        $cond2
+        (not)
+        (br_if $clause_1)
+
+        $attr2
+        $cond3
+        (not)
+        (br_if $clause_1)
+
+        $attr3
+        $code3 ; leaves response on the stack
+        (br $case_expr)
+   ); end block
+   (block $clause_2 (result $result_type)
+        $cond4
+        (not)
+        (br_if $clause_2)
+
+        $attr4
+        $code4
+        (br $case_expr)
+   ); end block
+   (unreachable)) ; end block
+
+*/
+
 fn emit_case_expression(
     subjects: &[TypedExpr],
     clauses: &[TypedClause],
@@ -601,50 +706,65 @@ fn emit_case_expression(
 
     let result_type = WasmTypeImpl::from_gleam_type(Arc::clone(&type_), env, table);
 
+    // open case block
+    insts.lst.push(wasm_encoder::Instruction::Block(
+        wasm_encoder::BlockType::Result(result_type.to_val_type()),
+    ));
+
     for clause in clauses {
-        let mut conditions = vec![];
-        let mut assignments = vec![];
         let mut inner_env = Environment::with_enclosing(env);
 
-        let mut first = true;
+        // open clause block
+        insts.lst.push(wasm_encoder::Instruction::Block(
+            wasm_encoder::BlockType::Empty,
+        ));
+
+        // TODO: we check multipatterns sequentially, not concurrently
+        // this could be more performant
+
         for (pattern, subject_id) in clause.pattern.iter().zip(&ids) {
             let compiled = pattern::compile_pattern(*subject_id, pattern, table, &env, locals);
-            let translated = pattern::translate_pattern(compiled, locals);
-            conditions.extend(translated.condition);
-            assignments.extend(translated.assignments);
-            for (name, local_id) in translated.bindings.iter() {
-                inner_env.set(name.clone(), Binding::Local(*local_id));
-            }
-            if first {
-                first = false;
-            } else {
-                conditions.push(wasm_encoder::Instruction::I32And);
+            let mut translated = Some(Box::new(pattern::translate_pattern(
+                compiled, locals, table,
+            )));
+
+            while let Some(t) = translated {
+                // emit conditions
+                insts.lst.extend(t.condition);
+
+                // jump to clause block
+                insts.lst.push(wasm_encoder::Instruction::I32Eqz);
+                insts.lst.push(wasm_encoder::Instruction::BrIf(0)); // clause
+
+                // emit assignments
+                insts.lst.extend(t.assignments);
+
+                // add bindings to the environment
+                for (name, local_id) in t.bindings.iter() {
+                    inner_env.set(name.clone(), Binding::Local(*local_id));
+                }
+
+                // move to the next pattern
+                translated = t.next;
             }
         }
 
-        insts.lst.extend(conditions);
-        insts.lst.push(wasm_encoder::Instruction::If(
-            wasm_encoder::BlockType::Result(result_type.to_val_type()),
-        ));
-        insts.lst.extend(assignments);
-
+        // emit code
         let new_insts = emit_expression(&clause.then, &inner_env, locals, table);
         insts.lst.extend(new_insts.lst);
 
-        insts.lst.push(wasm_encoder::Instruction::Else);
+        // break out of the case
+        insts.lst.push(wasm_encoder::Instruction::Br(1)); // case
 
-        // if we're the last clause, this is unreachable
-        // place a trap instruction
-        if clause == clauses.last().unwrap() {
-            // this is safe because pattern matching is exhaustive
-            insts.lst.push(wasm_encoder::Instruction::Unreachable);
-        }
-    }
-
-    // place n ends
-    for _ in 0..clauses.len() {
+        // close clause block
         insts.lst.push(wasm_encoder::Instruction::End);
     }
+
+    // add unreachable (all fine due to exhaustiveness)
+    insts.lst.push(wasm_encoder::Instruction::Unreachable);
+
+    // close case block
+    insts.lst.push(wasm_encoder::Instruction::End);
 
     insts.into()
 }

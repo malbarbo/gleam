@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::table::{FunctionId, LocalId, ProductId};
+use super::table::{FunctionId, LocalId, ProductId, SumId};
 use ecow::EcoString;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -8,6 +8,7 @@ pub enum Binding {
     Local(LocalId),
     Function(FunctionId),
     Product(ProductId),
+    Sum(SumId),
 }
 
 pub struct Environment<'a> {

@@ -17,6 +17,7 @@ use wasm_encoder::TypeSection;
 use crate::ast::TypedFunction;
 use crate::ast::TypedRecordConstructor;
 use crate::type_::Type;
+use crate::type_::TypeVar;
 
 use super::environment::Binding;
 use super::environment::Environment;
@@ -161,26 +162,47 @@ impl WasmTypeImpl {
     }
 
     pub fn from_gleam_type(type_: Arc<Type>, env: &Environment<'_>, table: &SymbolTable) -> Self {
+        fn resolve_type_name(
+            name: &str,
+            env: &Environment<'_>,
+            table: &SymbolTable,
+        ) -> WasmTypeImpl {
+            if let Some(binding) = env.get(name) {
+                match binding {
+                    Binding::Product(id) => {
+                        let product = table.products.get(id).unwrap();
+                        let type_ = table.types.get(product.type_).unwrap();
+                        WasmTypeImpl::StructRef(type_.definition.id)
+                    }
+                    Binding::Sum(id) => {
+                        let sum = table.sums.get(id).unwrap();
+                        let type_ = table.types.get(sum.type_).unwrap();
+                        WasmTypeImpl::StructRef(type_.definition.id)
+                    }
+                    _ => todo!("unsupported type: {binding:?}"),
+                }
+            } else {
+                unreachable!("used a named type that wasn't in the environment")
+            }
+        }
+
         if type_.is_int() {
             Self::Int
         } else {
             match type_.as_ref() {
-                Type::Named { name, .. } => {
-                    // TODO: assuming only module-level names
-                    if let Some(binding) = env.get(name) {
-                        match binding {
-                            Binding::Product(id) => {
-                                let product = table.products.get(id).unwrap();
-                                let type_ = table.types.get(product.type_).unwrap();
-                                Self::StructRef(type_.definition.id)
-                            }
-                            _ => todo!("unsupported type: {binding:?}"),
-                        }
+                // TODO: handle modules
+                Type::Named { name, module, .. } => resolve_type_name(name, env, table),
+                Type::Var {
+                    type_: type_var, ..
+                } => {
+                    let b = type_var.borrow();
+                    if let TypeVar::Link { ref type_ } = *b {
+                        Self::from_gleam_type(Arc::clone(type_), env, table)
                     } else {
-                        unreachable!("used a named type that wasn't in the environment")
+                        unreachable!("unresolved type var: {type_var:?}")
                     }
                 }
-                _ => unreachable!("only named types"),
+                _ => unreachable!("only named types, received: {type_:?}"),
             }
         }
     }
