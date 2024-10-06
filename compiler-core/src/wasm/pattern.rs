@@ -6,7 +6,7 @@ use wasm_encoder::Instruction;
 use crate::{
     analyse::Inferred,
     ast::{Pattern, TypedPattern},
-    type_::PatternConstructor,
+    type_::{FieldMap, PatternConstructor},
 };
 
 use super::{
@@ -16,12 +16,14 @@ use super::{
     table::{Local, LocalId, LocalStore, SumId, SymbolTable, TypeId},
 };
 
+#[derive(Debug, Clone)]
 pub struct CompiledPattern {
     pub checks: Vec<Check>,
     pub assignments: Vec<Assignment>,
-    pub next: Option<Box<CompiledPattern>>,
+    pub nested: Vec<CompiledPattern>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Check {
     IntegerEquality {
         local: LocalId,
@@ -38,6 +40,7 @@ pub enum Check {
     },
 }
 
+#[derive(Debug, Clone)]
 pub enum Assignment {
     // Reassigns `subject_local` to `target_local` and creates a named binding `name`
     Named {
@@ -84,7 +87,7 @@ pub fn compile_pattern(
                     value,
                 }],
                 assignments: vec![],
-                next: None,
+                nested: vec![],
             }
         }
         Pattern::Float { value, .. } => {
@@ -95,7 +98,7 @@ pub fn compile_pattern(
                     value,
                 }],
                 assignments: vec![],
-                next: None,
+                nested: vec![],
             }
         }
         Pattern::Variable { type_, name, .. } => {
@@ -116,14 +119,35 @@ pub fn compile_pattern(
                     subject_local: subject,
                     target_local: local_id,
                 }],
-                next: None,
+                nested: vec![],
             }
         }
-        Pattern::Assign { .. } => todo!("Not supported yet"),
+        Pattern::Assign { name, pattern, .. } => {
+            let local_id = locals.new_id();
+            locals.insert(
+                local_id,
+                Local {
+                    id: local_id,
+                    name: name.clone(),
+                    wasm_type: WasmTypeImpl::from_gleam_type(pattern.type_(), env, table),
+                },
+            );
+
+            let cp = compile_pattern(subject, pattern, table, env, locals);
+            CompiledPattern {
+                checks: vec![],
+                assignments: vec![Assignment::Named {
+                    name: name.clone(),
+                    subject_local: subject,
+                    target_local: local_id,
+                }],
+                nested: vec![cp],
+            }
+        }
         Pattern::Discard { .. } => CompiledPattern {
             checks: vec![],
             assignments: vec![],
-            next: None,
+            nested: vec![],
         },
         // TODO: module name
         Pattern::Constructor {
@@ -135,7 +159,6 @@ pub fn compile_pattern(
                 }),
             arguments,
             name,
-            type_,
             module,
             ..
         } => {
@@ -168,60 +191,72 @@ pub fn compile_pattern(
                 },
             );
 
-            let mut bindings = vec![Assignment::Cast {
+            let mut assignments = vec![Assignment::Cast {
                 subject_local: subject,
                 target_local: cast_local_id,
                 target_type: product_type.id,
             }];
 
             // chain remaining patterns
-            let mut head = None;
-            for arg in arguments {
-                // TODO: handle other fields in arg struct
-                // TODO: what are labels???
-                if arg.label.is_none() {
-                    // TODO: what do we do here?
-                }
-
-                // let label = arg.label.as_ref().unwrap();
-
-                // get the field index
-                let field_index = product
-                    .fields
-                    .iter()
-                    .position(|field| &field.name == label)
-                    .unwrap();
+            let mut nested_patterns = vec![];
+            for (i, arg) in arguments.iter().enumerate() {
+                let field_index = match field_map {
+                    None => i,
+                    Some(FieldMap { fields, .. }) => {
+                        let find = |(key, &val)| {
+                            if val as usize == i {
+                                Some(key)
+                            } else {
+                                None
+                            }
+                        };
+                        let label = fields.iter().find_map(find);
+                        match label {
+                            Some(label) => {
+                                // the field is the one with this name
+                                product
+                                    .fields
+                                    .iter()
+                                    .position(|f| &f.name == label)
+                                    .unwrap()
+                            }
+                            None => i,
+                        }
+                    }
+                };
                 let field = &product.fields[field_index];
 
-                // create a new named variable for each argument
+                // create a local for the argument
                 let arg_variable = locals.new_id();
                 locals.insert(
                     arg_variable,
                     Local {
                         id: arg_variable,
-                        name: label.clone(),
+                        name: field.name.clone(),
                         wasm_type: field.type_.clone(),
                     },
                 );
 
                 // assign the argument to the new variable
-                bindings.push(Assignment::StructField {
-                    subject_local: subject,
+                assignments.push(Assignment::StructField {
+                    subject_local: cast_local_id,
                     target_local: arg_variable,
-                    field_index: field_index as u32 + 1,
+                    field_index: i as u32 + 1,
                     struct_type: product.type_,
                 });
 
-                let mut cp = compile_pattern(arg_variable, &arg.value, table, env, locals);
-                cp.next = head;
-                head = Some(Box::new(cp));
+                // recursively compile
+                let inner_compiled_pattern =
+                    compile_pattern(arg_variable, &arg.value, table, env, locals);
+
+                nested_patterns.push(inner_compiled_pattern);
             }
 
-            CompiledPattern {
+            dbg!(CompiledPattern {
                 checks,
-                assignments: bindings,
-                next: head,
-            }
+                assignments,
+                nested: nested_patterns,
+            })
         }
         Pattern::Constructor {
             constructor: Inferred::Unknown,
@@ -243,7 +278,7 @@ pub struct TranslatedPattern {
     pub condition: Instructions,
     pub assignments: Instructions,
     pub bindings: Vec<(EcoString, LocalId)>,
-    pub next: Option<Box<TranslatedPattern>>,
+    pub nested: Vec<TranslatedPattern>,
 }
 
 pub fn translate_pattern(
@@ -382,8 +417,10 @@ pub fn translate_pattern(
         condition: cond_expr,
         assignments: assign_expr,
         bindings,
-        next: compiled
-            .next
-            .map(|cp| Box::new(translate_pattern(*cp, locals, table))),
+        nested: compiled
+            .nested
+            .into_iter()
+            .map(|cp| translate_pattern(cp, locals, table))
+            .collect(),
     }
 }

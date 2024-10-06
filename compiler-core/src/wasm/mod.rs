@@ -5,7 +5,7 @@ mod environment;
 mod pattern;
 mod table;
 
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 use ecow::EcoString;
 use encoder::{
@@ -502,7 +502,7 @@ fn emit_expression(
         TypedExpr::Var {
             constructor, name, ..
         } => match &constructor.variant {
-            ValueConstructorVariant::LocalVariable { .. } => match env.get(name).unwrap() {
+            ValueConstructorVariant::LocalVariable { .. } => match env.get(dbg!(name)).unwrap() {
                 Binding::Local(id) => WasmInstructions {
                     lst: vec![wasm_encoder::Instruction::LocalGet(id.id())],
                 },
@@ -723,12 +723,16 @@ fn emit_case_expression(
         // this could be more performant
 
         for (pattern, subject_id) in clause.pattern.iter().zip(&ids) {
-            let compiled = pattern::compile_pattern(*subject_id, pattern, table, &env, locals);
-            let mut translated = Some(Box::new(pattern::translate_pattern(
-                compiled, locals, table,
-            )));
+            let compiled =
+                pattern::compile_pattern(*subject_id, pattern, table, &inner_env, locals);
+            let translated = pattern::translate_pattern(compiled, locals, table);
 
-            while let Some(t) = translated {
+            // we need to emit the conditions and assignments in BFS order
+            // because inner conditions depend on outer conditions
+            // (topological ordering)
+            let mut queue = VecDeque::from([translated]);
+
+            while let Some(t) = queue.pop_front() {
                 // emit conditions
                 insts.lst.extend(t.condition);
 
@@ -744,8 +748,8 @@ fn emit_case_expression(
                     inner_env.set(name.clone(), Binding::Local(*local_id));
                 }
 
-                // move to the next pattern
-                translated = t.next;
+                // enqueue nested patterns
+                queue.extend(t.nested);
             }
         }
 
