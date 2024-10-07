@@ -111,7 +111,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
             }
             TypedDefinition::CustomType(t) => {
                 if !t.parameters.is_empty() {
-                    todo!("Only concrete types");
+                    todo!("Only concrete, non-generic types");
                 }
 
                 let sum_id = match root_environment.get(&t.name) {
@@ -345,12 +345,20 @@ fn generate_prelude_types(table: &mut SymbolTable, env: &mut Environment<'_>) {
     );
 
     // - PreludeType::String
+    // TODO: Strings
 
     // To be implemented:
     // - PreludeType::BitArray
+    // TODO: BitArrays
+
     // - PreludeType::List
+    // TODO: Lists
+
     // - PreludeType::Result
+    // TODO: Results
+
     // - PreludeType::UtfCodepoint
+    // TODO: UtfCodepoints
 }
 
 fn emit_variant_constructor(
@@ -483,39 +491,99 @@ fn emit_assignment(
     locals: &mut LocalStore,
     table: &SymbolTable,
 ) -> WasmInstructions {
-    // only non-assertions
+    // create a new local for the assignment subject
+    let id = locals.new_id();
+    let type_ = WasmTypeImpl::from_gleam_type(assignment.type_(), env, table);
+    let name = format!("#assign#{}", id.id());
+    locals.insert(
+        id,
+        Local {
+            id,
+            name: name.into(),
+            wasm_type: type_,
+        },
+    );
+
+    // compile pattern
+    let compiled = pattern::compile_pattern(id, &assignment.pattern, table, env, locals);
+    let translated = pattern::translate_pattern(compiled, locals, table);
+
+    // emit value
+    let mut insts = emit_expression(&assignment.value, env, locals, table);
+    insts.lst.push(wasm_encoder::Instruction::LocalSet(id.id()));
+
     if assignment.kind.is_assert() {
-        todo!("Only non-assertions");
-    }
+        // emit the conditions and assignments in BFS order
 
-    // only support simple assignments for now
-    match assignment.pattern {
-        Pattern::Variable {
-            ref name,
-            ref type_,
-            ..
-        } => {
-            // emit value
-            let mut insts = emit_expression(&assignment.value, env, locals, table);
-            // add variable to the environment
-            let id = locals.new_id();
-            locals.insert(
-                id,
-                Local {
-                    id,
-                    name: name.clone(),
-                    wasm_type: WasmTypeImpl::from_gleam_type(Arc::clone(type_), env, table),
-                },
-            );
+        // envolving block
+        insts.lst.push(wasm_encoder::Instruction::Block(
+            wasm_encoder::BlockType::Empty, // because we don't return anything
+        ));
 
-            env.set(name.clone(), Binding::Local(id));
-            // create local
-            insts.lst.push(wasm_encoder::Instruction::LocalTee(id.id()));
+        // pattern block
+        insts.lst.push(wasm_encoder::Instruction::Block(
+            wasm_encoder::BlockType::Empty,
+        ));
 
-            insts
+        let mut queue = VecDeque::from([translated]);
+
+        while let Some(t) = queue.pop_front() {
+            // emit conditions
+            insts.lst.extend(t.condition);
+
+            // jump to clause block
+            insts.lst.push(wasm_encoder::Instruction::I32Eqz);
+            insts.lst.push(wasm_encoder::Instruction::BrIf(0)); // clause
+
+            // emit assignments
+            insts.lst.extend(t.assignments);
+
+            // add bindings to the environment
+            for (name, local_id) in t.bindings.iter() {
+                env.set(name.clone(), Binding::Local(*local_id));
+            }
+
+            // enqueue nested patterns
+            queue.extend(t.nested);
         }
-        _ => todo!("Only simple assignments"),
+
+        // in regular pattern matching, here would be the result of the match expression
+        // but we don't need it here since we're only attributing the value to a variable
+
+        // break out of the case
+        insts.lst.push(wasm_encoder::Instruction::Br(1)); // case
+
+        // close pattern block
+        insts.lst.push(wasm_encoder::Instruction::End);
+
+        // there's no code to execute, so we need to add an unreachable
+        // TODO: emit a proper error message
+        insts.lst.push(wasm_encoder::Instruction::Unreachable);
+
+        // close envolving block
+        insts.lst.push(wasm_encoder::Instruction::End);
+    } else {
+        // this is irrefutable so do not emit any checks
+        let mut queue = VecDeque::from([translated]);
+
+        while let Some(t) = queue.pop_front() {
+            // emit assignments
+            insts.lst.extend(t.assignments);
+
+            // add bindings to the environment
+            for (name, local_id) in t.bindings.iter() {
+                env.set(name.clone(), Binding::Local(*local_id));
+            }
+
+            // enqueue nested patterns
+            queue.extend(t.nested);
+        }
     }
+
+    // return the value
+    insts.lst.push(wasm_encoder::Instruction::LocalGet(id.id()));
+
+    insts
 }
 
 fn emit_expression(
