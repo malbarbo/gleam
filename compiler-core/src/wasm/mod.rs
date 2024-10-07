@@ -2,6 +2,7 @@
 
 mod encoder;
 mod environment;
+mod integer;
 mod pattern;
 mod table;
 
@@ -12,7 +13,7 @@ use encoder::{
     WasmFunction, WasmGlobal, WasmInstructions, WasmModule, WasmType, WasmTypeDefinition,
     WasmTypeImpl,
 };
-use environment::{Binding, Environment};
+use environment::{Binding, BuiltinType, Environment};
 use itertools::Itertools;
 use table::{Local, LocalStore, SymbolTable};
 
@@ -35,7 +36,6 @@ pub fn module(writer: &impl FileSystemWriter, ast: &TypedModule) {
 fn construct_module(ast: &TypedModule) -> WasmModule {
     use crate::ast::TypedDefinition;
 
-    // FIRST PASS: generate indices for all functions and types in the top-level module
     let mut table = SymbolTable::new();
 
     let mut root_environment = Environment::new();
@@ -44,14 +44,46 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
     let mut constants = vec![];
 
     // generate prelude types
-    generate_prelude_types(&mut table);
+    generate_prelude_types(&mut table, &mut root_environment);
 
-    // TODO: handle local function/type definitions
-    // TODO: this doesn't work for out-of-order type definitions (indirect recursion)
-    // TODO: pre-register all types before generating them
+    // TODO: add support for recursive type and function definitions
+    // to do this we need to process our module in three passes:
+    // 1 - assign an ID to all sum types and functions
+    // 2 - generate sum, product and constructors/function types
+    // 3 - generate function and constructor bodies
+
+    // problem: need to know type id when generating references to structs
+
+    // recursive functions are working!
+
+    // FIRST PASS: generate indices for all names
+    for definition in &ast.definitions {
+        match definition {
+            TypedDefinition::CustomType(t) => {
+                let sum_id = table.sums.new_id();
+                root_environment.set(t.name.clone(), Binding::Sum(sum_id));
+            }
+            TypedDefinition::Function(f) => {
+                let function_id = table.functions.new_id();
+                root_environment.set(f.name.clone(), Binding::Function(function_id));
+            }
+            TypedDefinition::Import(_) => todo!("Imports aren't implemented yet"),
+            TypedDefinition::TypeAlias(_) => todo!("Type aliases aren't implemented yet"),
+            TypedDefinition::ModuleConstant(_) => {
+                todo!("Module constants aren't implemented yet")
+            }
+        }
+    }
+
+    // SECOND PASS: generate the types
     for definition in &ast.definitions {
         match definition {
             TypedDefinition::Function(f) => {
+                let function_id = match root_environment.get(&f.name) {
+                    Some(Binding::Function(id)) => id,
+                    _ => unreachable!("Expected function binding in environment"),
+                };
+
                 let function_type_id = table.types.new_id();
                 let function_type_name: EcoString = format!("fun@{}", f.name).into();
                 let function_type = table::Type {
@@ -67,7 +99,6 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                 };
                 table.types.insert(function_type_id, function_type);
 
-                let function_id = table.functions.new_id();
                 let function = table::Function {
                     id: function_id,
                     signature: function_type_id,
@@ -83,7 +114,10 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     todo!("Only concrete types");
                 }
 
-                let sum_id = table.sums.new_id();
+                let sum_id = match root_environment.get(&t.name) {
+                    Some(Binding::Sum(id)) => id,
+                    _ => unreachable!("Expected sum binding in environment"),
+                };
 
                 let sum_type_id = table.types.new_id();
                 let sum_type_name: EcoString = format!("sum@{}", t.name).into();
@@ -192,14 +226,14 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                         let mut fields = vec![];
 
                         for (i, arg) in variant.arguments.iter().enumerate() {
-                            if arg.label.is_none() {
-                                todo!("Only labeled arguments");
-                            }
-
-                            let label = arg.label.as_ref().unwrap();
+                            let label = if arg.label.is_none() {
+                                format!("arg{}", i).into()
+                            } else {
+                                arg.label.as_ref().unwrap().clone()
+                            };
 
                             fields.push(table::ProductField {
-                                name: label.clone(),
+                                name: label,
                                 index: i,
                                 type_: WasmTypeImpl::from_gleam_type(
                                     Arc::clone(&arg.type_),
@@ -234,7 +268,11 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                 };
                 table.sums.insert(sum_id, sum);
             }
-            _ => {}
+            TypedDefinition::ModuleConstant(_) => {
+                todo!("Module constants aren't implemented yet")
+            }
+            TypedDefinition::TypeAlias(_) => todo!("Type aliases aren't implemented yet"),
+            TypedDefinition::Import(_) => todo!("Imports aren't implemented yet"),
         }
     }
 
@@ -267,7 +305,11 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     }
                 }
             }
-            _ => todo!("unimplemented"),
+            TypedDefinition::ModuleConstant(_) => {
+                todo!("Module constants aren't implemented yet")
+            }
+            TypedDefinition::TypeAlias(_) => todo!("Type aliases aren't implemented yet"),
+            TypedDefinition::Import(_) => todo!("Imports aren't implemented yet"),
         }
     }
 
@@ -283,14 +325,25 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
     }
 }
 
-fn generate_prelude_types(_table: &mut SymbolTable) {
+fn generate_prelude_types(table: &mut SymbolTable, env: &mut Environment<'_>) {
     // Implementing these is not necessary:
     // - PreludeType::Float
     // - PreludeType::Int
 
     // Implemented:
     // - PreludeType::Nil
+    env.set("Nil".into(), Binding::Builtin(BuiltinType::Nil));
+
     // - PreludeType::Bool
+    env.set(
+        "True".into(),
+        Binding::Builtin(BuiltinType::Boolean { value: true }),
+    );
+    env.set(
+        "False".into(),
+        Binding::Builtin(BuiltinType::Boolean { value: false }),
+    );
+
     // - PreludeType::String
 
     // To be implemented:
@@ -306,7 +359,7 @@ fn emit_variant_constructor(
     table: &SymbolTable,
 ) -> WasmFunction {
     let mut instructions = vec![];
-    instructions.push(wasm_encoder::Instruction::I32Const(variant_data.tag as i32));
+    instructions.extend(integer::const_(variant_data.tag as _).lst);
     instructions.extend(
         (0..constructor.arguments.len()).map(|i| wasm_encoder::Instruction::LocalGet(i as u32)),
     );
@@ -418,7 +471,9 @@ fn emit_statement(
     match statement {
         Statement::Expression(expression) => emit_expression(expression, env, locals, table),
         Statement::Assignment(assignment) => emit_assignment(assignment, env, locals, table),
-        Statement::Use(_) => todo!("Only expressions and assignments"),
+        Statement::Use(_) => {
+            unreachable!("Use statements should not be present at this stage of compilation")
+        }
     }
 }
 
@@ -471,15 +526,13 @@ fn emit_expression(
 ) -> WasmInstructions {
     match expression {
         TypedExpr::Int { value, .. } => {
-            let val = parse_integer(value);
-            WasmInstructions {
-                lst: vec![wasm_encoder::Instruction::I32Const(val)],
-            }
+            let val = integer::parse(value);
+            integer::const_(val)
         }
         TypedExpr::NegateInt { value, .. } => {
             let mut insts = emit_expression(value, env, locals, table);
-            insts.lst.push(wasm_encoder::Instruction::I32Const(-1));
-            insts.lst.push(wasm_encoder::Instruction::I32Mul);
+            insts.lst.extend(integer::const_(-1).lst);
+            insts.lst.extend(integer::mul().lst);
             insts
         }
         TypedExpr::Block { statements, .. } => {
@@ -523,9 +576,11 @@ fn emit_expression(
                 _ => todo!("Expected function binding"),
             },
             // TODO: handle module
+            // TODO: handle field_map
             ValueConstructorVariant::Record {
                 name,
                 module,
+                field_map,
                 arity: 0,
                 ..
             } => match env.get(name).unwrap() {
@@ -545,6 +600,16 @@ fn emit_expression(
                         _ => todo!("Expected simple product"),
                     }
                 }
+                Binding::Builtin(BuiltinType::Nil) => WasmInstructions {
+                    lst: vec![wasm_encoder::Instruction::I32Const(0)],
+                },
+                Binding::Builtin(BuiltinType::Boolean { value }) => WasmInstructions {
+                    lst: vec![wasm_encoder::Instruction::I32Const(if value {
+                        1
+                    } else {
+                        0
+                    })],
+                },
                 _ => todo!("Expected product binding"),
             },
             ValueConstructorVariant::Record { .. } => todo!("Only simple records with 0 fields"),
@@ -598,73 +663,32 @@ fn emit_expression(
             typ,
             ..
         } => emit_case_expression(subjects, clauses, Arc::clone(typ), env, locals, table),
-        _ => todo!("Not supported yet"),
-    }
-}
-
-/*
-p1 { cond1, attr1, next: p2 }
-p2 { cond2, attr2, next: p3 }
-p3 { cond3, attr3, next: na }
-
-p4 { cond4, attr4, next: na }
-
-{
-    l1:
-    if (cond1) {
-        attr1
-        if (cond2) {
-            attr2
-            if (cond3) {
-                attr3
-                code3
-                break 'l1
+        TypedExpr::Float { value, .. } => {
+            let val = parse_float(value);
+            WasmInstructions {
+                lst: vec![wasm_encoder::Instruction::F64Const(val)],
             }
         }
-    }
-
-    l4:
-    if (cond4) {
-        attr4
-        code4
-        break 'l4
+        TypedExpr::String { .. } => todo!("Strings not implemented yet"),
+        TypedExpr::Pipeline { .. } => todo!("Pipelines not implemented yet"),
+        TypedExpr::Fn { .. } => todo!("Inner functions not implemented yet"),
+        TypedExpr::List { .. } => todo!("Lists not implemented yet"),
+        TypedExpr::RecordAccess { .. } => todo!("Record access not implemented yet"),
+        TypedExpr::ModuleSelect { .. } => todo!("Module access not implemented yet"),
+        TypedExpr::Tuple { .. } => todo!("Tuples not implemented yet"),
+        TypedExpr::TupleIndex { .. } => todo!("Tuple index not implemented yet"),
+        TypedExpr::Todo { .. } => todo!("Todo not implemented yet"),
+        TypedExpr::Panic { .. } => todo!("Panic not implemented yet"),
+        TypedExpr::BitArray { .. } => todo!("BitArrays not implemented yet"),
+        TypedExpr::RecordUpdate { .. } => todo!("Record update not implemented yet"),
+        TypedExpr::NegateBool { value, .. } => {
+            let mut insts = emit_expression(value, env, locals, table);
+            insts.lst.push(wasm_encoder::Instruction::I32Eqz);
+            insts
+        }
+        TypedExpr::Invalid { .. } => unreachable!("Invalid expression"),
     }
 }
-
-to wasm:
-
-(block $case_expr (result $result_type)
-    (block $clause_1 (result $result_type)
-        $cond1
-        (not)
-        (br_if $clause_1)
-
-        $attr1
-        $cond2
-        (not)
-        (br_if $clause_1)
-
-        $attr2
-        $cond3
-        (not)
-        (br_if $clause_1)
-
-        $attr3
-        $code3 ; leaves response on the stack
-        (br $case_expr)
-   ); end block
-   (block $clause_2 (result $result_type)
-        $cond4
-        (not)
-        (br_if $clause_2)
-
-        $attr4
-        $code4
-        (br $case_expr)
-   ); end block
-   (unreachable)) ; end block
-
-*/
 
 fn emit_case_expression(
     subjects: &[TypedExpr],
@@ -788,59 +812,311 @@ fn emit_binary_operation(
             let mut insts = emit_expression(left, env, locals, table);
             let right_insts = emit_expression(right, env, locals, table);
             insts.lst.extend(right_insts.lst);
-            insts.lst.push(wasm_encoder::Instruction::I32Add);
+            insts.lst.extend(integer::add().lst);
             insts
         }
         BinOp::SubInt => {
             let mut insts = emit_expression(left, env, locals, table);
             let right_insts = emit_expression(right, env, locals, table);
             insts.lst.extend(right_insts.lst);
-            insts.lst.push(wasm_encoder::Instruction::I32Sub);
+            insts.lst.extend(integer::sub().lst);
             insts
         }
         BinOp::MultInt => {
             let mut insts = emit_expression(left, env, locals, table);
             let right_insts = emit_expression(right, env, locals, table);
             insts.lst.extend(right_insts.lst);
-            insts.lst.push(wasm_encoder::Instruction::I32Mul);
+            insts.lst.extend(integer::mul().lst);
             insts
         }
         BinOp::DivInt => {
+            use wasm_encoder::Instruction;
+            /*
+               left
+               right
+               0
+               ==
+               if
+                   right
+                   div
+               else
+                   drop
+                   right
+               end
+            */
+            // we need to evaluate the right operand only once
+            // create a local
+            let right_id = locals.new_id();
+            locals.insert(
+                right_id,
+                Local {
+                    id: right_id,
+                    name: "@fdiv_rhs_temp".into(),
+                    wasm_type: WasmTypeImpl::Int,
+                },
+            );
+
             let mut insts = emit_expression(left, env, locals, table);
             let right_insts = emit_expression(right, env, locals, table);
+
             insts.lst.extend(right_insts.lst);
-            insts.lst.push(wasm_encoder::Instruction::I32DivS);
+            insts.lst.push(Instruction::LocalTee(right_id.id()));
+            insts.lst.extend(integer::const_(0).lst);
+            insts.lst.extend(integer::eq().lst);
+
+            // TODO: add a function type representing an integer division
+            insts
+                .lst
+                .push(Instruction::If(wasm_encoder::BlockType::Result(
+                    WasmTypeImpl::Int.to_val_type(),
+                )));
+
+            insts.lst.push(Instruction::LocalGet(right_id.id()));
+            insts.lst.extend(integer::div().lst);
+
+            insts.lst.push(Instruction::Else);
+
+            insts.lst.push(Instruction::Drop);
+            insts.lst.push(Instruction::LocalGet(right_id.id())); // 0
+
+            insts.lst.push(Instruction::End);
+
             insts
         }
         BinOp::RemainderInt => {
             let mut insts = emit_expression(left, env, locals, table);
             let right_insts = emit_expression(right, env, locals, table);
             insts.lst.extend(right_insts.lst);
-            insts.lst.push(wasm_encoder::Instruction::I32RemS);
+            insts.lst.extend(integer::rem().lst);
             insts
         }
-        _ => todo!("Only integer arithmetic"),
-    }
-}
+        BinOp::And => {
+            // short circuiting behavior: if left is false, don't evaluate right
+            let mut insts = emit_expression(left, env, locals, table);
 
-fn parse_integer(value: &str) -> i32 {
-    let val = value.replace("_", "");
+            insts.lst.push(wasm_encoder::Instruction::If(
+                wasm_encoder::BlockType::Result(WasmTypeImpl::Bool.to_val_type()),
+            ));
 
-    // TODO: support integers other than i32
-    // why do i have do this at codegen?
-    if let Some(val) = val.strip_prefix("0b") {
-        // base 2 literal
-        i32::from_str_radix(val, 2).expect("expected int to be a valid binary integer")
-    } else if let Some(val) = val.strip_prefix("0o") {
-        // base 8 literal
-        i32::from_str_radix(val, 8).expect("expected int to be a valid octal integer")
-    } else if let Some(val) = val.strip_prefix("0x") {
-        // base 16 literal
-        i32::from_str_radix(val, 16).expect("expected int to be a valid hexadecimal integer")
-    } else {
-        // base 10 literal
-        val.parse()
-            .expect("expected int to be a valid decimal integer")
+            let right_insts = emit_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+
+            insts.lst.push(wasm_encoder::Instruction::Else);
+            insts.lst.push(wasm_encoder::Instruction::I32Const(0));
+            insts.lst.push(wasm_encoder::Instruction::End);
+            insts
+        }
+        BinOp::Or => {
+            // short circuiting behavior: if left is true, don't evaluate right
+            let mut insts = emit_expression(left, env, locals, table);
+
+            insts.lst.push(wasm_encoder::Instruction::If(
+                wasm_encoder::BlockType::Result(WasmTypeImpl::Bool.to_val_type()),
+            ));
+            insts.lst.push(wasm_encoder::Instruction::I32Const(1));
+            insts.lst.push(wasm_encoder::Instruction::Else);
+
+            let right_insts = emit_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+
+            insts.lst.push(wasm_encoder::Instruction::End);
+            insts
+        }
+        BinOp::Eq => {
+            // check types
+            assert_eq!(left.type_(), right.type_(), "Expected equal types");
+
+            let type_ = left.type_();
+            match type_ {
+                _ if type_.is_int() => {
+                    let mut insts = emit_expression(left, env, locals, table);
+                    let right_insts = emit_expression(right, env, locals, table);
+                    insts.lst.extend(right_insts.lst);
+                    insts.lst.extend(integer::eq().lst);
+                    insts
+                }
+                _ if type_.is_float() => {
+                    let mut insts = emit_expression(left, env, locals, table);
+                    let right_insts = emit_expression(right, env, locals, table);
+                    insts.lst.extend(right_insts.lst);
+                    insts.lst.push(wasm_encoder::Instruction::F64Eq);
+                    insts
+                }
+                _ if type_.is_bool() => {
+                    let mut insts = emit_expression(left, env, locals, table);
+                    let right_insts = emit_expression(right, env, locals, table);
+                    insts.lst.extend(right_insts.lst);
+                    insts.lst.push(wasm_encoder::Instruction::I32Eq);
+                    insts
+                }
+                _ => todo!("Only int, float and bool types are supported"),
+            }
+        }
+        BinOp::NotEq => {
+            // check types
+            assert_eq!(left.type_(), right.type_(), "Expected equal types");
+
+            let type_ = left.type_();
+            match type_ {
+                _ if type_.is_int() => {
+                    let mut insts = emit_expression(left, env, locals, table);
+                    let right_insts = emit_expression(right, env, locals, table);
+                    insts.lst.extend(right_insts.lst);
+                    insts.lst.extend(integer::eq().lst);
+                    insts.lst.push(wasm_encoder::Instruction::I32Eqz);
+                    insts
+                }
+                _ if type_.is_float() => {
+                    let mut insts = emit_expression(left, env, locals, table);
+                    let right_insts = emit_expression(right, env, locals, table);
+                    insts.lst.extend(right_insts.lst);
+                    insts.lst.push(wasm_encoder::Instruction::F64Eq);
+                    insts.lst.push(wasm_encoder::Instruction::I32Eqz);
+                    insts
+                }
+                _ if type_.is_bool() => {
+                    let mut insts = emit_expression(left, env, locals, table);
+                    let right_insts = emit_expression(right, env, locals, table);
+                    insts.lst.extend(right_insts.lst);
+                    insts.lst.push(wasm_encoder::Instruction::I32Eq);
+                    insts.lst.push(wasm_encoder::Instruction::I32Eqz);
+                    insts
+                }
+                _ => todo!("Only int, float and bool types are supported"),
+            }
+        }
+        BinOp::LtInt => {
+            let mut insts = emit_expression(left, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.extend(integer::lt().lst);
+            insts
+        }
+        BinOp::LtEqInt => {
+            let mut insts = emit_expression(left, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.extend(integer::lte().lst);
+            insts
+        }
+        BinOp::LtFloat => {
+            let mut insts = emit_expression(left, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::F64Lt);
+            insts
+        }
+        BinOp::LtEqFloat => {
+            let mut insts = emit_expression(left, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::F64Le);
+            insts
+        }
+        BinOp::GtEqInt => {
+            let mut insts = emit_expression(left, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.extend(integer::gte().lst);
+            insts
+        }
+        BinOp::GtInt => {
+            let mut insts = emit_expression(left, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.extend(integer::gt().lst);
+            insts
+        }
+        BinOp::GtEqFloat => {
+            let mut insts = emit_expression(left, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::F64Ge);
+            insts
+        }
+        BinOp::GtFloat => {
+            let mut insts = emit_expression(left, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::F64Gt);
+            insts
+        }
+        BinOp::AddFloat => {
+            let mut insts = emit_expression(left, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::F64Add);
+            insts
+        }
+        BinOp::SubFloat => {
+            let mut insts = emit_expression(left, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::F64Sub);
+            insts
+        }
+        BinOp::MultFloat => {
+            let mut insts = emit_expression(left, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::F64Mul);
+            insts
+        }
+        BinOp::DivFloat => {
+            use wasm_encoder::Instruction;
+            /*
+               left
+               right
+               0.0
+               ==
+               if
+                   right
+                   div
+               else
+                   drop
+                   right
+               end
+            */
+            // we need to evaluate the right operand only once
+            // create a local
+            let right_id = locals.new_id();
+            locals.insert(
+                right_id,
+                Local {
+                    id: right_id,
+                    name: "@fdiv_rhs_temp".into(),
+                    wasm_type: WasmTypeImpl::Float,
+                },
+            );
+
+            let mut insts = emit_expression(left, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, table);
+
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(Instruction::LocalTee(right_id.id()));
+            insts.lst.push(Instruction::F64Const(0.0));
+            insts.lst.push(Instruction::F64Eq);
+
+            // TODO: add a function type representing a float division
+            insts
+                .lst
+                .push(Instruction::If(wasm_encoder::BlockType::Result(
+                    WasmTypeImpl::Float.to_val_type(),
+                )));
+
+            insts.lst.push(Instruction::LocalGet(right_id.id()));
+            insts.lst.push(Instruction::F64Div);
+
+            insts.lst.push(Instruction::Else);
+
+            insts.lst.push(Instruction::Drop);
+            insts.lst.push(Instruction::LocalGet(right_id.id())); // 0.0
+
+            insts.lst.push(Instruction::End);
+
+            insts
+        }
+        BinOp::Concatenate => todo!("<> not implemented yet"),
     }
 }
 

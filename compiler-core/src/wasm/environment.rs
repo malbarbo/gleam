@@ -9,6 +9,13 @@ pub enum Binding {
     Function(FunctionId),
     Product(ProductId),
     Sum(SumId),
+    Builtin(BuiltinType),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum BuiltinType {
+    Nil,
+    Boolean { value: bool },
 }
 
 pub struct Environment<'a> {

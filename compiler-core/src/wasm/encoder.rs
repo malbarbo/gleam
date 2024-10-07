@@ -21,6 +21,7 @@ use crate::type_::TypeVar;
 
 use super::environment::Binding;
 use super::environment::Environment;
+use super::integer;
 use super::table::SymbolTable;
 
 pub struct WasmModule {
@@ -147,13 +148,19 @@ impl WasmType {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum WasmTypeImpl {
     Int,
+    Float,
+    Bool,
+    Nil,
     StructRef(u32),
 }
 
 impl WasmTypeImpl {
     pub fn to_val_type(self) -> wasm_encoder::ValType {
         match self {
-            WasmTypeImpl::Int => wasm_encoder::ValType::I32,
+            WasmTypeImpl::Int => integer::VAL_TYPE,
+            WasmTypeImpl::Float => wasm_encoder::ValType::F64,
+            WasmTypeImpl::Bool => wasm_encoder::ValType::I32, // represent as a 32-bit integer
+            WasmTypeImpl::Nil => wasm_encoder::ValType::I32,  // represent as a 32-bit integer
             WasmTypeImpl::StructRef(typ) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
                 nullable: false,
                 heap_type: wasm_encoder::HeapType::Concrete(typ),
@@ -188,6 +195,10 @@ impl WasmTypeImpl {
 
         if type_.is_int() {
             Self::Int
+        } else if type_.is_bool() {
+            Self::Bool
+        } else if type_.is_nil() {
+            Self::Nil
         } else {
             match type_.as_ref() {
                 // TODO: handle modules
@@ -223,16 +234,20 @@ pub struct WasmFunction {
     pub function_index: u32,
 }
 
-pub fn emit(wasm_module: WasmModule) -> Vec<u8> {
+pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
     let mut module = wasm_encoder::Module::new();
 
     let tag_field = wasm_encoder::FieldType {
-        element_type: wasm_encoder::StorageType::Val(wasm_encoder::ValType::I32),
+        element_type: wasm_encoder::StorageType::Val(integer::VAL_TYPE),
         mutable: false,
     };
 
     // types
     let mut types = TypeSection::new();
+
+    // sort the types by id
+    wasm_module.types.sort_by_key(|t| t.id);
+
     for type_ in &wasm_module.types {
         let WasmType {
             definition: type_, ..
@@ -295,6 +310,7 @@ pub fn emit(wasm_module: WasmModule) -> Vec<u8> {
 
     // functions
     let mut functions = FunctionSection::new();
+    wasm_module.functions.sort_by_key(|f| f.function_index);
     for func in &wasm_module.functions {
         _ = functions.function(func.type_index);
     }
@@ -306,6 +322,7 @@ pub fn emit(wasm_module: WasmModule) -> Vec<u8> {
 
     // globals
     let mut globals = GlobalSection::new();
+    wasm_module.constants.sort_by_key(|g| g.global_index);
     for global in &wasm_module.constants {
         let heap_type = wasm_encoder::HeapType::Concrete(global.type_index);
         _ = globals.global(

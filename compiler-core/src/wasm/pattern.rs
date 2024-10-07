@@ -12,7 +12,7 @@ use crate::{
 use super::{
     encoder::WasmTypeImpl,
     environment::{Binding, Environment},
-    parse_float, parse_integer,
+    integer, parse_float,
     table::{Local, LocalId, LocalStore, SumId, SymbolTable, TypeId},
 };
 
@@ -80,7 +80,7 @@ pub fn compile_pattern(
     match pat {
         Pattern::Int { value, .. } => {
             // Assumes the value is on the stack
-            let value = parse_integer(value);
+            let value = integer::parse(value);
             CompiledPattern {
                 checks: vec![Check::IntegerEquality {
                     local: subject,
@@ -149,7 +149,6 @@ pub fn compile_pattern(
             assignments: vec![],
             nested: vec![],
         },
-        // TODO: module name
         Pattern::Constructor {
             constructor:
                 Inferred::Known(PatternConstructor {
@@ -162,6 +161,10 @@ pub fn compile_pattern(
             module,
             ..
         } => {
+            if module.is_some() {
+                todo!("Constructor access with module name not implemented yet")
+            }
+
             // get product type
             let product = if let Some(Binding::Product(id)) = env.get(&record_name) {
                 table.products.get(id).unwrap()
