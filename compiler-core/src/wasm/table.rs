@@ -125,9 +125,6 @@ pub struct Sum {
 
     /// The type of the sum type. Used for runtime type checking.
     pub type_: TypeId,
-
-    /// The variants of the sum type.
-    pub variants: Vec<ProductId>,
 }
 
 /// Represents a product type in the type table.

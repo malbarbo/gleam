@@ -19,8 +19,8 @@ use table::{Local, LocalStore, SymbolTable};
 
 use crate::{
     ast::{
-        BinOp, Pattern, Statement, TypedAssignment, TypedClause, TypedExpr, TypedFunction,
-        TypedModule, TypedRecordConstructor, TypedStatement,
+        BinOp, Statement, TypedAssignment, TypedClause, TypedExpr, TypedFunction, TypedModule,
+        TypedRecordConstructor, TypedStatement,
     },
     io::FileSystemWriter,
     type_::{Type, ValueConstructor, ValueConstructorVariant},
@@ -60,7 +60,28 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
     for definition in &ast.definitions {
         match definition {
             TypedDefinition::CustomType(t) => {
+                let sum_type_id = table.types.new_id();
+                let sum_type_name: EcoString = format!("sum@{}", t.name).into();
+                let sum_type = table::Type {
+                    id: sum_type_id,
+                    name: sum_type_name.clone(),
+                    definition: WasmType {
+                        id: sum_type_id.id(),
+                        name: sum_type_name,
+                        definition: WasmTypeDefinition::Sum,
+                    },
+                };
+                table.types.insert(sum_type_id, sum_type);
+
                 let sum_id = table.sums.new_id();
+                table.sums.insert(
+                    sum_id,
+                    table::Sum {
+                        id: sum_id,
+                        name: t.name.clone(),
+                        type_: sum_type_id,
+                    },
+                );
                 root_environment.set(t.name.clone(), Binding::Sum(sum_id));
             }
             TypedDefinition::Function(f) => {
@@ -119,18 +140,8 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     _ => unreachable!("Expected sum binding in environment"),
                 };
 
-                let sum_type_id = table.types.new_id();
-                let sum_type_name: EcoString = format!("sum@{}", t.name).into();
-                let sum_type = table::Type {
-                    id: sum_type_id,
-                    name: sum_type_name.clone(),
-                    definition: WasmType {
-                        id: sum_type_id.id(),
-                        name: sum_type_name,
-                        definition: WasmTypeDefinition::Sum,
-                    },
-                };
-                table.types.insert(sum_type_id, sum_type);
+                let sum_type = table.sums.get(sum_id).expect("Sum type to be added in");
+                let sum_type_id = sum_type.type_;
 
                 // add sum type to environment
                 root_environment.set(t.name.clone(), Binding::Sum(sum_id));
@@ -264,7 +275,6 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     id: sum_id,
                     name: t.name.clone(),
                     type_: sum_type_id,
-                    variants: product_ids,
                 };
                 table.sums.insert(sum_id, sum);
             }
