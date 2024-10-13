@@ -1,0 +1,36 @@
+FALTAM:
+
+MVP 1.0:
+- Constantes a nível de módulo
+- Igualdade de tipos que não sejam simples
+- Sintaxe de acesso de registro
+- String
+- Concatenação de strings
+- Padrões relacionados a strings
+- Entrada e saída básicas
+- Ligação e execução do módulo por um runtime
+
+MVP 2.0:
+- Panic, todo com strings de erro
+- Tipos genéricos
+- Result
+- Type aliases
+- Sintaxe de atualização de registro
+- Tuplas
+- List
+- Padrões relacionados a listas
+- Padrões relacionados a tuplas
+
+MVP 3.0:
+- Reordenação dos argumentos de uma função através de labels (no momento funciona por mágica)
+- Outros módulos (atualmente o código assume que todos os nomes pertencem ao mesmo módulo)
+- Imports
+
+FUTURO:
+- Inteiros de precisão arbitrária
+- BitArray
+- UtfCodepoint
+- Pipelines
+- Closures
+- Padrões relacionados a BitArray
+- Biblioteca padrão
