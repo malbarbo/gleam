@@ -80,6 +80,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                         id: sum_id,
                         name: t.name.clone(),
                         type_: sum_type_id,
+                        public: t.publicity.is_public(),
                     },
                 );
                 root_environment.set(t.name.clone(), Binding::Sum(sum_id));
@@ -270,13 +271,6 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
 
                     root_environment.set(variant.name.clone(), Binding::Product(product_id));
                 }
-
-                let sum = table::Sum {
-                    id: sum_id,
-                    name: t.name.clone(),
-                    type_: sum_type_id,
-                };
-                table.sums.insert(sum_id, sum);
             }
             TypedDefinition::ModuleConstant(_) => {
                 todo!("Module constants aren't implemented yet")
@@ -308,7 +302,13 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     match product_id {
                         Binding::Product(id) => {
                             let table_product = table.products.get(id).unwrap();
-                            let function = emit_variant_constructor(variant, table_product, &table);
+                            let table_sum = table.sums.get(table_product.parent).unwrap();
+                            let function = emit_variant_constructor(
+                                variant,
+                                table_product,
+                                &table,
+                                table_sum.public,
+                            );
                             functions.push(function);
                         }
                         _ => unreachable!("Expected product binding in environment"),
@@ -375,6 +375,7 @@ fn emit_variant_constructor(
     constructor: &TypedRecordConstructor,
     variant_data: &table::Product,
     table: &SymbolTable,
+    public: bool,
 ) -> WasmFunction {
     let mut instructions = vec![];
     instructions.extend(integer::const_(variant_data.tag as _).lst);
@@ -396,6 +397,7 @@ fn emit_variant_constructor(
         instructions: WasmInstructions { lst: instructions },
         argument_names: constructor.arguments.iter().map(|_| None).collect(),
         locals: vec![],
+        public,
     }
 }
 
@@ -456,6 +458,7 @@ fn emit_function(
             .skip(function_data.arity as _)
             .map(|local| (local.name, local.wasm_type))
             .collect_vec(),
+        public: function.publicity.is_public(),
     }
 }
 

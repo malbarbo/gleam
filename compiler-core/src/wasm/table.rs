@@ -125,6 +125,10 @@ pub struct Sum {
 
     /// The type of the sum type. Used for runtime type checking.
     pub type_: TypeId,
+
+    /// Whether the type is made public outside of its module.
+    /// If it's public, its constructor is exported from the Wasm module.
+    pub public: bool,
 }
 
 /// Represents a product type in the type table.

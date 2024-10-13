@@ -6,6 +6,7 @@ use ecow::EcoString;
 use wasm_encoder::CodeSection;
 
 use wasm_encoder::ElementSection;
+use wasm_encoder::ExportSection;
 use wasm_encoder::FunctionSection;
 use wasm_encoder::GlobalSection;
 use wasm_encoder::IndirectNameMap;
@@ -232,6 +233,7 @@ pub struct WasmFunction {
     pub locals: Vec<(EcoString, WasmTypeImpl)>,
     pub argument_names: Vec<Option<EcoString>>,
     pub function_index: u32,
+    pub public: bool,
 }
 
 pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
@@ -338,6 +340,20 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
         );
     }
     _ = module.section(&globals);
+
+    // exports
+    let mut exports = ExportSection::new();
+    // functions
+    for function in wasm_module.functions.iter() {
+        if function.public {
+            _ = exports.export(
+                &function.name,
+                wasm_encoder::ExportKind::Func,
+                function.function_index,
+            );
+        }
+    }
+    _ = module.section(&exports);
 
     // declare a start function
     let start = StartSection {
