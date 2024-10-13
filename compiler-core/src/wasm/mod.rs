@@ -19,8 +19,8 @@ use table::{Local, LocalStore, SymbolTable};
 
 use crate::{
     ast::{
-        BinOp, Statement, TypedAssignment, TypedClause, TypedExpr, TypedFunction, TypedModule,
-        TypedRecordConstructor, TypedStatement,
+        BinOp, Statement, TypedAssignment, TypedClause, TypedConstant, TypedExpr, TypedFunction,
+        TypedModule, TypedRecordConstructor, TypedStatement,
     },
     io::FileSystemWriter,
     type_::{Type, ValueConstructor, ValueConstructorVariant},
@@ -89,11 +89,12 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                 let function_id = table.functions.new_id();
                 root_environment.set(f.name.clone(), Binding::Function(function_id));
             }
+            TypedDefinition::ModuleConstant(m) => {
+                let constant_id = table.constants.new_id();
+                root_environment.set(m.name.clone(), Binding::Constant(constant_id));
+            }
             TypedDefinition::Import(_) => todo!("Imports aren't implemented yet"),
             TypedDefinition::TypeAlias(_) => todo!("Type aliases aren't implemented yet"),
-            TypedDefinition::ModuleConstant(_) => {
-                todo!("Module constants aren't implemented yet")
-            }
         }
     }
 
@@ -207,14 +208,13 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                         let global = table::Constant {
                             id: global_id,
                             name: global_name.clone().into(),
-                            type_: product_type_id,
                         };
                         table.constants.insert(global_id, global);
 
                         // add global
                         constants.push(WasmGlobal {
                             name: global_name.into(),
-                            type_index: product_type_id.id(),
+                            type_: WasmTypeImpl::StructRef(product_type_id.id()),
                             global_index: global_id.id(),
                             initializer: WasmInstructions {
                                 lst: vec![wasm_encoder::Instruction::Call(constructor_id.id())],
@@ -272,8 +272,8 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     root_environment.set(variant.name.clone(), Binding::Product(product_id));
                 }
             }
-            TypedDefinition::ModuleConstant(_) => {
-                todo!("Module constants aren't implemented yet")
+            TypedDefinition::ModuleConstant(m) => {
+                // we assign the constant type in the last pass
             }
             TypedDefinition::TypeAlias(_) => todo!("Type aliases aren't implemented yet"),
             TypedDefinition::Import(_) => todo!("Imports aren't implemented yet"),
@@ -315,8 +315,30 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     }
                 }
             }
-            TypedDefinition::ModuleConstant(_) => {
-                todo!("Module constants aren't implemented yet")
+            TypedDefinition::ModuleConstant(m) => {
+                let constant_id = match root_environment.get(&m.name) {
+                    Some(Binding::Constant(id)) => id,
+                    _ => unreachable!("Expected constant binding in environment"),
+                };
+
+                table.constants.insert(
+                    constant_id,
+                    table::Constant {
+                        id: constant_id,
+                        name: m.name.clone(),
+                    },
+                );
+
+                constants.push(WasmGlobal {
+                    name: m.name.clone(),
+                    global_index: constant_id.id(),
+                    type_: WasmTypeImpl::from_gleam_type(
+                        Arc::clone(&m.type_),
+                        &root_environment,
+                        &table,
+                    ),
+                    initializer: emit_constant(m.value.as_ref(), &root_environment, &table),
+                })
             }
             TypedDefinition::TypeAlias(_) => todo!("Type aliases aren't implemented yet"),
             TypedDefinition::Import(_) => todo!("Imports aren't implemented yet"),
@@ -332,6 +354,32 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
             .into_iter()
             .map(|x| x.definition)
             .collect(),
+    }
+}
+
+fn emit_constant(
+    value: &TypedConstant,
+    root_environment: &Environment<'_>,
+    table: &SymbolTable,
+) -> WasmInstructions {
+    match value {
+        TypedConstant::Int { value, .. } => {
+            let val = integer::parse(value);
+            integer::const_(val)
+        }
+        TypedConstant::Float { value, .. } => {
+            let val = parse_float(value);
+            WasmInstructions {
+                lst: vec![wasm_encoder::Instruction::F64Const(val)],
+            }
+        }
+        TypedConstant::Var { .. } => todo!("Variable constants not implemented yet"),
+        TypedConstant::Record { .. } => todo!("Record constants not implemented yet"),
+        TypedConstant::String { .. } => todo!("Strings not implemented yet"),
+        TypedConstant::Tuple { .. } => todo!("Tuples not implemented yet"),
+        TypedConstant::List { .. } => todo!("Lists not implemented yet"),
+        TypedConstant::BitArray { .. } => todo!("BitArrays not implemented yet"),
+        TypedConstant::Invalid { .. } => unreachable!(),
     }
 }
 
@@ -670,12 +718,24 @@ fn emit_expression(
         TypedExpr::Var {
             constructor, name, ..
         } => match &constructor.variant {
-            ValueConstructorVariant::LocalVariable { .. } => match env.get(dbg!(name)).unwrap() {
+            ValueConstructorVariant::LocalVariable { .. } => match env.get(name).unwrap() {
                 Binding::Local(id) => WasmInstructions {
                     lst: vec![wasm_encoder::Instruction::LocalGet(id.id())],
                 },
                 _ => todo!("Expected local variable binding"),
             },
+
+            // TODO: handle module
+            ValueConstructorVariant::ModuleConstant { module, .. } => {
+                // grab the global
+                match env.get(&name) {
+                    Some(Binding::Constant(id)) => WasmInstructions {
+                        lst: vec![wasm_encoder::Instruction::GlobalGet(id.id())],
+                    },
+                    _ => todo!("Expected constant binding"),
+                }
+            }
+
             // TODO: handle module
             // TODO: handle field_map
             ValueConstructorVariant::ModuleFn {
@@ -728,7 +788,7 @@ fn emit_expression(
                 _ => todo!("Expected product binding"),
             },
             ValueConstructorVariant::Record { .. } => todo!("Only simple records with 0 fields"),
-            _ => todo!("Only local variables and records"),
+            _ => todo!("Only local variables, named module constants and records"),
         },
         TypedExpr::Call { fun, args, .. } => {
             let mut insts = WasmInstructions { lst: vec![] };

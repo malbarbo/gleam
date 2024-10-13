@@ -189,9 +189,6 @@ pub struct Constant {
 
     /// The name of the constant, for debugging purposes.
     pub name: EcoString,
-
-    /// The constant's type.
-    pub type_: TypeId,
 }
 
 /// Represents a local variable in the local table.

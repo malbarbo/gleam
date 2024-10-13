@@ -72,6 +72,10 @@ pub fn gte() -> WasmInstructions {
     }
 }
 
+pub fn const_expr_initializer(arg: Representation) -> wasm_encoder::ConstExpr {
+    wasm_encoder::ConstExpr::i32_const(arg)
+}
+
 pub fn parse(value: &str) -> Representation {
     let val = value.replace("_", "");
 

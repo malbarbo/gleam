@@ -5,6 +5,7 @@ use std::sync::Arc;
 use ecow::EcoString;
 use wasm_encoder::CodeSection;
 
+use wasm_encoder::ConstExpr;
 use wasm_encoder::ElementSection;
 use wasm_encoder::ExportSection;
 use wasm_encoder::FunctionSection;
@@ -34,7 +35,7 @@ pub struct WasmModule {
 pub struct WasmGlobal {
     pub name: EcoString,
     pub global_index: u32,
-    pub type_index: u32,
+    pub type_: WasmTypeImpl,
     pub initializer: WasmInstructions,
 }
 
@@ -164,6 +165,19 @@ impl WasmTypeImpl {
             WasmTypeImpl::Nil => wasm_encoder::ValType::I32,  // represent as a 32-bit integer
             WasmTypeImpl::StructRef(typ) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
                 nullable: false,
+                heap_type: wasm_encoder::HeapType::Concrete(typ),
+            }),
+        }
+    }
+
+    pub fn to_nullable_val_type(self) -> wasm_encoder::ValType {
+        match self {
+            WasmTypeImpl::Int => integer::VAL_TYPE,
+            WasmTypeImpl::Float => wasm_encoder::ValType::F64,
+            WasmTypeImpl::Bool => wasm_encoder::ValType::I32, // represent as a 32-bit integer
+            WasmTypeImpl::Nil => wasm_encoder::ValType::I32,  // represent as a 32-bit integer
+            WasmTypeImpl::StructRef(typ) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
+                nullable: true,
                 heap_type: wasm_encoder::HeapType::Concrete(typ),
             }),
         }
@@ -326,17 +340,25 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
     let mut globals = GlobalSection::new();
     wasm_module.constants.sort_by_key(|g| g.global_index);
     for global in &wasm_module.constants {
-        let heap_type = wasm_encoder::HeapType::Concrete(global.type_index);
+        let val_type = global.type_.to_nullable_val_type();
+
+        let init_expr = match global.type_ {
+            WasmTypeImpl::Int => integer::const_expr_initializer(0),
+            WasmTypeImpl::Float => wasm_encoder::ConstExpr::f64_const(0.0),
+            WasmTypeImpl::Bool => wasm_encoder::ConstExpr::i32_const(0),
+            WasmTypeImpl::Nil => wasm_encoder::ConstExpr::i32_const(0),
+            WasmTypeImpl::StructRef(typ) => {
+                wasm_encoder::ConstExpr::ref_null(wasm_encoder::HeapType::Concrete(typ))
+            }
+        };
+
         _ = globals.global(
             wasm_encoder::GlobalType {
-                val_type: wasm_encoder::ValType::Ref(wasm_encoder::RefType {
-                    nullable: true, // this is so we can initialize it later
-                    heap_type: heap_type.clone(),
-                }),
+                val_type,
                 mutable: true, // this is so we can initialize it later
                 shared: false,
             },
-            &wasm_encoder::ConstExpr::ref_null(heap_type),
+            &init_expr,
         );
     }
     _ = module.section(&globals);
