@@ -254,6 +254,9 @@ pub struct SymbolTable {
     pub sums: Store<Sum>,
     pub products: Store<Product>,
     pub constants: Store<Constant>,
+
+    pub int_division: Option<TypeId>,
+    pub float_division: Option<TypeId>,
 }
 
 impl SymbolTable {
@@ -264,6 +267,8 @@ impl SymbolTable {
             sums: Store::new(),
             products: Store::new(),
             constants: Store::new(),
+            int_division: None,
+            float_division: None,
         }
     }
 }

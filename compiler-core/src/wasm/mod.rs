@@ -336,11 +336,45 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
 }
 
 fn generate_prelude_types(table: &mut SymbolTable, env: &mut Environment<'_>) {
-    // Implementing these is not necessary:
+    // Implement division signature
     // - PreludeType::Float
-    // - PreludeType::Int
+    let float_div_type_id = table.types.new_id();
+    table.types.insert(
+        float_div_type_id,
+        table::Type {
+            id: float_div_type_id,
+            name: "@Float@div".into(),
+            definition: WasmType {
+                name: "@Float@div".into(),
+                id: float_div_type_id.id(),
+                definition: WasmTypeDefinition::Function {
+                    parameters: vec![WasmTypeImpl::Float],
+                    returns: WasmTypeImpl::Float,
+                },
+            },
+        },
+    );
+    table.float_division = Some(float_div_type_id);
 
-    // Implemented:
+    // - PreludeType::Int
+    let int_div_type_id = table.types.new_id();
+    table.types.insert(
+        int_div_type_id,
+        table::Type {
+            id: int_div_type_id,
+            name: "@Int@div".into(),
+            definition: WasmType {
+                name: "@Int@div".into(),
+                id: int_div_type_id.id(),
+                definition: WasmTypeDefinition::Function {
+                    parameters: vec![WasmTypeImpl::Int],
+                    returns: WasmTypeImpl::Int,
+                },
+            },
+        },
+    );
+    table.int_division = Some(int_div_type_id);
+
     // - PreludeType::Nil
     env.set("Nil".into(), Binding::Builtin(BuiltinType::Nil));
 
@@ -945,11 +979,10 @@ fn emit_binary_operation(
             insts.lst.extend(integer::const_(0).lst);
             insts.lst.extend(integer::eq().lst);
 
-            // TODO: add a function type representing an integer division
             insts
                 .lst
-                .push(Instruction::If(wasm_encoder::BlockType::Result(
-                    WasmTypeImpl::Int.to_val_type(),
+                .push(Instruction::If(wasm_encoder::BlockType::FunctionType(
+                    table.int_division.unwrap().id(),
                 )));
 
             insts.lst.push(Instruction::LocalGet(right_id.id()));
@@ -1178,11 +1211,10 @@ fn emit_binary_operation(
             insts.lst.push(Instruction::F64Const(0.0));
             insts.lst.push(Instruction::F64Eq);
 
-            // TODO: add a function type representing a float division
             insts
                 .lst
-                .push(Instruction::If(wasm_encoder::BlockType::Result(
-                    WasmTypeImpl::Float.to_val_type(),
+                .push(Instruction::If(wasm_encoder::BlockType::FunctionType(
+                    table.float_division.unwrap().id(),
                 )));
 
             insts.lst.push(Instruction::LocalGet(right_id.id()));
