@@ -28,7 +28,7 @@ export const List: {
   new <T>(): List<T>;
   /** @deprecated */
   fromArray<T>(array: Array<T>): List<T>;
-}
+};
 export function List$Empty<T>(): List<T>;
 export function List$NonEmpty<T>(head: T, tail: List<T>): List<T>;
 export function List$isEmpty(list: any): list is List<unknown>;
@@ -36,9 +36,9 @@ export function List$isNonEmpty(list: any): list is List<unknown>;
 export function List$NonEmpty$first<T>(list: List<T>): T | undefined;
 export function List$NonEmpty$rest<T>(list: List<T>): List<T> | undefined;
 /** @deprecated */
-export class Empty<T = never> extends List<T> { }
+export class Empty<T = never> extends List<T> {}
 /** @deprecated */
-export class NonEmpty<T> extends List<T> { }
+export class NonEmpty<T> extends List<T> {}
 
 export interface BitArray {
   readonly __gleam: unique symbol;
@@ -52,7 +52,11 @@ export interface BitArray {
   /** @deprecated */
   rawBuffer: Uint8Array;
   /** @deprecated */
-  constructor(buffer: Uint8Array, bitSize?: number, bitOffset?: number): BitArray;
+  constructor(
+    buffer: Uint8Array,
+    bitSize?: number,
+    bitOffset?: number,
+  ): BitArray;
   /** @deprecated */
   byteAt(index: number): number;
   /** @deprecated */
@@ -65,8 +69,8 @@ export interface BitArray {
 /** @deprecated */
 export const BitArray: {
   /** @deprecated */
-  new(buffer: Uint8Array, bitSize?: number, bitOffset?: number): BitArray;
-}
+  new (buffer: Uint8Array, bitSize?: number, bitOffset?: number): BitArray;
+};
 export function BitArray$BitArray(
   buffer: Uint8Array,
   bitSize?: number,
@@ -83,8 +87,8 @@ export interface UtfCodepoint {
 /** @deprecated */
 export const UtfCodepoint: {
   /** @deprecated */
-  new(value: string): UtfCodepoint
-}
+  new (value: string): UtfCodepoint;
+};
 
 export interface Result<T, E> {
   readonly __gleam: unique symbol;
@@ -93,8 +97,8 @@ export interface Result<T, E> {
 }
 /** @deprecated */
 export const Result: {
-  new <T, E>(): Result<T, E>
-}
+  new <T, E>(): Result<T, E>;
+};
 export function Result$Ok<T, E>(value: T): Result<T, E>;
 export function Result$Error<T, E>(error: E): Result<T, E>;
 export function Result$isError(data: any): data is Result<unknown, unknown>;
@@ -130,7 +134,9 @@ export function prepend<T>(element: T, tail: List<T>): List<T>;
 export function toList<T>(array: Array<T>): List<T>;
 
 /** @deprecated */
-export function toBitArray(segments: Array<BitArray | Uint8Array | number>): BitArray;
+export function toBitArray(
+  segments: Array<BitArray | Uint8Array | number>,
+): BitArray;
 
 /** @deprecated */
 export function sizedInt(
@@ -139,7 +145,7 @@ export function sizedInt(
   /** @deprecated */
   size: number,
   /** @deprecated */
-  isBigEndian: boolean
+  isBigEndian: boolean,
 ): Uint8Array | BitArray;
 
 /** @deprecated */
@@ -152,7 +158,7 @@ export function codepointBits(codepoint: UtfCodepoint): Uint8Array;
 export function sizedFloat(
   value: number,
   size: number,
-  isBigEndian: boolean
+  isBigEndian: boolean,
 ): Uint8Array;
 
 /** @deprecated */
