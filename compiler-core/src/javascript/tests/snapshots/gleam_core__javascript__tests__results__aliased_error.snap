@@ -6,5 +6,5 @@ import * as $gleam from "../gleam.mjs";
 import { Error as Thing } from "../gleam.mjs";
 
 export function main() {
-  return new Thing(1);
+  return new Thing(1n);
 }

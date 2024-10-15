@@ -9,6 +9,6 @@ export function main(xs, y) {
     let x = xs[0];
     return x;
   } else {
-    return 0;
+    return 0n;
   }
 }

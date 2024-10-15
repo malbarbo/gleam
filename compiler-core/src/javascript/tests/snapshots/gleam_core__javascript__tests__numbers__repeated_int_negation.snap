@@ -3,7 +3,7 @@ source: compiler-core/src/javascript/tests/numbers.rs
 expression: "\nfn go() {\n  let a = 3\n  let b = --a\n}\n"
 ---
 function go() {
-  let a = 3;
+  let a = 3n;
   let b = - - a;
   return b;
 }

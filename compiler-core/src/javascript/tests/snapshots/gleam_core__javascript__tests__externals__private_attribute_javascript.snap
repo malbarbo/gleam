@@ -5,5 +5,5 @@ expression: "\n@external(javascript, \"./one.mjs\", \"oneJs\")\nfn one(x: Int) -
 import { oneJs as one } from "./one.mjs";
 
 export function main() {
-  return one(1);
+  return one(1n);
 }

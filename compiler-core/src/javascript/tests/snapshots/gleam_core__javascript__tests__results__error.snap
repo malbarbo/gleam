@@ -5,5 +5,5 @@ expression: "pub fn main() { Error(1) }"
 import { Error } from "../gleam.mjs";
 
 export function main() {
-  return new Error(1);
+  return new Error(1n);
 }

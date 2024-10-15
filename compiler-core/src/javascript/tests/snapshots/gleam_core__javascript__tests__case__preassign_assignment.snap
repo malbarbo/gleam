@@ -6,9 +6,9 @@ function go(x) {
   let y = (() => {
     let $ = x();
     if ($) {
-      return 1;
+      return 1n;
     } else {
-      return 0;
+      return 0n;
     }
   })();
   return y;

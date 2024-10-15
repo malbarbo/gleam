@@ -6,4 +6,4 @@ import { toList } from "../gleam.mjs";
 
 const a = /* @__PURE__ */ toList([]);
 
-const b = /* @__PURE__ */ toList([1, 2, 3]);
+const b = /* @__PURE__ */ toList([1n, 2n, 3n]);

@@ -130,11 +130,11 @@ fn go(a) {
 }
 "#,
         r#"function go(a) {
-  if (a[0] === 2) {
+  if (a[0] === 2n) {
     let a$1 = a[1];
     return a$1;
-  } else if (a[0] === 1 && a[1] === 1) {
-    return 1;
+  } else if (a[0] === 1n && a[1] === 1n) {
+    return 1n;
   } else {
     let a$1 = a[0];
     let b = a[1];
@@ -157,12 +157,12 @@ fn go(x) {
 }
 "#,
         r#"function go(x) {
-  if (x[0] === 2) {
+  if (x[0] === 2n) {
     let a = x[1][0];
     let b = x[1][1];
     return a + b;
   } else {
-    return 1;
+    return 1n;
   }
 }
 "#

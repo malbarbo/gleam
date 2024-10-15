@@ -20,9 +20,9 @@ class Box extends $CustomType {
 }
 
 function go() {
-  new Cat("Nubi", 1);
-  new Cat("Nubi", 2);
-  return new Cat("Nubi", 3);
+  new Cat("Nubi", 1n);
+  new Cat("Nubi", 2n);
+  return new Cat("Nubi", 3n);
 }
 
 function access(cat) {
@@ -30,7 +30,7 @@ function access(cat) {
 }
 
 function new_cat() {
-  return new Cat("Beau", 11);
+  return new Cat("Beau", 11n);
 }
 
 function update(cat) {
@@ -38,9 +38,9 @@ function update(cat) {
   cat.withFields({ name: "Bartholemew Wonder Puss the Fourth !!!!!!!!!!!!!!!!" });
   new_cat().withFields({ name: "Molly" });
   let box = new Box(cat);
-  return box.occupant.withFields({ cuteness: box.occupant.cuteness + 1 });
+  return box.occupant.withFields({ cuteness: box.occupant.cuteness + 1n });
 }
 
-const felix = /* @__PURE__ */ new Cat("Felix", 12);
+const felix = /* @__PURE__ */ new Cat("Felix", 12n);
 
-const tom = /* @__PURE__ */ new Cat("Tom", 1);
+const tom = /* @__PURE__ */ new Cat("Tom", 1n);

@@ -1,12 +1,11 @@
 ---
 source: compiler-core/src/javascript/tests/bit_arrays.rs
-assertion_line: 280
 expression: "\nfn go(x) {\n  let assert <<1, y>> = x\n}\n"
 ---
 import { makeError } from "../gleam.mjs";
 
 function go(x) {
-  if (x.byteAt(0) !== 1 || !(x.length == 2)) {
+  if (x.byteAt(0) !== 1n || !(x.length == 2)) {
     throw makeError(
       "let_assert",
       "my/mod",

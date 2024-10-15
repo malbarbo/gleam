@@ -8,5 +8,5 @@ function pair(f) {
 }
 
 export function main() {
-  return pair(() => { return 123; });
+  return pair(() => { return 123n; });
 }

@@ -13,9 +13,9 @@ export class X extends $CustomType {
 }
 
 export const x = /* @__PURE__ */ toList([
-  /* @__PURE__ */ new X(1, /* @__PURE__ */ toList(["1"])),
+  /* @__PURE__ */ new X(1n, /* @__PURE__ */ toList(["1"])),
 ]);
 
 const y = /* @__PURE__ */ toList([
-  /* @__PURE__ */ new X(1, /* @__PURE__ */ toList(["1"])),
+  /* @__PURE__ */ new X(1n, /* @__PURE__ */ toList(["1"])),
 ]);

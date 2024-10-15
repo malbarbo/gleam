@@ -6,5 +6,5 @@ import * as $other from "../other.mjs";
 import { Two } from "../other.mjs";
 
 export function main() {
-  return new Two(1, 2, 3);
+  return new Two(1n, 2n, 3n);
 }

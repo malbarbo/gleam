@@ -2,6 +2,6 @@
 source: compiler-core/src/javascript/tests/assignments.rs
 expression: "\npub const class = 5\npub const something = class\n"
 ---
-export const class$ = 5;
+export const class$ = 5n;
 
 export const something = class$;

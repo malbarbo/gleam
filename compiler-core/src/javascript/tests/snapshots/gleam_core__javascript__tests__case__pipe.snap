@@ -7,9 +7,9 @@ function go(x, f) {
     let _pipe = x;
     return f(_pipe);
   })();
-  if ($ === 0) {
-    return 1;
+  if ($ === 0n) {
+    return 1n;
   } else {
-    return 2;
+    return 2n;
   }
 }

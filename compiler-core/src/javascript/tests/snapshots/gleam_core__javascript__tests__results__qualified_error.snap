@@ -5,5 +5,5 @@ expression: "import gleam\npub fn main() { gleam.Error(1) }"
 import * as $gleam from "../gleam.mjs";
 
 export function main() {
-  return new $gleam.Error(1);
+  return new $gleam.Error(1n);
 }

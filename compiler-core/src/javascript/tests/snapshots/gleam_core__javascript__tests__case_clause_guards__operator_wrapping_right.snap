@@ -5,8 +5,8 @@ expression: "pub fn main(xs, y: Bool, z: Bool) {\n  case xs {\n    #(x) if x == 
 export function main(xs, y, z) {
   if (xs[0] === (y === z)) {
     let x = xs[0];
-    return 1;
+    return 1n;
   } else {
-    return 0;
+    return 0n;
   }
 }

@@ -7,5 +7,5 @@ import { oneJs as one } from "./one.mjs";
 export { one };
 
 export function main() {
-  return one(1);
+  return one(1n);
 }

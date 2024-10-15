@@ -5,5 +5,5 @@ expression: "\nfn go() {\n  <<256, 4>>\n}\n"
 import { toBitArray } from "../gleam.mjs";
 
 function go() {
-  return toBitArray([256, 4]);
+  return toBitArray([256n, 4n]);
 }

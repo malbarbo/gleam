@@ -7,6 +7,6 @@ export function main(loop$f, _) {
     let f = loop$f;
     f();
     loop$f = f;
-    1;
+    1n;
   }
 }

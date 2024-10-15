@@ -4,8 +4,8 @@ expression: "\nfn go(x) {\n  case x {\n    Ok(_) -> 1\n    Error(_) -> 0\n  }\n}
 ---
 function go(x) {
   if (x.isOk()) {
-    return 1;
+    return 1n;
   } else {
-    return 0;
+    return 0n;
   }
 }

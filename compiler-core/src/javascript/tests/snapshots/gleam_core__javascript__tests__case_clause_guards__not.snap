@@ -4,8 +4,8 @@ expression: "pub fn main(x, y) {\n  case x {\n    _ if !y -> 0\n    _ -> 1\n  }\
 ---
 export function main(x, y) {
   if (!y) {
-    return 0;
+    return 0n;
   } else {
-    return 1;
+    return 1n;
   }
 }

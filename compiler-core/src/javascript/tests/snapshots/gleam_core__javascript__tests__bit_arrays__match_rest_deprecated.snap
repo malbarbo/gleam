@@ -1,12 +1,11 @@
 ---
 source: compiler-core/src/javascript/tests/bit_arrays.rs
-assertion_line: 490
 expression: "\nfn go(x) {\n  let assert <<_, b:bytes>> = <<1,2,3>>\n}\n"
 ---
 import { makeError, toBitArray } from "../gleam.mjs";
 
 function go(x) {
-  let $ = toBitArray([1, 2, 3]);
+  let $ = toBitArray([1n, 2n, 3n]);
   if (!($.length >= 1)) {
     throw makeError(
       "let_assert",

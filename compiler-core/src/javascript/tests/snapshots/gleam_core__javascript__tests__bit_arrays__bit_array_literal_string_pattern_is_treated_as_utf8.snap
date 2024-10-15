@@ -7,8 +7,8 @@ import { toBitArray } from "../gleam.mjs";
 export function main() {
   let $ = toBitArray([]);
   if ($.byteAt(0) === 0x61 && $.byteAt(1) === 0x62 && $.length >= 2) {
-    return 1;
+    return 1n;
   } else {
-    return 2;
+    return 2n;
   }
 }

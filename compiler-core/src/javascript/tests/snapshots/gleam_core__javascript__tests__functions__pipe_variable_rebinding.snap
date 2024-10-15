@@ -5,12 +5,12 @@ expression: "\npub fn main() {\n  let version = 1 |> version()\n  version\n}\n\n
 import { Ok } from "../gleam.mjs";
 
 export function version(n) {
-  return new Ok(1);
+  return new Ok(1n);
 }
 
 export function main() {
   let version$1 = (() => {
-    let _pipe = 1;
+    let _pipe = 1n;
     return version(_pipe);
   })();
   return version$1;

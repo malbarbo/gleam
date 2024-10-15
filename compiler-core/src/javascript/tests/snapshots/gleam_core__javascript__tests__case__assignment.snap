@@ -5,9 +5,9 @@ expression: "\nfn go(x) {\n  let y = case x {\n    True -> 1\n    _ -> 0\n  }\n 
 function go(x) {
   let y = (() => {
     if (x) {
-      return 1;
+      return 1n;
     } else {
-      return 0;
+      return 0n;
     }
   })();
   return y;

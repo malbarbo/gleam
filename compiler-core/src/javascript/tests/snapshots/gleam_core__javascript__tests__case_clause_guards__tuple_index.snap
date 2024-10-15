@@ -4,8 +4,8 @@ expression: "pub fn main(x, xs: #(Bool, Bool, Bool)) {\n  case x {\n    _ if xs.
 ---
 export function main(x, xs) {
   if (xs[2]) {
-    return 1;
+    return 1n;
   } else {
-    return 0;
+    return 0n;
   }
 }

@@ -7,6 +7,6 @@ function id(x) {
 }
 
 export function main() {
-  let _pipe = 1;
+  let _pipe = 1n;
   return id(_pipe);
 }

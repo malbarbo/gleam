@@ -11,7 +11,7 @@ export function count(loop$xs, loop$n) {
     } else {
       let xs$1 = xs.tail;
       loop$xs = xs$1;
-      loop$n = n + 1;
+      loop$n = n + 1n;
     }
   }
 }

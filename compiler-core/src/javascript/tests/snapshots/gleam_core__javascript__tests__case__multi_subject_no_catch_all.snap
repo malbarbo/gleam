@@ -4,10 +4,10 @@ expression: "\nfn go(x, y) {\n  case x, y {\n    True, _ -> 1\n    _, True -> 2\
 ---
 function go(x, y) {
   if (x) {
-    return 1;
+    return 1n;
   } else if (y) {
-    return 2;
+    return 2n;
   } else {
-    return 0;
+    return 0n;
   }
 }

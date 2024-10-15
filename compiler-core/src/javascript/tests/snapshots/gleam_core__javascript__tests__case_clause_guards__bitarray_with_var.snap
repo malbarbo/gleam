@@ -5,7 +5,7 @@ expression: "pub fn main() {\n  case 5 {\n    z if <<z>> == <<z>> -> Nil\n    _ 
 import { isEqual, toBitArray } from "../gleam.mjs";
 
 export function main() {
-  let $ = 5;
+  let $ = 5n;
   if (isEqual(toBitArray([$]), toBitArray([$]))) {
     let z = $;
     return undefined;

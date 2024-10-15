@@ -5,5 +5,5 @@ expression: "pub fn main() { Ok(1) }"
 import { Ok } from "../gleam.mjs";
 
 export function main() {
-  return new Ok(1);
+  return new Ok(1n);
 }

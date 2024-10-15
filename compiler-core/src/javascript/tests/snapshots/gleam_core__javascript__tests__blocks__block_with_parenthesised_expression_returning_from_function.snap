@@ -3,5 +3,5 @@ source: compiler-core/src/javascript/tests/blocks.rs
 expression: "\nfn b() {\n  {\n    1 + 2\n  }\n}\n"
 ---
 function b() {
-  return 1 + 2;
+  return 1n + 2n;
 }

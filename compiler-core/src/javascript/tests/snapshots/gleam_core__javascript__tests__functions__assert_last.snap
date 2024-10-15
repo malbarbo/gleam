@@ -3,6 +3,6 @@ source: compiler-core/src/javascript/tests/functions.rs
 expression: "pub fn main() {\n  let assert x = 1\n}\n"
 ---
 export function main() {
-  let x = 1;
+  let x = 1n;
   return x;
 }

@@ -5,11 +5,11 @@ expression: "\npub fn main(x) {\n  case x {\n    0 -> Nil\n    _ -> {\n      let
 export function main(loop$x) {
   while (true) {
     let x = loop$x;
-    if (x === 0) {
+    if (x === 0n) {
       return undefined;
     } else {
       let y = x;
-      loop$x = y - 1;
+      loop$x = y - 1n;
     }
   }
 }

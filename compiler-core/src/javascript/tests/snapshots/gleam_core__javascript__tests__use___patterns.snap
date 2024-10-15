@@ -17,7 +17,7 @@ function apply(arg, fun) {
 
 export function main() {
   return apply(
-    new Box(1),
+    new Box(1n),
     (_use0) => {
       let x = _use0[0];
       return x;

@@ -5,13 +5,13 @@ expression: "\nfn go() {\n    1 + 1 // => 2\n    5 - 1 // => 4\n    5 / 2 // => 
 import { remainderInt, divideInt } from "../gleam.mjs";
 
 function go() {
-  1 + 1;
-  5 - 1;
-  divideInt(5, 2);
-  3 * 3;
-  remainderInt(5, 2);
-  2 > 1;
-  2 < 1;
-  2 >= 1;
-  return 2 <= 1;
+  1n + 1n;
+  5n - 1n;
+  divideInt(5n, 2n);
+  3n * 3n;
+  remainderInt(5n, 2n);
+  2n > 1n;
+  2n < 1n;
+  2n >= 1n;
+  return 2n <= 1n;
 }

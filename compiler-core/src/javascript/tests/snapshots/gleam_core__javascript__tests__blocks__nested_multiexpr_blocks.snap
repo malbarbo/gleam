@@ -4,10 +4,10 @@ expression: "\nfn go() {\n  let x = {\n    1\n    {\n      2\n      3\n    }\n  
 ---
 function go() {
   let x = (() => {
-    1;
+    1n;
     return (() => {
-      2;
-      return 3;
+      2n;
+      return 3n;
     })();
   })();
   return x;

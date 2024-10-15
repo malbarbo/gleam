@@ -4,8 +4,8 @@ expression: "\nfn go(x, y) {\n  case x, y {\n    True, True -> 1\n    _, _ -> 0\
 ---
 function go(x, y) {
   if (x && y) {
-    return 1;
+    return 1n;
   } else {
-    return 0;
+    return 0n;
   }
 }

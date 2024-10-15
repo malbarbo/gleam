@@ -5,9 +5,9 @@ expression: "\npub fn loop(indentation) {\n  case indentation > 0 {\n    True ->
 export function loop(loop$indentation) {
   while (true) {
     let indentation = loop$indentation;
-    let $ = indentation > 0;
+    let $ = indentation > 0n;
     if ($) {
-      loop$indentation = indentation - 1;
+      loop$indentation = indentation - 1n;
     } else {
       return undefined;
     }

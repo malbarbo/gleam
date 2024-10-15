@@ -4,5 +4,5 @@ expression: "\npub fn debug(x) {\n  let x = x\n  fn(x) { x + 1 }\n}\n"
 ---
 export function debug(x) {
   let x$1 = x;
-  return (x) => { return x + 1; };
+  return (x) => { return x + 1n; };
 }

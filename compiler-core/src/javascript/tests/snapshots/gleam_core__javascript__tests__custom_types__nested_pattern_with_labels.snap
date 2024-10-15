@@ -18,6 +18,6 @@ function go(x) {
     let b = x.b.b;
     return a + b;
   } else {
-    return 1;
+    return 1n;
   }
 }

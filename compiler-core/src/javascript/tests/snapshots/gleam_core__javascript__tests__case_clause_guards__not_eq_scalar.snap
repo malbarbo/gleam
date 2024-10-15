@@ -5,8 +5,8 @@ expression: "pub fn main(xs, y: Int) {\n  case xs {\n    #(x) if x != y -> 1\n  
 export function main(xs, y) {
   if (xs[0] !== y) {
     let x = xs[0];
-    return 1;
+    return 1n;
   } else {
-    return 0;
+    return 0n;
   }
 }

@@ -7,13 +7,13 @@ import { remainderInt } from "../gleam.mjs";
 function go() {
   return remainderInt(
     (() => {
-      let $ = 1 >= 0;
+      let $ = 1n >= 0n;
       if ($) {
-        return 2;
+        return 2n;
       } else {
-        return 4;
+        return 4n;
       }
     })(),
-    2
+    2n
   );
 }

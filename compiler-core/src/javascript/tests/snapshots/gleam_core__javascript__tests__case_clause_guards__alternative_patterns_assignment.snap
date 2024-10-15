@@ -10,6 +10,6 @@ export function main(xs) {
     let x = xs.tail.head;
     return x;
   } else {
-    return 1;
+    return 1n;
   }
 }

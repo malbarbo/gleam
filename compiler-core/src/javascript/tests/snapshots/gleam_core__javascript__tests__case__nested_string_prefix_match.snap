@@ -11,8 +11,8 @@ function main() {
   $[0].head === "a" &&
   $[0].tail.head.startsWith("b ") &&
   $[0].tail.tail.head === "d") {
-    return 1;
+    return 1n;
   } else {
-    return 1;
+    return 1n;
   }
 }

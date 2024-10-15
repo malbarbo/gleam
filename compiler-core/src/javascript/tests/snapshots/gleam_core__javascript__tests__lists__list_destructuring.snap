@@ -1,6 +1,5 @@
 ---
 source: compiler-core/src/javascript/tests/lists.rs
-assertion_line: 62
 expression: "\nfn go(x, y) {\n  let assert [] = x\n  let assert [a] = x\n  let assert [1, 2] = x\n  let assert [_, #(3, b)] = y\n  let assert [head, ..tail] = y\n}\n"
 ---
 import { makeError } from "../gleam.mjs";
@@ -27,7 +26,7 @@ function go(x, y) {
     )
   }
   let a = x.head;
-  if (!x.hasLength(2) || x.head !== 1 || x.tail.head !== 2) {
+  if (!x.hasLength(2) || x.head !== 1n || x.tail.head !== 2n) {
     throw makeError(
       "let_assert",
       "my/mod",
@@ -37,7 +36,7 @@ function go(x, y) {
       { value: x }
     )
   }
-  if (!y.hasLength(2) || y.tail.head[0] !== 3) {
+  if (!y.hasLength(2) || y.tail.head[0] !== 3n) {
     throw makeError(
       "let_assert",
       "my/mod",

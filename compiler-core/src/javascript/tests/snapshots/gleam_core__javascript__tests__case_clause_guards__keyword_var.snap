@@ -4,24 +4,24 @@ expression: "\npub const function = 5\npub const do = 10\npub fn main() {\n  let
 ---
 import { toList, isEqual } from "../gleam.mjs";
 
-export const function$ = 5;
+export const function$ = 5n;
 
-export const do$ = 10;
+export const do$ = 10n;
 
 export function main() {
-  let class$ = 5;
-  let while$ = 10;
-  let var$ = 7;
+  let class$ = 5n;
+  let while$ = 10n;
+  let var$ = 7n;
   if (class$ === while$) {
     return true;
-  } else if (isEqual(toList([class$]), toList([5]))) {
+  } else if (isEqual(toList([class$]), toList([5n]))) {
     return true;
-  } else if (isEqual([var$], [5])) {
+  } else if (isEqual([var$], [5n])) {
     let function$1 = var$;
     return false;
-  } else if (10 === 5) {
+  } else if (10n === 5n) {
     return true;
-  } else if (var$ > 5) {
+  } else if (var$ > 5n) {
     let while$1 = var$;
     return false;
   } else {

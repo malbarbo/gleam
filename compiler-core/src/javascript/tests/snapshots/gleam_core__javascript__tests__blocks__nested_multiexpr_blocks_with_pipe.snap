@@ -3,15 +3,15 @@ source: compiler-core/src/javascript/tests/blocks.rs
 expression: "\nfn add1(a) {\n  a + 1\n}\nfn go() {\n  let x = {\n    1\n    {\n      2\n      3 |> add1\n    } |> add1\n  }\n  x\n}\n"
 ---
 function add1(a) {
-  return a + 1;
+  return a + 1n;
 }
 
 function go() {
   let x = (() => {
-    1;
+    1n;
     let _pipe = (() => {
-      2;
-      let _pipe = 3;
+      2n;
+      let _pipe = 3n;
       return add1(_pipe);
     })();
     return add1(_pipe);

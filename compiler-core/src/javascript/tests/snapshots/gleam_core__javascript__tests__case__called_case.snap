@@ -4,7 +4,7 @@ expression: "\nfn go(x, y) {\n  case x {\n    0 -> y\n    _ -> y\n  }()\n}\n"
 ---
 function go(x, y) {
   return (() => {
-    if (x === 0) {
+    if (x === 0n) {
       return y;
     } else {
       return y;

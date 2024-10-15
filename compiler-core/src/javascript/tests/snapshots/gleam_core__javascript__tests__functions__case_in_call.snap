@@ -5,10 +5,10 @@ expression: "pub fn main(f, x) {\n  f(case x {\n    1 -> 2\n    _ -> 0\n  })\n}\
 export function main(f, x) {
   return f(
     (() => {
-      if (x === 1) {
-        return 2;
+      if (x === 1n) {
+        return 2n;
       } else {
-        return 0;
+        return 0n;
       }
     })(),
   );

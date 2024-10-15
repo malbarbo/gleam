@@ -4,7 +4,7 @@ expression: "\nconst a = \"Hello\"\nconst b = 1\nconst c = 2.0\nconst e = #(\"bo
 ---
 const a = "Hello";
 
-const b = 1;
+const b = 1n;
 
 const c = 2.0;
 
