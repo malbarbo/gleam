@@ -15,8 +15,8 @@ fn go(x) {
 ----- COMPILED JAVASCRIPT
 function go(x) {
   if (x.isOk()) {
-    return 1;
+    return 1n;
   } else {
-    return 0;
+    return 0n;
   }
 }

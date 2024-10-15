@@ -15,8 +15,8 @@ pub fn main(xs, y: Int) {
 export function main(xs, y) {
   if (xs[0] !== y) {
     let x = xs[0];
-    return 1;
+    return 1n;
   } else {
-    return 0;
+    return 0n;
   }
 }

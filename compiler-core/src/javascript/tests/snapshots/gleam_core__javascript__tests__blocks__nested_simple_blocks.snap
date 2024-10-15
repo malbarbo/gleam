@@ -16,6 +16,6 @@ fn go() {
 
 ----- COMPILED JAVASCRIPT
 function go() {
-  let x = 3;
+  let x = 3n;
   return x;
 }

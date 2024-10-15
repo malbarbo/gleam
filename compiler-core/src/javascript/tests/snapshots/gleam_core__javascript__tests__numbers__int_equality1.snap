@@ -12,6 +12,6 @@ fn go(y) {
 
 ----- COMPILED JAVASCRIPT
 function go(y) {
-  let x = 1;
+  let x = 1n;
   return x === y;
 }

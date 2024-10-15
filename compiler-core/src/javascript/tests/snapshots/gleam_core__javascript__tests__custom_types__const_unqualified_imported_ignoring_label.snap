@@ -11,4 +11,4 @@ pub const main = Two(1)
 import * as $other from "../other.mjs";
 import { Two } from "../other.mjs";
 
-export const main = /* @__PURE__ */ new Two(1);
+export const main = /* @__PURE__ */ new Two(1n);

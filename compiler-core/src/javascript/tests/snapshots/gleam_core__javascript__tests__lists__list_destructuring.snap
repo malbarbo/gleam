@@ -38,7 +38,7 @@ function go(x, y) {
     )
   }
   let a = x.head;
-  if (!x.hasLength(2) || x.head !== 1 || x.tail.head !== 2) {
+  if (!x.hasLength(2) || x.head !== 1n || x.tail.head !== 2n) {
     throw makeError(
       "let_assert",
       "my/mod",
@@ -48,7 +48,7 @@ function go(x, y) {
       { value: x }
     )
   }
-  if (!y.hasLength(2) || y.tail.head[0] !== 3) {
+  if (!y.hasLength(2) || y.tail.head[0] !== 3n) {
     throw makeError(
       "let_assert",
       "my/mod",

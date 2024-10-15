@@ -13,5 +13,5 @@ fn go() {
 import { toBitArray, sizedFloat } from "../gleam.mjs";
 
 function go() {
-  return toBitArray([sizedFloat(1.1, 32, true)]);
+  return toBitArray([sizedFloat(1.1, 32n, true)]);
 }

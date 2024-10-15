@@ -13,5 +13,5 @@ fn b() {
 
 ----- COMPILED JAVASCRIPT
 function b() {
-  return 1 + 2;
+  return 1n + 2n;
 }

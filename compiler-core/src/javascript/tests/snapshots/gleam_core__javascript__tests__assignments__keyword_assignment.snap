@@ -12,7 +12,7 @@ pub fn main() {
 
 ----- COMPILED JAVASCRIPT
 export function main() {
-  let class$ = 10;
-  let debugger$ = 50;
+  let class$ = 10n;
+  let debugger$ = 50n;
   return debugger$;
 }

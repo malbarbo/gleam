@@ -9,7 +9,7 @@ fn go(x) { let assert 1 = x }
 import { makeError } from "../gleam.mjs";
 
 function go(x) {
-  if (x !== 1) {
+  if (x !== 1n) {
     throw makeError(
       "let_assert",
       "my/mod",

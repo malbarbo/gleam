@@ -13,7 +13,7 @@ fn main(x) {
 import { makeError } from "../gleam.mjs";
 
 function main(x) {
-  if (x !== 9_179) {
+  if (x !== 9_179n) {
     throw makeError(
       "let_assert",
       "my/mod",

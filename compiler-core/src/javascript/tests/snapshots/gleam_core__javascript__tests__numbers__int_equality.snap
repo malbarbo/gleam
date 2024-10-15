@@ -12,6 +12,6 @@ fn go() {
 
 ----- COMPILED JAVASCRIPT
 function go() {
-  1 !== 2;
-  return 1 === 2;
+  1n !== 2n;
+  return 1n === 2n;
 }

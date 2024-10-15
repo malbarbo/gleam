@@ -132,7 +132,7 @@ export class BitArray {
 
 export class UtfCodepoint {
   constructor(value) {
-    this.value = value;
+    this.value = Number(value);
   }
 }
 
@@ -179,7 +179,7 @@ export function toBitArray(segments) {
       u8Array.set(segment, cursor);
       cursor += segment.byteLength;
     } else {
-      u8Array[cursor] = segment;
+      u8Array[cursor] = Number(segment);
       cursor++;
     }
   }
@@ -466,8 +466,8 @@ function structurallyCompatibleObjects(a, b) {
 
 // @internal
 export function remainderInt(a, b) {
-  if (b === 0) {
-    return 0;
+  if (b === 0n) {
+    return 0n;
   } else {
     return a % b;
   }
@@ -475,7 +475,11 @@ export function remainderInt(a, b) {
 
 // @internal
 export function divideInt(a, b) {
-  return Math.trunc(divideFloat(a, b));
+  if (b === 0n) {
+    return 0n
+  } else {
+    return a / b;
+  }
 }
 
 // @internal

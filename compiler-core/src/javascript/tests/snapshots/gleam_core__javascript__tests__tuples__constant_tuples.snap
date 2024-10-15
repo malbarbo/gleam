@@ -13,7 +13,7 @@ const e = #("bob", "dug")
 ----- COMPILED JAVASCRIPT
 const a = "Hello";
 
-const b = 1;
+const b = 1n;
 
 const c = 2.0;
 

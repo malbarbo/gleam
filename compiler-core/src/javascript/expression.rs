@@ -1174,6 +1174,7 @@ pub fn int(value: &str) -> Document<'_> {
         out.push('0');
     }
     out.push_str(value);
+    out.push('n');
 
     out.to_doc()
 }

@@ -16,7 +16,7 @@ function go(x) {
   return toList([
     (() => {
       true;
-      return 1;
+      return 1n;
     })(),
   ]);
 }

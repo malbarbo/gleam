@@ -17,12 +17,12 @@ fn go(xs) {
 ----- COMPILED JAVASCRIPT
 function go(xs) {
   if (xs.hasLength(0)) {
-    return 0;
+    return 0n;
   } else if (xs.hasLength(1)) {
-    return 1;
+    return 1n;
   } else if (xs.hasLength(2)) {
-    return 2;
+    return 2n;
   } else {
-    return 9999;
+    return 9999n;
   }
 }

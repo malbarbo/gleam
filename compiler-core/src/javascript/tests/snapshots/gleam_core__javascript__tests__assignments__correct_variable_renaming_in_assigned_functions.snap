@@ -13,5 +13,5 @@ pub fn debug(x) {
 ----- COMPILED JAVASCRIPT
 export function debug(x) {
   let x$1 = x;
-  return (x) => { return x + 1; };
+  return (x) => { return x + 1n; };
 }

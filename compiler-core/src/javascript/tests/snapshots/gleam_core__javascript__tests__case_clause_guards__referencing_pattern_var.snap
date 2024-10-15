@@ -15,8 +15,8 @@ pub fn main(xs) {
 export function main(xs) {
   if (xs[0]) {
     let x = xs[0];
-    return 1;
+    return 1n;
   } else {
-    return 0;
+    return 0n;
   }
 }

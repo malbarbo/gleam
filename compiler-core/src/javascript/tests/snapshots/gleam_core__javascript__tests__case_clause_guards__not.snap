@@ -14,8 +14,8 @@ pub fn main(x, y) {
 ----- COMPILED JAVASCRIPT
 export function main(x, y) {
   if (!y) {
-    return 0;
+    return 0n;
   } else {
-    return 1;
+    return 1n;
   }
 }

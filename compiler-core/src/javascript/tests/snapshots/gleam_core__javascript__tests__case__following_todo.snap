@@ -26,6 +26,6 @@ function go(x) {
       {}
     )
   } else {
-    return 1;
+    return 1n;
   }
 }

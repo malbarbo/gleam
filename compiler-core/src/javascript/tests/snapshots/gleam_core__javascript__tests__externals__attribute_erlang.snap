@@ -29,5 +29,5 @@ export function one(x) {
 }
 
 export function main() {
-  return one(1);
+  return one(1n);
 }

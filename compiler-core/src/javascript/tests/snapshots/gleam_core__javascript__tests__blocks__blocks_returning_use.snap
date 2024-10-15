@@ -19,7 +19,7 @@ fn b() {
 
 ----- COMPILED JAVASCRIPT
 function b() {
-  ((cb) => { return cb(1); })((a) => { return a; });
-  ((cb) => { return cb(2); })((b) => { return b; });
-  return 3;
+  ((cb) => { return cb(1n); })((a) => { return a; });
+  ((cb) => { return cb(2n); })((b) => { return b; });
+  return 3n;
 }

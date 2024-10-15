@@ -17,7 +17,7 @@ pub fn main(x) {
 export function main(x) {
   let z = (() => {
     let y = x;
-    return main(y - 1);
+    return main(y - 1n);
   })();
   return z;
 }

@@ -17,9 +17,9 @@ fn go(x) {
 function go(x) {
   let y = (() => {
     if (x) {
-      return 1;
+      return 1n;
     } else {
-      return 0;
+      return 0n;
     }
   })();
   return y;

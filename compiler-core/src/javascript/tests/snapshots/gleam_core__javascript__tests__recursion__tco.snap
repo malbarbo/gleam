@@ -16,10 +16,10 @@ pub fn main(x) {
 export function main(loop$x) {
   while (true) {
     let x = loop$x;
-    if (x === 0) {
+    if (x === 0n) {
       return undefined;
     } else {
-      loop$x = x - 1;
+      loop$x = x - 1n;
     }
   }
 }

@@ -11,5 +11,5 @@ fn go() {
 
 ----- COMPILED JAVASCRIPT
 function go() {
-  return [1, 2][0];
+  return [1n, 2n][0];
 }

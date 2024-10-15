@@ -10,4 +10,4 @@ pub const main = other.Two(1)
 ----- COMPILED JAVASCRIPT
 import * as $other from "../other.mjs";
 
-export const main = /* @__PURE__ */ new $other.Two(1);
+export const main = /* @__PURE__ */ new $other.Two(1n);

@@ -16,8 +16,8 @@ fn go() {
 ----- COMPILED JAVASCRIPT
 function go() {
   let x = (() => {
-    1;
-    return 2;
+    1n;
+    return 2n;
   })();
   return x;
 }

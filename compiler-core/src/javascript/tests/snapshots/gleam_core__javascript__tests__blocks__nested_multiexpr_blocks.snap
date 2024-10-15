@@ -19,10 +19,10 @@ fn go() {
 ----- COMPILED JAVASCRIPT
 function go() {
   let x = (() => {
-    1;
+    1n;
     return (() => {
-      2;
-      return 3;
+      2n;
+      return 3n;
     })();
   })();
   return x;

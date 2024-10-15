@@ -13,5 +13,5 @@ fn go() {
 import { remainderInt } from "../gleam.mjs";
 
 function go() {
-  return remainderInt(5, 0);
+  return remainderInt(5n, 0n);
 }

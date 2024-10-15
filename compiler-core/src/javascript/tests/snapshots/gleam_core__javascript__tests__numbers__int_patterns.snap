@@ -13,7 +13,7 @@ fn go(x) {
 import { makeError } from "../gleam.mjs";
 
 function go(x) {
-  if (x !== 4) {
+  if (x !== 4n) {
     throw makeError(
       "let_assert",
       "my/mod",

@@ -11,6 +11,6 @@ pub fn main() {
 
 ----- COMPILED JAVASCRIPT
 export function main() {
-  let main$1 = () => { return 0; };
+  let main$1 = () => { return 0n; };
   return main$1();
 }

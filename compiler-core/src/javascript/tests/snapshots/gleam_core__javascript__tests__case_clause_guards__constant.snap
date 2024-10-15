@@ -13,10 +13,10 @@ pub fn main(xs) {
 
 ----- COMPILED JAVASCRIPT
 export function main(xs) {
-  if (xs[0] === 1) {
+  if (xs[0] === 1n) {
     let x = xs[0];
     return x;
   } else {
-    return 0;
+    return 0n;
   }
 }

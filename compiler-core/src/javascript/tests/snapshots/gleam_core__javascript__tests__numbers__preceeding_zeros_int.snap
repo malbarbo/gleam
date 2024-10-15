@@ -11,5 +11,5 @@ fn main() {
 
 ----- COMPILED JAVASCRIPT
 function main() {
-  return 9_179;
+  return 9_179n;
 }

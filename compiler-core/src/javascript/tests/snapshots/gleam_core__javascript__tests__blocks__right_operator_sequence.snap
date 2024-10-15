@@ -15,7 +15,7 @@ fn go() {
 ----- COMPILED JAVASCRIPT
 function go() {
   return (() => {
-    1;
-    return 2;
-  })() === 1;
+    1n;
+    return 2n;
+  })() === 1n;
 }

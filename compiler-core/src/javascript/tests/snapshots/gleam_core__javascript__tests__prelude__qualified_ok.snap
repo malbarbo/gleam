@@ -11,5 +11,5 @@ pub fn go() { gleam.Ok(1) }
 import * as $gleam from "../gleam.mjs";
 
 export function go() {
-  return new $gleam.Ok(1);
+  return new $gleam.Ok(1n);
 }

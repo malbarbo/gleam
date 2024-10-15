@@ -13,11 +13,11 @@ pub fn main(xs) -> Int {
 
 ----- COMPILED JAVASCRIPT
 export function main(xs) {
-  if (xs.hasLength(1) && xs.head === 1) {
-    return 0;
-  } else if (xs.hasLength(2) && xs.head === 1 && xs.tail.head === 2) {
-    return 0;
+  if (xs.hasLength(1) && xs.head === 1n) {
+    return 0n;
+  } else if (xs.hasLength(2) && xs.head === 1n && xs.tail.head === 2n) {
+    return 0n;
   } else {
-    return 1;
+    return 1n;
   }
 }

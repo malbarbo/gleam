@@ -17,7 +17,7 @@ fn b() {
 
 ----- COMPILED JAVASCRIPT
 function b() {
-  ((cb) => { return cb(1); });
-  ((cb) => { return cb(2); });
-  return 3;
+  ((cb) => { return cb(1n); });
+  ((cb) => { return cb(2n); });
+  return 3n;
 }

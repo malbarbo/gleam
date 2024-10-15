@@ -18,12 +18,12 @@ fn go() {
 
 ----- COMPILED JAVASCRIPT
 function go() {
-  1;
-  2;
-  -3;
-  4001;
-  0b1111;
-  0o17;
-  0xF;
-  return 1_000;
+  1n;
+  2n;
+  -3n;
+  4001n;
+  0b1111n;
+  0o17n;
+  0xFn;
+  return 1_000n;
 }

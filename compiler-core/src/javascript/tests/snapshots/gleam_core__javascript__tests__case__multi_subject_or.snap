@@ -15,10 +15,10 @@ fn go(x, y) {
 ----- COMPILED JAVASCRIPT
 function go(x, y) {
   if (x) {
-    return 1;
+    return 1n;
   } else if (y) {
-    return 1;
+    return 1n;
   } else {
-    return 0;
+    return 0n;
   }
 }

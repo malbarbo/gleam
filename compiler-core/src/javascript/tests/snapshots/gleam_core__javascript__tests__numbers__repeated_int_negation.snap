@@ -12,7 +12,7 @@ fn go() {
 
 ----- COMPILED JAVASCRIPT
 function go() {
-  let a = 3;
+  let a = 3n;
   let b = - - a;
   return b;
 }

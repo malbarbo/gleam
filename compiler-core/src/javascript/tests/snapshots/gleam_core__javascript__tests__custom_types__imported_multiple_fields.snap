@@ -12,5 +12,5 @@ pub fn main() {
 import * as $other from "../other.mjs";
 
 export function main() {
-  return new $other.Two(1, 2, 3);
+  return new $other.Two(1n, 2n, 3n);
 }
