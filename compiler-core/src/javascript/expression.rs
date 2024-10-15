@@ -2325,6 +2325,10 @@ pub fn eco_string_int<'a>(value: EcoString) -> Document<'a> {
 
     out.push_str(value);
 
+    if is_bigint_enabled() {
+        out.push('n');
+    }
+
     out.to_doc()
 }
 

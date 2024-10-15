@@ -80,8 +80,8 @@ export class Error<T, E> extends Result<T, E> {
 
 export function isEqual(a: any, b: any): boolean;
 
-export function remainderInt(a: number, b: number): number;
+export function remainderInt(a: bigint, b: bigint): bigint;
 
-export function divideInt(a: number, b: number): number;
+export function divideInt(a: bigint, b: bigint): bigint;
 
 export function divideFloat(a: number, b: number): number;

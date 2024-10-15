@@ -291,7 +291,7 @@ where
         // Write the JavaScript prelude
         let path = build.join("prelude.mjs");
         if !self.io.is_file(&path) {
-            self.io.write(&path, crate::javascript::PRELUDE)?;
+            self.io.write(&path, crate::javascript::prelude())?;
         }
 
         // Write the TypeScript prelude, if asked for
