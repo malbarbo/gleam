@@ -1335,6 +1335,10 @@ pub fn int(value: &str) -> Document<'_> {
     }
     out.push_str(value);
 
+    if is_bigint_enabled() {
+        out.push('n');
+    }
+
     out.to_doc()
 }
 

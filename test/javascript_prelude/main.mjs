@@ -36,6 +36,8 @@ function fail(message) {
 function inspect(a) {
   if (typeof a === "object" && a !== null && typeof a.inspect === "function") {
     return a.inspect();
+  } else if (typeof a === "bigint") {
+    return a.toString();
   } else {
     return JSON.stringify(a);
   }
@@ -1083,24 +1085,24 @@ assertEqual(new BitArray(new Uint8Array([1, 2, 3, 4], 28)).byteSize, 4);
 // Division
 //
 
-assertEqual(divideInt(1, 0), 0);
-assertEqual(divideInt(1, 1), 1);
-assertEqual(divideInt(1, 2), 0);
-assertEqual(divideInt(3, 2), 1);
-assertEqual(divideInt(11, 3), 3);
-assertEqual(divideInt(-1, 0), 0);
-assertEqual(divideInt(-1, 1), -1);
-assertEqual(divideInt(-1, 2), -0);
-assertEqual(divideInt(-3, 2), -1);
-assertEqual(divideInt(-11, 3), -3);
-assertEqual(divideInt(1, -1), -1);
-assertEqual(divideInt(1, -2), 0);
-assertEqual(divideInt(3, -2), -1);
-assertEqual(divideInt(11, -3), -3);
-assertEqual(divideInt(-1, -1), 1);
-assertEqual(divideInt(-1, -2), 0);
-assertEqual(divideInt(-3, -2), 1);
-assertEqual(divideInt(-11, -3), 3);
+assertEqual(divideInt(1n, 0n), 0n);
+assertEqual(divideInt(1n, 1n), 1n);
+assertEqual(divideInt(1n, 2n), 0n);
+assertEqual(divideInt(3n, 2n), 1n);
+assertEqual(divideInt(11n, 3n), 3n);
+assertEqual(divideInt(-1n, 0n), 0n);
+assertEqual(divideInt(-1n, 1n), -1n);
+assertEqual(divideInt(-1n, 2n), -0n);
+assertEqual(divideInt(-3n, 2n), -1n);
+assertEqual(divideInt(-11n, 3n), -3n);
+assertEqual(divideInt(1n, -1n), -1n);
+assertEqual(divideInt(1n, -2n), 0n);
+assertEqual(divideInt(3n, -2n), -1n);
+assertEqual(divideInt(11n, -3n), -3n);
+assertEqual(divideInt(-1n, -1n), 1n);
+assertEqual(divideInt(-1n, -2n), 0n);
+assertEqual(divideInt(-3n, -2n), 1n);
+assertEqual(divideInt(-11n, -3n), 3n);
 
 assertEqual(divideFloat(1.5, 0.0), 0.0);
 assertEqual(divideFloat(1.5, 2.0), 0.75);
