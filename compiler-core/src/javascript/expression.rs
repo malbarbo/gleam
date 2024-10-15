@@ -1490,14 +1490,22 @@ impl<'module, 'a> Generator<'module, 'a> {
         // If we have a constant value divided by zero then it's safe to replace
         // it directly with 0.
         if left.is_literal() && right.is_zero_compile_time_number() {
-            "0".to_doc()
+            if is_bigint_enabled() {
+                "0n".to_doc()
+            } else {
+                "0".to_doc()
+            }
         } else if right.is_non_zero_compile_time_number() {
             let division = if let TypedExpr::BinOp { .. } = left {
                 docvec![left_doc.surround("(", ")"), " / ", right_doc]
             } else {
                 docvec![left_doc, " / ", right_doc]
             };
-            docvec!["globalThis.Math.trunc", wrap_arguments([division])]
+            if is_bigint_enabled() {
+                division
+            } else {
+                docvec!["globalThis.Math.trunc", wrap_arguments([division])]
+            }
         } else {
             self.tracker.int_division_used = true;
             docvec!["divideInt", wrap_arguments([left_doc, right_doc])]
@@ -2418,6 +2426,10 @@ pub fn eco_string_int<'a>(value: EcoString) -> Document<'a> {
     let value = value.trim_start_matches('_');
 
     out.push_str(value);
+
+    if is_bigint_enabled() {
+        out.push('n');
+    }
 
     out.to_doc()
 }

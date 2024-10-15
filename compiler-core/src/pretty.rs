@@ -35,6 +35,7 @@ use itertools::Itertools;
 use num_bigint::BigInt;
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::javascript::is_bigint_enabled;
 use crate::{Result, io::Utf8Writer};
 
 /// Join multiple documents together in a vector. This macro calls the `to_doc`
@@ -142,7 +143,10 @@ impl<'a> Documentable<'a> for u8 {
 
 impl<'a> Documentable<'a> for BigInt {
     fn to_doc(self) -> Document<'a> {
-        Document::eco_string(eco_format!("{self}"))
+        Document::eco_string(eco_format!(
+            "{self}{}",
+            if is_bigint_enabled() { "n" } else { "" }
+        ))
     }
 }
 

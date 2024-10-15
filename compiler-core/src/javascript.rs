@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::build::Target;
 use crate::build::package_compiler::StdlibPackage;
@@ -29,8 +30,24 @@ use self::import::{Imports, Member};
 
 const INDENT: isize = 2;
 
-pub const PRELUDE: &str = include_str!("../templates/prelude.mjs");
+const PRELUDE: &str = include_str!("../templates/prelude.mjs");
 pub const PRELUDE_TS_DEF: &str = include_str!("../templates/prelude.d.mts");
+
+static USE_BIGINT: AtomicBool = AtomicBool::new(false);
+
+pub fn is_bigint_enabled() -> bool {
+    USE_BIGINT.load(Ordering::SeqCst)
+}
+
+pub fn set_bigint_enabled(enabled: bool) {
+    USE_BIGINT.store(enabled, Ordering::SeqCst);
+}
+
+pub fn prelude() -> &'static str {
+    PRELUDE
+}
+
+// pub type Output<'a> = Result<Document<'a>, Error>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JavaScriptCodegenTarget {

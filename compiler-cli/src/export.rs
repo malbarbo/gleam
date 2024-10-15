@@ -133,7 +133,7 @@ Your hex tarball has been generated in {}.
 }
 
 pub fn javascript_prelude() -> Result<()> {
-    print!("{}", gleam_core::javascript::PRELUDE);
+    print!("{}", gleam_core::javascript::prelude());
     Ok(())
 }
 

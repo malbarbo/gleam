@@ -329,7 +329,7 @@ function bitArrayByteAt(buffer, bitOffset, index) {
 
 export class UtfCodepoint {
   constructor(value) {
-    this.value = value;
+    this.value = Number(value);
   }
 }
 
@@ -1544,13 +1544,23 @@ function structurallyCompatibleObjects(a, b) {
 export function remainderInt(a, b) {
   if (b === 0) {
     return 0;
+  } else if (b === 0n) {
+    return 0n;
   } else {
     return a % b;
   }
 }
 
 export function divideInt(a, b) {
-  return Math.trunc(divideFloat(a, b));
+  if (b === 0) {
+    return 0;
+  } else if (b === 0n) {
+    return 0n;
+  } else if (typeof a == "bigint") {
+    return a / b;
+  } else {
+    return Math.trunc(a / b);
+  }
 }
 
 export function divideFloat(a, b) {
