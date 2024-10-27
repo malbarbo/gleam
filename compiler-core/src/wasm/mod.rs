@@ -19,8 +19,9 @@ use table::{Local, LocalStore, SymbolTable};
 
 use crate::{
     ast::{
-        BinOp, Statement, TypedAssignment, TypedClause, TypedConstant, TypedExpr, TypedFunction,
-        TypedModule, TypedRecordConstructor, TypedStatement,
+        BinOp, ClauseGuard, Statement, TypedAssignment, TypedClause, TypedClauseGuard,
+        TypedConstant, TypedExpr, TypedFunction, TypedModule, TypedRecordConstructor,
+        TypedStatement,
     },
     io::FileSystemWriter,
     type_::{Type, ValueConstructor, ValueConstructorVariant},
@@ -921,12 +922,15 @@ fn emit_case_expression(
         // TODO: we check multipatterns sequentially, not concurrently
         // this could be more performant
 
+        // TODO: handle alt patterns
         for (pattern, subject_id) in clause.pattern.iter().zip(&ids) {
             let compiled =
                 pattern::compile_pattern(*subject_id, pattern, table, &inner_env, locals);
             let translated = pattern::translate_pattern(compiled, locals, table);
 
-            // we need to emit the conditions and assignments in BFS order
+            // we need to emit the conditions and assignments in tree order
+            // (a leaf node's code must show up after the parent node's code)
+            // it doesn't actually matter if it's a DFS or BFS, but we're doing BFS here
             // because inner conditions depend on outer conditions
             // (topological ordering)
             let mut queue = VecDeque::from([translated]);
@@ -952,6 +956,17 @@ fn emit_case_expression(
             }
         }
 
+        // if we have a clause guard, we need to test it here (with the inner binding)
+        if let Some(guard) = &clause.guard {
+            // emit condition
+            insts
+                .lst
+                .extend(emit_clause_guard_expression(guard, &inner_env, locals, table).lst);
+
+            insts.lst.push(wasm_encoder::Instruction::I32Eqz);
+            insts.lst.push(wasm_encoder::Instruction::BrIf(0)); // clause
+        }
+
         // emit code
         let new_insts = emit_expression(&clause.then, &inner_env, locals, table);
         insts.lst.extend(new_insts.lst);
@@ -970,6 +985,212 @@ fn emit_case_expression(
     insts.lst.push(wasm_encoder::Instruction::End);
 
     insts.into()
+}
+
+fn emit_clause_guard_expression(
+    guard: &TypedClauseGuard,
+    env: &Environment<'_>,
+    locals: &LocalStore,
+    table: &SymbolTable,
+) -> WasmInstructions {
+    match guard {
+        ClauseGuard::Equals { left, right, .. } => {
+            // check types
+            assert_eq!(left.type_(), right.type_(), "Expected equal types");
+
+            let type_ = left.type_();
+            match type_ {
+                _ if type_.is_int() => {
+                    let mut insts = emit_clause_guard_expression(left, env, locals, table);
+                    let right_insts = emit_clause_guard_expression(right, env, locals, table);
+                    insts.lst.extend(right_insts.lst);
+                    insts.lst.extend(integer::eq().lst);
+                    insts
+                }
+                _ if type_.is_float() => {
+                    let mut insts = emit_clause_guard_expression(left, env, locals, table);
+                    let right_insts = emit_clause_guard_expression(right, env, locals, table);
+                    insts.lst.extend(right_insts.lst);
+                    insts.lst.push(wasm_encoder::Instruction::F64Eq);
+                    insts
+                }
+                _ if type_.is_bool() => {
+                    let mut insts = emit_clause_guard_expression(left, env, locals, table);
+                    let right_insts = emit_clause_guard_expression(right, env, locals, table);
+                    insts.lst.extend(right_insts.lst);
+                    insts.lst.push(wasm_encoder::Instruction::I32Eq);
+                    insts
+                }
+                _ => todo!("Only int, float and bool types are supported"),
+            }
+        }
+        ClauseGuard::NotEquals { left, right, .. } => {
+            // check types
+            assert_eq!(left.type_(), right.type_(), "Expected equal types");
+
+            let type_ = left.type_();
+            match type_ {
+                _ if type_.is_int() => {
+                    let mut insts = emit_clause_guard_expression(left, env, locals, table);
+                    let right_insts = emit_clause_guard_expression(right, env, locals, table);
+                    insts.lst.extend(right_insts.lst);
+                    insts.lst.extend(integer::eq().lst);
+                    insts.lst.push(wasm_encoder::Instruction::I32Eqz);
+                    insts
+                }
+                _ if type_.is_float() => {
+                    let mut insts = emit_clause_guard_expression(left, env, locals, table);
+                    let right_insts = emit_clause_guard_expression(right, env, locals, table);
+                    insts.lst.extend(right_insts.lst);
+                    insts.lst.push(wasm_encoder::Instruction::F64Eq);
+                    insts.lst.push(wasm_encoder::Instruction::I32Eqz);
+                    insts
+                }
+                _ if type_.is_bool() => {
+                    let mut insts = emit_clause_guard_expression(left, env, locals, table);
+                    let right_insts = emit_clause_guard_expression(right, env, locals, table);
+                    insts.lst.extend(right_insts.lst);
+                    insts.lst.push(wasm_encoder::Instruction::I32Eq);
+                    insts.lst.push(wasm_encoder::Instruction::I32Eqz);
+                    insts
+                }
+                _ => todo!("Only int, float and bool types are supported"),
+            }
+        }
+        ClauseGuard::LtInt { left, right, .. } => {
+            let mut insts = emit_clause_guard_expression(left, env, locals, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.extend(integer::lt().lst);
+            insts
+        }
+        ClauseGuard::LtEqInt { left, right, .. } => {
+            let mut insts = emit_clause_guard_expression(left, env, locals, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.extend(integer::lte().lst);
+            insts
+        }
+        ClauseGuard::LtFloat { left, right, .. } => {
+            let mut insts = emit_clause_guard_expression(left, env, locals, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::F64Lt);
+            insts
+        }
+        ClauseGuard::LtEqFloat { left, right, .. } => {
+            let mut insts = emit_clause_guard_expression(left, env, locals, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::F64Le);
+            insts
+        }
+        ClauseGuard::GtEqInt { left, right, .. } => {
+            let mut insts = emit_clause_guard_expression(left, env, locals, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.extend(integer::gte().lst);
+            insts
+        }
+        ClauseGuard::GtInt { left, right, .. } => {
+            let mut insts = emit_clause_guard_expression(left, env, locals, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.extend(integer::gt().lst);
+            insts
+        }
+        ClauseGuard::GtEqFloat { left, right, .. } => {
+            let mut insts = emit_clause_guard_expression(left, env, locals, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::F64Ge);
+            insts
+        }
+        ClauseGuard::GtFloat { left, right, .. } => {
+            let mut insts = emit_clause_guard_expression(left, env, locals, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::F64Gt);
+            insts
+        }
+        ClauseGuard::And { left, right, .. } => {
+            // short circuiting behavior: if left is false, don't evaluate right
+            let mut insts = emit_clause_guard_expression(left, env, locals, table);
+
+            insts.lst.push(wasm_encoder::Instruction::If(
+                wasm_encoder::BlockType::Result(WasmTypeImpl::Bool.to_val_type()),
+            ));
+
+            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+
+            insts.lst.push(wasm_encoder::Instruction::Else);
+            insts.lst.push(wasm_encoder::Instruction::I32Const(0));
+            insts.lst.push(wasm_encoder::Instruction::End);
+            insts
+        }
+        ClauseGuard::Or { left, right, .. } => {
+            // short circuiting behavior: if left is true, don't evaluate right
+            let mut insts = emit_clause_guard_expression(left, env, locals, table);
+
+            insts.lst.push(wasm_encoder::Instruction::If(
+                wasm_encoder::BlockType::Result(WasmTypeImpl::Bool.to_val_type()),
+            ));
+            insts.lst.push(wasm_encoder::Instruction::I32Const(1));
+            insts.lst.push(wasm_encoder::Instruction::Else);
+
+            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+
+            insts.lst.push(wasm_encoder::Instruction::End);
+            insts
+        }
+        ClauseGuard::Not { expression, .. } => {
+            let mut insts = emit_clause_guard_expression(expression, env, locals, table);
+            insts.lst.push(wasm_encoder::Instruction::I32Eqz);
+            insts
+        }
+        ClauseGuard::Var { name, .. } => {
+            // this is simple variable access!
+            match env.get(name) {
+                Some(Binding::Builtin(BuiltinType::Boolean { value })) => WasmInstructions {
+                    lst: vec![wasm_encoder::Instruction::I32Const(if value {
+                        1
+                    } else {
+                        0
+                    })],
+                },
+                Some(Binding::Builtin(BuiltinType::Nil)) => WasmInstructions {
+                    lst: vec![wasm_encoder::Instruction::I32Const(0)],
+                },
+                Some(Binding::Local(id)) => WasmInstructions {
+                    lst: vec![wasm_encoder::Instruction::LocalGet(id.id())],
+                },
+                Some(Binding::Product(id)) => {
+                    let product = table.products.get(id).unwrap();
+                    match product.kind {
+                        table::ProductKind::Simple { instance } => WasmInstructions {
+                            lst: vec![wasm_encoder::Instruction::GlobalGet(instance.id())],
+                        },
+                        table::ProductKind::Composite => unimplemented!(
+                            "Composite user-defined types not supported in clause guards"
+                        ),
+                    }
+                }
+
+                Some(Binding::Sum(..)) => unreachable!("Types cannot be used as values in Gleam"),
+                Some(Binding::Constant(..)) => unreachable!("Constants shouldn't appear here"),
+                Some(Binding::Function(..)) => {
+                    unreachable!("Gleam does not support function references in clause guards")
+                }
+                None => unreachable!("Name does not exist in environment"),
+            }
+        }
+        ClauseGuard::Constant(constant) => emit_constant(constant, env, table),
+        ClauseGuard::TupleIndex { .. } => todo!("Tuples not implemented yet"),
+        ClauseGuard::FieldAccess { .. } => todo!("Field access not implemented yet"),
+        ClauseGuard::ModuleSelect { .. } => todo!("Modules not implemented yet"),
+    }
 }
 
 fn emit_binary_operation(
