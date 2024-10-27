@@ -865,6 +865,42 @@ fn emit_expression(
         TypedExpr::Invalid { .. } => unreachable!("Invalid expression"),
     }
 }
+/*
+    A | B | C -> code1
+    D -> code2
+
+    block 'case
+        block 'clause
+            block 'group
+                block 'a
+                    A checks (fail = break 'a)
+                    A attributions
+                    break 'group
+                end
+                block 'b
+                    B checks (fail = break 'b)
+                    B attributions
+                    break 'group
+                end
+                block 'c
+                    C checks (fail = break 'c)
+                    C attributions
+                    break 'group
+                end
+                break 'clause
+            end
+            code1
+            break 1
+        end
+        block
+            D checks
+            D attributions
+            code2
+            break 1
+        end
+        unreachable
+    end
+*/
 
 fn emit_case_expression(
     subjects: &[TypedExpr],
@@ -912,70 +948,93 @@ fn emit_case_expression(
     ));
 
     for clause in clauses {
-        let mut inner_env = Environment::with_enclosing(env);
+        // TODO: we just duplicate our code for each alt pattern, but we could use
+        //       a smarter approach with blocks
+        //
+        //       the idea is to use four levels of blocks: case block, clause block,
+        //       pattern group block and pattern block
+        //        - the case block is composed of a sequence of clause blocks and an
+        //          unreachable instruction
+        //        - each clause block is composed of a pattern group block, matching
+        //          expression code and a break 'case
+        //        - a pattern group block is a sequence of pattern blocks ended by a
+        //          break 'clause
+        //        - each pattern block has all conditions and definitions necessary to
+        //          the pattern being compiled. if a pattern doesn't match, it breaks
+        //          'pattern. if it does, it breaks 'group.
+        //
+        //      so why don't we do this? well, Gleam says that in the case that there
+        //      exist multiple alternate patterns, the valid bindings set is the intersection
+        //      of all bindings across alternates. doing this properly would require
+        //      reusing locals, or at least creating a new set of locals and initializing
+        //      them with each pattern's attributions.
+        let mut patterns = vec![clause.pattern.clone()];
+        patterns.extend(clause.alternative_patterns.iter().cloned());
 
-        // open clause block
-        insts.lst.push(wasm_encoder::Instruction::Block(
-            wasm_encoder::BlockType::Empty,
-        ));
+        for clause_pattern in patterns.into_iter() {
+            let mut inner_env = Environment::with_enclosing(env);
 
-        // TODO: we check multipatterns sequentially, not concurrently
-        // this could be more performant
+            // open clause block
+            insts.lst.push(wasm_encoder::Instruction::Block(
+                wasm_encoder::BlockType::Empty,
+            ));
 
-        // TODO: handle alt patterns
-        for (pattern, subject_id) in clause.pattern.iter().zip(&ids) {
-            let compiled =
-                pattern::compile_pattern(*subject_id, pattern, table, &inner_env, locals);
-            let translated = pattern::translate_pattern(compiled, locals, table);
+            // TODO: we check multipatterns sequentially, not concurrently
+            // this could be more performant
+            for (pattern, subject_id) in clause_pattern.iter().zip(&ids) {
+                let compiled =
+                    pattern::compile_pattern(*subject_id, pattern, table, &inner_env, locals);
+                let translated = pattern::translate_pattern(compiled, locals, table);
 
-            // we need to emit the conditions and assignments in tree order
-            // (a leaf node's code must show up after the parent node's code)
-            // it doesn't actually matter if it's a DFS or BFS, but we're doing BFS here
-            // because inner conditions depend on outer conditions
-            // (topological ordering)
-            let mut queue = VecDeque::from([translated]);
+                // we need to emit the conditions and assignments in tree order
+                // (a leaf node's code must show up after the parent node's code)
+                // it doesn't actually matter if it's a DFS or BFS, but we're doing BFS here
+                // because inner conditions depend on outer conditions
+                // (topological ordering)
+                let mut queue = VecDeque::from([translated]);
 
-            while let Some(t) = queue.pop_front() {
-                // emit conditions
-                insts.lst.extend(t.condition);
+                while let Some(t) = queue.pop_front() {
+                    // emit conditions
+                    insts.lst.extend(t.condition);
 
-                // jump to clause block
+                    // jump to clause block
+                    insts.lst.push(wasm_encoder::Instruction::I32Eqz);
+                    insts.lst.push(wasm_encoder::Instruction::BrIf(0)); // clause
+
+                    // emit assignments
+                    insts.lst.extend(t.assignments);
+
+                    // add bindings to the environment
+                    for (name, local_id) in t.bindings.iter() {
+                        inner_env.set(name.clone(), Binding::Local(*local_id));
+                    }
+
+                    // enqueue nested patterns
+                    queue.extend(t.nested);
+                }
+            }
+
+            // if we have a clause guard, we need to test it here (with the inner binding)
+            if let Some(guard) = &clause.guard {
+                // emit condition
+                insts
+                    .lst
+                    .extend(emit_clause_guard_expression(guard, &inner_env, locals, table).lst);
+
                 insts.lst.push(wasm_encoder::Instruction::I32Eqz);
                 insts.lst.push(wasm_encoder::Instruction::BrIf(0)); // clause
-
-                // emit assignments
-                insts.lst.extend(t.assignments);
-
-                // add bindings to the environment
-                for (name, local_id) in t.bindings.iter() {
-                    inner_env.set(name.clone(), Binding::Local(*local_id));
-                }
-
-                // enqueue nested patterns
-                queue.extend(t.nested);
             }
+
+            // emit code
+            let new_insts = emit_expression(&clause.then, &inner_env, locals, table);
+            insts.lst.extend(new_insts.lst);
+
+            // break out of the case
+            insts.lst.push(wasm_encoder::Instruction::Br(1)); // case
+
+            // close clause block
+            insts.lst.push(wasm_encoder::Instruction::End);
         }
-
-        // if we have a clause guard, we need to test it here (with the inner binding)
-        if let Some(guard) = &clause.guard {
-            // emit condition
-            insts
-                .lst
-                .extend(emit_clause_guard_expression(guard, &inner_env, locals, table).lst);
-
-            insts.lst.push(wasm_encoder::Instruction::I32Eqz);
-            insts.lst.push(wasm_encoder::Instruction::BrIf(0)); // clause
-        }
-
-        // emit code
-        let new_insts = emit_expression(&clause.then, &inner_env, locals, table);
-        insts.lst.extend(new_insts.lst);
-
-        // break out of the case
-        insts.lst.push(wasm_encoder::Instruction::Br(1)); // case
-
-        // close clause block
-        insts.lst.push(wasm_encoder::Instruction::End);
     }
 
     // add unreachable (all fine due to exhaustiveness)
