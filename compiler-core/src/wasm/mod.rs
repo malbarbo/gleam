@@ -74,6 +74,9 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                 };
                 table.types.insert(sum_type_id, sum_type);
 
+                // generate function in second pass. we need the id now
+                let equality_function_id = table.functions.new_id();
+
                 let sum_id = table.sums.new_id();
                 table.sums.insert(
                     sum_id,
@@ -82,6 +85,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                         name: t.name.clone(),
                         type_: sum_type_id,
                         public: t.publicity.is_public(),
+                        equality_test: equality_function_id,
                     },
                 );
                 root_environment.set(t.name.clone(), Binding::Sum(sum_id));
@@ -217,9 +221,9 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                             name: global_name.into(),
                             type_: WasmTypeImpl::StructRef(product_type_id.id()),
                             global_index: global_id.id(),
-                            initializer: WasmInstructions {
-                                lst: vec![wasm_encoder::Instruction::Call(constructor_id.id())],
-                            },
+                            initializer: WasmInstructions::single(wasm_encoder::Instruction::Call(
+                                constructor_id.id(),
+                            )),
                         });
 
                         table::Product {
@@ -272,6 +276,38 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
 
                     root_environment.set(variant.name.clone(), Binding::Product(product_id));
                 }
+
+                // generate equality types
+                let equality_test_id = table.types.new_id();
+                let equality_test_name: EcoString = format!("eq@{}", t.name).into();
+                let equality_test = table::Type {
+                    id: equality_test_id,
+                    name: equality_test_name.clone(),
+                    definition: WasmType {
+                        id: equality_test_id.id(),
+                        name: equality_test_name,
+                        definition: WasmTypeDefinition::Function {
+                            parameters: vec![
+                                WasmTypeImpl::StructRef(sum_type_id.id()),
+                                WasmTypeImpl::StructRef(sum_type_id.id()),
+                            ],
+                            returns: WasmTypeImpl::Bool,
+                        },
+                    },
+                };
+                table.types.insert(equality_test_id, equality_test);
+
+                // generate equality function
+                let equality_function_id = sum_type.equality_test;
+                let equality_function = table::Function {
+                    id: equality_function_id,
+                    signature: equality_test_id,
+                    name: format!("eq@{}", t.name).into(),
+                    arity: 2,
+                };
+                table
+                    .functions
+                    .insert(equality_function_id, equality_function);
             }
             TypedDefinition::ModuleConstant(m) => {
                 // we assign the constant type in the last pass
@@ -314,6 +350,16 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                         }
                         _ => unreachable!("Expected product binding in environment"),
                     }
+                }
+                // generate the equality function
+                let sum_id = root_environment.get(&c.name).unwrap();
+                match sum_id {
+                    Binding::Sum(id) => {
+                        let sum = table.sums.get(id).unwrap();
+                        let function = emit_sum_equality(sum, &table);
+                        functions.push(function);
+                    }
+                    _ => unreachable!("Expected sum binding in environment"),
                 }
             }
             TypedDefinition::ModuleConstant(m) => {
@@ -358,6 +404,180 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
     }
 }
 
+fn emit_sum_equality(sum: &table::Sum, table: &SymbolTable) -> WasmFunction {
+    use wasm_encoder::Instruction as Inst;
+
+    let mut instructions = vec![];
+
+    let struct_type = table.types.get(sum.type_).unwrap();
+    let function = table.functions.get(sum.equality_test).unwrap();
+    let function_type = table.types.get(function.signature).unwrap();
+
+    let mut locals = LocalStore::new();
+
+    // outer block
+    instructions.push(Inst::Block(wasm_encoder::BlockType::Empty));
+
+    // get the tag of the first argument
+    instructions.push(Inst::LocalGet(0));
+    instructions.push(Inst::StructGet {
+        struct_type_index: struct_type.definition.id,
+        field_index: 0,
+    });
+    instructions.push(Inst::End);
+
+    // get the tag of the second argument
+    instructions.push(Inst::LocalGet(1));
+    instructions.push(Inst::StructGet {
+        struct_type_index: struct_type.definition.id,
+        field_index: 0,
+    });
+    instructions.push(Inst::End);
+
+    // compare the tags
+    instructions.push(Inst::I32Eq);
+    instructions.push(Inst::I32Eqz);
+    instructions.push(Inst::BrIf(0)); // return false
+
+    // generate comparison code for each variant
+    let variants = table
+        .products
+        .as_list()
+        .into_iter()
+        .filter(|p| p.parent == sum.id)
+        .collect_vec();
+
+    for variant in variants {
+        // start block
+        instructions.push(Inst::Block(wasm_encoder::BlockType::Empty));
+
+        // compare tag
+        instructions.push(Inst::LocalGet(0));
+        instructions.push(Inst::StructGet {
+            struct_type_index: struct_type.definition.id,
+            field_index: 0,
+        });
+        instructions.push(Inst::I32Const(variant.tag as _));
+        instructions.push(Inst::I32Eq);
+        instructions.push(Inst::I32Eqz);
+        instructions.push(Inst::BrIf(0)); // next variant
+
+        // create local storing casted struct
+        let struct_type = table.types.get(variant.type_).unwrap();
+        let lhs_local = locals.new_id();
+        let rhs_local = locals.new_id();
+        locals.insert(
+            lhs_local,
+            Local {
+                id: lhs_local,
+                name: format!("lhs@{}", variant.name).into(),
+                wasm_type: WasmTypeImpl::StructRef(struct_type.definition.id),
+            },
+        );
+        locals.insert(
+            rhs_local,
+            Local {
+                id: rhs_local,
+                name: format!("rhs@{}", variant.name).into(),
+                wasm_type: WasmTypeImpl::StructRef(struct_type.definition.id),
+            },
+        );
+
+        // cast the structs
+        instructions.push(Inst::LocalGet(0));
+        instructions.push(Inst::RefCastNonNull(wasm_encoder::HeapType::Concrete(
+            struct_type.definition.id,
+        )));
+        instructions.push(Inst::LocalSet(lhs_local.id()));
+
+        instructions.push(Inst::LocalGet(1));
+        instructions.push(Inst::RefCastNonNull(wasm_encoder::HeapType::Concrete(
+            struct_type.definition.id,
+        )));
+        instructions.push(Inst::LocalSet(rhs_local.id()));
+
+        // for each field, compare the values
+        for field in &variant.fields {
+            // start block
+            instructions.push(Inst::Block(wasm_encoder::BlockType::Empty));
+
+            // get the field from the first struct
+            instructions.push(Inst::LocalGet(lhs_local.id()));
+            instructions.push(Inst::StructGet {
+                struct_type_index: struct_type.definition.id,
+                field_index: field.index as u32 + 1,
+            });
+
+            // get the field from the second struct
+            instructions.push(Inst::LocalGet(rhs_local.id()));
+            instructions.push(Inst::StructGet {
+                struct_type_index: struct_type.definition.id,
+                field_index: field.index as u32 + 1,
+            });
+
+            // generate the appropriate equality test
+            instructions.extend(emit_equality_test(Arc::clone(&field.type_), table).lst);
+
+            // if the test fails, return false
+            instructions.push(Inst::I32Eqz);
+            instructions.push(Inst::BrIf(2)); // field, variant, function
+
+            // end block
+            instructions.push(Inst::End);
+        }
+
+        // unreachable
+        instructions.push(Inst::Unreachable);
+
+        // end block
+        instructions.push(Inst::End);
+    }
+
+    // return true if we got here
+    instructions.push(Inst::I32Const(1));
+    instructions.push(Inst::Return);
+
+    // end outer block
+    instructions.push(Inst::End);
+
+    instructions.push(Inst::I32Const(0)); // return false
+
+    WasmFunction {
+        name: format!("eq@{}", sum.name).into(),
+        type_index: function_type.definition.id,
+        instructions: WasmInstructions { lst: instructions },
+        locals: locals
+            .as_list()
+            .into_iter()
+            .map(|local| (local.name, local.wasm_type))
+            .collect_vec(),
+        argument_names: vec![Some(EcoString::from("lhs")), Some(EcoString::from("rhs"))],
+        function_index: function.id.id(),
+        public: false,
+    }
+}
+
+fn emit_equality_test(type_: Arc<Type>, table: &SymbolTable) -> WasmInstructions {
+    // assumes that there are two values on the stack (lhs, rhs)
+
+    match type_.as_ref() {
+        _ if type_.is_int() => integer::eq(),
+        _ if type_.is_float() => WasmInstructions::single(wasm_encoder::Instruction::F64Eq),
+        _ if type_.is_bool() => WasmInstructions::single(wasm_encoder::Instruction::I32Eq),
+        _ if type_.is_nil() => WasmInstructions::single(wasm_encoder::Instruction::I32Eq),
+        Type::Named {
+            publicity,
+            package,
+            module,
+            name,
+            args,
+        } => todo!(),
+        Type::Fn { args, retrn } => todo!(),
+        Type::Var { type_ } => todo!(),
+        Type::Tuple { elems } => todo!(),
+    }
+}
+
 fn emit_constant(
     value: &TypedConstant,
     root_environment: &Environment<'_>,
@@ -370,9 +590,7 @@ fn emit_constant(
         }
         TypedConstant::Float { value, .. } => {
             let val = parse_float(value);
-            WasmInstructions {
-                lst: vec![wasm_encoder::Instruction::F64Const(val)],
-            }
+            WasmInstructions::single(wasm_encoder::Instruction::F64Const(val))
         }
         TypedConstant::Var { .. } => todo!("Variable constants not implemented yet"),
         TypedConstant::Record { .. } => todo!("Record constants not implemented yet"),
@@ -551,7 +769,7 @@ fn emit_statement_list(
     locals: &mut LocalStore,
     table: &SymbolTable,
 ) -> WasmInstructions {
-    let mut instructions = WasmInstructions { lst: vec![] };
+    let mut instructions = WasmInstructions::empty();
 
     for statement in statements.iter().dropping_back(1) {
         let new_insts = emit_statement(statement, env, locals, table);
@@ -720,9 +938,9 @@ fn emit_expression(
             constructor, name, ..
         } => match &constructor.variant {
             ValueConstructorVariant::LocalVariable { .. } => match env.get(name).unwrap() {
-                Binding::Local(id) => WasmInstructions {
-                    lst: vec![wasm_encoder::Instruction::LocalGet(id.id())],
-                },
+                Binding::Local(id) => {
+                    WasmInstructions::single(wasm_encoder::Instruction::LocalGet(id.id()))
+                }
                 _ => todo!("Expected local variable binding"),
             },
 
@@ -730,9 +948,9 @@ fn emit_expression(
             ValueConstructorVariant::ModuleConstant { module, .. } => {
                 // grab the global
                 match env.get(&name) {
-                    Some(Binding::Constant(id)) => WasmInstructions {
-                        lst: vec![wasm_encoder::Instruction::GlobalGet(id.id())],
-                    },
+                    Some(Binding::Constant(id)) => {
+                        WasmInstructions::single(wasm_encoder::Instruction::GlobalGet(id.id()))
+                    }
                     _ => todo!("Expected constant binding"),
                 }
             }
@@ -745,9 +963,9 @@ fn emit_expression(
                 field_map,
                 ..
             } => match env.get(name).unwrap() {
-                Binding::Function(id) => WasmInstructions {
-                    lst: vec![wasm_encoder::Instruction::Call(id.id())],
-                },
+                Binding::Function(id) => {
+                    WasmInstructions::single(wasm_encoder::Instruction::Call(id.id()))
+                }
 
                 _ => todo!("Expected function binding"),
             },
@@ -776,23 +994,23 @@ fn emit_expression(
                         _ => todo!("Expected simple product"),
                     }
                 }
-                Binding::Builtin(BuiltinType::Nil) => WasmInstructions {
-                    lst: vec![wasm_encoder::Instruction::I32Const(0)],
-                },
-                Binding::Builtin(BuiltinType::Boolean { value }) => WasmInstructions {
-                    lst: vec![wasm_encoder::Instruction::I32Const(if value {
+                Binding::Builtin(BuiltinType::Nil) => {
+                    WasmInstructions::single(wasm_encoder::Instruction::I32Const(0))
+                }
+                Binding::Builtin(BuiltinType::Boolean { value }) => {
+                    WasmInstructions::single(wasm_encoder::Instruction::I32Const(if value {
                         1
                     } else {
                         0
-                    })],
-                },
+                    }))
+                }
                 _ => todo!("Expected product binding"),
             },
             ValueConstructorVariant::Record { .. } => todo!("Only simple records with 0 fields"),
             _ => todo!("Only local variables, named module constants and records"),
         },
         TypedExpr::Call { fun, args, .. } => {
-            let mut insts = WasmInstructions { lst: vec![] };
+            let mut insts = WasmInstructions::empty();
             // TODO: implement out-of-declared-order parameter function calls
             for arg in args {
                 let new_insts = emit_expression(&arg.value, env, locals, table);
@@ -841,9 +1059,7 @@ fn emit_expression(
         } => emit_case_expression(subjects, clauses, Arc::clone(typ), env, locals, table),
         TypedExpr::Float { value, .. } => {
             let val = parse_float(value);
-            WasmInstructions {
-                lst: vec![wasm_encoder::Instruction::F64Const(val)],
-            }
+            WasmInstructions::single(wasm_encoder::Instruction::F64Const(val))
         }
         TypedExpr::String { .. } => todo!("Strings not implemented yet"),
         TypedExpr::Pipeline { .. } => todo!("Pipelines not implemented yet"),
@@ -933,7 +1149,7 @@ fn emit_case_expression(
         .collect();
 
     // then, emit the subject expressions and store them in the locals
-    let mut insts = WasmInstructions { lst: vec![] };
+    let mut insts = WasmInstructions::empty();
     for (id, subject) in ids.iter().zip(subjects) {
         let new_insts = emit_expression(subject, env, locals, table);
         insts.lst.extend(new_insts.lst);
@@ -1057,64 +1273,26 @@ fn emit_clause_guard_expression(
             // check types
             assert_eq!(left.type_(), right.type_(), "Expected equal types");
 
-            let type_ = left.type_();
-            match type_ {
-                _ if type_.is_int() => {
-                    let mut insts = emit_clause_guard_expression(left, env, locals, table);
-                    let right_insts = emit_clause_guard_expression(right, env, locals, table);
-                    insts.lst.extend(right_insts.lst);
-                    insts.lst.extend(integer::eq().lst);
-                    insts
-                }
-                _ if type_.is_float() => {
-                    let mut insts = emit_clause_guard_expression(left, env, locals, table);
-                    let right_insts = emit_clause_guard_expression(right, env, locals, table);
-                    insts.lst.extend(right_insts.lst);
-                    insts.lst.push(wasm_encoder::Instruction::F64Eq);
-                    insts
-                }
-                _ if type_.is_bool() => {
-                    let mut insts = emit_clause_guard_expression(left, env, locals, table);
-                    let right_insts = emit_clause_guard_expression(right, env, locals, table);
-                    insts.lst.extend(right_insts.lst);
-                    insts.lst.push(wasm_encoder::Instruction::I32Eq);
-                    insts
-                }
-                _ => todo!("Only int, float and bool types are supported"),
-            }
+            let mut insts = emit_clause_guard_expression(left, env, locals, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts
+                .lst
+                .extend(emit_equality_test(left.type_(), table).lst);
+            insts
         }
         ClauseGuard::NotEquals { left, right, .. } => {
             // check types
             assert_eq!(left.type_(), right.type_(), "Expected equal types");
 
-            let type_ = left.type_();
-            match type_ {
-                _ if type_.is_int() => {
-                    let mut insts = emit_clause_guard_expression(left, env, locals, table);
-                    let right_insts = emit_clause_guard_expression(right, env, locals, table);
-                    insts.lst.extend(right_insts.lst);
-                    insts.lst.extend(integer::eq().lst);
-                    insts.lst.push(wasm_encoder::Instruction::I32Eqz);
-                    insts
-                }
-                _ if type_.is_float() => {
-                    let mut insts = emit_clause_guard_expression(left, env, locals, table);
-                    let right_insts = emit_clause_guard_expression(right, env, locals, table);
-                    insts.lst.extend(right_insts.lst);
-                    insts.lst.push(wasm_encoder::Instruction::F64Eq);
-                    insts.lst.push(wasm_encoder::Instruction::I32Eqz);
-                    insts
-                }
-                _ if type_.is_bool() => {
-                    let mut insts = emit_clause_guard_expression(left, env, locals, table);
-                    let right_insts = emit_clause_guard_expression(right, env, locals, table);
-                    insts.lst.extend(right_insts.lst);
-                    insts.lst.push(wasm_encoder::Instruction::I32Eq);
-                    insts.lst.push(wasm_encoder::Instruction::I32Eqz);
-                    insts
-                }
-                _ => todo!("Only int, float and bool types are supported"),
-            }
+            let mut insts = emit_clause_guard_expression(left, env, locals, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts
+                .lst
+                .extend(emit_equality_test(left.type_(), table).lst);
+            insts.lst.push(wasm_encoder::Instruction::I32Eqz);
+            insts
         }
         ClauseGuard::LtInt { left, right, .. } => {
             let mut insts = emit_clause_guard_expression(left, env, locals, table);
@@ -1212,25 +1390,25 @@ fn emit_clause_guard_expression(
         ClauseGuard::Var { name, .. } => {
             // this is simple variable access!
             match env.get(name) {
-                Some(Binding::Builtin(BuiltinType::Boolean { value })) => WasmInstructions {
-                    lst: vec![wasm_encoder::Instruction::I32Const(if value {
+                Some(Binding::Builtin(BuiltinType::Boolean { value })) => {
+                    WasmInstructions::single(wasm_encoder::Instruction::I32Const(if value {
                         1
                     } else {
                         0
-                    })],
-                },
-                Some(Binding::Builtin(BuiltinType::Nil)) => WasmInstructions {
-                    lst: vec![wasm_encoder::Instruction::I32Const(0)],
-                },
-                Some(Binding::Local(id)) => WasmInstructions {
-                    lst: vec![wasm_encoder::Instruction::LocalGet(id.id())],
-                },
+                    }))
+                }
+                Some(Binding::Builtin(BuiltinType::Nil)) => {
+                    WasmInstructions::single(wasm_encoder::Instruction::I32Const(0))
+                }
+                Some(Binding::Local(id)) => {
+                    WasmInstructions::single(wasm_encoder::Instruction::LocalGet(id.id()))
+                }
                 Some(Binding::Product(id)) => {
                     let product = table.products.get(id).unwrap();
                     match product.kind {
-                        table::ProductKind::Simple { instance } => WasmInstructions {
-                            lst: vec![wasm_encoder::Instruction::GlobalGet(instance.id())],
-                        },
+                        table::ProductKind::Simple { instance } => WasmInstructions::single(
+                            wasm_encoder::Instruction::GlobalGet(instance.id()),
+                        ),
                         table::ProductKind::Composite => unimplemented!(
                             "Composite user-defined types not supported in clause guards"
                         ),
@@ -1285,7 +1463,6 @@ fn emit_binary_operation(
             insts
         }
         BinOp::DivInt => {
-            use wasm_encoder::Instruction;
             /*
                left
                right
@@ -1315,25 +1492,29 @@ fn emit_binary_operation(
             let right_insts = emit_expression(right, env, locals, table);
 
             insts.lst.extend(right_insts.lst);
-            insts.lst.push(Instruction::LocalTee(right_id.id()));
+            insts
+                .lst
+                .push(wasm_encoder::Instruction::LocalTee(right_id.id()));
             insts.lst.extend(integer::const_(0).lst);
             insts.lst.extend(integer::eq().lst);
 
+            insts.lst.push(wasm_encoder::Instruction::If(
+                wasm_encoder::BlockType::FunctionType(table.int_division.unwrap().id()),
+            ));
+
             insts
                 .lst
-                .push(Instruction::If(wasm_encoder::BlockType::FunctionType(
-                    table.int_division.unwrap().id(),
-                )));
-
-            insts.lst.push(Instruction::LocalGet(right_id.id()));
+                .push(wasm_encoder::Instruction::LocalGet(right_id.id()));
             insts.lst.extend(integer::div().lst);
 
-            insts.lst.push(Instruction::Else);
+            insts.lst.push(wasm_encoder::Instruction::Else);
 
-            insts.lst.push(Instruction::Drop);
-            insts.lst.push(Instruction::LocalGet(right_id.id())); // 0
+            insts.lst.push(wasm_encoder::Instruction::Drop);
+            insts
+                .lst
+                .push(wasm_encoder::Instruction::LocalGet(right_id.id())); // 0
 
-            insts.lst.push(Instruction::End);
+            insts.lst.push(wasm_encoder::Instruction::End);
 
             insts
         }
@@ -1517,7 +1698,6 @@ fn emit_binary_operation(
             insts
         }
         BinOp::DivFloat => {
-            use wasm_encoder::Instruction;
             /*
                left
                right
@@ -1547,25 +1727,29 @@ fn emit_binary_operation(
             let right_insts = emit_expression(right, env, locals, table);
 
             insts.lst.extend(right_insts.lst);
-            insts.lst.push(Instruction::LocalTee(right_id.id()));
-            insts.lst.push(Instruction::F64Const(0.0));
-            insts.lst.push(Instruction::F64Eq);
+            insts
+                .lst
+                .push(wasm_encoder::Instruction::LocalTee(right_id.id()));
+            insts.lst.push(wasm_encoder::Instruction::F64Const(0.0));
+            insts.lst.push(wasm_encoder::Instruction::F64Eq);
+
+            insts.lst.push(wasm_encoder::Instruction::If(
+                wasm_encoder::BlockType::FunctionType(table.float_division.unwrap().id()),
+            ));
 
             insts
                 .lst
-                .push(Instruction::If(wasm_encoder::BlockType::FunctionType(
-                    table.float_division.unwrap().id(),
-                )));
+                .push(wasm_encoder::Instruction::LocalGet(right_id.id()));
+            insts.lst.push(wasm_encoder::Instruction::F64Div);
 
-            insts.lst.push(Instruction::LocalGet(right_id.id()));
-            insts.lst.push(Instruction::F64Div);
+            insts.lst.push(wasm_encoder::Instruction::Else);
 
-            insts.lst.push(Instruction::Else);
+            insts.lst.push(wasm_encoder::Instruction::Drop);
+            insts
+                .lst
+                .push(wasm_encoder::Instruction::LocalGet(right_id.id())); // 0.0
 
-            insts.lst.push(Instruction::Drop);
-            insts.lst.push(Instruction::LocalGet(right_id.id())); // 0.0
-
-            insts.lst.push(Instruction::End);
+            insts.lst.push(wasm_encoder::Instruction::End);
 
             insts
         }

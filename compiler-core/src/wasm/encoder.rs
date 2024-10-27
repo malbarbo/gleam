@@ -5,7 +5,6 @@ use std::sync::Arc;
 use ecow::EcoString;
 use wasm_encoder::CodeSection;
 
-use wasm_encoder::ConstExpr;
 use wasm_encoder::ElementSection;
 use wasm_encoder::ExportSection;
 use wasm_encoder::FunctionSection;
@@ -237,6 +236,16 @@ impl WasmTypeImpl {
 #[derive(Debug)]
 pub struct WasmInstructions {
     pub lst: Vec<wasm_encoder::Instruction<'static>>,
+}
+
+impl WasmInstructions {
+    pub fn single(inst: wasm_encoder::Instruction<'static>) -> Self {
+        Self { lst: vec![inst] }
+    }
+
+    pub fn empty() -> Self {
+        Self { lst: vec![] }
+    }
 }
 
 #[derive(Debug)]

@@ -129,6 +129,9 @@ pub struct Sum {
     /// Whether the type is made public outside of its module.
     /// If it's public, its constructor is exported from the Wasm module.
     pub public: bool,
+
+    /// Function which tests for equality between two instances of this sum type.
+    pub equality_test: FunctionId,
 }
 
 /// Represents a product type in the type table.

@@ -7,69 +7,47 @@ pub type Representation = i32;
 pub const VAL_TYPE: ValType = ValType::I32;
 
 pub fn add() -> WasmInstructions {
-    WasmInstructions {
-        lst: vec![Instruction::I32Add],
-    }
+    WasmInstructions::single(Instruction::I32Add)
 }
 
 pub fn sub() -> WasmInstructions {
-    WasmInstructions {
-        lst: vec![Instruction::I32Sub],
-    }
+    WasmInstructions::single(Instruction::I32Sub)
 }
 
 pub fn mul() -> WasmInstructions {
-    WasmInstructions {
-        lst: vec![Instruction::I32Mul],
-    }
+    WasmInstructions::single(Instruction::I32Mul)
 }
 
 pub fn div() -> WasmInstructions {
-    WasmInstructions {
-        lst: vec![Instruction::I32DivS],
-    }
+    WasmInstructions::single(Instruction::I32DivS)
 }
 
 pub fn rem() -> WasmInstructions {
-    WasmInstructions {
-        lst: vec![Instruction::I32RemS],
-    }
+    WasmInstructions::single(Instruction::I32RemS)
 }
 
 pub fn const_(value: Representation) -> WasmInstructions {
-    WasmInstructions {
-        lst: vec![Instruction::I32Const(value)],
-    }
+    WasmInstructions::single(Instruction::I32Const(value))
 }
 
 pub fn eq() -> WasmInstructions {
-    WasmInstructions {
-        lst: vec![Instruction::I32Eq],
-    }
+    WasmInstructions::single(Instruction::I32Eq)
 }
 
 pub fn lt() -> WasmInstructions {
-    WasmInstructions {
-        lst: vec![Instruction::I32LtS],
-    }
+    WasmInstructions::single(Instruction::I32LtS)
 }
 
 pub fn gt() -> WasmInstructions {
-    WasmInstructions {
-        lst: vec![Instruction::I32GtS],
-    }
+    WasmInstructions::single(Instruction::I32GtS)
 }
 
 pub fn lte() -> WasmInstructions {
-    WasmInstructions {
-        lst: vec![Instruction::I32LeS],
-    }
+    WasmInstructions::single(Instruction::I32LeS)
 }
 
 pub fn gte() -> WasmInstructions {
-    WasmInstructions {
-        lst: vec![Instruction::I32GeS],
-    }
+    WasmInstructions::single(Instruction::I32GeS)
 }
 
 pub fn const_expr_initializer(arg: Representation) -> wasm_encoder::ConstExpr {
