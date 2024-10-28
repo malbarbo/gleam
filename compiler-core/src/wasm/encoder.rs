@@ -203,12 +203,14 @@ impl WasmTypeImpl {
                     _ => todo!("unsupported type: {binding:?}"),
                 }
             } else {
-                unreachable!("used a named type that wasn't in the environment")
+                unreachable!("used a named type that wasn't in the environment: {}", name)
             }
         }
 
         if type_.is_int() {
             Self::Int
+        } else if type_.is_float() {
+            Self::Float
         } else if type_.is_bool() {
             Self::Bool
         } else if type_.is_nil() {

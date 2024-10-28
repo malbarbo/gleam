@@ -15,7 +15,7 @@ use encoder::{
 };
 use environment::{Binding, BuiltinType, Environment};
 use itertools::Itertools;
-use table::{Local, LocalStore, SymbolTable};
+use table::{FieldType, Local, LocalStore, SymbolTable};
 
 use crate::{
     ast::{
@@ -252,7 +252,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                             fields.push(table::ProductField {
                                 name: label,
                                 index: i,
-                                type_: WasmTypeImpl::from_gleam_type(
+                                type_: FieldType::from_gleam_type(
                                     Arc::clone(&arg.type_),
                                     &root_environment,
                                     &table,
@@ -424,7 +424,6 @@ fn emit_sum_equality(sum: &table::Sum, table: &SymbolTable) -> WasmFunction {
         struct_type_index: struct_type.definition.id,
         field_index: 0,
     });
-    instructions.push(Inst::End);
 
     // get the tag of the second argument
     instructions.push(Inst::LocalGet(1));
@@ -432,7 +431,6 @@ fn emit_sum_equality(sum: &table::Sum, table: &SymbolTable) -> WasmFunction {
         struct_type_index: struct_type.definition.id,
         field_index: 0,
     });
-    instructions.push(Inst::End);
 
     // compare the tags
     instructions.push(Inst::I32Eq);
@@ -488,13 +486,13 @@ fn emit_sum_equality(sum: &table::Sum, table: &SymbolTable) -> WasmFunction {
         instructions.push(Inst::RefCastNonNull(wasm_encoder::HeapType::Concrete(
             struct_type.definition.id,
         )));
-        instructions.push(Inst::LocalSet(lhs_local.id()));
+        instructions.push(Inst::LocalSet(2 + lhs_local.id()));
 
         instructions.push(Inst::LocalGet(1));
         instructions.push(Inst::RefCastNonNull(wasm_encoder::HeapType::Concrete(
             struct_type.definition.id,
         )));
-        instructions.push(Inst::LocalSet(rhs_local.id()));
+        instructions.push(Inst::LocalSet(2 + rhs_local.id()));
 
         // for each field, compare the values
         for field in &variant.fields {
@@ -502,21 +500,21 @@ fn emit_sum_equality(sum: &table::Sum, table: &SymbolTable) -> WasmFunction {
             instructions.push(Inst::Block(wasm_encoder::BlockType::Empty));
 
             // get the field from the first struct
-            instructions.push(Inst::LocalGet(lhs_local.id()));
+            instructions.push(Inst::LocalGet(2 + lhs_local.id()));
             instructions.push(Inst::StructGet {
                 struct_type_index: struct_type.definition.id,
                 field_index: field.index as u32 + 1,
             });
 
             // get the field from the second struct
-            instructions.push(Inst::LocalGet(rhs_local.id()));
+            instructions.push(Inst::LocalGet(2 + rhs_local.id()));
             instructions.push(Inst::StructGet {
                 struct_type_index: struct_type.definition.id,
                 field_index: field.index as u32 + 1,
             });
 
             // generate the appropriate equality test
-            instructions.extend(emit_equality_test(Arc::clone(&field.type_), table).lst);
+            instructions.extend(emit_equality_test(&field.type_, table).lst);
 
             // if the test fails, return false
             instructions.push(Inst::I32Eqz);
@@ -542,6 +540,9 @@ fn emit_sum_equality(sum: &table::Sum, table: &SymbolTable) -> WasmFunction {
 
     instructions.push(Inst::I32Const(0)); // return false
 
+    // finish function
+    instructions.push(Inst::End);
+
     WasmFunction {
         name: format!("eq@{}", sum.name).into(),
         type_index: function_type.definition.id,
@@ -557,24 +558,20 @@ fn emit_sum_equality(sum: &table::Sum, table: &SymbolTable) -> WasmFunction {
     }
 }
 
-fn emit_equality_test(type_: Arc<Type>, table: &SymbolTable) -> WasmInstructions {
+fn emit_equality_test(type_: &FieldType, table: &SymbolTable) -> WasmInstructions {
     // assumes that there are two values on the stack (lhs, rhs)
 
-    match type_.as_ref() {
-        _ if type_.is_int() => integer::eq(),
-        _ if type_.is_float() => WasmInstructions::single(wasm_encoder::Instruction::F64Eq),
-        _ if type_.is_bool() => WasmInstructions::single(wasm_encoder::Instruction::I32Eq),
-        _ if type_.is_nil() => WasmInstructions::single(wasm_encoder::Instruction::I32Eq),
-        Type::Named {
-            publicity,
-            package,
-            module,
-            name,
-            args,
-        } => todo!(),
-        Type::Fn { args, retrn } => todo!(),
-        Type::Var { type_ } => todo!(),
-        Type::Tuple { elems } => todo!(),
+    match type_ {
+        FieldType::Sum(id) => {
+            let sum = table.sums.get(*id).unwrap();
+            let function = table.functions.get(sum.equality_test).unwrap();
+            WasmInstructions::single(wasm_encoder::Instruction::Call(function.id.id()))
+        }
+        FieldType::Int => integer::eq(),
+        FieldType::Float => WasmInstructions::single(wasm_encoder::Instruction::F64Eq),
+        FieldType::Bool | FieldType::Nil => {
+            WasmInstructions::single(wasm_encoder::Instruction::I32Eq)
+        }
     }
 }
 
@@ -948,9 +945,12 @@ fn emit_expression(
             ValueConstructorVariant::ModuleConstant { module, .. } => {
                 // grab the global
                 match env.get(&name) {
-                    Some(Binding::Constant(id)) => {
-                        WasmInstructions::single(wasm_encoder::Instruction::GlobalGet(id.id()))
-                    }
+                    Some(Binding::Constant(id)) => WasmInstructions {
+                        lst: vec![
+                            wasm_encoder::Instruction::GlobalGet(id.id()),
+                            wasm_encoder::Instruction::RefAsNonNull,
+                        ],
+                    },
                     _ => todo!("Expected constant binding"),
                 }
             }
@@ -1276,9 +1276,10 @@ fn emit_clause_guard_expression(
             let mut insts = emit_clause_guard_expression(left, env, locals, table);
             let right_insts = emit_clause_guard_expression(right, env, locals, table);
             insts.lst.extend(right_insts.lst);
-            insts
-                .lst
-                .extend(emit_equality_test(left.type_(), table).lst);
+            insts.lst.extend(
+                emit_equality_test(&FieldType::from_gleam_type(left.type_(), env, table), table)
+                    .lst,
+            );
             insts
         }
         ClauseGuard::NotEquals { left, right, .. } => {
@@ -1288,9 +1289,10 @@ fn emit_clause_guard_expression(
             let mut insts = emit_clause_guard_expression(left, env, locals, table);
             let right_insts = emit_clause_guard_expression(right, env, locals, table);
             insts.lst.extend(right_insts.lst);
-            insts
-                .lst
-                .extend(emit_equality_test(left.type_(), table).lst);
+            insts.lst.extend(
+                emit_equality_test(&FieldType::from_gleam_type(left.type_(), env, table), table)
+                    .lst,
+            );
             insts.lst.push(wasm_encoder::Instruction::I32Eqz);
             insts
         }
@@ -1406,9 +1408,12 @@ fn emit_clause_guard_expression(
                 Some(Binding::Product(id)) => {
                     let product = table.products.get(id).unwrap();
                     match product.kind {
-                        table::ProductKind::Simple { instance } => WasmInstructions::single(
-                            wasm_encoder::Instruction::GlobalGet(instance.id()),
-                        ),
+                        table::ProductKind::Simple { instance } => WasmInstructions {
+                            lst: vec![
+                                wasm_encoder::Instruction::GlobalGet(instance.id()),
+                                wasm_encoder::Instruction::RefAsNonNull,
+                            ],
+                        },
                         table::ProductKind::Composite => unimplemented!(
                             "Composite user-defined types not supported in clause guards"
                         ),
@@ -1562,63 +1567,27 @@ fn emit_binary_operation(
             assert_eq!(left.type_(), right.type_(), "Expected equal types");
 
             let type_ = left.type_();
-            match type_ {
-                _ if type_.is_int() => {
-                    let mut insts = emit_expression(left, env, locals, table);
-                    let right_insts = emit_expression(right, env, locals, table);
-                    insts.lst.extend(right_insts.lst);
-                    insts.lst.extend(integer::eq().lst);
-                    insts
-                }
-                _ if type_.is_float() => {
-                    let mut insts = emit_expression(left, env, locals, table);
-                    let right_insts = emit_expression(right, env, locals, table);
-                    insts.lst.extend(right_insts.lst);
-                    insts.lst.push(wasm_encoder::Instruction::F64Eq);
-                    insts
-                }
-                _ if type_.is_bool() => {
-                    let mut insts = emit_expression(left, env, locals, table);
-                    let right_insts = emit_expression(right, env, locals, table);
-                    insts.lst.extend(right_insts.lst);
-                    insts.lst.push(wasm_encoder::Instruction::I32Eq);
-                    insts
-                }
-                _ => todo!("Only int, float and bool types are supported"),
-            }
+            let mut insts = emit_expression(left, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.extend(
+                emit_equality_test(&FieldType::from_gleam_type(type_, env, table), table).lst,
+            );
+            insts
         }
         BinOp::NotEq => {
             // check types
             assert_eq!(left.type_(), right.type_(), "Expected equal types");
 
             let type_ = left.type_();
-            match type_ {
-                _ if type_.is_int() => {
-                    let mut insts = emit_expression(left, env, locals, table);
-                    let right_insts = emit_expression(right, env, locals, table);
-                    insts.lst.extend(right_insts.lst);
-                    insts.lst.extend(integer::eq().lst);
-                    insts.lst.push(wasm_encoder::Instruction::I32Eqz);
-                    insts
-                }
-                _ if type_.is_float() => {
-                    let mut insts = emit_expression(left, env, locals, table);
-                    let right_insts = emit_expression(right, env, locals, table);
-                    insts.lst.extend(right_insts.lst);
-                    insts.lst.push(wasm_encoder::Instruction::F64Eq);
-                    insts.lst.push(wasm_encoder::Instruction::I32Eqz);
-                    insts
-                }
-                _ if type_.is_bool() => {
-                    let mut insts = emit_expression(left, env, locals, table);
-                    let right_insts = emit_expression(right, env, locals, table);
-                    insts.lst.extend(right_insts.lst);
-                    insts.lst.push(wasm_encoder::Instruction::I32Eq);
-                    insts.lst.push(wasm_encoder::Instruction::I32Eqz);
-                    insts
-                }
-                _ => todo!("Only int, float and bool types are supported"),
-            }
+            let mut insts = emit_expression(left, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, table);
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::I32Eqz);
+            insts.lst.extend(
+                emit_equality_test(&FieldType::from_gleam_type(type_, env, table), table).lst,
+            );
+            insts
         }
         BinOp::LtInt => {
             let mut insts = emit_expression(left, env, locals, table);

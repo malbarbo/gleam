@@ -236,7 +236,7 @@ pub fn compile_pattern(
                     Local {
                         id: arg_variable,
                         name: field.name.clone(),
-                        wasm_type: field.type_.clone(),
+                        wasm_type: field.type_.to_wasm_type(table),
                     },
                 );
 

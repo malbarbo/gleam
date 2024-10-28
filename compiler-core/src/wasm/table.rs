@@ -1,9 +1,13 @@
 use ecow::EcoString;
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
 
+use crate::wasm::environment::Binding;
+
 use super::encoder::WasmTypeImpl;
+use super::environment::Environment;
 
 /// A unique identifier parameterized by a type.
 pub struct Id<T> {
@@ -167,8 +171,95 @@ pub struct Product {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProductField {
     pub name: EcoString,
-    pub type_: WasmTypeImpl,
+    pub type_: FieldType,
     pub index: usize,
+}
+
+/// Represents a field type.
+// TODO: Remove this enum and use TypeId directly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FieldType {
+    /// A sum reference.
+    Sum(SumId),
+
+    /// Integer
+    Int,
+
+    /// Float
+    Float,
+
+    /// Boolean
+    Bool,
+
+    /// Unit
+    Nil,
+}
+
+impl FieldType {
+    // basically copied from WasmTypeImpl
+    pub fn from_gleam_type(
+        type_: Arc<crate::type_::Type>,
+        env: &Environment<'_>,
+        table: &SymbolTable,
+    ) -> Self {
+        use crate::type_::Type as GleamType;
+        use crate::type_::TypeVar;
+
+        fn resolve_type_name(name: &str, env: &Environment<'_>, table: &SymbolTable) -> FieldType {
+            if let Some(binding) = env.get(name) {
+                match binding {
+                    Binding::Product(id) => {
+                        let product = table.products.get(id).unwrap();
+                        FieldType::Sum(product.parent)
+                    }
+                    Binding::Sum(id) => FieldType::Sum(id),
+                    _ => todo!("unsupported type: {binding:?}"),
+                }
+            } else {
+                unreachable!("used a named type that wasn't in the environment: {}", name)
+            }
+        }
+
+        if type_.is_int() {
+            Self::Int
+        } else if type_.is_float() {
+            Self::Float
+        } else if type_.is_bool() {
+            Self::Bool
+        } else if type_.is_nil() {
+            Self::Nil
+        } else {
+            match type_.as_ref() {
+                // TODO: handle modules
+                GleamType::Named { name, module, .. } => resolve_type_name(name, env, table),
+                GleamType::Var {
+                    type_: type_var, ..
+                } => {
+                    let b = type_var.borrow();
+                    if let TypeVar::Link { ref type_ } = *b {
+                        Self::from_gleam_type(Arc::clone(type_), env, table)
+                    } else {
+                        unreachable!("unresolved type var: {type_var:?}")
+                    }
+                }
+                _ => unreachable!("only named types, received: {type_:?}"),
+            }
+        }
+    }
+
+    pub fn to_wasm_type(&self, table: &SymbolTable) -> WasmTypeImpl {
+        match self {
+            Self::Int => WasmTypeImpl::Int,
+            Self::Float => WasmTypeImpl::Float,
+            Self::Bool => WasmTypeImpl::Bool,
+            Self::Nil => WasmTypeImpl::Nil,
+            Self::Sum(sum_id) => {
+                let sum = table.sums.get(*sum_id).unwrap();
+                let sum_type = table.types.get(sum.type_).unwrap();
+                WasmTypeImpl::StructRef(sum_type.definition.id)
+            }
+        }
+    }
 }
 
 /// The kind of a product type.
