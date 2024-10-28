@@ -1,9 +1,7 @@
 FALTAM:
 
 MVP 1.0:
-- Case guards e outros recursos do pattern matching
 - Constantes a nível de módulo (não-básicas)
-- Igualdade de tipos que não sejam simples
 - Somas e produtos com mesmo nome
 - Sintaxe de acesso de registro
 - String
