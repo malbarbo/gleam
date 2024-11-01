@@ -1065,11 +1065,8 @@ mod uri_serde_default_https {
 
 mod package_name {
     use ecow::EcoString;
-    use regex::Regex;
     use serde::Deserializer;
-    use std::{fmt, sync::OnceLock};
-
-    static PACKAGE_NAME_PATTERN: OnceLock<Regex> = OnceLock::new();
+    use std::fmt;
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<EcoString, D::Error>
     where
@@ -1091,9 +1088,10 @@ mod package_name {
         where
             E: serde::de::Error,
         {
-            if PACKAGE_NAME_PATTERN
-                .get_or_init(|| Regex::new("^[a-z][a-z0-9_]*$").expect("Package name regex"))
-                .is_match(value)
+            // ^[a-z][a-z0-9_]*$
+            let mut chars = value.chars();
+            if chars.next().map(|ch| ch.is_ascii_lowercase()) == Some(true)
+                && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
             {
                 Ok(value.into())
             } else {

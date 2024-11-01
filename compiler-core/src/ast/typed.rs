@@ -1,5 +1,3 @@
-use std::sync::OnceLock;
-
 use type_::{FieldMap, TypedCallArg};
 
 use super::*;
@@ -1498,12 +1496,7 @@ pub(crate) fn pairwise_all<A>(one: &[A], other: &[A], function: impl Fn((&A, &A)
 }
 
 fn is_non_zero_number(value: &EcoString) -> bool {
-    use regex::Regex;
-    static NON_ZERO: OnceLock<Regex> = OnceLock::new();
-
-    NON_ZERO
-        .get_or_init(|| Regex::new(r"[1-9]").expect("NON_ZERO regex"))
-        .is_match(value)
+    matches!(value.chars().next(), Some('1'..='9'))
 }
 
 impl<'a> From<&'a TypedExpr> for Located<'a> {
