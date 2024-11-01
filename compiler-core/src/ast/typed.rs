@@ -1,8 +1,5 @@
-use std::sync::OnceLock;
-
-use type_::{FieldMap, TypedCallArg};
-
 use super::*;
+use type_::{FieldMap, TypedCallArg};
 use crate::type_::{HasType, Type, ValueConstructorVariant, bool};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -511,13 +508,10 @@ impl TypedExpr {
     }
 
     pub fn non_zero_compile_time_number(&self) -> bool {
-        use regex::Regex;
-        static NON_ZERO: OnceLock<Regex> = OnceLock::new();
-
         matches!(
             self,
-            Self::Int{ value, .. } | Self::Float { value, .. } if NON_ZERO.get_or_init(||
-                Regex::new(r"[1-9]").expect("NON_ZERO regex")).is_match(value)
+            Self::Int{ value, .. } | Self::Float { value, .. }
+                if matches!(value.chars().next(), Some('1'..='9'))
         )
     }
 
