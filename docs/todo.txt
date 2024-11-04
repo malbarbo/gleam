@@ -7,7 +7,6 @@ MVP 1.0:
 - Concatenação de strings
 - Padrões relacionados a strings
 - Entrada e saída básicas
-- Ligação e execução do módulo por um runtime
 
 MVP 2.0:
 - Panic, todo com strings de erro
