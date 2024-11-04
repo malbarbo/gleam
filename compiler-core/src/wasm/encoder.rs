@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use ecow::EcoString;
+use tracing::warn;
 use wasm_encoder::CodeSection;
 
 use wasm_encoder::ElementSection;
@@ -244,6 +245,7 @@ impl WasmInstructions {
 pub struct WasmFunction {
     pub name: EcoString,
     pub type_index: u32,
+    pub arity: u32,
     pub instructions: WasmInstructions,
     pub locals: Vec<(EcoString, WasmTypeImpl)>,
     pub argument_names: Vec<Option<EcoString>>,
@@ -323,6 +325,10 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
     // also declare the start function type
     let init_function_type_idx = wasm_module.types.len() as u32;
     _ = types.function(vec![], vec![]);
+
+    let start_function_type_idx = init_function_type_idx + 1;
+    _ = types.function(vec![], vec![]);
+
     _ = module.section(&types);
 
     // functions
@@ -335,7 +341,23 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
     // create start function as well
     let init_function_idx = wasm_module.functions.len() as u32;
     _ = functions.function(init_function_type_idx);
+
+    // create a _start function
+    let start_function_idx = init_function_idx + 1;
+    _ = functions.function(start_function_type_idx);
+
     _ = module.section(&functions);
+
+    // memory
+    let mut memories = wasm_encoder::MemorySection::new();
+    _ = memories.memory(wasm_encoder::MemoryType {
+        minimum: 1,
+        maximum: None,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+    _ = module.section(&memories);
 
     // globals
     let mut globals = GlobalSection::new();
@@ -376,6 +398,11 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
             );
         }
     }
+    // export the _start function
+    _ = exports.export("_start", wasm_encoder::ExportKind::Func, start_function_idx);
+
+    // fake memory
+    _ = exports.export("memory", wasm_encoder::ExportKind::Memory, 0);
     _ = module.section(&exports);
 
     // declare a start function
@@ -424,12 +451,36 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
         }
         _ = codes.function(&f);
     }
+    // for the _start function
+    {
+        // check if there's a main function
+        let main_function_idx = wasm_module
+            .functions
+            .iter()
+            .find(|f| f.name == "main" && f.public && f.arity == 0) // TODO: check arity in a nicer way
+            .map(|f| f.function_index);
+
+        let mut instructions = vec![];
+        if let Some(main_function_idx) = main_function_idx {
+            instructions.push(wasm_encoder::Instruction::Call(main_function_idx));
+            instructions.push(wasm_encoder::Instruction::Drop);
+        } else {
+            warn!("no public main function of arity 0 found; _start function will do nothing");
+        }
+
+        instructions.push(wasm_encoder::Instruction::End);
+        let mut f = wasm_encoder::Function::new(vec![]);
+        for inst in instructions {
+            _ = f.instruction(&inst);
+        }
+        _ = codes.function(&f);
+    }
     _ = module.section(&codes);
 
     // names
     let mut names = NameSection::new();
 
-    // modules, functions, locals, types
+    // modules, functions, locals, types, tables, memories, globals, elements
 
     // functions
     let mut function_names = NameMap::new();
@@ -437,6 +488,7 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
         _ = function_names.append(func.function_index, &func.name);
     }
     _ = function_names.append(init_function_idx, "init@");
+    _ = function_names.append(start_function_idx, "_start");
     _ = names.functions(&function_names);
 
     // locals
@@ -466,7 +518,13 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
         _ = type_names.append(type_.id, &type_.name);
     }
     _ = type_names.append(init_function_type_idx, "typ@init");
+    _ = type_names.append(start_function_type_idx, "typ@_start");
     _ = names.types(&type_names);
+
+    // memories
+    let mut memory_names = NameMap::new();
+    _ = memory_names.append(0, "memory");
+    _ = names.memories(&memory_names);
 
     // globals
     let mut global_names = NameMap::new();

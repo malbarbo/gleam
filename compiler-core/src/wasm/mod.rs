@@ -4,6 +4,7 @@ mod encoder;
 mod environment;
 mod integer;
 mod pattern;
+mod string;
 mod table;
 
 use std::{collections::VecDeque, sync::Arc};
@@ -46,16 +47,6 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
 
     // generate prelude types
     generate_prelude_types(&mut table, &mut root_environment);
-
-    // TODO: add support for recursive type and function definitions
-    // to do this we need to process our module in three passes:
-    // 1 - assign an ID to all sum types and functions
-    // 2 - generate sum, product and constructors/function types
-    // 3 - generate function and constructor bodies
-
-    // problem: need to know type id when generating references to structs
-
-    // recursive functions are working!
 
     // FIRST PASS: generate indices for all names
     for definition in &ast.definitions {
@@ -553,6 +544,7 @@ fn emit_sum_equality(sum: &table::Sum, table: &SymbolTable) -> WasmFunction {
             .collect_vec(),
         argument_names: vec![Some(EcoString::from("lhs")), Some(EcoString::from("rhs"))],
         function_index: function.id.id(),
+        arity: 2,
         public: false,
     }
 }
@@ -694,6 +686,7 @@ fn emit_variant_constructor(
         instructions: WasmInstructions { lst: instructions },
         argument_names: constructor.arguments.iter().map(|_| None).collect(),
         locals: vec![],
+        arity: constructor.arguments.len() as u32,
         public,
     }
 }
@@ -755,6 +748,7 @@ fn emit_function(
             .skip(function_data.arity as _)
             .map(|local| (local.name, local.wasm_type))
             .collect_vec(),
+        arity: function_data.arity,
         public: function.publicity.is_public(),
     }
 }
@@ -932,82 +926,7 @@ fn emit_expression(
         } => emit_binary_operation(env, locals, table, typ, *name, left, right),
         TypedExpr::Var {
             constructor, name, ..
-        } => match &constructor.variant {
-            ValueConstructorVariant::LocalVariable { .. } => match env.get(name).unwrap() {
-                Binding::Local(id) => {
-                    WasmInstructions::single(wasm_encoder::Instruction::LocalGet(id.id()))
-                }
-                _ => todo!("Expected local variable binding"),
-            },
-
-            // TODO: handle module
-            ValueConstructorVariant::ModuleConstant { module, .. } => {
-                // grab the global
-                match env.get(&name) {
-                    Some(Binding::Constant(id)) => WasmInstructions {
-                        lst: vec![
-                            wasm_encoder::Instruction::GlobalGet(id.id()),
-                            wasm_encoder::Instruction::RefAsNonNull,
-                        ],
-                    },
-                    _ => todo!("Expected constant binding"),
-                }
-            }
-
-            // TODO: handle module
-            // TODO: handle field_map
-            ValueConstructorVariant::ModuleFn {
-                name,
-                module,
-                field_map,
-                ..
-            } => match env.get(name).unwrap() {
-                Binding::Function(id) => {
-                    WasmInstructions::single(wasm_encoder::Instruction::Call(id.id()))
-                }
-
-                _ => todo!("Expected function binding"),
-            },
-            // TODO: handle module
-            // TODO: handle field_map
-            ValueConstructorVariant::Record {
-                name,
-                module,
-                field_map,
-                arity: 0,
-                ..
-            } => match env.get(name).unwrap() {
-                Binding::Product(id) => {
-                    let product = table.products.get(id).unwrap();
-                    match product {
-                        table::Product {
-                            kind: table::ProductKind::Simple { instance },
-                            ..
-                        } => WasmInstructions {
-                            lst: vec![
-                                wasm_encoder::Instruction::GlobalGet(instance.id()),
-                                wasm_encoder::Instruction::RefAsNonNull, // safe because we initialize all globals before running
-                            ],
-                        },
-
-                        _ => todo!("Expected simple product"),
-                    }
-                }
-                Binding::Builtin(BuiltinType::Nil) => {
-                    WasmInstructions::single(wasm_encoder::Instruction::I32Const(0))
-                }
-                Binding::Builtin(BuiltinType::Boolean { value }) => {
-                    WasmInstructions::single(wasm_encoder::Instruction::I32Const(if value {
-                        1
-                    } else {
-                        0
-                    }))
-                }
-                _ => todo!("Expected product binding"),
-            },
-            ValueConstructorVariant::Record { .. } => todo!("Only simple records with 0 fields"),
-            _ => todo!("Only local variables, named module constants and records"),
-        },
+        } => emit_value_constructor(constructor, env, name, table),
         TypedExpr::Call { fun, args, .. } => {
             let mut insts = WasmInstructions::empty();
             // TODO: implement out-of-declared-order parameter function calls
@@ -1091,6 +1010,90 @@ fn emit_expression(
             insts
         }
         TypedExpr::Invalid { .. } => unreachable!("Invalid expression"),
+    }
+}
+
+fn emit_value_constructor(
+    constructor: &ValueConstructor,
+    env: &Environment<'_>,
+    name: &EcoString,
+    table: &SymbolTable,
+) -> WasmInstructions {
+    match &constructor.variant {
+        ValueConstructorVariant::LocalVariable { .. } => match env.get(name).unwrap() {
+            Binding::Local(id) => {
+                WasmInstructions::single(wasm_encoder::Instruction::LocalGet(id.id()))
+            }
+            _ => todo!("Expected local variable binding"),
+        },
+
+        // TODO: handle module
+        ValueConstructorVariant::ModuleConstant { module, .. } => {
+            // grab the global
+            match env.get(&name) {
+                Some(Binding::Constant(id)) => WasmInstructions {
+                    lst: vec![
+                        wasm_encoder::Instruction::GlobalGet(id.id()),
+                        wasm_encoder::Instruction::RefAsNonNull,
+                    ],
+                },
+                _ => todo!("Expected constant binding"),
+            }
+        }
+
+        // TODO: handle module
+        // TODO: handle field_map
+        ValueConstructorVariant::ModuleFn {
+            name,
+            module,
+            field_map,
+            ..
+        } => match env.get(name).unwrap() {
+            Binding::Function(id) => {
+                WasmInstructions::single(wasm_encoder::Instruction::Call(id.id()))
+            }
+
+            _ => todo!("Expected function binding"),
+        },
+        // TODO: handle module
+        // TODO: handle field_map
+        ValueConstructorVariant::Record {
+            name,
+            module,
+            field_map,
+            arity: 0,
+            ..
+        } => match env.get(name).unwrap() {
+            Binding::Product(id) => {
+                let product = table.products.get(id).unwrap();
+                match product {
+                    table::Product {
+                        kind: table::ProductKind::Simple { instance },
+                        ..
+                    } => WasmInstructions {
+                        lst: vec![
+                            wasm_encoder::Instruction::GlobalGet(instance.id()),
+                            wasm_encoder::Instruction::RefAsNonNull, // safe because we initialize all globals before running
+                        ],
+                    },
+
+                    _ => todo!("Expected simple product"),
+                }
+            }
+            Binding::Builtin(BuiltinType::Nil) => {
+                WasmInstructions::single(wasm_encoder::Instruction::I32Const(0))
+            }
+            Binding::Builtin(BuiltinType::Boolean { value }) => {
+                WasmInstructions::single(wasm_encoder::Instruction::I32Const(if value {
+                    1
+                } else {
+                    0
+                }))
+            }
+            _ => todo!("Expected product binding"),
+        },
+        ValueConstructorVariant::Record { .. } => todo!("Only simple records with 0 fields"),
+        ValueConstructorVariant::LocalConstant { literal } => emit_constant(literal, env, table),
     }
 }
 /*

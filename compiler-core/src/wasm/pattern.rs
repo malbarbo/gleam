@@ -38,6 +38,10 @@ pub enum Check {
         test_sum: SumId,
         discriminant: u32,
     },
+    BooleanEquality {
+        local: LocalId,
+        value: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +147,43 @@ pub fn compile_pattern(
             assignments: vec![],
             nested: vec![],
         },
+
+        Pattern::Constructor {
+            type_,
+            constructor: Inferred::Known(PatternConstructor { name, .. }),
+            ..
+        } if type_.is_bool() && name == "True" => CompiledPattern {
+            checks: vec![Check::BooleanEquality {
+                local: subject,
+                value: true,
+            }],
+            assignments: vec![],
+            nested: vec![],
+        },
+
+        Pattern::Constructor {
+            type_,
+            constructor: Inferred::Known(PatternConstructor { name, .. }),
+            ..
+        } if type_.is_bool() && name == "False" => CompiledPattern {
+            checks: vec![Check::BooleanEquality {
+                local: subject,
+                value: false,
+            }],
+            assignments: vec![],
+            nested: vec![],
+        },
+
+        Pattern::Constructor {
+            type_,
+            constructor: Inferred::Known(PatternConstructor { .. }),
+            ..
+        } if type_.is_nil() => CompiledPattern {
+            checks: vec![],
+            assignments: vec![],
+            nested: vec![],
+        },
+
         Pattern::Constructor {
             constructor:
                 Inferred::Known(PatternConstructor {
@@ -327,6 +368,11 @@ pub fn translate_pattern(
                     });
                     // push comparison
                     cond_expr.push(Instruction::I32Const(discriminant as i32));
+                    cond_expr.push(Instruction::I32Eq);
+                }
+                Check::BooleanEquality { local, value } => {
+                    cond_expr.push(Instruction::I32Const(if value { 1 } else { 0 }));
+                    cond_expr.push(Instruction::LocalGet(locals.get(local).unwrap().id.id()));
                     cond_expr.push(Instruction::I32Eq);
                 }
             }
