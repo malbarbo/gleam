@@ -1061,6 +1061,20 @@ fn emit_expression(
             let val = parse_float(value);
             WasmInstructions::single(wasm_encoder::Instruction::F64Const(val))
         }
+        TypedExpr::Todo { message, .. } => {
+            if message.is_some() {
+                todo!("Todo with message not implemented yet");
+            }
+
+            WasmInstructions::single(wasm_encoder::Instruction::Unreachable)
+        }
+        TypedExpr::Panic { message, .. } => {
+            if message.is_some() {
+                todo!("Panic with message not implemented yet");
+            }
+
+            WasmInstructions::single(wasm_encoder::Instruction::Unreachable)
+        }
         TypedExpr::String { .. } => todo!("Strings not implemented yet"),
         TypedExpr::Pipeline { .. } => todo!("Pipelines not implemented yet"),
         TypedExpr::Fn { .. } => todo!("Inner functions not implemented yet"),
@@ -1069,8 +1083,6 @@ fn emit_expression(
         TypedExpr::ModuleSelect { .. } => todo!("Module access not implemented yet"),
         TypedExpr::Tuple { .. } => todo!("Tuples not implemented yet"),
         TypedExpr::TupleIndex { .. } => todo!("Tuple index not implemented yet"),
-        TypedExpr::Todo { .. } => todo!("Todo not implemented yet"),
-        TypedExpr::Panic { .. } => todo!("Panic not implemented yet"),
         TypedExpr::BitArray { .. } => todo!("BitArrays not implemented yet"),
         TypedExpr::RecordUpdate { .. } => todo!("Record update not implemented yet"),
         TypedExpr::NegateBool { value, .. } => {
