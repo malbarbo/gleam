@@ -8,9 +8,13 @@ pub enum Binding {
     Local(LocalId),
     Function(FunctionId),
     Product(ProductId),
-    Sum(SumId),
     Constant(ConstantId),
     Builtin(BuiltinType),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum TypeBinding {
+    Sum(SumId),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -23,6 +27,9 @@ pub struct Environment<'a> {
     /// The values of the bindings in the current scope.
     values: HashMap<EcoString, Binding>,
 
+    /// The values of the type bindings in the current scope.
+    types: HashMap<EcoString, TypeBinding>,
+
     /// The parent scope, if any.
     enclosing: Option<&'a Environment<'a>>,
 }
@@ -31,6 +38,7 @@ impl<'a> Environment<'a> {
     pub fn new() -> Self {
         Self {
             values: HashMap::new(),
+            types: HashMap::new(),
             enclosing: None,
         }
     }
@@ -38,6 +46,7 @@ impl<'a> Environment<'a> {
     pub fn with_enclosing(enclosing: &'a Environment<'a>) -> Self {
         Self {
             values: HashMap::new(),
+            types: HashMap::new(),
             enclosing: Some(enclosing),
         }
     }
@@ -51,6 +60,18 @@ impl<'a> Environment<'a> {
             self.enclosing
                 .as_ref()
                 .and_then(|enclosing| enclosing.get(name))
+        })
+    }
+
+    pub fn set_type(&mut self, name: EcoString, binding: TypeBinding) {
+        _ = self.types.insert(name, binding);
+    }
+
+    pub fn get_type(&self, name: &str) -> Option<TypeBinding> {
+        self.types.get(name).cloned().or_else(|| {
+            self.enclosing
+                .as_ref()
+                .and_then(|enclosing| enclosing.get_type(name))
         })
     }
 }

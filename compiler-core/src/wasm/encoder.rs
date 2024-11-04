@@ -19,8 +19,8 @@ use crate::ast::TypedFunction;
 use crate::ast::TypedRecordConstructor;
 use crate::type_::Type;
 use crate::type_::TypeVar;
+use crate::wasm::environment::TypeBinding;
 
-use super::environment::Binding;
 use super::environment::Environment;
 use super::integer;
 use super::table::SymbolTable;
@@ -188,22 +188,12 @@ impl WasmTypeImpl {
             env: &Environment<'_>,
             table: &SymbolTable,
         ) -> WasmTypeImpl {
-            if let Some(binding) = env.get(name) {
-                match binding {
-                    Binding::Product(id) => {
-                        let product = table.products.get(id).unwrap();
-                        let type_ = table.types.get(product.type_).unwrap();
-                        WasmTypeImpl::StructRef(type_.definition.id)
-                    }
-                    Binding::Sum(id) => {
-                        let sum = table.sums.get(id).unwrap();
-                        let type_ = table.types.get(sum.type_).unwrap();
-                        WasmTypeImpl::StructRef(type_.definition.id)
-                    }
-                    _ => todo!("unsupported type: {binding:?}"),
-                }
+            if let Some(TypeBinding::Sum(id)) = env.get_type(name) {
+                let sum = table.sums.get(id).unwrap();
+                let type_ = table.types.get(sum.type_).unwrap();
+                WasmTypeImpl::StructRef(type_.definition.id)
             } else {
-                unreachable!("used a named type that wasn't in the environment: {}", name)
+                panic!("used a named type that wasn't in the environment: {}", name)
             }
         }
 

@@ -13,7 +13,7 @@ use encoder::{
     WasmFunction, WasmGlobal, WasmInstructions, WasmModule, WasmType, WasmTypeDefinition,
     WasmTypeImpl,
 };
-use environment::{Binding, BuiltinType, Environment};
+use environment::{Binding, BuiltinType, Environment, TypeBinding};
 use itertools::Itertools;
 use table::{FieldType, Local, LocalStore, SymbolTable};
 
@@ -88,7 +88,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                         equality_test: equality_function_id,
                     },
                 );
-                root_environment.set(t.name.clone(), Binding::Sum(sum_id));
+                root_environment.set_type(t.name.clone(), TypeBinding::Sum(sum_id));
             }
             TypedDefinition::Function(f) => {
                 let function_id = table.functions.new_id();
@@ -142,16 +142,16 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     todo!("Only concrete, non-generic types");
                 }
 
-                let sum_id = match root_environment.get(&t.name) {
-                    Some(Binding::Sum(id)) => id,
-                    _ => unreachable!("Expected sum binding in environment"),
+                let sum_id = match root_environment.get_type(&t.name) {
+                    Some(TypeBinding::Sum(id)) => id,
+                    _ => panic!("Expected sum binding in environment"),
                 };
 
                 let sum_type = table.sums.get(sum_id).expect("Sum type to be added in");
                 let sum_type_id = sum_type.type_;
 
                 // add sum type to environment
-                root_environment.set(t.name.clone(), Binding::Sum(sum_id));
+                root_environment.set_type(t.name.clone(), TypeBinding::Sum(sum_id));
 
                 let mut product_ids = vec![];
                 for (tag, variant) in t.constructors.iter().enumerate() {
@@ -309,7 +309,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     .functions
                     .insert(equality_function_id, equality_function);
             }
-            TypedDefinition::ModuleConstant(m) => {
+            TypedDefinition::ModuleConstant(_) => {
                 // we assign the constant type in the last pass
             }
             TypedDefinition::TypeAlias(_) => todo!("Type aliases aren't implemented yet"),
@@ -352,14 +352,13 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     }
                 }
                 // generate the equality function
-                let sum_id = root_environment.get(&c.name).unwrap();
+                let sum_id = root_environment.get_type(&c.name).unwrap();
                 match sum_id {
-                    Binding::Sum(id) => {
+                    TypeBinding::Sum(id) => {
                         let sum = table.sums.get(id).unwrap();
                         let function = emit_sum_equality(sum, &table);
                         functions.push(function);
                     }
-                    _ => unreachable!("Expected sum binding in environment"),
                 }
             }
             TypedDefinition::ModuleConstant(m) => {
@@ -1038,16 +1037,17 @@ fn emit_expression(
                             ..
                         },
                     ..
-                } => match env.get(name).unwrap() {
-                    Binding::Product(id) => {
+                } => {
+                    if let Some(Binding::Product(id)) = env.get(name) {
                         let product = table.products.get(id).unwrap();
                         insts
                             .lst
                             .push(wasm_encoder::Instruction::Call(product.constructor.id()));
                         insts
+                    } else {
+                        panic!("Expected product binding")
                     }
-                    _ => todo!("Expected product binding"),
-                },
+                }
                 _ => todo!("Only simple function calls and type constructors"),
             }
         }
@@ -1419,8 +1419,6 @@ fn emit_clause_guard_expression(
                         ),
                     }
                 }
-
-                Some(Binding::Sum(..)) => unreachable!("Types cannot be used as values in Gleam"),
                 Some(Binding::Constant(..)) => unreachable!("Constants shouldn't appear here"),
                 Some(Binding::Function(..)) => {
                     unreachable!("Gleam does not support function references in clause guards")

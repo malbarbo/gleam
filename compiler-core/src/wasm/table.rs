@@ -4,7 +4,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
 
-use crate::wasm::environment::Binding;
+use crate::wasm::environment::TypeBinding;
 
 use super::encoder::WasmTypeImpl;
 use super::environment::Environment;
@@ -206,17 +206,12 @@ impl FieldType {
         use crate::type_::TypeVar;
 
         fn resolve_type_name(name: &str, env: &Environment<'_>, table: &SymbolTable) -> FieldType {
-            if let Some(binding) = env.get(name) {
+            if let Some(binding) = env.get_type(name) {
                 match binding {
-                    Binding::Product(id) => {
-                        let product = table.products.get(id).unwrap();
-                        FieldType::Sum(product.parent)
-                    }
-                    Binding::Sum(id) => FieldType::Sum(id),
-                    _ => todo!("unsupported type: {binding:?}"),
+                    TypeBinding::Sum(id) => FieldType::Sum(id),
                 }
             } else {
-                unreachable!("used a named type that wasn't in the environment: {}", name)
+                panic!("Unknown type name: {}", name)
             }
         }
 

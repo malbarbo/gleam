@@ -49,12 +49,6 @@ pub enum Assignment {
         target_local: LocalId,
     },
 
-    // Reassigns `subject_local` to `target_local` without creating a binding
-    Unnamed {
-        subject_local: LocalId,
-        target_local: LocalId,
-    },
-
     Cast {
         subject_local: LocalId,
         target_local: LocalId,
@@ -166,10 +160,11 @@ pub fn compile_pattern(
             }
 
             // get product type
+            // todo: Nil, True and False
             let product = if let Some(Binding::Product(id)) = env.get(&record_name) {
                 table.products.get(id).unwrap()
             } else {
-                unreachable!("Invalid product type")
+                unreachable!("Invalid product type: {}", record_name)
             };
 
             let sum = table.sums.get(product.parent).unwrap();
@@ -360,17 +355,6 @@ pub fn translate_pattern(
                     locals.get(target_local).unwrap().id.id(),
                 ));
                 bindings.push((name.clone(), target_local));
-            }
-            Assignment::Unnamed {
-                subject_local,
-                target_local,
-            } => {
-                assign_expr.push(Instruction::LocalGet(
-                    locals.get(subject_local).unwrap().id.id(),
-                ));
-                assign_expr.push(Instruction::LocalSet(
-                    locals.get(target_local).unwrap().id.id(),
-                ));
             }
             Assignment::Cast {
                 subject_local,
