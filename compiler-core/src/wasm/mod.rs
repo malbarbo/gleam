@@ -48,7 +48,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
     let mut constants = vec![];
 
     // generate prelude types
-    generate_prelude_types(&mut table, &mut root_environment);
+    let mut module = generate_prelude_types(&mut table, &mut root_environment);
 
     // FIRST PASS: generate indices for all names
     for definition in &ast.definitions {
@@ -388,67 +388,20 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
             TypedDefinition::Import(_) => todo!("Imports aren't implemented yet"),
         }
     }
-    // also generate the string function
-    let string_type = table
+
+    module.functions.extend(functions);
+    module.constants.extend(constants);
+    module
+        .strings
+        .extend(strings.as_list().into_iter().map(|x| WasmString {
+            data_index: x.data_segment,
+            value: x.value.clone(),
+        }));
+    module
         .types
-        .get(table.string_type.unwrap())
-        .unwrap()
-        .definition
-        .id;
+        .extend(table.types.as_list().into_iter().map(|x| x.definition));
 
-    let string_equality_test_type_id = table.types.new_id();
-    let string_equality_test_type = table::Type {
-        id: string_equality_test_type_id,
-        name: "typ@@string_equality".into(),
-        definition: WasmType {
-            name: "typ@eq@String".into(),
-            id: string_equality_test_type_id.id(),
-            definition: WasmTypeDefinition::Function {
-                parameters: [WasmTypeImpl::ArrayRef(string_type); 2].to_vec(),
-                returns: WasmTypeImpl::Bool,
-            },
-        },
-    };
-    table
-        .types
-        .insert(string_equality_test_type_id, string_equality_test_type);
-
-    let string_equality_test_id = table.functions.new_id();
-    let string_equality_test = table::Function {
-        id: string_equality_test_id,
-        signature: string_equality_test_type_id,
-        name: "eq@String".into(),
-        arity: 2,
-    };
-    table
-        .functions
-        .insert(string_equality_test_id, string_equality_test);
-
-    let string_fn = string::emit_string_equality_function(
-        string_equality_test_type_id,
-        string_equality_test_id,
-        &table,
-    );
-    functions.push(string_fn);
-
-    WasmModule {
-        functions,
-        constants,
-        strings: strings
-            .as_list()
-            .into_iter()
-            .map(|x| WasmString {
-                data_index: x.data_segment,
-                value: x.value.clone(),
-            })
-            .collect(),
-        types: table
-            .types
-            .as_list()
-            .into_iter()
-            .map(|x| x.definition)
-            .collect(),
-    }
+    module
 }
 
 fn emit_sum_equality(sum: &table::Sum, table: &SymbolTable) -> WasmFunction {
@@ -650,7 +603,15 @@ fn emit_constant(
     }
 }
 
-fn generate_prelude_types(table: &mut SymbolTable, env: &mut Environment<'_>) {
+fn generate_prelude_types(table: &mut SymbolTable, env: &mut Environment<'_>) -> WasmModule {
+    // etc
+    let mut module = WasmModule {
+        functions: vec![],
+        constants: vec![],
+        strings: vec![],
+        types: vec![],
+    };
+
     // Implement division signature
     // - PreludeType::Float
     let float_div_type_id = table.types.new_id();
@@ -719,6 +680,50 @@ fn generate_prelude_types(table: &mut SymbolTable, env: &mut Environment<'_>) {
     );
     table.string_type = Some(string_type_id);
 
+    // also generate the string function
+    let string_type = table
+        .types
+        .get(table.string_type.unwrap())
+        .unwrap()
+        .definition
+        .id;
+
+    let string_equality_test_type_id = table.types.new_id();
+    let string_equality_test_type = table::Type {
+        id: string_equality_test_type_id,
+        name: "typ@@string_equality".into(),
+        definition: WasmType {
+            name: "typ@eq@String".into(),
+            id: string_equality_test_type_id.id(),
+            definition: WasmTypeDefinition::Function {
+                parameters: [WasmTypeImpl::ArrayRef(string_type); 2].to_vec(),
+                returns: WasmTypeImpl::Bool,
+            },
+        },
+    };
+    table
+        .types
+        .insert(string_equality_test_type_id, string_equality_test_type);
+
+    let string_equality_test_id = table.functions.new_id();
+    let string_equality_test = table::Function {
+        id: string_equality_test_id,
+        signature: string_equality_test_type_id,
+        name: "eq@String".into(),
+        arity: 2,
+    };
+    table
+        .functions
+        .insert(string_equality_test_id, string_equality_test);
+    table.string_equality_test = Some(string_equality_test_id);
+
+    let string_fn = string::emit_string_equality_function(
+        string_equality_test_type_id,
+        string_equality_test_id,
+        &table,
+    );
+    module.functions.push(string_fn);
+
     // To be implemented:
     // - PreludeType::BitArray
     // TODO: BitArrays
@@ -731,6 +736,8 @@ fn generate_prelude_types(table: &mut SymbolTable, env: &mut Environment<'_>) {
 
     // - PreludeType::UtfCodepoint
     // TODO: UtfCodepoints
+
+    module
 }
 
 fn emit_variant_constructor(

@@ -78,6 +78,7 @@ pub fn emit_string_equality_function(
 
         i.push(Block(wasm_encoder::BlockType::Empty));
         {
+            // Check if strings are the same length
             i.push(LocalGet(0));
             i.push(ArrayLen);
             i.push(LocalTee(counter_id.id()));
@@ -87,26 +88,32 @@ pub fn emit_string_equality_function(
             i.push(I32Eqz);
             i.push(BrIf(0));
 
-            i.push(Loop(wasm_encoder::BlockType::Empty));
+            i.push(Block(wasm_encoder::BlockType::Empty));
             {
-                i.push(LocalGet(counter_id.id()));
-                i.push(I32Eqz);
-                i.push(BrIf(0));
+                i.push(Loop(wasm_encoder::BlockType::Empty));
+                {
+                    i.push(LocalGet(counter_id.id()));
+                    i.push(I32Eqz);
+                    i.push(BrIf(1)); // loop creates a branch at beginning, not at end
 
-                i.push(LocalGet(counter_id.id()));
-                i.push(I32Const(1));
-                i.push(I32Sub);
-                i.push(LocalSet(counter_id.id()));
+                    i.push(LocalGet(counter_id.id()));
+                    i.push(I32Const(1));
+                    i.push(I32Sub);
+                    i.push(LocalSet(counter_id.id()));
 
-                i.push(LocalGet(0));
-                i.push(LocalGet(counter_id.id()));
-                i.push(ArrayGetU(string_type_id));
-                i.push(LocalGet(1));
-                i.push(LocalGet(counter_id.id()));
-                i.push(ArrayGetU(string_type_id));
-                i.push(I32Eq);
-                i.push(I32Eqz);
-                i.push(BrIf(1));
+                    i.push(LocalGet(0));
+                    i.push(LocalGet(counter_id.id()));
+                    i.push(ArrayGetU(string_type_id));
+                    i.push(LocalGet(1));
+                    i.push(LocalGet(counter_id.id()));
+                    i.push(ArrayGetU(string_type_id));
+                    i.push(I32Eq);
+                    i.push(I32Eqz);
+                    i.push(BrIf(1)); // quit loop
+
+                    i.push(Br(0));
+                }
+                i.push(End);
             }
             i.push(End);
             i.push(I32Const(1));
