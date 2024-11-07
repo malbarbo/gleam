@@ -951,8 +951,8 @@ fn emit_assignment(
     );
 
     // compile pattern
-    let compiled = pattern::compile_pattern(id, &assignment.pattern, table, env, locals);
-    let translated = pattern::translate_pattern(compiled, locals, table);
+    let compiled = pattern::compile_pattern(id, &assignment.pattern, table, env, strings, locals);
+    let translated = pattern::translate_pattern(compiled, locals, strings, table);
 
     // emit value
     let mut insts = emit_expression(&assignment.value, env, locals, strings, table);
@@ -1386,9 +1386,15 @@ fn emit_case_expression(
             // TODO: we check multipatterns sequentially, not concurrently
             // this could be more performant
             for (pattern, subject_id) in clause_pattern.iter().zip(&ids) {
-                let compiled =
-                    pattern::compile_pattern(*subject_id, pattern, table, &inner_env, locals);
-                let translated = pattern::translate_pattern(compiled, locals, table);
+                let compiled = pattern::compile_pattern(
+                    *subject_id,
+                    pattern,
+                    table,
+                    &inner_env,
+                    strings,
+                    locals,
+                );
+                let translated = pattern::translate_pattern(compiled, locals, strings, table);
 
                 // we need to emit the conditions and assignments in tree order
                 // (a leaf node's code must show up after the parent node's code)

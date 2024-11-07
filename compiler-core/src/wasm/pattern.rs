@@ -13,7 +13,7 @@ use super::{
     encoder::WasmTypeImpl,
     environment::{Binding, Environment},
     integer, parse_float,
-    table::{Local, LocalId, LocalStore, SumId, SymbolTable, TypeId},
+    table::{Local, LocalId, LocalStore, Strings, SumId, SymbolTable, TypeId},
 };
 
 #[derive(Debug, Clone)]
@@ -23,7 +23,7 @@ pub struct CompiledPattern {
     pub nested: Vec<CompiledPattern>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Check {
     IntegerEquality {
         local: LocalId,
@@ -41,6 +41,10 @@ pub enum Check {
     BooleanEquality {
         local: LocalId,
         value: bool,
+    },
+    StringEquality {
+        local: LocalId,
+        string: EcoString,
     },
 }
 
@@ -73,6 +77,7 @@ pub fn compile_pattern(
     pat: &TypedPattern,
     table: &SymbolTable,
     env: &Environment<'_>,
+    strings: &mut Strings,
     locals: &mut LocalStore,
 ) -> CompiledPattern {
     match pat {
@@ -131,7 +136,7 @@ pub fn compile_pattern(
                 },
             );
 
-            let cp = compile_pattern(subject, pattern, table, env, locals);
+            let cp = compile_pattern(subject, pattern, table, env, strings, locals);
             CompiledPattern {
                 checks: vec![],
                 assignments: vec![Assignment::Named {
@@ -286,23 +291,30 @@ pub fn compile_pattern(
 
                 // recursively compile
                 let inner_compiled_pattern =
-                    compile_pattern(arg_variable, &arg.value, table, env, locals);
+                    compile_pattern(arg_variable, &arg.value, table, env, strings, locals);
 
                 nested_patterns.push(inner_compiled_pattern);
             }
 
-            dbg!(CompiledPattern {
+            CompiledPattern {
                 checks,
                 assignments,
                 nested: nested_patterns,
-            })
+            }
         }
         Pattern::Constructor {
             constructor: Inferred::Unknown,
             ..
         } => unreachable!("Generating code for uninferred type"),
-        Pattern::String { .. } => todo!("Strings not implemented yet"),
-        Pattern::StringPrefix { .. } => todo!("Strings not implemented yet"),
+        Pattern::String { value, .. } => CompiledPattern {
+            checks: vec![Check::StringEquality {
+                local: subject,
+                string: value.clone(),
+            }],
+            assignments: vec![],
+            nested: vec![],
+        },
+        Pattern::StringPrefix { .. } => todo!("String prefix not implemented yet"),
         Pattern::BitArray { .. } => todo!("BitArrays not implemented yet"),
         Pattern::VarUsage { .. } => todo!("BitArrays not implemented yet"),
         Pattern::List { .. } => todo!("Lists not implemented yet"),
@@ -323,6 +335,7 @@ pub struct TranslatedPattern {
 pub fn translate_pattern(
     compiled: CompiledPattern,
     locals: &LocalStore,
+    strings: &mut Strings,
     table: &SymbolTable,
 ) -> TranslatedPattern {
     // checks
@@ -374,6 +387,24 @@ pub fn translate_pattern(
                     cond_expr.push(Instruction::I32Const(if value { 1 } else { 0 }));
                     cond_expr.push(Instruction::LocalGet(locals.get(local).unwrap().id.id()));
                     cond_expr.push(Instruction::I32Eq);
+                }
+                Check::StringEquality { local, string } => {
+                    let string_type_id = table
+                        .types
+                        .get(table.string_type.unwrap())
+                        .unwrap()
+                        .definition
+                        .id;
+
+                    let string_data_id = strings.get_or_insert_data_segment(&string);
+
+                    cond_expr.push(Instruction::LocalGet(local.id()));
+                    cond_expr.push(Instruction::I32Const(string.len() as _));
+                    cond_expr.push(Instruction::ArrayNewData {
+                        array_type_index: string_type_id,
+                        array_data_index: string_data_id,
+                    });
+                    cond_expr.push(Instruction::Call(table.string_equality_test.unwrap().id()));
                 }
             }
             if first {
@@ -453,7 +484,7 @@ pub fn translate_pattern(
         nested: compiled
             .nested
             .into_iter()
-            .map(|cp| translate_pattern(cp, locals, table))
+            .map(|cp| translate_pattern(cp, locals, strings, table))
             .collect(),
     }
 }
