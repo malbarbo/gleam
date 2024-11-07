@@ -346,7 +346,7 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
                 });
             }
             WasmTypeDefinition::String => {
-                _ = types.array(&wasm_encoder::StorageType::I8, false);
+                _ = types.array(&wasm_encoder::StorageType::I8, true);
             }
         }
     }

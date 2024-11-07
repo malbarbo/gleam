@@ -703,8 +703,7 @@ fn generate_prelude_types(table: &mut SymbolTable, env: &mut Environment<'_>) ->
     );
     table.string_type = Some(string_type_id);
 
-    // also generate the string function
-    let string_type = table
+    let string_type_wasm_id = table
         .types
         .get(table.string_type.unwrap())
         .unwrap()
@@ -719,7 +718,7 @@ fn generate_prelude_types(table: &mut SymbolTable, env: &mut Environment<'_>) ->
             name: "typ@eq@String".into(),
             id: string_equality_test_type_id.id(),
             definition: WasmTypeDefinition::Function {
-                parameters: [WasmTypeImpl::ArrayRef(string_type); 2].to_vec(),
+                parameters: [WasmTypeImpl::ArrayRef(string_type_wasm_id); 2].to_vec(),
                 returns: WasmTypeImpl::Bool,
             },
         },
@@ -740,12 +739,43 @@ fn generate_prelude_types(table: &mut SymbolTable, env: &mut Environment<'_>) ->
         .insert(string_equality_test_id, string_equality_test);
     table.string_equality_test = Some(string_equality_test_id);
 
-    let string_fn = string::emit_string_equality_function(
+    let string_equality_fn = string::emit_string_equality_function(
         string_equality_test_type_id,
         string_equality_test_id,
         &table,
     );
-    module.functions.push(string_fn);
+    module.functions.push(string_equality_fn);
+
+    let string_concat_type_id = table.types.new_id();
+    let string_concat_type = table::Type {
+        id: string_concat_type_id,
+        name: "typ@@string_concat".into(),
+        definition: WasmType {
+            name: "typ@string_concat@String".into(),
+            id: string_concat_type_id.id(),
+            definition: WasmTypeDefinition::Function {
+                parameters: [WasmTypeImpl::ArrayRef(string_type_wasm_id); 2].to_vec(),
+                returns: WasmTypeImpl::ArrayRef(string_type_wasm_id),
+            },
+        },
+    };
+    table
+        .types
+        .insert(string_concat_type_id, string_concat_type);
+
+    let string_concat_id = table.functions.new_id();
+    let string_concat = table::Function {
+        id: string_concat_id,
+        signature: string_concat_type_id,
+        name: "string_concat".into(),
+        arity: 2,
+    };
+    table.functions.insert(string_concat_id, string_concat);
+    table.string_concat = Some(string_concat_id);
+
+    let string_concat_fn =
+        string::emit_string_concat_function(string_concat_type_id, string_concat_id, &table);
+    module.functions.push(string_concat_fn);
 
     // To be implemented:
     // - PreludeType::BitArray
@@ -1880,7 +1910,16 @@ fn emit_binary_operation(
 
             insts
         }
-        BinOp::Concatenate => todo!("<> not implemented yet"),
+        BinOp::Concatenate => {
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
+
+            insts.lst.extend(right_insts.lst);
+            insts.lst.push(wasm_encoder::Instruction::Call(
+                table.string_concat.unwrap().id(),
+            ));
+            insts
+        }
     }
 }
 
