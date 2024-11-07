@@ -381,7 +381,12 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                         &root_environment,
                         &table,
                     ),
-                    initializer: emit_constant(m.value.as_ref(), &root_environment, &table),
+                    initializer: emit_constant(
+                        m.value.as_ref(),
+                        &root_environment,
+                        &mut strings,
+                        &table,
+                    ),
                 })
             }
             TypedDefinition::TypeAlias(_) => todo!("Type aliases aren't implemented yet"),
@@ -582,6 +587,7 @@ fn emit_equality_test(type_: &FieldType, table: &SymbolTable) -> WasmInstruction
 fn emit_constant(
     value: &TypedConstant,
     root_environment: &Environment<'_>,
+    strings: &mut Strings,
     table: &SymbolTable,
 ) -> WasmInstructions {
     match value {
@@ -595,7 +601,24 @@ fn emit_constant(
         }
         TypedConstant::Var { .. } => todo!("Variable constants not implemented yet"),
         TypedConstant::Record { .. } => todo!("Record constants not implemented yet"),
-        TypedConstant::String { .. } => todo!("Strings not implemented yet"),
+        TypedConstant::String { value, .. } => {
+            let string_type_id = table.string_type.unwrap();
+            let string_type = table.types.get(string_type_id).unwrap();
+
+            let data_segment = strings.get_or_insert_data_segment(value);
+            WasmInstructions {
+                lst: vec![
+                    // number of bytes
+                    wasm_encoder::Instruction::I32Const(value.len() as _),
+                    // offset
+                    wasm_encoder::Instruction::I32Const(0),
+                    wasm_encoder::Instruction::ArrayNewData {
+                        array_type_index: string_type.definition.id,
+                        array_data_index: data_segment,
+                    },
+                ],
+            }
+        }
         TypedConstant::Tuple { .. } => todo!("Tuples not implemented yet"),
         TypedConstant::List { .. } => todo!("Lists not implemented yet"),
         TypedConstant::BitArray { .. } => todo!("BitArrays not implemented yet"),
@@ -1017,7 +1040,7 @@ fn emit_expression(
         } => emit_binary_operation(env, locals, strings, table, typ, *name, left, right),
         TypedExpr::Var {
             constructor, name, ..
-        } => emit_value_constructor(constructor, env, name, table),
+        } => emit_value_constructor(constructor, env, name, strings, table),
         TypedExpr::Call { fun, args, .. } => {
             let mut insts = WasmInstructions::empty();
             // TODO: implement out-of-declared-order parameter function calls
@@ -1133,6 +1156,7 @@ fn emit_value_constructor(
     constructor: &ValueConstructor,
     env: &Environment<'_>,
     name: &EcoString,
+    strings: &mut Strings,
     table: &SymbolTable,
 ) -> WasmInstructions {
     match &constructor.variant {
@@ -1209,7 +1233,9 @@ fn emit_value_constructor(
             _ => todo!("Expected product binding"),
         },
         ValueConstructorVariant::Record { .. } => todo!("Only simple records with 0 fields"),
-        ValueConstructorVariant::LocalConstant { literal } => emit_constant(literal, env, table),
+        ValueConstructorVariant::LocalConstant { literal } => {
+            emit_constant(literal, env, strings, table)
+        }
     }
 }
 /*
@@ -1559,7 +1585,7 @@ fn emit_clause_guard_expression(
                 None => unreachable!("Name does not exist in environment"),
             }
         }
-        ClauseGuard::Constant(constant) => emit_constant(constant, env, table),
+        ClauseGuard::Constant(constant) => emit_constant(constant, env, strings, table),
         ClauseGuard::TupleIndex { .. } => todo!("Tuples not implemented yet"),
         ClauseGuard::FieldAccess { .. } => todo!("Field access not implemented yet"),
         ClauseGuard::ModuleSelect { .. } => todo!("Modules not implemented yet"),
