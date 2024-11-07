@@ -6,6 +6,7 @@ use ecow::EcoString;
 use tracing::warn;
 use wasm_encoder::CodeSection;
 
+use wasm_encoder::DataCountSection;
 use wasm_encoder::ElementSection;
 use wasm_encoder::ExportSection;
 use wasm_encoder::FunctionSection;
@@ -29,7 +30,13 @@ use super::table::SymbolTable;
 pub struct WasmModule {
     pub functions: Vec<WasmFunction>,
     pub constants: Vec<WasmGlobal>,
+    pub strings: Vec<WasmString>,
     pub types: Vec<WasmType>,
+}
+
+pub struct WasmString {
+    pub value: EcoString,
+    pub data_index: u32,
 }
 
 pub struct WasmGlobal {
@@ -58,6 +65,7 @@ pub enum WasmTypeDefinition {
         tag: u32,
         fields: Vec<WasmTypeImpl>,
     },
+    String,
 }
 
 impl WasmType {
@@ -154,6 +162,7 @@ pub enum WasmTypeImpl {
     Bool,
     Nil,
     StructRef(u32),
+    ArrayRef(u32),
 }
 
 impl WasmTypeImpl {
@@ -164,6 +173,10 @@ impl WasmTypeImpl {
             WasmTypeImpl::Bool => wasm_encoder::ValType::I32, // represent as a 32-bit integer
             WasmTypeImpl::Nil => wasm_encoder::ValType::I32,  // represent as a 32-bit integer
             WasmTypeImpl::StructRef(typ) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
+                nullable: false,
+                heap_type: wasm_encoder::HeapType::Concrete(typ),
+            }),
+            WasmTypeImpl::ArrayRef(typ) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
                 nullable: false,
                 heap_type: wasm_encoder::HeapType::Concrete(typ),
             }),
@@ -178,6 +191,10 @@ impl WasmTypeImpl {
             WasmTypeImpl::Nil => wasm_encoder::ValType::I32,  // represent as a 32-bit integer
             WasmTypeImpl::StructRef(typ) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
                 nullable: true,
+                heap_type: wasm_encoder::HeapType::Concrete(typ),
+            }),
+            WasmTypeImpl::ArrayRef(typ) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
+                nullable: false,
                 heap_type: wasm_encoder::HeapType::Concrete(typ),
             }),
         }
@@ -206,6 +223,14 @@ impl WasmTypeImpl {
             Self::Bool
         } else if type_.is_nil() {
             Self::Nil
+        } else if type_.is_string() {
+            let string_type_index = table
+                .types
+                .get(table.string_type.unwrap())
+                .unwrap()
+                .definition
+                .id;
+            Self::ArrayRef(string_type_index)
         } else {
             match type_.as_ref() {
                 // TODO: handle modules
@@ -320,6 +345,9 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
                     },
                 });
             }
+            WasmTypeDefinition::String => {
+                _ = types.array(&wasm_encoder::StorageType::I8, false);
+            }
         }
     }
     // also declare the start function type
@@ -373,6 +401,9 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
             WasmTypeImpl::StructRef(typ) => {
                 wasm_encoder::ConstExpr::ref_null(wasm_encoder::HeapType::Concrete(typ))
             }
+            WasmTypeImpl::ArrayRef(typ) => {
+                wasm_encoder::ConstExpr::ref_null(wasm_encoder::HeapType::Concrete(typ))
+            }
         };
 
         _ = globals.global(
@@ -419,6 +450,12 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
         elements: wasm_encoder::Elements::Functions(&indices[..]),
     });
     _ = module.section(&elems);
+
+    // data count
+    let data_count = DataCountSection {
+        count: wasm_module.strings.len() as u32,
+    };
+    _ = module.section(&data_count);
 
     // code
     let mut codes = CodeSection::new();
@@ -476,6 +513,15 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
         _ = codes.function(&f);
     }
     _ = module.section(&codes);
+
+    // datas
+    let mut datas = wasm_encoder::DataSection::new();
+    // sort the strings by data_index
+    wasm_module.strings.sort_by_key(|s| s.data_index);
+    for string in wasm_module.strings.iter() {
+        _ = datas.passive(string.value.as_bytes().to_owned());
+    }
+    _ = module.section(&datas);
 
     // names
     let mut names = NameSection::new();

@@ -191,6 +191,9 @@ pub enum FieldType {
     /// Boolean
     Bool,
 
+    /// String
+    String,
+
     /// Unit
     Nil,
 }
@@ -223,6 +226,8 @@ impl FieldType {
             Self::Bool
         } else if type_.is_nil() {
             Self::Nil
+        } else if type_.is_string() {
+            Self::String
         } else {
             match type_.as_ref() {
                 // TODO: handle modules
@@ -252,6 +257,15 @@ impl FieldType {
                 let sum = table.sums.get(*sum_id).unwrap();
                 let sum_type = table.types.get(sum.type_).unwrap();
                 WasmTypeImpl::StructRef(sum_type.definition.id)
+            }
+            Self::String => {
+                let string_type = table
+                    .types
+                    .get(table.string_type.unwrap())
+                    .unwrap()
+                    .definition
+                    .id;
+                WasmTypeImpl::ArrayRef(string_type)
             }
         }
     }
@@ -293,6 +307,19 @@ pub struct Local {
     pub wasm_type: WasmTypeImpl,
 }
 
+/// Represents a string in the string table.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GleamString {
+    /// The unique identifier of the string.
+    pub id: Id<GleamString>,
+
+    /// The string value.
+    pub value: EcoString,
+
+    /// The data segment index.
+    pub data_segment: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Store<T: Clone + Debug> {
     items: HashMap<Id<T>, T>,
@@ -304,6 +331,13 @@ impl<T: Clone + Debug> Store<T> {
         Self {
             items: HashMap::new(),
             next: 0,
+        }
+    }
+
+    pub fn with_offset(offset: u32) -> Self {
+        Self {
+            items: HashMap::new(),
+            next: offset,
         }
     }
 
@@ -343,6 +377,9 @@ pub struct SymbolTable {
 
     pub int_division: Option<TypeId>,
     pub float_division: Option<TypeId>,
+    pub string_type: Option<TypeId>,
+
+    pub string_equality_test: Option<FunctionId>,
 }
 
 impl SymbolTable {
@@ -355,9 +392,50 @@ impl SymbolTable {
             constants: Store::new(),
             int_division: None,
             float_division: None,
+            string_type: None,
+            string_equality_test: None,
         }
     }
 }
 
 /// A store for allocating local variables.
 pub type LocalStore = Store<Local>;
+
+/// A store for allocating strings.
+pub type StringStore = Store<GleamString>;
+
+/// Structure for string lookups;
+pub struct Strings {
+    strings: HashMap<EcoString, Id<GleamString>>,
+    store: StringStore,
+}
+
+impl Strings {
+    pub fn new() -> Self {
+        Self {
+            strings: HashMap::new(),
+            store: StringStore::new(),
+        }
+    }
+
+    pub fn get_or_insert_data_segment(&mut self, value: &str) -> u32 {
+        if let Some(id) = self.strings.get(value) {
+            return self.store.get(*id).unwrap().data_segment;
+        }
+
+        let id = self.store.new_id();
+        let data_segment = id.id();
+        let gleam_string = GleamString {
+            id,
+            value: value.into(),
+            data_segment,
+        };
+        self.store.insert(id, gleam_string);
+        _ = self.strings.insert(value.into(), id);
+        data_segment
+    }
+
+    pub fn as_list(&self) -> Vec<GleamString> {
+        self.store.as_list()
+    }
+}

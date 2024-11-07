@@ -11,12 +11,12 @@ use std::{collections::VecDeque, sync::Arc};
 
 use ecow::EcoString;
 use encoder::{
-    WasmFunction, WasmGlobal, WasmInstructions, WasmModule, WasmType, WasmTypeDefinition,
-    WasmTypeImpl,
+    WasmFunction, WasmGlobal, WasmInstructions, WasmModule, WasmString, WasmType,
+    WasmTypeDefinition, WasmTypeImpl,
 };
 use environment::{Binding, BuiltinType, Environment, TypeBinding};
 use itertools::Itertools;
-use table::{FieldType, Local, LocalStore, SymbolTable};
+use table::{FieldType, GleamString, Local, LocalStore, Strings, SymbolTable};
 
 use crate::{
     ast::{
@@ -41,6 +41,8 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
     let mut table = SymbolTable::new();
 
     let mut root_environment = Environment::new();
+
+    let mut strings = Strings::new();
 
     let mut functions = vec![];
     let mut constants = vec![];
@@ -308,7 +310,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
         }
     }
 
-    // SECOND PASS: generate the actual function bodies and types
+    // THIRD PASS: generate the actual function bodies and types
     for definition in &ast.definitions {
         match definition {
             TypedDefinition::Function(f) => {
@@ -316,8 +318,13 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                 match function_id {
                     Binding::Function(id) => {
                         let function_data = table.functions.get(id).unwrap();
-                        let function =
-                            emit_function(f, function_data.id, &table, &root_environment);
+                        let function = emit_function(
+                            f,
+                            function_data.id,
+                            &table,
+                            &mut strings,
+                            &root_environment,
+                        );
                         functions.push(function);
                     }
                     _ => unreachable!("Expected function binding in environment"),
@@ -381,10 +388,60 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
             TypedDefinition::Import(_) => todo!("Imports aren't implemented yet"),
         }
     }
+    // also generate the string function
+    let string_type = table
+        .types
+        .get(table.string_type.unwrap())
+        .unwrap()
+        .definition
+        .id;
+
+    let string_equality_test_type_id = table.types.new_id();
+    let string_equality_test_type = table::Type {
+        id: string_equality_test_type_id,
+        name: "typ@@string_equality".into(),
+        definition: WasmType {
+            name: "typ@eq@String".into(),
+            id: string_equality_test_type_id.id(),
+            definition: WasmTypeDefinition::Function {
+                parameters: [WasmTypeImpl::ArrayRef(string_type); 2].to_vec(),
+                returns: WasmTypeImpl::Bool,
+            },
+        },
+    };
+    table
+        .types
+        .insert(string_equality_test_type_id, string_equality_test_type);
+
+    let string_equality_test_id = table.functions.new_id();
+    let string_equality_test = table::Function {
+        id: string_equality_test_id,
+        signature: string_equality_test_type_id,
+        name: "eq@String".into(),
+        arity: 2,
+    };
+    table
+        .functions
+        .insert(string_equality_test_id, string_equality_test);
+
+    let string_fn = string::emit_string_equality_function(
+        string_equality_test_type_id,
+        string_equality_test_id,
+        &table,
+    );
+    functions.push(string_fn);
 
     WasmModule {
         functions,
         constants,
+        strings: strings
+            .as_list()
+            .into_iter()
+            .map(|x| WasmString {
+                data_index: x.data_segment,
+                value: x.value.clone(),
+            })
+            .collect(),
         types: table
             .types
             .as_list()
@@ -563,6 +620,9 @@ fn emit_equality_test(type_: &FieldType, table: &SymbolTable) -> WasmInstruction
         FieldType::Bool | FieldType::Nil => {
             WasmInstructions::single(wasm_encoder::Instruction::I32Eq)
         }
+        FieldType::String => WasmInstructions::single(wasm_encoder::Instruction::Call(
+            table.string_equality_test.unwrap().id(),
+        )),
     }
 }
 
@@ -644,7 +704,20 @@ fn generate_prelude_types(table: &mut SymbolTable, env: &mut Environment<'_>) {
     );
 
     // - PreludeType::String
-    // TODO: Strings
+    let string_type_id = table.types.new_id();
+    table.types.insert(
+        string_type_id,
+        table::Type {
+            id: string_type_id,
+            name: "String".into(),
+            definition: WasmType {
+                name: "String".into(),
+                id: string_type_id.id(),
+                definition: WasmTypeDefinition::String,
+            },
+        },
+    );
+    table.string_type = Some(string_type_id);
 
     // To be implemented:
     // - PreludeType::BitArray
@@ -695,6 +768,7 @@ fn emit_function(
     function: &TypedFunction,
     function_id: table::FunctionId,
     table: &SymbolTable,
+    strings: &mut Strings,
     top_level_env: &Environment<'_>,
 ) -> WasmFunction {
     let mut env = Environment::with_enclosing(top_level_env);
@@ -728,7 +802,8 @@ fn emit_function(
         env.set(name, Binding::Local(idx));
     }
 
-    let mut instructions = emit_statement_list(&function.body, &mut env, &mut locals, table);
+    let mut instructions =
+        emit_statement_list(&function.body, &mut env, &mut locals, strings, table);
     instructions.lst.push(wasm_encoder::Instruction::End);
 
     WasmFunction {
@@ -757,17 +832,18 @@ fn emit_statement_list(
     statements: &[TypedStatement],
     env: &mut Environment<'_>,
     locals: &mut LocalStore,
+    strings: &mut Strings,
     table: &SymbolTable,
 ) -> WasmInstructions {
     let mut instructions = WasmInstructions::empty();
 
     for statement in statements.iter().dropping_back(1) {
-        let new_insts = emit_statement(statement, env, locals, table);
+        let new_insts = emit_statement(statement, env, locals, strings, table);
         instructions.lst.extend(new_insts.lst);
         instructions.lst.push(wasm_encoder::Instruction::Drop);
     }
     if let Some(statement) = statements.last() {
-        let new_insts = emit_statement(statement, env, locals, table);
+        let new_insts = emit_statement(statement, env, locals, strings, table);
         instructions.lst.extend(new_insts.lst);
     }
 
@@ -778,11 +854,16 @@ fn emit_statement(
     statement: &TypedStatement,
     env: &mut Environment<'_>,
     locals: &mut LocalStore,
+    strings: &mut Strings,
     table: &SymbolTable,
 ) -> WasmInstructions {
     match statement {
-        Statement::Expression(expression) => emit_expression(expression, env, locals, table),
-        Statement::Assignment(assignment) => emit_assignment(assignment, env, locals, table),
+        Statement::Expression(expression) => {
+            emit_expression(expression, env, locals, strings, table)
+        }
+        Statement::Assignment(assignment) => {
+            emit_assignment(assignment, env, locals, strings, table)
+        }
         Statement::Use(_) => {
             unreachable!("Use statements should not be present at this stage of compilation")
         }
@@ -793,6 +874,7 @@ fn emit_assignment(
     assignment: &TypedAssignment,
     env: &mut Environment<'_>,
     locals: &mut LocalStore,
+    strings: &mut Strings,
     table: &SymbolTable,
 ) -> WasmInstructions {
     // create a new local for the assignment subject
@@ -813,7 +895,7 @@ fn emit_assignment(
     let translated = pattern::translate_pattern(compiled, locals, table);
 
     // emit value
-    let mut insts = emit_expression(&assignment.value, env, locals, table);
+    let mut insts = emit_expression(&assignment.value, env, locals, strings, table);
     insts.lst.push(wasm_encoder::Instruction::LocalSet(id.id()));
 
     if assignment.kind.is_assert() {
@@ -894,6 +976,7 @@ fn emit_expression(
     expression: &TypedExpr,
     env: &Environment<'_>,
     locals: &mut LocalStore,
+    strings: &mut Strings,
     table: &SymbolTable,
 ) -> WasmInstructions {
     match expression {
@@ -902,7 +985,7 @@ fn emit_expression(
             integer::const_(val)
         }
         TypedExpr::NegateInt { value, .. } => {
-            let mut insts = emit_expression(value, env, locals, table);
+            let mut insts = emit_expression(value, env, locals, strings, table);
             insts.lst.extend(integer::const_(-1).lst);
             insts.lst.extend(integer::mul().lst);
             insts
@@ -913,6 +996,7 @@ fn emit_expression(
                 statements,
                 &mut Environment::with_enclosing(env),
                 locals,
+                strings,
                 table,
             );
             statements
@@ -923,7 +1007,7 @@ fn emit_expression(
             left,
             right,
             ..
-        } => emit_binary_operation(env, locals, table, typ, *name, left, right),
+        } => emit_binary_operation(env, locals, strings, table, typ, *name, left, right),
         TypedExpr::Var {
             constructor, name, ..
         } => emit_value_constructor(constructor, env, name, table),
@@ -931,7 +1015,7 @@ fn emit_expression(
             let mut insts = WasmInstructions::empty();
             // TODO: implement out-of-declared-order parameter function calls
             for arg in args {
-                let new_insts = emit_expression(&arg.value, env, locals, table);
+                let new_insts = emit_expression(&arg.value, env, locals, strings, table);
                 insts.lst.extend(new_insts.lst);
             }
             match fun.as_ref() {
@@ -975,7 +1059,15 @@ fn emit_expression(
             clauses,
             typ,
             ..
-        } => emit_case_expression(subjects, clauses, Arc::clone(typ), env, locals, table),
+        } => emit_case_expression(
+            subjects,
+            clauses,
+            Arc::clone(typ),
+            env,
+            locals,
+            strings,
+            table,
+        ),
         TypedExpr::Float { value, .. } => {
             let val = parse_float(value);
             WasmInstructions::single(wasm_encoder::Instruction::F64Const(val))
@@ -994,7 +1086,24 @@ fn emit_expression(
 
             WasmInstructions::single(wasm_encoder::Instruction::Unreachable)
         }
-        TypedExpr::String { .. } => todo!("Strings not implemented yet"),
+        TypedExpr::String { value, .. } => {
+            let string_type_id = table.string_type.unwrap();
+            let string_type = table.types.get(string_type_id).unwrap();
+
+            let data_segment = strings.get_or_insert_data_segment(value);
+            WasmInstructions {
+                lst: vec![
+                    // number of bytes
+                    wasm_encoder::Instruction::I32Const(value.len() as _),
+                    // offset
+                    wasm_encoder::Instruction::I32Const(0),
+                    wasm_encoder::Instruction::ArrayNewData {
+                        array_type_index: string_type.definition.id,
+                        array_data_index: data_segment,
+                    },
+                ],
+            }
+        }
         TypedExpr::Pipeline { .. } => todo!("Pipelines not implemented yet"),
         TypedExpr::Fn { .. } => todo!("Inner functions not implemented yet"),
         TypedExpr::List { .. } => todo!("Lists not implemented yet"),
@@ -1005,7 +1114,7 @@ fn emit_expression(
         TypedExpr::BitArray { .. } => todo!("BitArrays not implemented yet"),
         TypedExpr::RecordUpdate { .. } => todo!("Record update not implemented yet"),
         TypedExpr::NegateBool { value, .. } => {
-            let mut insts = emit_expression(value, env, locals, table);
+            let mut insts = emit_expression(value, env, locals, strings, table);
             insts.lst.push(wasm_encoder::Instruction::I32Eqz);
             insts
         }
@@ -1139,6 +1248,7 @@ fn emit_case_expression(
     type_: Arc<Type>,
     env: &Environment<'_>,
     locals: &mut LocalStore,
+    strings: &mut Strings,
     table: &SymbolTable,
 ) -> WasmInstructions {
     // first, declare a new local for every subject
@@ -1166,7 +1276,7 @@ fn emit_case_expression(
     // then, emit the subject expressions and store them in the locals
     let mut insts = WasmInstructions::empty();
     for (id, subject) in ids.iter().zip(subjects) {
-        let new_insts = emit_expression(subject, env, locals, table);
+        let new_insts = emit_expression(subject, env, locals, strings, table);
         insts.lst.extend(new_insts.lst);
         insts.lst.push(wasm_encoder::Instruction::LocalSet(id.id()));
     }
@@ -1248,16 +1358,16 @@ fn emit_case_expression(
             // if we have a clause guard, we need to test it here (with the inner binding)
             if let Some(guard) = &clause.guard {
                 // emit condition
-                insts
-                    .lst
-                    .extend(emit_clause_guard_expression(guard, &inner_env, locals, table).lst);
+                insts.lst.extend(
+                    emit_clause_guard_expression(guard, &inner_env, locals, strings, table).lst,
+                );
 
                 insts.lst.push(wasm_encoder::Instruction::I32Eqz);
                 insts.lst.push(wasm_encoder::Instruction::BrIf(0)); // clause
             }
 
             // emit code
-            let new_insts = emit_expression(&clause.then, &inner_env, locals, table);
+            let new_insts = emit_expression(&clause.then, &inner_env, locals, strings, table);
             insts.lst.extend(new_insts.lst);
 
             // break out of the case
@@ -1281,6 +1391,7 @@ fn emit_clause_guard_expression(
     guard: &TypedClauseGuard,
     env: &Environment<'_>,
     locals: &LocalStore,
+    strings: &mut Strings,
     table: &SymbolTable,
 ) -> WasmInstructions {
     match guard {
@@ -1288,8 +1399,8 @@ fn emit_clause_guard_expression(
             // check types
             assert_eq!(left.type_(), right.type_(), "Expected equal types");
 
-            let mut insts = emit_clause_guard_expression(left, env, locals, table);
-            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            let mut insts = emit_clause_guard_expression(left, env, locals, strings, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.extend(
                 emit_equality_test(&FieldType::from_gleam_type(left.type_(), env, table), table)
@@ -1301,8 +1412,8 @@ fn emit_clause_guard_expression(
             // check types
             assert_eq!(left.type_(), right.type_(), "Expected equal types");
 
-            let mut insts = emit_clause_guard_expression(left, env, locals, table);
-            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            let mut insts = emit_clause_guard_expression(left, env, locals, strings, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.extend(
                 emit_equality_test(&FieldType::from_gleam_type(left.type_(), env, table), table)
@@ -1312,70 +1423,70 @@ fn emit_clause_guard_expression(
             insts
         }
         ClauseGuard::LtInt { left, right, .. } => {
-            let mut insts = emit_clause_guard_expression(left, env, locals, table);
-            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            let mut insts = emit_clause_guard_expression(left, env, locals, strings, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.extend(integer::lt().lst);
             insts
         }
         ClauseGuard::LtEqInt { left, right, .. } => {
-            let mut insts = emit_clause_guard_expression(left, env, locals, table);
-            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            let mut insts = emit_clause_guard_expression(left, env, locals, strings, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.extend(integer::lte().lst);
             insts
         }
         ClauseGuard::LtFloat { left, right, .. } => {
-            let mut insts = emit_clause_guard_expression(left, env, locals, table);
-            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            let mut insts = emit_clause_guard_expression(left, env, locals, strings, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::F64Lt);
             insts
         }
         ClauseGuard::LtEqFloat { left, right, .. } => {
-            let mut insts = emit_clause_guard_expression(left, env, locals, table);
-            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            let mut insts = emit_clause_guard_expression(left, env, locals, strings, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::F64Le);
             insts
         }
         ClauseGuard::GtEqInt { left, right, .. } => {
-            let mut insts = emit_clause_guard_expression(left, env, locals, table);
-            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            let mut insts = emit_clause_guard_expression(left, env, locals, strings, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.extend(integer::gte().lst);
             insts
         }
         ClauseGuard::GtInt { left, right, .. } => {
-            let mut insts = emit_clause_guard_expression(left, env, locals, table);
-            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            let mut insts = emit_clause_guard_expression(left, env, locals, strings, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.extend(integer::gt().lst);
             insts
         }
         ClauseGuard::GtEqFloat { left, right, .. } => {
-            let mut insts = emit_clause_guard_expression(left, env, locals, table);
-            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            let mut insts = emit_clause_guard_expression(left, env, locals, strings, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::F64Ge);
             insts
         }
         ClauseGuard::GtFloat { left, right, .. } => {
-            let mut insts = emit_clause_guard_expression(left, env, locals, table);
-            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            let mut insts = emit_clause_guard_expression(left, env, locals, strings, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::F64Gt);
             insts
         }
         ClauseGuard::And { left, right, .. } => {
             // short circuiting behavior: if left is false, don't evaluate right
-            let mut insts = emit_clause_guard_expression(left, env, locals, table);
+            let mut insts = emit_clause_guard_expression(left, env, locals, strings, table);
 
             insts.lst.push(wasm_encoder::Instruction::If(
                 wasm_encoder::BlockType::Result(WasmTypeImpl::Bool.to_val_type()),
             ));
 
-            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
 
             insts.lst.push(wasm_encoder::Instruction::Else);
@@ -1385,7 +1496,7 @@ fn emit_clause_guard_expression(
         }
         ClauseGuard::Or { left, right, .. } => {
             // short circuiting behavior: if left is true, don't evaluate right
-            let mut insts = emit_clause_guard_expression(left, env, locals, table);
+            let mut insts = emit_clause_guard_expression(left, env, locals, strings, table);
 
             insts.lst.push(wasm_encoder::Instruction::If(
                 wasm_encoder::BlockType::Result(WasmTypeImpl::Bool.to_val_type()),
@@ -1393,14 +1504,14 @@ fn emit_clause_guard_expression(
             insts.lst.push(wasm_encoder::Instruction::I32Const(1));
             insts.lst.push(wasm_encoder::Instruction::Else);
 
-            let right_insts = emit_clause_guard_expression(right, env, locals, table);
+            let right_insts = emit_clause_guard_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
 
             insts.lst.push(wasm_encoder::Instruction::End);
             insts
         }
         ClauseGuard::Not { expression, .. } => {
-            let mut insts = emit_clause_guard_expression(expression, env, locals, table);
+            let mut insts = emit_clause_guard_expression(expression, env, locals, strings, table);
             insts.lst.push(wasm_encoder::Instruction::I32Eqz);
             insts
         }
@@ -1451,6 +1562,7 @@ fn emit_clause_guard_expression(
 fn emit_binary_operation(
     env: &Environment<'_>,
     locals: &mut LocalStore,
+    strings: &mut Strings,
     table: &SymbolTable,
     // only used to disambiguate equals
     _typ: &Type,
@@ -1460,22 +1572,22 @@ fn emit_binary_operation(
 ) -> WasmInstructions {
     match name {
         BinOp::AddInt => {
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.extend(integer::add().lst);
             insts
         }
         BinOp::SubInt => {
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.extend(integer::sub().lst);
             insts
         }
         BinOp::MultInt => {
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.extend(integer::mul().lst);
             insts
@@ -1506,8 +1618,8 @@ fn emit_binary_operation(
                 },
             );
 
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
 
             insts.lst.extend(right_insts.lst);
             insts
@@ -1537,21 +1649,21 @@ fn emit_binary_operation(
             insts
         }
         BinOp::RemainderInt => {
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.extend(integer::rem().lst);
             insts
         }
         BinOp::And => {
             // short circuiting behavior: if left is false, don't evaluate right
-            let mut insts = emit_expression(left, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
 
             insts.lst.push(wasm_encoder::Instruction::If(
                 wasm_encoder::BlockType::Result(WasmTypeImpl::Bool.to_val_type()),
             ));
 
-            let right_insts = emit_expression(right, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
 
             insts.lst.push(wasm_encoder::Instruction::Else);
@@ -1561,7 +1673,7 @@ fn emit_binary_operation(
         }
         BinOp::Or => {
             // short circuiting behavior: if left is true, don't evaluate right
-            let mut insts = emit_expression(left, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
 
             insts.lst.push(wasm_encoder::Instruction::If(
                 wasm_encoder::BlockType::Result(WasmTypeImpl::Bool.to_val_type()),
@@ -1569,7 +1681,7 @@ fn emit_binary_operation(
             insts.lst.push(wasm_encoder::Instruction::I32Const(1));
             insts.lst.push(wasm_encoder::Instruction::Else);
 
-            let right_insts = emit_expression(right, env, locals, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
 
             insts.lst.push(wasm_encoder::Instruction::End);
@@ -1580,8 +1692,8 @@ fn emit_binary_operation(
             assert_eq!(left.type_(), right.type_(), "Expected equal types");
 
             let type_ = left.type_();
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.extend(
                 emit_equality_test(&FieldType::from_gleam_type(type_, env, table), table).lst,
@@ -1593,8 +1705,8 @@ fn emit_binary_operation(
             assert_eq!(left.type_(), right.type_(), "Expected equal types");
 
             let type_ = left.type_();
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::I32Eqz);
             insts.lst.extend(
@@ -1603,78 +1715,78 @@ fn emit_binary_operation(
             insts
         }
         BinOp::LtInt => {
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.extend(integer::lt().lst);
             insts
         }
         BinOp::LtEqInt => {
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.extend(integer::lte().lst);
             insts
         }
         BinOp::LtFloat => {
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::F64Lt);
             insts
         }
         BinOp::LtEqFloat => {
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::F64Le);
             insts
         }
         BinOp::GtEqInt => {
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.extend(integer::gte().lst);
             insts
         }
         BinOp::GtInt => {
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.extend(integer::gt().lst);
             insts
         }
         BinOp::GtEqFloat => {
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::F64Ge);
             insts
         }
         BinOp::GtFloat => {
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::F64Gt);
             insts
         }
         BinOp::AddFloat => {
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::F64Add);
             insts
         }
         BinOp::SubFloat => {
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::F64Sub);
             insts
         }
         BinOp::MultFloat => {
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
             insts.lst.push(wasm_encoder::Instruction::F64Mul);
             insts
@@ -1705,8 +1817,8 @@ fn emit_binary_operation(
                 },
             );
 
-            let mut insts = emit_expression(left, env, locals, table);
-            let right_insts = emit_expression(right, env, locals, table);
+            let mut insts = emit_expression(left, env, locals, strings, table);
+            let right_insts = emit_expression(right, env, locals, strings, table);
 
             insts.lst.extend(right_insts.lst);
             insts

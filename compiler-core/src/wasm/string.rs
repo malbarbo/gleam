@@ -1,66 +1,137 @@
+use ecow::EcoString;
+
 use super::{
-    encoder::WasmFunction,
-    table::{self, SymbolTable},
+    encoder::{WasmFunction, WasmInstructions, WasmTypeImpl},
+    table::{self, FunctionId, LocalStore, SymbolTable, TypeId},
 };
 
-pub fn emit_get_codepoint(sum: &table::Sum, table: &SymbolTable) -> WasmFunction {
-    todo!()
-    // emit_get_codepoint(string: array[i8], index: i32) -> i32, i32
-    // Gets the unicode codepoint that starts at index in UTF-8 encoded string.
-    // Returns the codepoint and the index of the next codepoint.
-    // If the index is out of bounds, returns -1 and -1.
-
-    // UTF-8 table:
-    // First code point     Last code point 	Byte 1 	    Byte 2 	    Byte 3 	    Byte 4
-    // U+0000 	            U+007F 	            0yyyzzzz
-    // U+0080 	            U+07FF 	            110xxxyy 	10yyzzzz
-    // U+0800 	            U+FFFF 	            1110wwww 	10xxxxyy 	10yyzzzz
-    // U+010000 	        U+10FFFF 	        11110uvv 	10vvwwww 	10xxxxyy 	10yyzzzz
-    // src: https://en.wikipedia.org/wiki/UTF-8
-
+pub fn emit_string_equality_function(
+    function_type: TypeId,
+    function_id: FunctionId,
+    table: &SymbolTable,
+) -> WasmFunction {
     /*
-       -- 80 = 1000 0000
-       -- C0 = 1100 0000
-       -- E0 = 1110 0000
-       -- F0 = 1111 0000
-       -- F8 = 1111 1000
+       (func $string_equality (param $string $string) (result $string)
+           (local $counter i32)
+           (block
+               (; Check if strings are the same length ;)
+               (local.get 0)
+               (array.len)
+               (local.tee $counter)
+               (local.get 1)
+               (array.len)
+               (i32.eq)
+               (i32.eqz)
+               (br_if 0)
 
-       -- 1F = 0001 1111
-       -- 3F = 0011 1111
+               (; Loop through each byte ;)
+               (loop
+                   (; if counter == 0, then strings are equal ;)
+                   (local.get $counter)
+                   (i32.eqz)
+                   (br_if 0)
 
-       first_byte = string[index]
-       if (first_byte & 0x80) == 0 then
-           -- first category
-           return first_byte, index + 1
-       else if (first_byte & 0xE0) == 0xC0 then
-           -- second category
-           second_byte = string[index + 1]
-           if (second_byte & 0xC0) == 0x80 then
-               return ((first_byte & 0x1F) << 6) | (second_byte & 0x3F), index + 2
-           else
-               return -1, -1
-           end
-       else if (first_byte & 0xF0) == 0xE0 then
-           -- third category
-           second_byte = string[index + 1]
-           third_byte = string[index + 2]
-           if (second_byte & 0xC0) == 0x80 and (third_byte & 0xC0) == 0x80 then
-               return ((first_byte & 0x0F) << 12) | ((second_byte & 0x3F) << 6) | (third_byte & 0x3F), index + 3
-           else
-               return -1, -1
-           end
-       else if (first_byte & 0xF8) == 0xF0 then
-           -- fourth category
-           second_byte = string[index + 1]
-           third_byte = string[index + 2]
-           fourth_byte = string[index + 3]
-           if (second_byte & 0xC0) == 0x80 and (third_byte & 0xC0) == 0x80 and (fourth_byte & 0xC0) == 0x80 then
-               return ((first_byte & 0x07) << 18) | ((second_byte & 0x3F) << 12) | ((third_byte & 0x3F) << 6) | (fourth_byte & 0x3F), index + 4
-           else
-               return -1, -1
-           end
-       else
-           return -1, -1
-       end
+                   (; decrement counter ;)
+                   (local.get $counter)
+                   (i32.const 1)
+                   (i32.sub)
+                   (local.set $counter)
+
+                   (; if string1[counter] != string2[counter], then strings are not equal ;)
+                   (local.get 0)
+                   (local.get $counter)
+                   (array.get_u)
+                   (local.get 1)
+                   (local.get $counter)
+                   (array.get_u)
+                   (i32.eq)
+                   (i32.eqz)
+                   (br_if 1)
+               )
+               (i32.const 1)
+               (return)
+           )
+           (i32.const 0)
+       )
     */
+
+    // variables
+    let mut local_generator = LocalStore::with_offset(2);
+    let counter_id = local_generator.new_id();
+    let counter = table::Local {
+        id: counter_id,
+        name: "counter".into(),
+        wasm_type: WasmTypeImpl::Int,
+    };
+    local_generator.insert(counter_id, counter);
+
+    // code
+    let mut i = vec![];
+    let string_type_id = table
+        .types
+        .get(table.string_type.unwrap())
+        .unwrap()
+        .definition
+        .id;
+    {
+        use wasm_encoder::Instruction::*;
+
+        i.push(Block(wasm_encoder::BlockType::Empty));
+        {
+            i.push(LocalGet(0));
+            i.push(ArrayLen);
+            i.push(LocalTee(counter_id.id()));
+            i.push(LocalGet(1));
+            i.push(ArrayLen);
+            i.push(I32Eq);
+            i.push(I32Eqz);
+            i.push(BrIf(0));
+
+            i.push(Loop(wasm_encoder::BlockType::Empty));
+            {
+                i.push(LocalGet(counter_id.id()));
+                i.push(I32Eqz);
+                i.push(BrIf(0));
+
+                i.push(LocalGet(counter_id.id()));
+                i.push(I32Const(1));
+                i.push(I32Sub);
+                i.push(LocalSet(counter_id.id()));
+
+                i.push(LocalGet(0));
+                i.push(LocalGet(counter_id.id()));
+                i.push(ArrayGetU(string_type_id));
+                i.push(LocalGet(1));
+                i.push(LocalGet(counter_id.id()));
+                i.push(ArrayGetU(string_type_id));
+                i.push(I32Eq);
+                i.push(I32Eqz);
+                i.push(BrIf(1));
+            }
+            i.push(End);
+            i.push(I32Const(1));
+            i.push(Return);
+        }
+        i.push(End);
+        i.push(I32Const(0));
+        i.push(End);
+    }
+
+    WasmFunction {
+        name: "string_equality".into(),
+        function_index: function_id.id(),
+        type_index: table.types.get(function_type).unwrap().definition.id,
+        arity: 2,
+        instructions: WasmInstructions { lst: i },
+        locals: local_generator
+            .as_list()
+            .into_iter()
+            .map(|x| (x.name, x.wasm_type))
+            .collect(),
+        argument_names: [Some("lhs"), Some("rhs")]
+            .into_iter()
+            .map(|x| x.map(EcoString::from))
+            .collect(),
+        public: false,
+    }
 }
