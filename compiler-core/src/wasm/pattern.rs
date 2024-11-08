@@ -46,6 +46,10 @@ pub enum Check {
         local: LocalId,
         string: EcoString,
     },
+    PrefixEquality {
+        local: LocalId,
+        prefix: EcoString,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +73,21 @@ pub enum Assignment {
         target_local: LocalId,
         field_index: u32,
         struct_type: TypeId,
+    },
+
+    /// Assigns a suffix of a string to a local variable
+    StringSuffix {
+        subject_local: LocalId,
+        target_local: LocalId,
+        name: EcoString,
+        from: u32,
+    },
+
+    /// Assigns a string constant to a local variable
+    StringConstant {
+        constant: EcoString,
+        target_local: LocalId,
+        name: EcoString,
     },
 }
 
@@ -314,7 +333,83 @@ pub fn compile_pattern(
             assignments: vec![],
             nested: vec![],
         },
-        Pattern::StringPrefix { .. } => todo!("String prefix not implemented yet"),
+        Pattern::StringPrefix {
+            left_side_assignment,
+            left_side_string,
+            right_side_assignment,
+            ..
+        } => {
+            // "Oioi" as x <> rest
+            // left_side_string = "Oioi"
+            // left_side_assignment = Some(("x", _))
+            // right_side_assignment = AssignName::Named("rest")
+
+            // "Oioi" <> _wow
+            // left_side_string = "Oioi"
+            // left_side_assignment = None
+            // right_side_assignment = AssignName::Discard("_wow")
+
+            let mut assignments = vec![];
+
+            if let Some((name, _)) = left_side_assignment {
+                let string_type_id = table
+                    .types
+                    .get(table.string_type.unwrap())
+                    .unwrap()
+                    .definition
+                    .id;
+
+                let target_id = locals.new_id();
+                locals.insert(
+                    target_id,
+                    Local {
+                        id: target_id,
+                        name: name.clone(),
+                        wasm_type: WasmTypeImpl::ArrayRef(string_type_id),
+                    },
+                );
+
+                assignments.push(Assignment::StringConstant {
+                    constant: left_side_string.clone(),
+                    target_local: target_id,
+                    name: name.clone(),
+                });
+            }
+
+            if let Some(name) = right_side_assignment.assigned_name() {
+                let string_type_id = table
+                    .types
+                    .get(table.string_type.unwrap())
+                    .unwrap()
+                    .definition
+                    .id;
+
+                let target_id = locals.new_id();
+                locals.insert(
+                    target_id,
+                    Local {
+                        id: target_id,
+                        name: name.into(),
+                        wasm_type: WasmTypeImpl::ArrayRef(string_type_id),
+                    },
+                );
+
+                assignments.push(Assignment::StringSuffix {
+                    subject_local: subject,
+                    target_local: target_id,
+                    from: left_side_string.len() as u32,
+                    name: name.into(),
+                });
+            }
+            CompiledPattern {
+                checks: vec![Check::PrefixEquality {
+                    local: subject,
+                    prefix: left_side_string.clone(),
+                }],
+                assignments,
+                nested: vec![],
+            }
+        }
         Pattern::BitArray { .. } => todo!("BitArrays not implemented yet"),
         Pattern::VarUsage { .. } => todo!("BitArrays not implemented yet"),
         Pattern::List { .. } => todo!("Lists not implemented yet"),
@@ -399,11 +494,41 @@ pub fn translate_pattern(
                     let string_data_id = strings.get_or_insert_data_segment(&string);
 
                     cond_expr.push(Instruction::LocalGet(local.id()));
+                    // number of bytes
                     cond_expr.push(Instruction::I32Const(string.len() as _));
+                    // offset
+                    cond_expr.push(Instruction::I32Const(0));
                     cond_expr.push(Instruction::ArrayNewData {
                         array_type_index: string_type_id,
                         array_data_index: string_data_id,
                     });
+                    cond_expr.push(Instruction::Call(table.string_equality_test.unwrap().id()));
+                }
+                Check::PrefixEquality { local, prefix } => {
+                    let string_type_id = table
+                        .types
+                        .get(table.string_type.unwrap())
+                        .unwrap()
+                        .definition
+                        .id;
+
+                    let prefix_data = strings.get_or_insert_data_segment(&prefix);
+
+                    // to verify: first we create a substring of the subject, then we compare it with the prefix
+                    cond_expr.push(Instruction::LocalGet(local.id()));
+                    cond_expr.push(Instruction::I32Const(0));
+                    cond_expr.push(Instruction::I32Const(prefix.len() as _));
+                    cond_expr.push(Instruction::Call(table.string_substring.unwrap().id()));
+
+                    // number of bytes
+                    cond_expr.push(Instruction::I32Const(prefix.len() as _));
+                    // offset
+                    cond_expr.push(Instruction::I32Const(0));
+                    cond_expr.push(Instruction::ArrayNewData {
+                        array_type_index: string_type_id,
+                        array_data_index: prefix_data,
+                    });
+
                     cond_expr.push(Instruction::Call(table.string_equality_test.unwrap().id()));
                 }
             }
@@ -473,6 +598,49 @@ pub fn translate_pattern(
                 assign_expr.push(Instruction::LocalSet(
                     locals.get(target_local).unwrap().id.id(),
                 ));
+            }
+            Assignment::StringSuffix {
+                subject_local,
+                target_local,
+                from,
+                name,
+            } => {
+                assign_expr.push(Instruction::LocalGet(
+                    locals.get(subject_local).unwrap().id.id(),
+                ));
+                assign_expr.push(Instruction::I32Const(from as _));
+                assign_expr.push(Instruction::I32Const(-1));
+                assign_expr.push(Instruction::Call(table.string_substring.unwrap().id()));
+                assign_expr.push(Instruction::LocalSet(
+                    locals.get(target_local).unwrap().id.id(),
+                ));
+
+                bindings.push((name.clone(), target_local));
+            }
+            Assignment::StringConstant {
+                constant,
+                target_local,
+                name,
+            } => {
+                let string_type_id = table
+                    .types
+                    .get(table.string_type.unwrap())
+                    .unwrap()
+                    .definition
+                    .id;
+
+                let string_data_id = strings.get_or_insert_data_segment(&constant);
+
+                // number of bytes
+                assign_expr.push(Instruction::I32Const(constant.len() as _));
+                // offset
+                assign_expr.push(Instruction::I32Const(0));
+                assign_expr.push(Instruction::ArrayNewData {
+                    array_type_index: string_type_id,
+                    array_data_index: string_data_id,
+                });
+                assign_expr.push(Instruction::LocalSet(target_local.id()));
+                bindings.push((name.clone(), target_local));
             }
         }
     }

@@ -5,56 +5,11 @@ use super::{
     table::{self, FunctionId, LocalStore, SymbolTable, TypeId},
 };
 
-pub fn emit_string_equality_function(
+pub fn emit_streq(
     function_type: TypeId,
     function_id: FunctionId,
     table: &SymbolTable,
 ) -> WasmFunction {
-    /*
-       (func $string_equality (param $string $string) (result $string)
-           (local $counter i32)
-           (block
-               (; Check if strings are the same length ;)
-               (local.get 0)
-               (array.len)
-               (local.tee $counter)
-               (local.get 1)
-               (array.len)
-               (i32.eq)
-               (i32.eqz)
-               (br_if 0)
-
-               (; Loop through each byte ;)
-               (loop
-                   (; if counter == 0, then strings are equal ;)
-                   (local.get $counter)
-                   (i32.eqz)
-                   (br_if 0)
-
-                   (; decrement counter ;)
-                   (local.get $counter)
-                   (i32.const 1)
-                   (i32.sub)
-                   (local.set $counter)
-
-                   (; if string1[counter] != string2[counter], then strings are not equal ;)
-                   (local.get 0)
-                   (local.get $counter)
-                   (array.get_u)
-                   (local.get 1)
-                   (local.get $counter)
-                   (array.get_u)
-                   (i32.eq)
-                   (i32.eqz)
-                   (br_if 1)
-               )
-               (i32.const 1)
-               (return)
-           )
-           (i32.const 0)
-       )
-    */
-
     // variables
     let mut local_generator = LocalStore::with_offset(2);
     let counter_id = local_generator.new_id();
@@ -125,7 +80,7 @@ pub fn emit_string_equality_function(
     }
 
     WasmFunction {
-        name: "string_equality".into(),
+        name: "streq".into(),
         function_index: function_id.id(),
         type_index: table.types.get(function_type).unwrap().definition.id,
         arity: 2,
@@ -143,53 +98,11 @@ pub fn emit_string_equality_function(
     }
 }
 
-pub fn emit_string_concat_function(
+pub fn emit_strcat(
     function_type: TypeId,
     function_id: FunctionId,
     table: &SymbolTable,
 ) -> WasmFunction {
-    /*
-       (func $concatenate (param ($lhs (ref $String)) ($rhs (ref $String))) (result (ref $String))
-           (; compute the length of the new string ;)
-           (local $lhs_len i32)
-           (local $rhs_len i32)
-           (local $new_string $String)
-
-           (local.get $lhs)
-           (array.len)
-           (local.set $lhs_len)
-
-           (local.get $rhs)
-           (array.len)
-           (local.set $rhs_len)
-
-           (local.get $lhs_len)
-           (local.get $rhs_len)
-           (i32.add)
-           (array.new $String)
-           (local.set $new_string)
-
-           (; copy the lhs string into the new string ;)
-
-           (; dest, dest_offset, src, src_offset, length ;)
-           (local.get $new_string)
-           (i32.const 0)
-           (local.get $lhs)
-           (i32.const 0)
-           (local.get $lhs_len)
-           (array.copy)
-
-           (; copy the rhs string into the new string ;)
-           (local.get $new_string)
-           (local.get $lhs_len)
-           (local.get $rhs)
-           (i32.const 0)
-           (local.get $lhs_len)
-           (array.copy)
-
-           (local.get $new_string)
-       )
-    */
     let string_type_id = table
         .types
         .get(table.string_type.unwrap())
@@ -266,7 +179,7 @@ pub fn emit_string_concat_function(
     }
 
     WasmFunction {
-        name: "string_concat".into(),
+        name: "strcat".into(),
         function_index: function_id.id(),
         type_index: table.types.get(function_type).unwrap().definition.id,
         arity: 2,
@@ -283,3 +196,296 @@ pub fn emit_string_concat_function(
         public: false,
     }
 }
+
+// strsub(str, start, end) -> str
+// Returns a substring of a string from a start index to an end index. end index is not inclusive.
+// If start or end are negative, they will be treated as offsets from the string length + 1.
+// If start is < 0, it will be treated as 0. If end is > #str, it will be treated as #str.
+// If after this start is greater than or equal to end, the function will return an empty string.
+pub fn emit_strsub(
+    function_type: TypeId,
+    function_id: FunctionId,
+    table: &SymbolTable,
+) -> WasmFunction {
+    /*
+       (func $strsub (param ($str (ref $String)) ($start i32) ($end i32)) (result ($ref String))
+           (local $str_len i32)
+           (local $result (ref $String))
+           (local $result_len i32)
+
+           (local.get $str)
+           (array.len)
+           (local.set $str_len)
+
+           ; if start is negative, replace by length + start
+           (local.get $start)
+           (const.i32 0)
+           (i32.lt_s)
+           (if
+               (local.get $str_len)
+               (local.get $start)
+               (i32.add)
+               (local.set $start)
+           end)
+
+           ; if end is negative, replace by length + end + 1
+           (local.get $end)
+           (const.i32 0)
+           (i32.lt_s)
+           (if
+               (local.get $str_len)
+               (local.get $end)
+               (i32.add)
+               (local.set $end)
+           end)
+
+           ; if start < 0, replace by 0
+           (local.get $start)
+           (const.i32 0)
+           (i32.lt_s)
+           (if
+               (const.i32 0)
+               (local.set $start)
+           end)
+
+           ; if end > length, replace by length
+           (local.get $end)
+           (local.get $str_len)
+           (i32.gt_s)
+           (if
+               (local.get $str_len)
+               (local.set $end)
+           end)
+
+           ; if start >= end, return empty string
+           (local.get $start)
+           (local.get $end)
+           (i32.ge_s)
+           (if
+               (i32.const 0)
+               (array.new $String)
+               (return)
+           end)
+
+           ; otherwise, return substring
+           ; length
+           (local.get $end)
+           (local.get $start)
+           (i32.sub)
+           (local.tee $result_len)
+           (array.new_default $String)
+           (local.set $result)
+
+           ; origin, start, destination, start, length
+           (local.get $str)
+           (local.get $start)
+           (local.get $result)
+           (i32.const 0)
+           (local.get $result_len)
+           (array.copy $String $String)
+       )
+
+    */
+    let string_type_id = table
+        .types
+        .get(table.string_type.unwrap())
+        .unwrap()
+        .definition
+        .id;
+
+    // variables
+    let str_id = 0;
+    let start_id = 1;
+    let end_id = 2;
+
+    let mut local_generator = LocalStore::with_offset(3);
+    let str_len_id = local_generator.new_id();
+    let str_len = table::Local {
+        id: str_len_id,
+        name: "str_len".into(),
+        wasm_type: WasmTypeImpl::Int,
+    };
+    local_generator.insert(str_len_id, str_len);
+
+    let result_id = local_generator.new_id();
+    let result = table::Local {
+        id: result_id,
+        name: "new_string".into(),
+        wasm_type: WasmTypeImpl::ArrayRef(string_type_id),
+    };
+    local_generator.insert(result_id, result);
+
+    let result_len_id = local_generator.new_id();
+    let result_len = table::Local {
+        id: result_len_id,
+        name: "result_len".into(),
+        wasm_type: WasmTypeImpl::Int,
+    };
+    local_generator.insert(result_len_id, result_len);
+
+    // code
+    let mut i = vec![];
+
+    {
+        use wasm_encoder::Instruction::*;
+        i.push(LocalGet(str_id));
+        i.push(ArrayLen);
+        i.push(LocalSet(str_len_id.id()));
+
+        // if start is negative, replace by length + start
+        i.push(LocalGet(start_id));
+        i.push(I32Const(0));
+        i.push(I32LtS);
+        i.push(If(wasm_encoder::BlockType::Empty));
+        {
+            i.push(LocalGet(str_len_id.id()));
+            i.push(LocalGet(start_id));
+            i.push(I32Add);
+            i.push(LocalSet(start_id));
+        }
+        i.push(End);
+
+        // if end is negative, replace by length + end + 1
+        i.push(LocalGet(end_id));
+        i.push(I32Const(0));
+        i.push(I32LtS);
+        i.push(If(wasm_encoder::BlockType::Empty));
+        {
+            i.push(LocalGet(str_len_id.id()));
+            i.push(LocalGet(end_id));
+            i.push(I32Add);
+            i.push(I32Const(1));
+            i.push(I32Add);
+            i.push(LocalSet(end_id));
+        }
+        i.push(End);
+
+        // if start < 0, replace by 0
+        i.push(LocalGet(start_id));
+        i.push(I32Const(0));
+        i.push(I32LtS);
+        i.push(If(wasm_encoder::BlockType::Empty));
+        {
+            i.push(I32Const(0));
+            i.push(LocalSet(start_id));
+        }
+        i.push(End);
+
+        // if end > length, replace by length
+        i.push(LocalGet(end_id));
+        i.push(LocalGet(str_len_id.id()));
+        i.push(I32GtS);
+        i.push(If(wasm_encoder::BlockType::Empty));
+        {
+            i.push(LocalGet(str_len_id.id()));
+            i.push(LocalSet(end_id));
+        }
+        i.push(End);
+
+        // if start >= end, return empty string
+        i.push(LocalGet(start_id));
+        i.push(LocalGet(end_id));
+        i.push(I32GeS);
+        i.push(If(wasm_encoder::BlockType::Empty));
+        {
+            i.push(I32Const(0));
+            i.push(ArrayNewDefault(string_type_id));
+            i.push(Return);
+        }
+        i.push(End);
+
+        // otherwise, return substring
+        // length
+        i.push(LocalGet(end_id));
+        i.push(LocalGet(start_id));
+        i.push(I32Sub);
+        i.push(LocalTee(result_len_id.id()));
+        i.push(ArrayNewDefault(string_type_id));
+        i.push(LocalSet(result_id.id()));
+
+        // origin, start, destination, start, length
+        i.push(LocalGet(str_id));
+        i.push(LocalGet(start_id));
+        i.push(LocalGet(result_id.id()));
+        i.push(I32Const(0));
+        i.push(LocalGet(result_len_id.id()));
+        i.push(ArrayCopy {
+            array_type_index_src: string_type_id,
+            array_type_index_dst: string_type_id,
+        });
+        i.push(LocalGet(result_id.id()));
+
+        // end
+        i.push(End);
+    }
+
+    WasmFunction {
+        name: "strsub".into(),
+        function_index: function_id.id(),
+        type_index: table.types.get(function_type).unwrap().definition.id,
+        arity: 3,
+        instructions: WasmInstructions { lst: i },
+        locals: local_generator
+            .as_list()
+            .into_iter()
+            .map(|x| (x.name, x.wasm_type))
+            .collect(),
+        argument_names: [Some("str"), Some("start"), Some("end")]
+            .into_iter()
+            .map(|x| x.map(EcoString::from))
+            .collect(),
+        public: false,
+    }
+}
+
+// memtostr(mem, offset, length) -> str
+// Copies a substring from memory into a new string from a given offset with a given length.
+
+// strtomem(str, mem, offset) -> void
+// Copies a string to memory at a given offset.
+
+/*
+TEMPLATE:
+
+pub fn emit_strsub(
+    function_type: TypeId,
+    function_id: FunctionId,
+    table: &SymbolTable,
+) -> WasmFunction {
+    let string_type_id = table
+        .types
+        .get(table.string_type.unwrap())
+        .unwrap()
+        .definition
+        .id;
+
+    // variables
+    let mut local_generator = LocalStore::with_offset(2);
+
+    // code
+    let mut i = vec![];
+
+    {
+        use wasm_encoder::Instruction::*;
+    }
+
+    WasmFunction {
+        name: "strcat".into(),
+        function_index: function_id.id(),
+        type_index: table.types.get(function_type).unwrap().definition.id,
+        arity: 2,
+        instructions: WasmInstructions { lst: i },
+        locals: local_generator
+            .as_list()
+            .into_iter()
+            .map(|x| (x.name, x.wasm_type))
+            .collect(),
+        argument_names: [Some("lhs"), Some("rhs")]
+            .into_iter()
+            .map(|x| x.map(EcoString::from))
+            .collect(),
+        public: false,
+    }
+}
+
+*/

@@ -381,6 +381,7 @@ pub struct SymbolTable {
 
     pub string_equality_test: Option<FunctionId>,
     pub string_concat: Option<FunctionId>,
+    pub string_substring: Option<FunctionId>,
 }
 
 impl SymbolTable {
@@ -396,6 +397,7 @@ impl SymbolTable {
             string_type: None,
             string_equality_test: None,
             string_concat: None,
+            string_substring: None,
         }
     }
 }

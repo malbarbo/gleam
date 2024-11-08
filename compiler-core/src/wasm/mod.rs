@@ -710,6 +710,7 @@ fn generate_prelude_types(table: &mut SymbolTable, env: &mut Environment<'_>) ->
         .definition
         .id;
 
+    // string equality //////////////////////////////////////////////
     let string_equality_test_type_id = table.types.new_id();
     let string_equality_test_type = table::Type {
         id: string_equality_test_type_id,
@@ -739,13 +740,14 @@ fn generate_prelude_types(table: &mut SymbolTable, env: &mut Environment<'_>) ->
         .insert(string_equality_test_id, string_equality_test);
     table.string_equality_test = Some(string_equality_test_id);
 
-    let string_equality_fn = string::emit_string_equality_function(
+    let string_equality_fn = string::emit_streq(
         string_equality_test_type_id,
         string_equality_test_id,
         &table,
     );
     module.functions.push(string_equality_fn);
 
+    // string concatenation //////////////////////////////////////////////
     let string_concat_type_id = table.types.new_id();
     let string_concat_type = table::Type {
         id: string_concat_type_id,
@@ -773,9 +775,47 @@ fn generate_prelude_types(table: &mut SymbolTable, env: &mut Environment<'_>) ->
     table.functions.insert(string_concat_id, string_concat);
     table.string_concat = Some(string_concat_id);
 
-    let string_concat_fn =
-        string::emit_string_concat_function(string_concat_type_id, string_concat_id, &table);
+    let string_concat_fn = string::emit_strcat(string_concat_type_id, string_concat_id, &table);
     module.functions.push(string_concat_fn);
+
+    // substring //////////////////////////////////////////////
+    let string_substring_type_id = table.types.new_id();
+    let string_substring_type = table::Type {
+        id: string_substring_type_id,
+        name: "typ@@strsub".into(),
+        definition: WasmType {
+            name: "typ@strsub@String".into(),
+            id: string_substring_type_id.id(),
+            definition: WasmTypeDefinition::Function {
+                parameters: [
+                    WasmTypeImpl::ArrayRef(string_type_wasm_id),
+                    WasmTypeImpl::Int,
+                    WasmTypeImpl::Int,
+                ]
+                .to_vec(),
+                returns: WasmTypeImpl::ArrayRef(string_type_wasm_id),
+            },
+        },
+    };
+    table
+        .types
+        .insert(string_substring_type_id, string_substring_type);
+
+    let string_substring_id = table.functions.new_id();
+    let string_substring = table::Function {
+        id: string_substring_id,
+        signature: string_substring_type_id,
+        name: "strsub".into(),
+        arity: 3,
+    };
+    table
+        .functions
+        .insert(string_substring_id, string_substring);
+    table.string_substring = Some(string_substring_id);
+
+    let string_substring_fn =
+        string::emit_strsub(string_substring_type_id, string_substring_id, &table);
+    module.functions.push(string_substring_fn);
 
     // To be implemented:
     // - PreludeType::BitArray
@@ -1758,7 +1798,11 @@ fn emit_binary_operation(
         }
         BinOp::Eq => {
             // check types
-            assert_eq!(left.type_(), right.type_(), "Expected equal types");
+            assert_eq!(
+                left.type_().named_type_name(),
+                right.type_().named_type_name(),
+                "Expected equal types"
+            );
 
             let type_ = left.type_();
             let mut insts = emit_expression(left, env, locals, strings, table);
@@ -1771,7 +1815,11 @@ fn emit_binary_operation(
         }
         BinOp::NotEq => {
             // check types
-            assert_eq!(left.type_(), right.type_(), "Expected equal types");
+            assert_eq!(
+                left.type_().named_type_name(),
+                right.type_().named_type_name(),
+                "Expected equal types"
+            );
 
             let type_ = left.type_();
             let mut insts = emit_expression(left, env, locals, strings, table);
