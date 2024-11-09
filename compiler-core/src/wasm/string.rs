@@ -21,6 +21,8 @@ pub fn emit_streq(
     local_generator.insert(counter_id, counter);
 
     // code
+    let lhs_id = 0;
+    let rhs_id = 1;
     let mut i = vec![];
     let string_type_id = table
         .types
@@ -31,22 +33,23 @@ pub fn emit_streq(
     {
         use wasm_encoder::Instruction::*;
 
-        i.push(Block(wasm_encoder::BlockType::Empty));
         {
+            i.push(Block(wasm_encoder::BlockType::Empty));
+
             // Check if strings are the same length
-            i.push(LocalGet(0));
+            i.push(LocalGet(lhs_id));
             i.push(ArrayLen);
             i.push(LocalTee(counter_id.id()));
-            i.push(LocalGet(1));
+            i.push(LocalGet(rhs_id));
             i.push(ArrayLen);
             i.push(I32Eq);
             i.push(I32Eqz);
             i.push(BrIf(0));
 
-            i.push(Block(wasm_encoder::BlockType::Empty));
             {
-                i.push(Loop(wasm_encoder::BlockType::Empty));
+                i.push(Block(wasm_encoder::BlockType::Empty));
                 {
+                    i.push(Loop(wasm_encoder::BlockType::Empty));
                     i.push(LocalGet(counter_id.id()));
                     i.push(I32Eqz);
                     i.push(BrIf(1)); // loop creates a branch at beginning, not at end
@@ -56,25 +59,25 @@ pub fn emit_streq(
                     i.push(I32Sub);
                     i.push(LocalSet(counter_id.id()));
 
-                    i.push(LocalGet(0));
+                    i.push(LocalGet(lhs_id));
                     i.push(LocalGet(counter_id.id()));
                     i.push(ArrayGetU(string_type_id));
-                    i.push(LocalGet(1));
+                    i.push(LocalGet(rhs_id));
                     i.push(LocalGet(counter_id.id()));
                     i.push(ArrayGetU(string_type_id));
                     i.push(I32Eq);
                     i.push(I32Eqz);
-                    i.push(BrIf(1)); // quit loop
+                    i.push(BrIf(2)); // quit loop
 
                     i.push(Br(0));
+                    i.push(End);
                 }
                 i.push(End);
             }
-            i.push(End);
             i.push(I32Const(1));
             i.push(Return);
+            i.push(End);
         }
-        i.push(End);
         i.push(I32Const(0));
         i.push(End);
     }

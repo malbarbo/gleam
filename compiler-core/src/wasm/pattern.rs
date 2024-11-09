@@ -494,10 +494,10 @@ pub fn translate_pattern(
                     let string_data_id = strings.get_or_insert_data_segment(&string);
 
                     cond_expr.push(Instruction::LocalGet(local.id()));
-                    // number of bytes
-                    cond_expr.push(Instruction::I32Const(string.len() as _));
                     // offset
                     cond_expr.push(Instruction::I32Const(0));
+                    // number of bytes
+                    cond_expr.push(Instruction::I32Const(string.len() as _));
                     cond_expr.push(Instruction::ArrayNewData {
                         array_type_index: string_type_id,
                         array_data_index: string_data_id,
@@ -520,10 +520,10 @@ pub fn translate_pattern(
                     cond_expr.push(Instruction::I32Const(prefix.len() as _));
                     cond_expr.push(Instruction::Call(table.string_substring.unwrap().id()));
 
-                    // number of bytes
-                    cond_expr.push(Instruction::I32Const(prefix.len() as _));
                     // offset
                     cond_expr.push(Instruction::I32Const(0));
+                    // number of bytes
+                    cond_expr.push(Instruction::I32Const(prefix.len() as _));
                     cond_expr.push(Instruction::ArrayNewData {
                         array_type_index: string_type_id,
                         array_data_index: prefix_data,
@@ -631,10 +631,10 @@ pub fn translate_pattern(
 
                 let string_data_id = strings.get_or_insert_data_segment(&constant);
 
-                // number of bytes
-                assign_expr.push(Instruction::I32Const(constant.len() as _));
                 // offset
                 assign_expr.push(Instruction::I32Const(0));
+                // number of bytes
+                assign_expr.push(Instruction::I32Const(constant.len() as _));
                 assign_expr.push(Instruction::ArrayNewData {
                     array_type_index: string_type_id,
                     array_data_index: string_data_id,

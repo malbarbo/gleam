@@ -608,10 +608,10 @@ fn emit_constant(
             let data_segment = strings.get_or_insert_data_segment(value);
             WasmInstructions {
                 lst: vec![
-                    // number of bytes
-                    wasm_encoder::Instruction::I32Const(value.len() as _),
                     // offset
                     wasm_encoder::Instruction::I32Const(0),
+                    // number of bytes
+                    wasm_encoder::Instruction::I32Const(value.len() as _),
                     wasm_encoder::Instruction::ArrayNewData {
                         array_type_index: string_type.definition.id,
                         array_data_index: data_segment,
@@ -1193,10 +1193,10 @@ fn emit_expression(
             let data_segment = strings.get_or_insert_data_segment(value);
             WasmInstructions {
                 lst: vec![
-                    // number of bytes
-                    wasm_encoder::Instruction::I32Const(value.len() as _),
                     // offset
                     wasm_encoder::Instruction::I32Const(0),
+                    // number of bytes
+                    wasm_encoder::Instruction::I32Const(value.len() as _),
                     wasm_encoder::Instruction::ArrayNewData {
                         array_type_index: string_type.definition.id,
                         array_data_index: data_segment,
