@@ -9,6 +9,6 @@ pub const something = class
 
 
 ----- COMPILED JAVASCRIPT
-export const class$ = 5;
+export const class$ = 5n;
 
 export const something = class$;

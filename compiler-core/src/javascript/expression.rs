@@ -810,6 +810,10 @@ impl<'module> Generator<'module> {
                             .to_doc()
                             .surround('"', '"');
                         let line_number = self.line_numbers.line_number(location.start).to_doc();
+                        arguments = arguments
+                            .into_iter()
+                            .map(|arg| arg.surround("() => { return ", " }"))
+                            .collect();
                         arguments.push(module);
                         arguments.push(function);
                         arguments.push(line_number);

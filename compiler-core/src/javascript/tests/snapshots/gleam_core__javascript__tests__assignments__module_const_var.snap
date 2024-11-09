@@ -13,7 +13,7 @@ pub fn use_compound() { compound.0 + compound.1 }
 
 
 ----- COMPILED JAVASCRIPT
-export const int = 42;
+export const int = 42n;
 
 export const int_alias = int;
 

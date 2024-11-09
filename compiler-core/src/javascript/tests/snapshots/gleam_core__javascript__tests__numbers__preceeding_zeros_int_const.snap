@@ -8,4 +8,4 @@ const x = 09_179
 
 
 ----- COMPILED JAVASCRIPT
-const x = 9_179;
+const x = 9_179n;

@@ -11,7 +11,7 @@ pub fn export() {
 
 
 ----- COMPILED JAVASCRIPT
-const in$ = 1;
+const in$ = 1n;
 
 export function export$() {
   return in$;

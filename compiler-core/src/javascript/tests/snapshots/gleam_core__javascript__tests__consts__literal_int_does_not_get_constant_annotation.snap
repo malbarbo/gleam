@@ -6,4 +6,4 @@ expression: pub const a = 1
 pub const a = 1
 
 ----- COMPILED JAVASCRIPT
-export const a = 1;
+export const a = 1n;
