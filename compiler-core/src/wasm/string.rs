@@ -114,6 +114,8 @@ pub fn emit_strcat(
         .id;
 
     // variables
+    let lhs = 0;
+    let rhs = 1;
     let mut local_generator = LocalStore::with_offset(2);
     let lhs_len_id = local_generator.new_id();
     let lhs_len = table::Local {
@@ -145,11 +147,11 @@ pub fn emit_strcat(
     {
         use wasm_encoder::Instruction::*;
 
-        i.push(LocalGet(0));
+        i.push(LocalGet(lhs));
         i.push(ArrayLen);
         i.push(LocalTee(lhs_len_id.id()));
 
-        i.push(LocalGet(1));
+        i.push(LocalGet(rhs));
         i.push(ArrayLen);
         i.push(LocalTee(rhs_len_id.id()));
 
@@ -157,9 +159,10 @@ pub fn emit_strcat(
         i.push(ArrayNewDefault(string_type_id));
         i.push(LocalSet(result_id.id()));
 
+        // destination, start, origin, start, length
         i.push(LocalGet(result_id.id()));
         i.push(I32Const(0));
-        i.push(LocalGet(0));
+        i.push(LocalGet(lhs));
         i.push(I32Const(0));
         i.push(LocalGet(lhs_len_id.id()));
         i.push(ArrayCopy {
@@ -167,9 +170,10 @@ pub fn emit_strcat(
             array_type_index_dst: string_type_id,
         });
 
+        // destination, start, origin, start, length
         i.push(LocalGet(result_id.id()));
         i.push(LocalGet(lhs_len_id.id()));
-        i.push(LocalGet(1));
+        i.push(LocalGet(rhs));
         i.push(I32Const(0));
         i.push(LocalGet(rhs_len_id.id()));
         i.push(ArrayCopy {
@@ -406,11 +410,11 @@ pub fn emit_strsub(
         i.push(ArrayNewDefault(string_type_id));
         i.push(LocalSet(result_id.id()));
 
-        // origin, start, destination, start, length
-        i.push(LocalGet(str_id));
-        i.push(LocalGet(start_id));
+        // destination, start, origin, start, length
         i.push(LocalGet(result_id.id()));
         i.push(I32Const(0));
+        i.push(LocalGet(str_id));
+        i.push(LocalGet(start_id));
         i.push(LocalGet(result_len_id.id()));
         i.push(ArrayCopy {
             array_type_index_src: string_type_id,
