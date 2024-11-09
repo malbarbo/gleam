@@ -1318,7 +1318,7 @@ impl<'module, 'a> Generator<'module, 'a> {
     fn call_with_doc_args(
         &mut self,
         fun: &'a TypedExpr,
-        arguments: Vec<Document<'a>>,
+        mut arguments: Vec<Document<'a>>,
     ) -> Output<'a> {
         match fun {
             // Qualified record construction
@@ -1387,6 +1387,25 @@ impl<'module, 'a> Generator<'module, 'a> {
             }
 
             _ => {
+                if let TypedExpr::ModuleSelect {
+                    constructor: ModuleValueConstructor::Fn { module, .. },
+                    location,
+                    ..
+                } = fun
+                {
+                    if module == "sgleam/check" {
+                        let module = self.module_name.clone().to_doc().surround('"', '"');
+                        let function = self.function_name.clone().to_doc().surround('"', '"');
+                        let line_number = self.line_numbers.line_number(location.start).to_doc();
+                        arguments = arguments
+                            .into_iter()
+                            .map(|arg| arg.surround("() => { return ", " }"))
+                            .collect();
+                        arguments.push(module);
+                        arguments.push(function);
+                        arguments.push(line_number);
+                    }
+                };
                 let fun = self.not_in_tail_position(None, |this| {
                     let is_fn_literal = matches!(fun, TypedExpr::Fn { .. });
                     let fun = this.wrap_expression(fun)?;
