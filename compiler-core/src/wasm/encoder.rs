@@ -59,7 +59,9 @@ pub enum WasmTypeDefinition {
         parameters: Vec<WasmTypeImpl>,
         returns: WasmTypeImpl,
     },
-    Sum,
+    Sum {
+        common_fields: Vec<WasmTypeImpl>,
+    },
     Product {
         supertype_index: u32,
         tag: u32,
@@ -309,13 +311,21 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
                 let returns = [returns.to_val_type()];
                 _ = types.function(parameters, returns);
             }
-            WasmTypeDefinition::Sum => {
+            WasmTypeDefinition::Sum { common_fields } => {
+                let mut field_list = vec![tag_field.clone()];
+                for field in common_fields {
+                    field_list.push(wasm_encoder::FieldType {
+                        element_type: wasm_encoder::StorageType::Val(field.to_val_type()),
+                        mutable: false,
+                    });
+                }
+
                 _ = types.subtype(&wasm_encoder::SubType {
                     is_final: false,
                     supertype_idx: None,
                     composite_type: wasm_encoder::CompositeType {
                         inner: wasm_encoder::CompositeInnerType::Struct(wasm_encoder::StructType {
-                            fields: vec![tag_field.clone()].into_boxed_slice(),
+                            fields: field_list.into_boxed_slice(),
                         }),
                         shared: false,
                     },

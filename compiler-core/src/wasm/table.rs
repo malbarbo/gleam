@@ -136,6 +136,9 @@ pub struct Sum {
 
     /// Function which tests for equality between two instances of this sum type.
     pub equality_test: FunctionId,
+
+    /// Common fields.
+    pub common_fields: Vec<ProductField>,
 }
 
 /// Represents a product type in the type table.
@@ -163,7 +166,7 @@ pub struct Product {
     /// The constructor function index.
     pub constructor: FunctionId,
 
-    /// Map from field names to field indices.
+    /// All fields.
     pub fields: Vec<ProductField>,
 }
 
@@ -353,6 +356,10 @@ impl<T: Clone + Debug> Store<T> {
 
     pub fn get(&self, id: Id<T>) -> Option<&T> {
         self.items.get(&id)
+    }
+
+    pub fn get_mut(&mut self, id: Id<T>) -> Option<&mut T> {
+        self.items.get_mut(&id)
     }
 
     pub fn as_list(&self) -> Vec<T> {

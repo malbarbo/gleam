@@ -16,7 +16,7 @@ use encoder::{
 };
 use environment::{Binding, BuiltinType, Environment, TypeBinding};
 use itertools::Itertools;
-use table::{FieldType, GleamString, Local, LocalStore, Strings, SymbolTable};
+use table::{FieldType, GleamString, Local, LocalStore, ProductField, Strings, SymbolTable};
 
 use crate::{
     ast::{
@@ -62,7 +62,10 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     definition: WasmType {
                         id: sum_type_id.id(),
                         name: sum_type_name,
-                        definition: WasmTypeDefinition::Sum,
+                        definition: WasmTypeDefinition::Sum {
+                            // filled later
+                            common_fields: vec![],
+                        },
                     },
                 };
                 table.types.insert(sum_type_id, sum_type);
@@ -79,6 +82,8 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                         type_: sum_type_id,
                         public: t.publicity.is_public(),
                         equality_test: equality_function_id,
+                        // filled later
+                        common_fields: vec![],
                     },
                 );
                 root_environment.set_type(t.name.clone(), TypeBinding::Sum(sum_id));
@@ -298,6 +303,41 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     name: format!("eq@{}", t.name).into(),
                     arity: 2,
                 };
+
+                // compute common fields
+                // the common fields of a sum type is the longest common prefix of all its variants
+                let mut common_fields = vec![];
+                let products = product_ids
+                    .iter()
+                    .map(|id| table.products.get(*id).unwrap());
+                for i in 0.. {
+                    let field: Option<Vec<&ProductField>> = products
+                        .clone()
+                        .map(|p| p.fields.get(i))
+                        .collect::<Option<Vec<_>>>();
+                    if let Some(field) = field {
+                        if field.iter().all(|f| f == &field[0]) {
+                            common_fields.push(field[0].clone());
+                            continue;
+                        }
+                    }
+                    break;
+                }
+
+                {
+                    let fielded_wasm_type = WasmTypeDefinition::Sum {
+                        common_fields: common_fields
+                            .iter()
+                            .map(|f| f.type_.to_wasm_type(&table))
+                            .collect(),
+                    };
+
+                    let sum = table.sums.get_mut(sum_id).unwrap();
+                    let sum_type = table.types.get_mut(sum.type_).unwrap();
+                    sum_type.definition.definition = fielded_wasm_type;
+                    sum.common_fields = common_fields;
+                }
+
                 table
                     .functions
                     .insert(equality_function_id, equality_function);
@@ -1204,10 +1244,29 @@ fn emit_expression(
                 ],
             }
         }
+        TypedExpr::RecordAccess {
+            typ, index, record, ..
+        } => {
+            let mut insts = emit_expression(record, env, locals, strings, table);
+
+            let type_ = WasmTypeImpl::from_gleam_type(Arc::clone(&record.type_()), env, table);
+            let type_id = match type_ {
+                WasmTypeImpl::StructRef(id) => id,
+                _ => panic!("Expected struct type"),
+            };
+            insts.lst.push(wasm_encoder::Instruction::RefCastNonNull(
+                wasm_encoder::HeapType::Concrete(type_id),
+            ));
+            insts.lst.push(wasm_encoder::Instruction::StructGet {
+                struct_type_index: type_id,
+                field_index: (index + 1) as _,
+            });
+            insts
+        }
+
         TypedExpr::Pipeline { .. } => todo!("Pipelines not implemented yet"),
         TypedExpr::Fn { .. } => todo!("Inner functions not implemented yet"),
         TypedExpr::List { .. } => todo!("Lists not implemented yet"),
-        TypedExpr::RecordAccess { .. } => todo!("Record access not implemented yet"),
         TypedExpr::ModuleSelect { .. } => todo!("Module access not implemented yet"),
         TypedExpr::Tuple { .. } => todo!("Tuples not implemented yet"),
         TypedExpr::TupleIndex { .. } => todo!("Tuple index not implemented yet"),
@@ -1661,9 +1720,28 @@ fn emit_clause_guard_expression(
                 None => unreachable!("Name does not exist in environment"),
             }
         }
+        ClauseGuard::FieldAccess {
+            index, container, ..
+        } => {
+            let mut insts = emit_clause_guard_expression(container, env, locals, strings, table);
+
+            let type_ = WasmTypeImpl::from_gleam_type(Arc::clone(&container.type_()), env, table);
+            let type_id = match type_ {
+                WasmTypeImpl::StructRef(id) => id,
+                _ => panic!("Expected struct type"),
+            };
+
+            insts.lst.push(wasm_encoder::Instruction::RefCastNonNull(
+                wasm_encoder::HeapType::Concrete(type_id),
+            ));
+            insts.lst.push(wasm_encoder::Instruction::StructGet {
+                struct_type_index: type_id,
+                field_index: (index.expect("Could not find index") + 1) as _,
+            });
+            insts
+        }
         ClauseGuard::Constant(constant) => emit_constant(constant, env, strings, table),
         ClauseGuard::TupleIndex { .. } => todo!("Tuples not implemented yet"),
-        ClauseGuard::FieldAccess { .. } => todo!("Field access not implemented yet"),
         ClauseGuard::ModuleSelect { .. } => todo!("Modules not implemented yet"),
     }
 }
