@@ -2,7 +2,6 @@ FALTAM:
 
 MVP 1.0:
 - Constantes a nível de módulo (não-básicas)
-- Sintaxe de acesso de registro
 - Entrada e saída básicas
 - Referências a funções
 
