@@ -504,7 +504,7 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
         let main_function_idx = wasm_module
             .functions
             .iter()
-            .find(|f| f.name == "main" && f.public && f.arity == 0) // TODO: check arity in a nicer way
+            .find(|f| f.name == "main" && f.public && f.arity == 0)
             .map(|f| f.function_index);
 
         let mut instructions = vec![];
