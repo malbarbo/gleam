@@ -101,7 +101,7 @@ impl WasmType {
     }
 
     pub fn from_product_type(
-        variant: &TypedRecordConstructor,
+        fields: &[WasmTypeImpl],
         name: &str,
         type_id: u32,
         tag: u32,
@@ -109,22 +109,13 @@ impl WasmType {
         table: &SymbolTable,
         env: &Environment<'_>,
     ) -> Self {
-        let mut fields = vec![];
-        for arg in &variant.arguments {
-            fields.push(WasmTypeImpl::from_gleam_type(
-                Arc::clone(&arg.type_),
-                env,
-                table,
-            ));
-        }
-
         WasmType {
             name: name.into(),
             id: type_id,
             definition: WasmTypeDefinition::Product {
                 supertype_index,
                 tag,
-                fields,
+                fields: fields.to_vec(),
             },
         }
     }

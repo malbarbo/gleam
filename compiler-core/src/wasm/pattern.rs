@@ -13,7 +13,7 @@ use super::{
     encoder::WasmTypeImpl,
     environment::{Binding, Environment},
     integer, parse_float,
-    table::{Local, LocalId, LocalStore, Strings, SumId, SymbolTable, TypeId},
+    table::{Local, LocalId, LocalStore, ProductId, Strings, SumId, SymbolTable, TypeId},
 };
 
 #[derive(Debug, Clone)]
@@ -300,11 +300,17 @@ pub fn compile_pattern(
                     },
                 );
 
+                let actual_field_index = product
+                    .gleam_to_canonical_id
+                    .get(&field_index)
+                    .copied()
+                    .unwrap_or(field_index);
+
                 // assign the argument to the new variable
                 assignments.push(Assignment::StructField {
                     subject_local: cast_local_id,
                     target_local: arg_variable,
-                    field_index: i as u32 + 1,
+                    field_index: actual_field_index as u32 + 1,
                     struct_type: product.type_,
                 });
 

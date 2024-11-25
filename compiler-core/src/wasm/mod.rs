@@ -7,7 +7,10 @@ mod pattern;
 mod string;
 mod table;
 
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use ecow::EcoString;
 use encoder::{
@@ -84,6 +87,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                         equality_test: equality_function_id,
                         // filled later
                         common_fields: vec![],
+                        gleam_to_canonical_id: HashMap::new(),
                     },
                 );
                 root_environment.set_type(t.name.clone(), TypeBinding::Sum(sum_id));
@@ -151,17 +155,144 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                 // add sum type to environment
                 root_environment.set_type(t.name.clone(), TypeBinding::Sum(sum_id));
 
+                // process fields
+                let variant_fields = t
+                    .constructors
+                    .iter()
+                    .map(|variant| {
+                        variant
+                            .arguments
+                            .iter()
+                            .enumerate()
+                            .map(|(i, arg)| {
+                                let label = if arg.label.is_none() {
+                                    format!("arg{}", i).into()
+                                } else {
+                                    arg.label.as_ref().unwrap().clone()
+                                };
+
+                                ProductField {
+                                    name: label,
+                                    index: i,
+                                    type_: FieldType::from_gleam_type(
+                                        Arc::clone(&arg.type_),
+                                        &root_environment,
+                                        &table,
+                                    ),
+                                }
+                            })
+                            .collect_vec()
+                    })
+                    .collect_vec();
+
+                // find common fields
+                // a field is common if it is:
+                // 1) present in all variants
+                // 2) has the same type in all variants
+                // 3) has the same name in all variants
+
+                // first, identify common fields and note their indices
+                let shortest_field_count =
+                    variant_fields.iter().map(|v| v.len()).min().unwrap_or(0);
+                let mut common_indices = vec![];
+                for i in 0..shortest_field_count {
+                    let mut common = true;
+                    let mut field = None;
+                    for variant in &variant_fields {
+                        match field {
+                            None => field = Some(&variant[i]),
+                            Some(f) => {
+                                if f != &variant[i] {
+                                    common = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if common {
+                        common_indices.push(i);
+                    }
+                }
+
+                // second, reorder the fields so the common fields happen first
+                // also construct a map from the original index to the new index
+                // the way we do this is we bubble up the non-common fields to the end
+                // fields not in the map keep their indices
+                let mut reordered_indices = HashMap::new();
+                let mut count = 0;
+
+                // add common fields
+                for i in 0..shortest_field_count {
+                    if common_indices.contains(&i) {
+                        _ = reordered_indices.insert(i, count);
+                        count += 1;
+                    }
+                }
+                // add non-common fields
+                for i in 0..shortest_field_count {
+                    if !common_indices.contains(&i) {
+                        _ = reordered_indices.insert(i, count);
+                        count += 1;
+                    }
+                }
+
+                // reorder fields
+                let reordered_fields = variant_fields
+                    .iter()
+                    .map(|fields| {
+                        let mut f = vec![];
+
+                        // common fields
+                        for i in 0..fields.len() {
+                            if common_indices.contains(&i) {
+                                let l = f.len();
+                                f.push(ProductField {
+                                    name: fields[i].name.clone(),
+                                    index: l,
+                                    type_: fields[i].type_.clone(),
+                                });
+                            }
+                        }
+
+                        // non-common fields
+                        for i in 0..fields.len() {
+                            if !common_indices.contains(&i) {
+                                let l = f.len();
+                                f.push(ProductField {
+                                    name: fields[i].name.clone(),
+                                    index: l,
+                                    type_: fields[i].type_.clone(),
+                                });
+                            }
+                        }
+
+                        f
+                    })
+                    .collect_vec();
+
+                // generate common fields
+                let common_fields = reordered_fields
+                    .first()
+                    .map(|o| o.iter().cloned().take(common_indices.len()).collect_vec())
+                    .unwrap_or_else(|| vec![]);
+
+                // declare types, constructors and etc
                 let mut product_ids = vec![];
                 for (tag, variant) in t.constructors.iter().enumerate() {
                     // type
                     let product_type_id = table.types.new_id();
                     let product_type_name: EcoString =
                         format!("typ@{}.{}", t.name, variant.name).into();
+                    let wasm_type_fields = reordered_fields[tag]
+                        .iter()
+                        .map(|f| f.type_.to_wasm_type(&table))
+                        .collect_vec();
                     let product_type = table::Type {
                         id: product_type_id,
                         name: product_type_name.clone(),
                         definition: WasmType::from_product_type(
-                            variant,
+                            &wasm_type_fields,
                             &product_type_name,
                             product_type_id.id(),
                             tag as u32,
@@ -235,29 +366,11 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                                 instance: global_id,
                             },
                             fields: vec![],
+                            gleam_to_canonical_id: HashMap::new(),
                         }
                     } else {
-                        // add constructor to the environment
-                        let mut fields = vec![];
-
-                        for (i, arg) in variant.arguments.iter().enumerate() {
-                            let label = if arg.label.is_none() {
-                                format!("arg{}", i).into()
-                            } else {
-                                arg.label.as_ref().unwrap().clone()
-                            };
-
-                            fields.push(table::ProductField {
-                                name: label,
-                                index: i,
-                                type_: FieldType::from_gleam_type(
-                                    Arc::clone(&arg.type_),
-                                    &root_environment,
-                                    &table,
-                                ),
-                            });
-                        }
-
+                        let fields = reordered_fields[tag].clone();
+                        let gleam_to_canonical_order = reordered_indices.clone();
                         table::Product {
                             id: product_id,
                             name: format!("product@{}.{}", t.name, variant.name).into(),
@@ -267,6 +380,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                             constructor: constructor_id,
                             kind: table::ProductKind::Composite,
                             fields,
+                            gleam_to_canonical_id: gleam_to_canonical_order,
                         }
                     };
                     table.products.insert(product_id, product);
@@ -304,26 +418,6 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     arity: 2,
                 };
 
-                // compute common fields
-                // the common fields of a sum type is the longest common prefix of all its variants
-                let mut common_fields = vec![];
-                let products = product_ids
-                    .iter()
-                    .map(|id| table.products.get(*id).unwrap());
-                for i in 0.. {
-                    let field: Option<Vec<&ProductField>> = products
-                        .clone()
-                        .map(|p| p.fields.get(i))
-                        .collect::<Option<Vec<_>>>();
-                    if let Some(field) = field {
-                        if field.iter().all(|f| f == &field[0]) {
-                            common_fields.push(field[0].clone());
-                            continue;
-                        }
-                    }
-                    break;
-                }
-
                 {
                     let fielded_wasm_type = WasmTypeDefinition::Sum {
                         common_fields: common_fields
@@ -336,6 +430,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                     let sum_type = table.types.get_mut(sum.type_).unwrap();
                     sum_type.definition.definition = fielded_wasm_type;
                     sum.common_fields = common_fields;
+                    sum.gleam_to_canonical_id = reordered_indices;
                 }
 
                 table
@@ -881,9 +976,15 @@ fn emit_variant_constructor(
 ) -> WasmFunction {
     let mut instructions = vec![];
     instructions.extend(integer::const_(variant_data.tag as _).lst);
-    instructions.extend(
-        (0..constructor.arguments.len()).map(|i| wasm_encoder::Instruction::LocalGet(i as u32)),
-    );
+    instructions.extend((0..constructor.arguments.len()).map(|i| {
+        wasm_encoder::Instruction::LocalGet(
+            variant_data
+                .gleam_to_canonical_id
+                .get(&i)
+                .copied()
+                .unwrap_or(i) as _,
+        )
+    }));
     instructions.push(wasm_encoder::Instruction::StructNew(
         variant_data.type_.id(),
     ));
@@ -1244,22 +1345,29 @@ fn emit_expression(
                 ],
             }
         }
-        TypedExpr::RecordAccess {
-            typ, index, record, ..
-        } => {
+        TypedExpr::RecordAccess { index, record, .. } => {
             let mut insts = emit_expression(record, env, locals, strings, table);
 
-            let type_ = WasmTypeImpl::from_gleam_type(Arc::clone(&record.type_()), env, table);
-            let type_id = match type_ {
-                WasmTypeImpl::StructRef(id) => id,
-                _ => panic!("Expected struct type"),
+            // TODO: handle module
+            let sum = match env.get_type(&record.type_().named_type_name().unwrap().1) {
+                Some(TypeBinding::Sum(id)) => table.sums.get(id).unwrap(),
+                _ => panic!("Expected sum type"),
             };
+
+            let product_type = table.types.get(sum.type_).unwrap();
+            let product_type_id = product_type.definition.id;
+            let field_position = sum
+                .gleam_to_canonical_id
+                .get(&(*index as _))
+                .copied()
+                .unwrap_or(*index as _);
+
             insts.lst.push(wasm_encoder::Instruction::RefCastNonNull(
-                wasm_encoder::HeapType::Concrete(type_id),
+                wasm_encoder::HeapType::Concrete(product_type_id),
             ));
             insts.lst.push(wasm_encoder::Instruction::StructGet {
-                struct_type_index: type_id,
-                field_index: (index + 1) as _,
+                struct_type_index: product_type_id,
+                field_index: (field_position + 1) as _,
             });
             insts
         }
@@ -1725,18 +1833,26 @@ fn emit_clause_guard_expression(
         } => {
             let mut insts = emit_clause_guard_expression(container, env, locals, strings, table);
 
-            let type_ = WasmTypeImpl::from_gleam_type(Arc::clone(&container.type_()), env, table);
-            let type_id = match type_ {
-                WasmTypeImpl::StructRef(id) => id,
-                _ => panic!("Expected struct type"),
+            let sum = match env.get_type(&container.type_().named_type_name().unwrap().1) {
+                Some(TypeBinding::Sum(id)) => table.sums.get(id).unwrap(),
+                _ => panic!("Expected sum type"),
             };
 
+            let sum_type = table.types.get(sum.type_).unwrap();
+            let sum_type_id = sum_type.definition.id;
+            let index = index.expect("Could not find index");
+            let field_position = sum
+                .gleam_to_canonical_id
+                .get(&(index as _))
+                .copied()
+                .unwrap_or(index as _);
+
             insts.lst.push(wasm_encoder::Instruction::RefCastNonNull(
-                wasm_encoder::HeapType::Concrete(type_id),
+                wasm_encoder::HeapType::Concrete(sum_type_id),
             ));
             insts.lst.push(wasm_encoder::Instruction::StructGet {
-                struct_type_index: type_id,
-                field_index: (index.expect("Could not find index") + 1) as _,
+                struct_type_index: sum_type_id,
+                field_index: (field_position + 1) as _,
             });
             insts
         }

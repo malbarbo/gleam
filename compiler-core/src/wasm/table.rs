@@ -119,7 +119,7 @@ pub struct Function {
 }
 
 /// Represents a sum type in the type table.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sum {
     /// The unique identifier of the sum type.
     pub id: SumId,
@@ -139,6 +139,9 @@ pub struct Sum {
 
     /// Common fields.
     pub common_fields: Vec<ProductField>,
+
+    /// Field order (from gleam-order to canonical-order).
+    pub gleam_to_canonical_id: HashMap<usize, usize>,
 }
 
 /// Represents a product type in the type table.
@@ -168,6 +171,9 @@ pub struct Product {
 
     /// All fields.
     pub fields: Vec<ProductField>,
+
+    /// Field order (from gleam-order to wasm-order).
+    pub gleam_to_canonical_id: HashMap<usize, usize>,
 }
 
 /// Represents a field in a product type.
