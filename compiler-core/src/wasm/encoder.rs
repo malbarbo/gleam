@@ -404,7 +404,29 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
     let start_function_type_idx = init_function_type_idx + 1;
     _ = types.function(vec![], vec![]);
 
+    // declare a type for fd_write
+    let fd_write_type_idx = start_function_type_idx + 1;
+    _ = types.function(
+        vec![
+            wasm_encoder::ValType::I32,
+            wasm_encoder::ValType::I32,
+            wasm_encoder::ValType::I32,
+            wasm_encoder::ValType::I32,
+        ],
+        vec![wasm_encoder::ValType::I32],
+    );
+
     _ = module.section(&types);
+
+    // imports
+    // note: HARDCODED
+    let mut imports = wasm_encoder::ImportSection::new();
+    _ = imports.import(
+        "wasi_snapshot_preview1",
+        "fd_write",
+        wasm_encoder::EntityType::Function(fd_write_type_idx),
+    );
+    _ = module.section(&imports);
 
     // functions
     let mut functions = FunctionSection::new();
@@ -414,7 +436,7 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
     }
 
     // create start function as well
-    let init_function_idx = wasm_module.functions.len() as u32;
+    let init_function_idx = wasm_module.functions.len() as u32 + 1; // fd_write
     _ = functions.function(init_function_type_idx);
 
     // create a _start function
@@ -494,7 +516,7 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
 
     // elems
     let mut elems = ElementSection::new();
-    let indices: Vec<_> = (0..(wasm_module.functions.len() as u32)).collect();
+    let indices: Vec<_> = (0..(wasm_module.functions.len() as u32 + 3)).collect(); // start, init and fd_write
     _ = elems.segment(wasm_encoder::ElementSegment {
         mode: wasm_encoder::ElementMode::Declared,
         elements: wasm_encoder::Elements::Functions(&indices[..]),

@@ -94,6 +94,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
             }
             TypedDefinition::Function(f) => {
                 let function_id = table.functions.new_id();
+                dbg!(f);
                 root_environment.set(f.name.clone(), Binding::Function(function_id));
             }
             TypedDefinition::ModuleConstant(m) => {
@@ -453,14 +454,30 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                 match function_id {
                     Binding::Function(id) => {
                         let function_data = table.functions.get(id).unwrap();
-                        let function = emit_function(
-                            f,
-                            function_data.id,
-                            &table,
-                            &mut strings,
-                            &root_environment,
-                        );
-                        functions.push(function);
+                        if f.external_wasm.is_some() {
+                            let (module, item) = f.external_wasm.as_ref().unwrap();
+                            if module == "gleam" && item == "string_write_out" {
+                                let function = emit_stub_function(
+                                    f,
+                                    function_data.id,
+                                    &table,
+                                    &root_environment,
+                                    table.string_write_out.unwrap(),
+                                );
+                                functions.push(function);
+                            } else {
+                                todo!("External wasm functions not implemented yet");
+                            }
+                        } else {
+                            let function = emit_function(
+                                f,
+                                function_data.id,
+                                &table,
+                                &mut strings,
+                                &root_environment,
+                            );
+                            functions.push(function);
+                        }
                     }
                     _ => unreachable!("Expected function binding in environment"),
                 }
@@ -953,6 +970,40 @@ fn generate_prelude_types(table: &mut SymbolTable, env: &mut Environment<'_>) ->
         string::emit_strsub(string_substring_type_id, string_substring_id, &table);
     module.functions.push(string_substring_fn);
 
+    // string write to output //////////////////////////////////////////////
+    let string_write_out_type_id = table.types.new_id();
+    let string_write_out_type = table::Type {
+        id: string_write_out_type_id,
+        name: "typ@@strwrite".into(),
+        definition: WasmType {
+            name: "typ@strwrite@String".into(),
+            id: string_write_out_type_id.id(),
+            definition: WasmTypeDefinition::Function {
+                parameters: [WasmTypeImpl::ArrayRef(string_type_wasm_id)].to_vec(),
+                returns: WasmTypeImpl::Nil,
+            },
+        },
+    };
+    table
+        .types
+        .insert(string_write_out_type_id, string_write_out_type);
+
+    let string_write_out_id = table.functions.new_id();
+    let string_write_out = table::Function {
+        id: string_write_out_id,
+        signature: string_write_out_type_id,
+        name: "strwrite".into(),
+        arity: 1,
+    };
+    table
+        .functions
+        .insert(string_write_out_id, string_write_out);
+    table.string_write_out = Some(string_write_out_id);
+
+    let string_write_out_fn =
+        string::emit_strwritestdout(string_write_out_type_id, string_write_out_id, &table);
+    module.functions.push(string_write_out_fn);
+
     // To be implemented:
     // - PreludeType::BitArray
     // TODO: BitArrays
@@ -1065,6 +1116,63 @@ fn emit_function(
             .skip(function_data.arity as _)
             .map(|local| (local.name, local.wasm_type))
             .collect_vec(),
+        arity: function_data.arity,
+        public: function.publicity.is_public(),
+    }
+}
+
+fn emit_stub_function(
+    function: &TypedFunction,
+    function_id: table::FunctionId,
+    table: &SymbolTable,
+    env: &Environment<'_>,
+    call_id: table::FunctionId,
+) -> WasmFunction {
+    let mut locals = LocalStore::new();
+
+    let function_data = table
+        .functions
+        .get(function_id)
+        .expect("The function exists");
+
+    for arg in &function.arguments {
+        // get a variable number
+        let idx = locals.new_id();
+
+        let name = arg
+            .names
+            .get_variable_name()
+            .cloned()
+            .unwrap_or_else(|| "#{idx}".into());
+
+        locals.insert(
+            idx,
+            Local {
+                id: idx,
+                name: name.clone(),
+                wasm_type: WasmTypeImpl::from_gleam_type(Arc::clone(&arg.type_), &env, table),
+            },
+        );
+    }
+
+    let mut insts = vec![];
+    insts
+        .extend((0..function.arguments.len()).map(|i| wasm_encoder::Instruction::LocalGet(i as _)));
+    insts.push(wasm_encoder::Instruction::Call(call_id.id()));
+    insts.push(wasm_encoder::Instruction::End);
+
+    WasmFunction {
+        name: function_data.name.clone(),
+        function_index: function_data.id.id(),
+        type_index: function_data.signature.id(),
+        instructions: WasmInstructions { lst: insts },
+        argument_names: locals
+            .as_list()
+            .into_iter()
+            .take(function_data.arity as _)
+            .map(|local| Some(local.name))
+            .collect_vec(),
+        locals: vec![],
         arity: function_data.arity,
         public: function.publicity.is_public(),
     }
@@ -1273,7 +1381,7 @@ fn emit_expression(
                         insts.lst.push(wasm_encoder::Instruction::Call(id.id()));
                         insts
                     }
-                    _ => todo!("Expected function binding"),
+                    _ => todo!("Expected function or builtin binding"),
                 },
                 TypedExpr::Var {
                     constructor:

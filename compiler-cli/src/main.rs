@@ -52,14 +52,15 @@ use std::str::FromStr;
 
 use camino::Utf8PathBuf;
 use clap::{
-    Args,
-    builder::{PossibleValuesParser, Styles, styling, TypedValueParser}, Parser, Subcommand,
+    builder::{styling, PossibleValuesParser, Styles, TypedValueParser},
+    Args, Parser, Subcommand,
 };
 use strum::VariantNames;
 
 use config::root_config;
 use dependencies::UseManifest;
 use fs::{get_current_directory, get_project_root};
+pub use gleam_core::error::{Error, Result};
 use gleam_core::{
     analyse::TargetSupport,
     build::{Codegen, Mode, Options, Runtime, Target},
@@ -67,7 +68,6 @@ use gleam_core::{
     paths::ProjectPaths,
     version::COMPILER_VERSION,
 };
-pub use gleam_core::error::{Error, Result};
 use hex::ApiKeyCommand as _;
 
 mod add;
@@ -425,7 +425,7 @@ enum Docs {
 
 fn main() {
     initialise_logger();
-    panic::add_handler();
+    // panic::add_handler();
     let stderr = cli::stderr_buffer_writer();
 
     let result = match Command::parse() {
@@ -480,11 +480,11 @@ fn main() {
         Command::PrintConfig => print_config(),
 
         Command::Hex(Hex::Retire {
-                         package,
-                         version,
-                         reason,
-                         message,
-                     }) => hex::RetireCommand::new(package, version, reason, message).run(),
+            package,
+            version,
+            reason,
+            message,
+        }) => hex::RetireCommand::new(package, version, reason, message).run(),
 
         Command::Hex(Hex::Unretire { package, version }) => {
             hex::UnretireCommand::new(package, version).run()

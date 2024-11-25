@@ -434,25 +434,30 @@ pub struct SymbolTable {
     pub float_division: Option<TypeId>,
     pub string_type: Option<TypeId>,
 
+    pub wasi_fd_write: u32,
+
     pub string_equality_test: Option<FunctionId>,
     pub string_concat: Option<FunctionId>,
     pub string_substring: Option<FunctionId>,
+    pub string_write_out: Option<FunctionId>,
 }
 
 impl SymbolTable {
     pub fn new() -> Self {
         Self {
             types: Store::new(),
-            functions: Store::new(),
+            functions: Store::with_offset(1), // for fd_write's import
             sums: Store::new(),
             products: Store::new(),
             constants: Store::new(),
             int_division: None,
             float_division: None,
+            wasi_fd_write: 0, // hardcoded for now
             string_type: None,
             string_equality_test: None,
             string_concat: None,
             string_substring: None,
+            string_write_out: None,
         }
     }
 }

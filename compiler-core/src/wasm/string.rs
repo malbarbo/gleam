@@ -1,4 +1,5 @@
 use ecow::EcoString;
+use wasm_encoder::MemArg;
 
 use super::{
     encoder::{WasmFunction, WasmInstructions, WasmTypeImpl},
@@ -438,6 +439,143 @@ pub fn emit_strsub(
             .map(|x| (x.name, x.wasm_type))
             .collect(),
         argument_names: [Some("str"), Some("start"), Some("end")]
+            .into_iter()
+            .map(|x| x.map(EcoString::from))
+            .collect(),
+        public: false,
+    }
+}
+
+pub fn emit_strwritestdout(
+    function_type: TypeId,
+    function_id: FunctionId,
+    table: &SymbolTable,
+) -> WasmFunction {
+    // variables
+    let string_type_id = table
+        .types
+        .get(table.string_type.unwrap())
+        .unwrap()
+        .definition
+        .id;
+    let str_id = 0;
+
+    let mut local_generator = LocalStore::with_offset(1);
+    let str_len_id = local_generator.new_id();
+    let str_len = table::Local {
+        id: str_len_id,
+        name: "str_len".into(),
+        wasm_type: WasmTypeImpl::Int,
+    };
+    local_generator.insert(str_len_id, str_len);
+
+    let offset_id = local_generator.new_id();
+    let offset = table::Local {
+        id: offset_id,
+        name: "offset".into(),
+        wasm_type: WasmTypeImpl::Int,
+    };
+    local_generator.insert(offset_id, offset);
+
+    // code
+    let mut i = vec![];
+
+    {
+        use wasm_encoder::Instruction::*;
+
+        // write iov_base
+        // pointer to start of string (position 4, length 4)
+        i.push(I32Const(4));
+        i.push(I32Const(12));
+        i.push(I32Store(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+
+        // write iov_len
+        // length of string (position 8, length 4)
+        i.push(I32Const(8));
+        i.push(LocalGet(str_id));
+        i.push(ArrayLen);
+        i.push(I32Store(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+
+        // write the string itself to memory
+        // ugh... need to loop through the string...
+        // while string_length > 0, write 1 byte of the string, then increment the pointer and decrement the string_length
+        i.push(LocalGet(str_id));
+        i.push(ArrayLen);
+        i.push(LocalSet(str_len_id.id()));
+
+        i.push(I32Const(0));
+        i.push(LocalSet(offset_id.id()));
+
+        i.push(Block(wasm_encoder::BlockType::Empty));
+        {
+            i.push(Loop(wasm_encoder::BlockType::Empty));
+            {
+                i.push(LocalGet(str_len_id.id()));
+                i.push(I32Eqz);
+                i.push(BrIf(1));
+
+                i.push(LocalGet(offset_id.id()));
+                i.push(LocalGet(str_id));
+                i.push(LocalGet(offset_id.id()));
+                i.push(ArrayGetU(string_type_id));
+                i.push(I32Store8(MemArg {
+                    offset: 12,
+                    align: 0,
+                    memory_index: 0,
+                }));
+
+                i.push(LocalGet(offset_id.id()));
+                i.push(I32Const(1));
+                i.push(I32Add);
+                i.push(LocalSet(offset_id.id()));
+
+                i.push(LocalGet(str_len_id.id()));
+                i.push(I32Const(1));
+                i.push(I32Sub);
+                i.push(LocalSet(str_len_id.id()));
+
+                i.push(Br(0));
+            }
+            i.push(End);
+        }
+        i.push(End);
+
+        // call fd_write
+        i.push(I32Const(1)); // stdout
+        i.push(I32Const(4)); // pointer to *iovs
+        i.push(I32Const(1)); // number of iovs
+        i.push(I32Const(0)); // where to write the number of bytes written
+        i.push(Call(table.wasi_fd_write));
+
+        // drop bytes written
+        i.push(Drop);
+
+        // push a nil
+        i.push(I32Const(0));
+
+        i.push(End);
+    }
+
+    WasmFunction {
+        name: "strwritestdout".into(),
+        function_index: function_id.id(),
+        type_index: table.types.get(function_type).unwrap().definition.id,
+        arity: 1,
+        instructions: WasmInstructions { lst: i },
+        locals: local_generator
+            .as_list()
+            .into_iter()
+            .map(|x| (x.name, x.wasm_type))
+            .collect(),
+        argument_names: [Some("str")]
             .into_iter()
             .map(|x| x.map(EcoString::from))
             .collect(),
