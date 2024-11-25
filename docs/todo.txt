@@ -3,7 +3,6 @@ FALTAM:
 MVP 1.0:
 - Constantes a nível de módulo (não-básicas)
 - Entrada e saída básicas
-- Referências a funções
 
 MVP 2.0:
 - Panic, todo com strings de erro

@@ -1,9 +1,11 @@
 use ecow::EcoString;
+use itertools::Itertools;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
 
+use crate::wasm::encoder::WasmTypeDefinition;
 use crate::wasm::environment::TypeBinding;
 
 use super::encoder::WasmTypeImpl;
@@ -191,6 +193,9 @@ pub enum FieldType {
     /// A sum reference.
     Sum(SumId),
 
+    /// A function reference.
+    Function(u32),
+
     /// Integer
     Int,
 
@@ -251,7 +256,43 @@ impl FieldType {
                         unreachable!("unresolved type var: {type_var:?}")
                     }
                 }
-                _ => unreachable!("only named types, received: {type_:?}"),
+                GleamType::Fn { args, retrn } => {
+                    // find call type
+
+                    // HACK: if we're calling this, then we know there exists a function with this type
+                    // so we can just grab the first one that matches... but we need to scan the whole list
+                    // of functions to find it
+                    // ugh...
+
+                    let these_args = args
+                        .iter()
+                        .map(|t| WasmTypeImpl::from_gleam_type(Arc::clone(&t), env, table))
+                        .collect_vec();
+                    let this_return = WasmTypeImpl::from_gleam_type(Arc::clone(&retrn), env, table);
+
+                    let mut function_type_id = None;
+                    for function in table.functions.as_list().into_iter() {
+                        // the type matches if the parameters and return types match
+                        let function_type = table.types.get(function.signature).unwrap();
+                        let (parameters, returns) = match &function_type.definition.definition {
+                            WasmTypeDefinition::Function {
+                                parameters,
+                                returns,
+                            } => (parameters, returns),
+                            _ => unreachable!("Expected function type"),
+                        };
+                        if parameters == &these_args && returns == &this_return {
+                            function_type_id = Some(function_type.definition.id);
+                            break;
+                        }
+                    }
+
+                    let function_type_id =
+                        function_type_id.expect("There exists a function with this type");
+
+                    Self::Function(function_type_id)
+                }
+                GleamType::Tuple { elems } => todo!("Tuples not implemented yet"),
             }
         }
     }
@@ -276,6 +317,7 @@ impl FieldType {
                     .id;
                 WasmTypeImpl::ArrayRef(string_type)
             }
+            Self::Function(type_id) => WasmTypeImpl::FuncRef(*type_id),
         }
     }
 }

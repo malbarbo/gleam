@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use ecow::EcoString;
+use itertools::Itertools;
 use tracing::warn;
 use wasm_encoder::CodeSection;
 
@@ -156,6 +157,7 @@ pub enum WasmTypeImpl {
     Nil,
     StructRef(u32),
     ArrayRef(u32),
+    FuncRef(u32),
 }
 
 impl WasmTypeImpl {
@@ -173,6 +175,10 @@ impl WasmTypeImpl {
                 nullable: false,
                 heap_type: wasm_encoder::HeapType::Concrete(typ),
             }),
+            WasmTypeImpl::FuncRef(typ) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
+                nullable: false,
+                heap_type: wasm_encoder::HeapType::Concrete(typ),
+            }),
         }
     }
 
@@ -187,7 +193,11 @@ impl WasmTypeImpl {
                 heap_type: wasm_encoder::HeapType::Concrete(typ),
             }),
             WasmTypeImpl::ArrayRef(typ) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
-                nullable: false,
+                nullable: true,
+                heap_type: wasm_encoder::HeapType::Concrete(typ),
+            }),
+            WasmTypeImpl::FuncRef(typ) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
+                nullable: true,
                 heap_type: wasm_encoder::HeapType::Concrete(typ),
             }),
         }
@@ -238,7 +248,43 @@ impl WasmTypeImpl {
                         unreachable!("unresolved type var: {type_var:?}")
                     }
                 }
-                _ => unreachable!("only named types, received: {type_:?}"),
+                Type::Fn { args, retrn } => {
+                    // find call type
+
+                    // HACK: if we're calling this, then we know there exists a function with this type
+                    // so we can just grab the first one that matches... but we need to scan the whole list
+                    // of functions to find it
+                    // ugh...
+
+                    let these_args = args
+                        .iter()
+                        .map(|t| WasmTypeImpl::from_gleam_type(Arc::clone(&t), env, table))
+                        .collect_vec();
+                    let this_return = WasmTypeImpl::from_gleam_type(Arc::clone(&retrn), env, table);
+
+                    let mut function_type_id = None;
+                    for function in table.functions.as_list().into_iter() {
+                        // the type matches if the parameters and return types match
+                        let function_type = table.types.get(function.signature).unwrap();
+                        let (parameters, returns) = match &function_type.definition.definition {
+                            WasmTypeDefinition::Function {
+                                parameters,
+                                returns,
+                            } => (parameters, returns),
+                            _ => unreachable!("Expected function type"),
+                        };
+                        if parameters == &these_args && returns == &this_return {
+                            function_type_id = Some(function_type.definition.id);
+                            break;
+                        }
+                    }
+
+                    let function_type_id =
+                        function_type_id.expect("There exists a function with this type");
+
+                    Self::FuncRef(function_type_id)
+                }
+                Type::Tuple { .. } => todo!("Tuples not implemented yet"),
             }
         }
     }
@@ -403,6 +449,9 @@ pub fn emit(mut wasm_module: WasmModule) -> Vec<u8> {
                 wasm_encoder::ConstExpr::ref_null(wasm_encoder::HeapType::Concrete(typ))
             }
             WasmTypeImpl::ArrayRef(typ) => {
+                wasm_encoder::ConstExpr::ref_null(wasm_encoder::HeapType::Concrete(typ))
+            }
+            WasmTypeImpl::FuncRef(typ) => {
                 wasm_encoder::ConstExpr::ref_null(wasm_encoder::HeapType::Concrete(typ))
             }
         };

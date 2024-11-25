@@ -716,6 +716,7 @@ fn emit_equality_test(type_: &FieldType, table: &SymbolTable) -> WasmInstruction
         FieldType::String => WasmInstructions::single(wasm_encoder::Instruction::Call(
             table.string_equality_test.unwrap().id(),
         )),
+        FieldType::Function(_) => WasmInstructions::single(wasm_encoder::Instruction::RefEq),
     }
 }
 
@@ -1292,7 +1293,50 @@ fn emit_expression(
                         panic!("Expected product binding")
                     }
                 }
-                _ => todo!("Only simple function calls and type constructors"),
+                expr => {
+                    let mut insts = emit_expression(expr, env, locals, strings, table);
+                    // find call type
+
+                    // HACK: if we're calling this, then we know there exists a function with this type
+                    // so we can just grab the first one that matches... but we need to scan the whole list
+                    // of functions to find it
+                    // ugh...
+
+                    let (these_args, this_return) = match expr.type_().as_ref() {
+                        Type::Fn { args, retrn } => (args.clone(), retrn.clone()),
+                        _ => unreachable!("Expected function type"),
+                    };
+                    let these_args = these_args
+                        .into_iter()
+                        .map(|t| WasmTypeImpl::from_gleam_type(t, env, table))
+                        .collect_vec();
+                    let this_return = WasmTypeImpl::from_gleam_type(this_return, env, table);
+
+                    let mut function_type_id = None;
+                    for function in table.functions.as_list().into_iter() {
+                        // the type matches if the parameters and return types match
+                        let function_type = table.types.get(function.signature).unwrap();
+                        let (parameters, returns) = match &function_type.definition.definition {
+                            WasmTypeDefinition::Function {
+                                parameters,
+                                returns,
+                            } => (parameters, returns),
+                            _ => unreachable!("Expected function type"),
+                        };
+                        if parameters == &these_args && returns == &this_return {
+                            function_type_id = Some(function_type.definition.id);
+                            break;
+                        }
+                    }
+
+                    let function_type_id =
+                        function_type_id.expect("There exists a function with this type");
+
+                    insts
+                        .lst
+                        .push(wasm_encoder::Instruction::CallRef(function_type_id));
+                    insts
+                } // _ => todo!("Only simple function calls and type constructors"),
             }
         }
         TypedExpr::Case {
@@ -1427,7 +1471,7 @@ fn emit_value_constructor(
             ..
         } => match env.get(name).unwrap() {
             Binding::Function(id) => {
-                WasmInstructions::single(wasm_encoder::Instruction::Call(id.id()))
+                WasmInstructions::single(wasm_encoder::Instruction::RefFunc(id.id()))
             }
 
             _ => todo!("Expected function binding"),
