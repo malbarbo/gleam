@@ -13,7 +13,7 @@ use super::{
     encoder::WasmTypeImpl,
     environment::{Binding, Environment},
     integer, parse_float,
-    table::{Local, LocalId, LocalStore, ProductId, Strings, SumId, SymbolTable, TypeId},
+    table::{Local, LocalId, LocalStore, Strings, SumId, SymbolTable, TypeId},
 };
 
 #[derive(Debug, Clone)]

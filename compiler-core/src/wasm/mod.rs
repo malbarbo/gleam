@@ -19,7 +19,7 @@ use encoder::{
 };
 use environment::{Binding, BuiltinType, Environment, TypeBinding};
 use itertools::Itertools;
-use table::{FieldType, GleamString, Local, LocalStore, ProductField, Strings, SymbolTable};
+use table::{FieldType, Local, LocalStore, ProductField, Strings, SymbolTable};
 
 use crate::{
     ast::{
@@ -94,7 +94,6 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
             }
             TypedDefinition::Function(f) => {
                 let function_id = table.functions.new_id();
-                dbg!(f);
                 root_environment.set(f.name.clone(), Binding::Function(function_id));
             }
             TypedDefinition::ModuleConstant(m) => {
@@ -314,7 +313,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                         definition: WasmType::from_product_type_constructor(
                             variant,
                             &constructor_sig_name,
-                            product_type_id.id(),
+                            sum_type_id.id(),
                             constructor_sig_id.id(),
                             &table,
                             &root_environment,
@@ -349,7 +348,7 @@ fn construct_module(ast: &TypedModule) -> WasmModule {
                         // add global
                         constants.push(WasmGlobal {
                             name: global_name.into(),
-                            type_: WasmTypeImpl::StructRef(product_type_id.id()),
+                            type_: WasmTypeImpl::StructRef(sum_type_id.id()),
                             global_index: global_id.id(),
                             initializer: WasmInstructions::single(wasm_encoder::Instruction::Call(
                                 constructor_id.id(),
@@ -752,8 +751,43 @@ fn emit_constant(
             let val = parse_float(value);
             WasmInstructions::single(wasm_encoder::Instruction::F64Const(val))
         }
-        TypedConstant::Var { .. } => todo!("Variable constants not implemented yet"),
-        TypedConstant::Record { .. } => todo!("Record constants not implemented yet"),
+        // TODO: handle module
+        TypedConstant::Var { module, name, .. } => match root_environment.get(&name) {
+            Some(Binding::Constant(id)) => {
+                WasmInstructions::single(wasm_encoder::Instruction::GlobalGet(id.id()))
+            }
+            Some(Binding::Function(id)) => {
+                WasmInstructions::single(wasm_encoder::Instruction::RefFunc(id.id()))
+            }
+            _ => todo!("Expected constant binding in environment"),
+        },
+        // TODO: handle module, out-of-order fields
+        TypedConstant::Record {
+            module, name, args, ..
+        } => match root_environment.get(&name) {
+            Some(Binding::Product(id)) => {
+                let product = table.products.get(id).expect("Product exists").clone();
+                let ctor = table.functions.get(product.constructor).unwrap().clone();
+                let ctor_type = table.types.get(ctor.signature).unwrap().clone();
+                let mut insts = WasmInstructions::empty();
+                if args.len() != product.fields.len() {
+                    // probably a function reference?
+                    insts
+                        .lst
+                        .push(wasm_encoder::Instruction::RefFunc(product.constructor.id()));
+                } else {
+                    for arg in args {
+                        let new_insts = emit_constant(&arg.value, root_environment, strings, table);
+                        insts.lst.extend(new_insts.lst);
+                    }
+                    insts
+                        .lst
+                        .push(wasm_encoder::Instruction::Call(ctor.id.id()));
+                }
+                insts
+            }
+            _ => unreachable!("Expected product binding in environment"),
+        },
         TypedConstant::String { value, .. } => {
             let string_type_id = table.string_type.unwrap();
             let string_type = table.types.get(string_type_id).unwrap();
@@ -1372,9 +1406,10 @@ fn emit_expression(
                 TypedExpr::Var {
                     constructor:
                         ValueConstructor {
-                            variant: ValueConstructorVariant::ModuleFn { name, .. },
+                            variant: ValueConstructorVariant::ModuleFn { .. },
                             ..
                         },
+                    name,
                     ..
                 } => match env.get(name).unwrap() {
                     Binding::Function(id) => {
@@ -1386,9 +1421,10 @@ fn emit_expression(
                 TypedExpr::Var {
                     constructor:
                         ValueConstructor {
-                            variant: ValueConstructorVariant::Record { name, .. },
+                            variant: ValueConstructorVariant::Record { .. },
                             ..
                         },
+                    name,
                     ..
                 } => {
                     if let Some(Binding::Product(id)) = env.get(name) {
@@ -1402,7 +1438,9 @@ fn emit_expression(
                     }
                 }
                 expr => {
-                    let mut insts = emit_expression(expr, env, locals, strings, table);
+                    insts
+                        .lst
+                        .extend(emit_expression(expr, env, locals, strings, table).lst);
                     // find call type
 
                     // HACK: if we're calling this, then we know there exists a function with this type
@@ -1571,28 +1609,16 @@ fn emit_value_constructor(
         }
 
         // TODO: handle module
-        // TODO: handle field_map
-        ValueConstructorVariant::ModuleFn {
-            name,
-            module,
-            field_map,
-            ..
-        } => match env.get(name).unwrap() {
+        ValueConstructorVariant::ModuleFn { module, .. } => match env.get(name).unwrap() {
             Binding::Function(id) => {
                 WasmInstructions::single(wasm_encoder::Instruction::RefFunc(id.id()))
             }
 
             _ => todo!("Expected function binding"),
         },
+
         // TODO: handle module
-        // TODO: handle field_map
-        ValueConstructorVariant::Record {
-            name,
-            module,
-            field_map,
-            arity: 0,
-            ..
-        } => match env.get(name).unwrap() {
+        ValueConstructorVariant::Record { module, .. } => match env.get(name).unwrap() {
             Binding::Product(id) => {
                 let product = table.products.get(id).unwrap();
                 match product {
@@ -1606,7 +1632,13 @@ fn emit_value_constructor(
                         ],
                     },
 
-                    _ => todo!("Expected simple product"),
+                    table::Product {
+                        kind: table::ProductKind::Composite,
+                        constructor,
+                        ..
+                    } => WasmInstructions {
+                        lst: vec![wasm_encoder::Instruction::RefFunc(constructor.id())],
+                    },
                 }
             }
             Binding::Builtin(BuiltinType::Nil) => {
@@ -1621,7 +1653,6 @@ fn emit_value_constructor(
             }
             _ => todo!("Expected product binding"),
         },
-        ValueConstructorVariant::Record { .. } => todo!("Only simple records with 0 fields"),
         ValueConstructorVariant::LocalConstant { literal } => {
             emit_constant(literal, env, strings, table)
         }

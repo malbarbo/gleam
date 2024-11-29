@@ -124,7 +124,7 @@ impl WasmType {
     pub fn from_product_type_constructor(
         variant: &TypedRecordConstructor,
         name: &str,
-        product_type_index: u32,
+        sum_type_index: u32,
         constructor_type_index: u32,
         table: &SymbolTable,
         env: &Environment<'_>,
@@ -143,7 +143,7 @@ impl WasmType {
             id: constructor_type_index,
             definition: WasmTypeDefinition::Function {
                 parameters: fields,
-                returns: WasmTypeImpl::StructRef(product_type_index),
+                returns: WasmTypeImpl::StructRef(sum_type_index),
             },
         }
     }
@@ -263,16 +263,16 @@ impl WasmTypeImpl {
                     let this_return = WasmTypeImpl::from_gleam_type(Arc::clone(&retrn), env, table);
 
                     let mut function_type_id = None;
-                    for function in table.functions.as_list().into_iter() {
+                    for function_type in table.types.as_list().into_iter() {
                         // the type matches if the parameters and return types match
-                        let function_type = table.types.get(function.signature).unwrap();
                         let (parameters, returns) = match &function_type.definition.definition {
                             WasmTypeDefinition::Function {
                                 parameters,
                                 returns,
                             } => (parameters, returns),
-                            _ => unreachable!("Expected function type"),
+                            _ => continue,
                         };
+
                         if parameters == &these_args && returns == &this_return {
                             function_type_id = Some(function_type.definition.id);
                             break;
