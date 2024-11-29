@@ -450,6 +450,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             &body,
             &external_erlang,
             &external_javascript,
+            &external_wasm,
             location,
         );
 
@@ -640,10 +641,11 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
         body: &Vec1<UntypedStatement>,
         external_erlang: &Option<(EcoString, EcoString)>,
         external_javascript: &Option<(EcoString, EcoString)>,
+        external_wasm: &Option<(EcoString, EcoString)>,
         location: SrcSpan,
     ) -> bool {
-        match (external_erlang, external_javascript) {
-            (None, None) if body.first().is_placeholder() => {
+        match (external_erlang, external_javascript, external_wasm) {
+            (None, None, None) if body.first().is_placeholder() => {
                 self.errors.push(Error::NoImplementation { location });
                 false
             }
