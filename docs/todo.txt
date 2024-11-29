@@ -1,10 +1,10 @@
 FALTAM:
 
 MVP 1.0:
-- Constantes a nível de módulo (não-básicas)
-- Entrada e saída básicas
+(Concluído 29/11/2024 18:14)
 
 MVP 2.0:
+- Print de inteiros e floats
 - Panic, todo com strings de erro
 - Tipos genéricos
 - Result
