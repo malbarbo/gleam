@@ -6,6 +6,7 @@ mod integer;
 mod pattern;
 mod string;
 mod table;
+mod tests;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -19,6 +20,7 @@ use encoder::{
 };
 use environment::{Binding, BuiltinType, Environment, TypeBinding};
 use itertools::Itertools;
+use string::unescape;
 use table::{FieldType, Local, LocalStore, ProductField, Strings, SymbolTable};
 
 use crate::{
@@ -789,10 +791,11 @@ fn emit_constant(
             _ => unreachable!("Expected product binding in environment"),
         },
         TypedConstant::String { value, .. } => {
+            let value = unescape(value);
             let string_type_id = table.string_type.unwrap();
             let string_type = table.types.get(string_type_id).unwrap();
 
-            let data_segment = strings.get_or_insert_data_segment(value);
+            let data_segment = strings.get_or_insert_data_segment(&value);
             WasmInstructions {
                 lst: vec![
                     // offset
@@ -1518,10 +1521,11 @@ fn emit_expression(
             WasmInstructions::single(wasm_encoder::Instruction::Unreachable)
         }
         TypedExpr::String { value, .. } => {
+            let value = unescape(value);
             let string_type_id = table.string_type.unwrap();
             let string_type = table.types.get(string_type_id).unwrap();
 
-            let data_segment = strings.get_or_insert_data_segment(value);
+            let data_segment = strings.get_or_insert_data_segment(&value);
             WasmInstructions {
                 lst: vec![
                     // offset
@@ -2083,7 +2087,7 @@ fn emit_binary_operation(
                left
                right
                0
-               ==
+               !=
                if
                    right
                    div
@@ -2099,7 +2103,7 @@ fn emit_binary_operation(
                 right_id,
                 Local {
                     id: right_id,
-                    name: "@fdiv_rhs_temp".into(),
+                    name: "@div_rhs_temp".into(),
                     wasm_type: WasmTypeImpl::Int,
                 },
             );
@@ -2112,7 +2116,7 @@ fn emit_binary_operation(
                 .lst
                 .push(wasm_encoder::Instruction::LocalTee(right_id.id()));
             insts.lst.extend(integer::const_(0).lst);
-            insts.lst.extend(integer::eq().lst);
+            insts.lst.extend(integer::ne().lst);
 
             insts.lst.push(wasm_encoder::Instruction::If(
                 wasm_encoder::BlockType::FunctionType(table.int_division.unwrap().id()),
@@ -2135,10 +2139,59 @@ fn emit_binary_operation(
             insts
         }
         BinOp::RemainderInt => {
+            /*
+               left
+               right
+               0
+               !=
+               if
+                   right
+                   rem
+               else
+                   drop
+                   right
+               end
+            */
+            // we need to evaluate the right operand only once
+            // create a local
+            let right_id = locals.new_id();
+            locals.insert(
+                right_id,
+                Local {
+                    id: right_id,
+                    name: "@div_rhs_temp".into(),
+                    wasm_type: WasmTypeImpl::Int,
+                },
+            );
+
             let mut insts = emit_expression(left, env, locals, strings, table);
             let right_insts = emit_expression(right, env, locals, strings, table);
+
             insts.lst.extend(right_insts.lst);
+            insts
+                .lst
+                .push(wasm_encoder::Instruction::LocalTee(right_id.id()));
+            insts.lst.extend(integer::const_(0).lst);
+            insts.lst.extend(integer::ne().lst);
+
+            insts.lst.push(wasm_encoder::Instruction::If(
+                wasm_encoder::BlockType::FunctionType(table.int_division.unwrap().id()),
+            ));
+
+            insts
+                .lst
+                .push(wasm_encoder::Instruction::LocalGet(right_id.id()));
             insts.lst.extend(integer::rem().lst);
+
+            insts.lst.push(wasm_encoder::Instruction::Else);
+
+            insts.lst.push(wasm_encoder::Instruction::Drop);
+            insts
+                .lst
+                .push(wasm_encoder::Instruction::LocalGet(right_id.id())); // 0
+
+            insts.lst.push(wasm_encoder::Instruction::End);
+
             insts
         }
         BinOp::And => {
@@ -2202,10 +2255,10 @@ fn emit_binary_operation(
             let mut insts = emit_expression(left, env, locals, strings, table);
             let right_insts = emit_expression(right, env, locals, strings, table);
             insts.lst.extend(right_insts.lst);
-            insts.lst.push(wasm_encoder::Instruction::I32Eqz);
             insts.lst.extend(
                 emit_equality_test(&FieldType::from_gleam_type(type_, env, table), table).lst,
             );
+            insts.lst.push(wasm_encoder::Instruction::I32Eqz);
             insts
         }
         BinOp::LtInt => {
@@ -2290,7 +2343,7 @@ fn emit_binary_operation(
                left
                right
                0.0
-               ==
+               !=
                if
                    right
                    div
@@ -2319,7 +2372,7 @@ fn emit_binary_operation(
                 .lst
                 .push(wasm_encoder::Instruction::LocalTee(right_id.id()));
             insts.lst.push(wasm_encoder::Instruction::F64Const(0.0));
-            insts.lst.push(wasm_encoder::Instruction::F64Eq);
+            insts.lst.push(wasm_encoder::Instruction::F64Ne);
 
             insts.lst.push(wasm_encoder::Instruction::If(
                 wasm_encoder::BlockType::FunctionType(table.float_division.unwrap().id()),

@@ -1,3 +1,5 @@
+use std::str::Chars;
+
 use ecow::EcoString;
 use wasm_encoder::MemArg;
 
@@ -5,6 +7,38 @@ use super::{
     encoder::{WasmFunction, WasmInstructions, WasmTypeImpl},
     table::{self, FunctionId, LocalStore, SymbolTable, TypeId},
 };
+
+pub fn unescape(s: &str) -> String {
+    let mut r = String::new();
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            r.push(ch);
+            continue;
+        }
+        // see https://tour.gleam.run/basics/strings/
+        let ch = match chars.next() {
+            Some('"') => '"',
+            Some('\\') => '\\',
+            Some('f') => '\x0C',
+            Some('n') => '\n',
+            Some('r') => '\r',
+            Some('t') => '\t',
+            Some('u') => unescape_unicode(&mut chars),
+            _ => panic!(),
+        };
+        r.push(ch);
+    }
+    r
+}
+
+fn unescape_unicode(chars: &mut Chars<'_>) -> char {
+    let s = chars.as_str();
+    assert_eq!(chars.next(), Some('{'));
+    let num = 1 + chars.take_while(|c| *c != '}').count();
+    *chars = s[num + 1..].chars();
+    char::from_u32(u32::from_str_radix(&s[1..num], 16).unwrap()).unwrap()
+}
 
 pub fn emit_streq(
     function_type: TypeId,

@@ -77,3 +77,5 @@ pretty_assertions.workspace = true
 insta.workspace = true
 # Random value generation
 rand = "0"
+tempdir = "0.3.7"
+assert_cmd = "2.0.16"

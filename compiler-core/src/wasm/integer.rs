@@ -34,6 +34,10 @@ pub fn eq() -> WasmInstructions {
     WasmInstructions::single(Instruction::I32Eq)
 }
 
+pub fn ne() -> WasmInstructions {
+    WasmInstructions::single(Instruction::I32Ne)
+}
+
 pub fn lt() -> WasmInstructions {
     WasmInstructions::single(Instruction::I32LtS)
 }
