@@ -338,10 +338,6 @@ function bitArrayPrintDeprecationWarning(name, message) {
     return;
   }
 
-  console.warn(
-    `Deprecated BitArray.${name} property used in JavaScript FFI code. ${message}.`,
-  );
-
   isBitArrayDeprecationMessagePrinted[name] = true;
 }
 
