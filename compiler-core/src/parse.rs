@@ -52,7 +52,7 @@
 pub mod error;
 pub mod extra;
 pub mod lexer;
-mod token;
+pub mod token;
 
 use crate::Warning;
 use crate::analyse::Inferred;
@@ -234,6 +234,10 @@ where
         parser.advance();
         parser.advance();
         parser
+    }
+
+    pub fn tok01(&self) -> (Option<Spanned>, Option<Spanned>) {
+        (self.tok0.clone(), self.tok1.clone())
     }
 
     fn parse_module(&mut self) -> Result<Parsed, ParseError> {
