@@ -1394,14 +1394,14 @@ impl<'module, 'a> Generator<'module, 'a> {
                 } = fun
                 {
                     if module == "sgleam/check" {
-                        let module = self.module_name.clone().to_doc().surround('"', '"');
+                        let src_path = self.src_path.clone().to_doc();
                         let function = self.function_name.clone().to_doc().surround('"', '"');
                         let line_number = self.line_numbers.line_number(location.start).to_doc();
                         arguments = arguments
                             .into_iter()
                             .map(|arg| arg.surround("() => { return ", " }"))
                             .collect();
-                        arguments.push(module);
+                        arguments.push(src_path);
                         arguments.push(function);
                         arguments.push(line_number);
                     }
