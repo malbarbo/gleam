@@ -174,6 +174,13 @@ pub fn parse_module(
     Ok(parsed)
 }
 
+pub fn parse_repl(src: &str) -> Result<Vec<ReplItem>, ParseError> {
+    let lex = lexer::make_tokenizer(src);
+    let mut parser = Parser::new(lex);
+    let items = parser.series_of(&Parser::parse_definition_or_statement, None);
+    parser.ensure_no_errors_or_remaining_input(items)
+}
+
 //
 // Test Interface
 //
@@ -202,6 +209,12 @@ pub fn parse_const_value(src: &str) -> Result<Constant<(), ()>, ParseError> {
         Some(e) => Ok(e),
         _ => parse_error(ParseErrorType::ExpectedExpr, SrcSpan { start: 0, end: 0 }),
     }
+}
+
+#[derive(Debug)]
+pub enum ReplItem {
+    ReplDefinition(TargetedDefinition),
+    ReplStatement(UntypedStatement),
 }
 
 //
@@ -298,6 +311,22 @@ where
             // Return any existing parse error
             parse_result
         }
+    }
+
+    fn parse_definition_or_statement(parser: &mut Self) -> Result<Option<ReplItem>, ParseError> {
+        // special case for anonymous function
+        if let (Some((_, Token::Fn, _)), Some((_, Token::LeftParen, _))) =
+            (parser.tok0.as_ref(), parser.tok0.as_ref())
+        {
+            return Ok(parser.parse_statement()?.map(ReplItem::ReplStatement));
+        }
+        if let Some(def) = parser.parse_definition()? {
+            return Ok(Some(ReplItem::ReplDefinition(def)));
+        }
+        if let Some(sta) = parser.parse_statement()? {
+            return Ok(Some(ReplItem::ReplStatement(sta)));
+        }
+        Ok(None)
     }
 
     fn parse_definition(&mut self) -> Result<Option<TargetedDefinition>, ParseError> {
