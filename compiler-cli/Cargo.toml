@@ -12,6 +12,8 @@ gleam-core = { path = "../compiler-core" }
 ctrlc = { version = "3", features = ["termination"] }
 # Command line interface
 clap = { version = "4", features = ["derive"] }
+# Get user dir to save repl history
+dirs = "6.0.0"
 # Recursively traversing directories
 ignore = "0"
 # Allow user to type in sensitive information without showing it in the shell
@@ -27,6 +29,8 @@ reqwest = { version = "0", default-features = false, features = ["rustls-tls"] }
 sha2 = "0"
 # Getting hostname
 hostname = "0"
+# Creation of temporary directories
+tempfile = "3"
 # TOML parser/editor that preserves comments & formatting
 toml_edit = "0"
 # File locking
@@ -37,6 +41,8 @@ same-file = "1"
 opener = "0"
 # Pubgrub dependency resolution algorithm
 pubgrub = "0.3"
+# Readline for the repl
+rustyline = "17.0.0"
 
 camino = { workspace = true, features = ["serde1"] }
 async-trait.workspace = true
@@ -61,7 +67,5 @@ toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-# Creation of temporary directories
-tempfile = "3"
 pretty_assertions.workspace = true
 insta.workspace = true

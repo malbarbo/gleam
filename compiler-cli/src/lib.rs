@@ -71,6 +71,7 @@ mod new;
 mod panic;
 mod publish;
 mod remove;
+mod repl;
 pub mod run;
 mod shell;
 
@@ -209,6 +210,9 @@ enum Command {
     },
     /// Rewrite deprecated Gleam code
     Fix,
+
+    /// Start an repl
+    Repl,
 
     /// Start an Erlang shell
     Shell,
@@ -573,6 +577,11 @@ fn parse_and_run_command() -> Result<(), Error> {
         Command::Shell => {
             let paths = find_project_paths()?;
             shell::command(&paths)
+        }
+
+        Command::Repl => {
+            let paths = find_project_paths()?;
+            repl::command(&paths)
         }
 
         Command::Run {
