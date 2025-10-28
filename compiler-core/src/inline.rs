@@ -1969,6 +1969,7 @@ impl InlinableValueConstructor {
                     implementations: Implementations::supporting_all(),
                     external_erlang: None,
                     external_javascript: None,
+                    external_webassembly: None,
                     purity: Purity::Unknown,
                 }
             }

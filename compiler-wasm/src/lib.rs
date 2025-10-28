@@ -116,8 +116,11 @@ pub fn compile_package(project_id: usize, target: &str) -> Result<(), String> {
     let target = match target.to_lowercase().as_str() {
         "erl" | "erlang" => Target::Erlang,
         "js" | "javascript" => Target::JavaScript,
+        "wasm" | "webassembly" => Target::WebAssembly,
         _ => {
-            let msg = format!("Unknown target `{target}`, expected `erlang` or `javascript`");
+            let msg = format!(
+                "Unknown target `{target}`, expected `erlang` or `javascript` or `webassembly`"
+            );
             return Err(msg);
         }
     };
@@ -183,6 +186,7 @@ fn do_compile_package(project: Project, target: Target) -> Result<(), Error> {
             emit_typescript_definitions: false,
             prelude_location: Utf8PathBuf::from("./gleam_prelude.mjs"),
         },
+        Target::WebAssembly => TargetCodegenConfiguration::WebAssembly,
     };
 
     tracing::info!("Compiling package");

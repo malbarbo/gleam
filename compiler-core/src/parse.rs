@@ -123,6 +123,7 @@ struct Attributes {
     deprecated: Deprecation,
     external_erlang: Option<(EcoString, EcoString, SrcSpan)>,
     external_javascript: Option<(EcoString, EcoString, SrcSpan)>,
+    external_webassembly: Option<(EcoString, EcoString, SrcSpan)>,
     internal: InternalAttribute,
 }
 
@@ -135,6 +136,7 @@ impl Attributes {
         match target {
             Target::Erlang => self.external_erlang.is_some(),
             Target::JavaScript => self.external_javascript.is_some(),
+            Target::WebAssembly => self.external_webassembly.is_some(),
         }
     }
 
@@ -142,6 +144,7 @@ impl Attributes {
         match target {
             Target::Erlang => self.external_erlang = ext,
             Target::JavaScript => self.external_javascript = ext,
+            Target::WebAssembly => self.external_webassembly = ext,
         }
     }
 }
@@ -2180,12 +2183,15 @@ where
             deprecation: std::mem::take(&mut attributes.deprecated),
             external_erlang: attributes.external_erlang.take(),
             external_javascript: attributes.external_javascript.take(),
+            external_webassembly: attributes.external_webassembly.take(),
             implementations: Implementations {
                 gleam: true,
                 can_run_on_erlang: true,
                 can_run_on_javascript: true,
+                can_run_on_webassembly: true,
                 uses_erlang_externals: false,
                 uses_javascript_externals: false,
+                uses_webassembly_externals: false,
             },
             purity: Purity::Pure,
         })))
@@ -3078,8 +3084,10 @@ where
                         gleam: true,
                         can_run_on_erlang: true,
                         can_run_on_javascript: true,
+                        can_run_on_webassembly: true,
                         uses_erlang_externals: false,
                         uses_javascript_externals: false,
+                        uses_webassembly_externals: false,
                     },
                 })))
             }
@@ -3842,6 +3850,7 @@ functions are declared separately from types.";
             Token::Name { name } => match name.as_str() {
                 "javascript" => Ok(Target::JavaScript),
                 "erlang" => Ok(Target::Erlang),
+                "webassembly" => Ok(Target::WebAssembly),
                 "js" => {
                     self.warnings
                         .push(DeprecatedSyntaxWarning::DeprecatedTargetShorthand {
@@ -4158,6 +4167,7 @@ functions are declared separately from types.";
         let target = match name.as_str() {
             "erlang" => Target::Erlang,
             "javascript" => Target::JavaScript,
+            "webassembly" => Target::WebAssembly,
             _ => return parse_error(ParseErrorType::UnknownTarget, SrcSpan::new(start, end)),
         };
 

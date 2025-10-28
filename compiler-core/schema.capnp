@@ -183,8 +183,10 @@ struct Implementations {
   gleam @0 :Bool;
   usesErlangExternals @1 :Bool;
   usesJavascriptExternals @2 :Bool;
-  canRunOnErlang @3 :Bool;
-  canRunOnJavascript @4 :Bool;
+  usesWebassemblyExternals @3 :Bool;
+  canRunOnErlang @4 :Bool;
+  canRunOnJavascript @5 :Bool;
+  canRunOnWebassembly @6 :Bool;
 }
 
 struct ValueConstructorVariant {
@@ -208,6 +210,7 @@ struct ValueConstructorVariant {
       implementations @18 :Implementations;
       externalErlang @20 :Option(External);
       externalJavascript @21 :Option(External);
+      externalWebassembly @24 :Option(External);
       purity @23 :Purity;
     }
 

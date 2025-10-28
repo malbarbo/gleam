@@ -362,6 +362,10 @@ where
             TargetCodegenConfiguration::Erlang { app_file } => {
                 self.perform_erlang_codegen(modules, app_file.as_ref())
             }
+            TargetCodegenConfiguration::WebAssembly => {
+                eprintln!("webassembly code generation not implemented");
+                Ok(())
+            },
         }
     }
 

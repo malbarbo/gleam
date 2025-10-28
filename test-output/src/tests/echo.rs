@@ -101,6 +101,9 @@ macro_rules! assert_echo {
             },
             Target::Erlang => {
                 assert_echo!(&snapshot_name, Some($target), None, $project_name);
+            },
+            Target::WebAssembly => {
+                todo!();
             }
         }
     };

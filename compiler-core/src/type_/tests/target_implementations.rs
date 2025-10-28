@@ -51,8 +51,10 @@ pub fn pure_gleam_2() { pure_gleam_1() * 2 }
                     gleam: true,
                     uses_erlang_externals: false,
                     uses_javascript_externals: false,
+                    uses_webassembly_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
+                    can_run_on_webassembly: true,
                 }
             ),
             (
@@ -61,8 +63,10 @@ pub fn pure_gleam_2() { pure_gleam_1() * 2 }
                     gleam: true,
                     uses_erlang_externals: false,
                     uses_javascript_externals: false,
+                    uses_webassembly_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
+                    can_run_on_webassembly: true,
                 }
             )
         ],
@@ -85,8 +89,10 @@ pub fn erlang_only_2() { erlang_only_1() * 2 }
                     gleam: false,
                     uses_erlang_externals: true,
                     uses_javascript_externals: false,
+                    uses_webassembly_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: false,
+                    can_run_on_webassembly: false,
                 }
             ),
             (
@@ -95,8 +101,10 @@ pub fn erlang_only_2() { erlang_only_1() * 2 }
                     gleam: false,
                     uses_erlang_externals: true,
                     uses_javascript_externals: false,
+                    uses_webassembly_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: false,
+                    can_run_on_webassembly: false,
                 }
             )
         ],
@@ -109,6 +117,7 @@ pub fn externals_only_function() {
         r#"
 @external(erlang, "wibble", "wobble")
 @external(javascript, "wibble", "wobble")
+@external(webassembly, "wibble", "wobble")
 pub fn all_externals_1() -> Int
 
 pub fn all_externals_2() { all_externals_1() * 2 }
@@ -120,8 +129,10 @@ pub fn all_externals_2() { all_externals_1() * 2 }
                     gleam: false,
                     uses_erlang_externals: true,
                     uses_javascript_externals: true,
+                    uses_webassembly_externals: true,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
+                    can_run_on_webassembly: true,
                 }
             ),
             (
@@ -130,8 +141,10 @@ pub fn all_externals_2() { all_externals_1() * 2 }
                     gleam: false,
                     uses_erlang_externals: true,
                     uses_javascript_externals: true,
+                    uses_webassembly_externals: true,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
+                    can_run_on_webassembly: true,
                 }
             )
         ],
@@ -148,8 +161,11 @@ pub fn javascript_external_and_pure_body() -> Int { 1 + 1 }
 @external(erlang, "wibble", "wobble")
 pub fn erlang_external_and_pure_body() -> Int { 1 + 1 }
 
+@external(webassembly, "wibble", "wobble")
+pub fn webassembly_external_and_pure_body() -> Int { 1 + 1 }
+
 pub fn pure_gleam() {
-  javascript_external_and_pure_body() + erlang_external_and_pure_body()
+  javascript_external_and_pure_body() + erlang_external_and_pure_body() + webassembly_external_and_pure_body()
 }
 "#,
         [
@@ -159,8 +175,10 @@ pub fn pure_gleam() {
                     gleam: true,
                     uses_erlang_externals: true,
                     uses_javascript_externals: false,
+                    uses_webassembly_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
+                    can_run_on_webassembly: true,
                 }
             ),
             (
@@ -169,8 +187,10 @@ pub fn pure_gleam() {
                     gleam: true,
                     uses_erlang_externals: false,
                     uses_javascript_externals: true,
+                    uses_webassembly_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
+                    can_run_on_webassembly: true,
                 }
             ),
             (
@@ -179,10 +199,24 @@ pub fn pure_gleam() {
                     gleam: true,
                     uses_erlang_externals: true,
                     uses_javascript_externals: true,
+                    uses_webassembly_externals: true,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
+                    can_run_on_webassembly: true,
                 }
-            )
+            ),
+            (
+                "webassembly_external_and_pure_body",
+                Implementations {
+                    gleam: true,
+                    uses_erlang_externals: false,
+                    uses_javascript_externals: false,
+                    uses_webassembly_externals: true,
+                    can_run_on_erlang: true,
+                    can_run_on_javascript: true,
+                    can_run_on_webassembly: true,
+                }
+            ),
         ],
     );
 }
@@ -206,8 +240,10 @@ pub fn all_externals() -> Int { erlang_external_and_javascript_body() }
                     gleam: false,
                     uses_erlang_externals: true,
                     uses_javascript_externals: true,
+                    uses_webassembly_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
+                    can_run_on_webassembly: false,
                 }
             ),
             (
@@ -216,8 +252,10 @@ pub fn all_externals() -> Int { erlang_external_and_javascript_body() }
                     gleam: false,
                     uses_erlang_externals: true,
                     uses_javascript_externals: true,
+                    uses_webassembly_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
+                    can_run_on_webassembly: false,
                 }
             ),
             (
@@ -226,8 +264,10 @@ pub fn all_externals() -> Int { erlang_external_and_javascript_body() }
                     gleam: false,
                     uses_erlang_externals: false,
                     uses_javascript_externals: true,
+                    uses_webassembly_externals: false,
                     can_run_on_erlang: false,
                     can_run_on_javascript: true,
+                    can_run_on_webassembly: false,
                 }
             )
         ],
@@ -253,8 +293,10 @@ pub fn all_externals() -> Int { javascript_external_and_erlang_body() }
                     gleam: false,
                     uses_erlang_externals: true,
                     uses_javascript_externals: true,
+                    uses_webassembly_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
+                    can_run_on_webassembly: false,
                 }
             ),
             (
@@ -263,8 +305,10 @@ pub fn all_externals() -> Int { javascript_external_and_erlang_body() }
                     gleam: false,
                     uses_erlang_externals: true,
                     uses_javascript_externals: false,
+                    uses_webassembly_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: false,
+                    can_run_on_webassembly: false,
                 }
             ),
             (
@@ -273,8 +317,10 @@ pub fn all_externals() -> Int { javascript_external_and_erlang_body() }
                     gleam: false,
                     uses_erlang_externals: true,
                     uses_javascript_externals: true,
+                    uses_webassembly_externals: false,
                     can_run_on_erlang: true,
                     can_run_on_javascript: true,
+                    can_run_on_webassembly: false,
                 }
             )
         ],
