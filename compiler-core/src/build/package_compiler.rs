@@ -1,5 +1,6 @@
 use crate::analyse::{ModuleAnalyzerConstructor, TargetSupport};
 use crate::build::package_loader::CacheFiles;
+use crate::codegen::WebAssembly;
 use crate::inline;
 use crate::io::files_with_extension;
 use crate::line_numbers::{self, LineNumbers};
@@ -362,10 +363,7 @@ where
             TargetCodegenConfiguration::Erlang { app_file } => {
                 self.perform_erlang_codegen(modules, app_file.as_ref())
             }
-            TargetCodegenConfiguration::WebAssembly => {
-                eprintln!("webassembly code generation not implemented");
-                Ok(())
-            },
+            TargetCodegenConfiguration::WebAssembly => self.perform_webassembly_codegen(modules),
         }
     }
 
@@ -444,6 +442,10 @@ where
         }
 
         Ok(())
+    }
+
+    fn perform_webassembly_codegen(&mut self, modules: &[Module]) -> Result<(), Error> {
+        WebAssembly::new(self.out).render(&self.io, modules)
     }
 
     fn render_erlang_entrypoint_module(

@@ -8,6 +8,7 @@ use crate::{
     io::FileSystemWriter,
     javascript::{self, ModuleConfig},
     line_numbers::LineNumbers,
+    webassembly,
 };
 use ecow::EcoString;
 use erlang::escape_atom_string;
@@ -270,5 +271,38 @@ impl<'a> JavaScript<'a> {
         });
         tracing::debug!(name = ?js_name, "Generated js module");
         writer.write(&path, &output)
+    }
+}
+
+#[derive(Debug)]
+pub struct WebAssembly<'a> {
+    output_directory: &'a Utf8Path,
+}
+
+impl<'a> WebAssembly<'a> {
+    pub fn new(output_directory: &'a Utf8Path) -> Self {
+        Self { output_directory }
+    }
+
+    pub fn render(&self, writer: &impl FileSystemWriter, modules: &[Module]) -> Result<()> {
+        for module in modules {
+            let wasm_name = module.name.clone();
+            self.wasm_module(writer, module, &wasm_name)?
+        }
+        Ok(())
+    }
+
+    fn wasm_module<Writer: FileSystemWriter>(
+        &self,
+        writer: &Writer,
+        module: &Module,
+        wasm_name: &str,
+    ) -> Result<()> {
+        let name = format!("{wasm_name}.wasm");
+        let path = self.output_directory.join(&name);
+        let line_numbers = LineNumbers::new(&module.code);
+        let output = webassembly::module(&module.ast, &line_numbers);
+        tracing::debug!(name = ?name, "Generated WebAssembly module");
+        writer.write_bytes(&path, &output)
     }
 }

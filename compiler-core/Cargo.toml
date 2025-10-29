@@ -73,6 +73,7 @@ termcolor.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
+wasm-encoder = "0.240.0"
 
 [build-dependencies]
 # Data (de)serialisation
