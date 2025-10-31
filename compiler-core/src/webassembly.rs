@@ -5,7 +5,8 @@ use ecow::EcoString;
 use num_bigint::BigInt;
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, ExportKind, ExportSection, Function, FunctionSection,
-    GlobalSection, GlobalType, InstructionSink, Module, StartSection, TypeSection, ValType,
+    GlobalSection, GlobalType, HeapType, InstructionSink, Module, RefType, StartSection,
+    TypeSection, ValType,
 };
 
 use crate::{
@@ -192,9 +193,18 @@ impl<'a> Generator<'a> {
         index
     }
 
-    fn val_type(&self, type_: &Type) -> ValType {
+    fn val_type(&mut self, type_: &Type) -> ValType {
         if type_.is_int() {
             return INT.val_type();
+        }
+        if let Some((params, return_)) = type_.fn_types() {
+            let params: Vec<_> = params.iter().map(|type_| self.val_type(type_)).collect();
+            let return_ = self.val_type(&return_);
+            let type_index = self.function_type_index(params, Some(return_));
+            return ValType::Ref(RefType {
+                heap_type: HeapType::Concrete(type_index),
+                nullable: false,
+            });
         }
         panic!("{:?}", type_);
     }
@@ -608,7 +618,10 @@ impl Locals {
                 } => self.insert(location, type_),
                 _ => todo!(),
             },
-            AssignmentKind::Assert { .. } => todo!(),
+            AssignmentKind::Assert { .. } => match &assignment.pattern {
+                Pattern::Int { .. } => {}
+                _ => todo!(),
+            },
             AssignmentKind::Generated => todo!(),
         }
     }
