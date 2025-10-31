@@ -4,14 +4,15 @@ use std::{cell::RefCell, collections::HashMap, fmt::Write, ops::Deref, rc::Rc, s
 use ecow::EcoString;
 use num_bigint::BigInt;
 use wasm_encoder::{
-    BlockType, CodeSection, ExportKind, ExportSection, Function, FunctionSection, InstructionSink,
-    Module, TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, ExportKind, ExportSection, Function, FunctionSection,
+    GlobalSection, GlobalType, InstructionSink, Module, TypeSection, ValType,
 };
 
 use crate::{
     ast::{
-        AssignmentKind, BinOp, Definition, Pattern, SrcSpan, Statement, TypedArg, TypedAssignment,
-        TypedExpr, TypedFunction, TypedModule, TypedPattern, TypedStatement,
+        AssignmentKind, BinOp, Constant, Definition, Pattern, SrcSpan, Statement, TypedArg,
+        TypedAssignment, TypedExpr, TypedFunction, TypedModule, TypedModuleConstant, TypedPattern,
+        TypedStatement,
     },
     line_numbers::LineNumbers,
     type_::{Type, TypeVar},
@@ -29,6 +30,7 @@ pub fn module(module: &TypedModule, _line_numbers: &LineNumbers) -> Vec<u8> {
     let _ = module
         .section(&generator.types_section)
         .section(&generator.functions_section)
+        .section(&generator.globals_sections)
         .section(&generator.exports_section)
         .section(&codes_section);
     module.finish()
@@ -38,6 +40,7 @@ struct Generator<'a> {
     functions_types: HashMap<(Vec<ValType>, Vec<ValType>), u32>,
     functions: Vec<(u32, Function)>,
     next_function_id: u32,
+    globals_sections: GlobalSection,
     types_section: TypeSection,
     functions_section: FunctionSection,
     exports_section: ExportSection,
@@ -55,6 +58,7 @@ impl<'a> Generator<'a> {
             functions_types: HashMap::new(),
             functions: vec![],
             next_function_id: 0,
+            globals_sections: GlobalSection::new(),
             types_section: TypeSection::new(),
             functions_section: FunctionSection::new(),
             exports_section: ExportSection::new(),
@@ -66,6 +70,9 @@ impl<'a> Generator<'a> {
     fn all_pub(&mut self) {
         for definition in &self.module.definitions {
             match definition {
+                Definition::ModuleConstant(module_constant) => {
+                    let _ = self.constant(module_constant);
+                }
                 Definition::Function(function) => {
                     if !function.publicity.is_public()
                         || is_generic_function(&function_type(function))
@@ -77,16 +84,19 @@ impl<'a> Generator<'a> {
                 Definition::TypeAlias(_type_alias) => todo!(),
                 Definition::CustomType(_custom_type) => todo!(),
                 Definition::Import(_import) => todo!(),
-                Definition::ModuleConstant(_module_constant) => todo!(),
             }
         }
     }
 
     fn on_demand(&mut self, name: &EcoString, required_type: &Type) -> Id {
-        let (params, return_) = required_type.fn_types().unwrap();
         for definition in &self.module.definitions {
             match definition {
+                Definition::ModuleConstant(module_constant) => {
+                    assert!(required_type.same_as(&module_constant.type_));
+                    return self.constant(module_constant);
+                }
                 Definition::Function(function) if &function.name.as_ref().unwrap().1 == name => {
+                    let (params, return_) = required_type.fn_types().unwrap();
                     let declared_type = function_type(function);
                     return if is_generic_function(&declared_type) {
                         match find_global(&mangle(name, &params, &return_), &self.globals) {
@@ -243,7 +253,7 @@ impl<'a> Generator<'a> {
 
                 let _ = match id.kind {
                     IdKind::Func => instructions.ref_func(id.index),
-                    // IdKind::Global => instructions.global_get(id.index),
+                    IdKind::Global => instructions.global_get(id.index),
                     IdKind::Local => instructions.local_get(id.index),
                 };
             }
@@ -304,6 +314,34 @@ impl<'a> Generator<'a> {
         }
         scope
     }
+
+    fn constant(&mut self, module_constant: &TypedModuleConstant) -> Id {
+        match &*module_constant.value {
+            Constant::Int { int_value, .. } => {
+                let index = self.globals_sections.len();
+                let _ = self.globals_sections.global(
+                    GlobalType {
+                        val_type: INT.val_type(),
+                        mutable: false,
+                        shared: false,
+                    },
+                    &INT.int_const(int_value),
+                );
+                if module_constant.publicity.is_public() {
+                    let _ = self.exports_section.export(
+                        &module_constant.name,
+                        ExportKind::Global,
+                        index,
+                    );
+                }
+                let id = Id::global(module_constant.name.clone(), index);
+                self.globals.borrow_mut().push(id.clone());
+                id
+            }
+
+            _ => todo!(),
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -317,6 +355,13 @@ impl IntType {
         match self {
             IntType::Int32 => ValType::I32,
             IntType::Int64 => ValType::I64,
+        }
+    }
+
+    fn int_const(&self, value: &BigInt) -> ConstExpr {
+        match self {
+            IntType::Int32 => ConstExpr::i32_const(value.try_into().unwrap()),
+            IntType::Int64 => ConstExpr::i64_const(value.try_into().unwrap()),
         }
     }
 }
@@ -398,6 +443,7 @@ impl<'a> IntInstructions for InstructionSink<'a> {
 
 #[derive(Clone)]
 enum IdKind {
+    Global,
     Func,
     Local,
 }
@@ -410,6 +456,14 @@ struct Id {
 }
 
 impl Id {
+    fn global(name: EcoString, index: u32) -> Id {
+        Id {
+            kind: IdKind::Global,
+            name,
+            index,
+        }
+    }
+
     fn func(name: EcoString, index: u32) -> Id {
         Id {
             kind: IdKind::Func,
