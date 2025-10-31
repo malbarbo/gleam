@@ -83,8 +83,7 @@ impl<'a> Generator<'a> {
                     let _ = self.constant(module_constant);
                 }
                 Definition::Function(function) => {
-                    if !function.publicity.is_public()
-                        || is_generic_function(&function_type(function))
+                    if !function.publicity.is_public() || is_generic_type(&function_type(function))
                     {
                         continue;
                     }
@@ -102,7 +101,7 @@ impl<'a> Generator<'a> {
 
     fn start(&mut self, id: Id) {
         let type_index = self.function_type_index(vec![], None);
-        let index = self.functions_section.len();
+        let index = self.next_function_id();
         let _ = self.functions_section.function(type_index);
         let mut code = Function::new([]);
         let _ = code.instructions().call(id.index).drop().end();
@@ -121,7 +120,7 @@ impl<'a> Generator<'a> {
                 Definition::Function(function) if &function.name.as_ref().unwrap().1 == name => {
                     let (params, return_) = required_type.fn_types().unwrap();
                     let declared_type = function_type(function);
-                    return if is_generic_function(&declared_type) {
+                    return if is_generic_type(&declared_type) {
                         match find_global(&mangle(name, &params, &return_), &self.globals) {
                             Some(id) => id, // the function has already been monomorphized
                             None => self.function(&monomorphize(function, &params, &return_)),
@@ -133,7 +132,10 @@ impl<'a> Generator<'a> {
                 _ => {}
             }
         }
-        panic!("name not found: {:?}", name);
+        panic!(
+            "Name not found: {:?}. Are you using closures? They are not supporte yet.",
+            name
+        );
     }
 
     fn next_function_id(&mut self) -> u32 {
@@ -153,12 +155,11 @@ impl<'a> Generator<'a> {
         self.globals
             .borrow_mut()
             .push(Id::func(name.clone(), index));
-
-        let type_index = self.funtion_type(function);
+        let type_index = self.function_type(&function.arguments, &function.return_type);
         let _ = self.functions_section.function(type_index);
 
-        let locals = Locals::new(function.arguments.len() as u32, &function.body);
-        let mut code = Function::new(vec![(locals.len(), INT.val_type())]);
+        let locals = Locals::new(self, function.arguments.len() as u32, &function.body);
+        let mut code = Function::new(locals.val_types());
         self.statements(
             &mut code.instructions(),
             Scope::with_params(self.globals.clone(), &function.arguments),
@@ -170,13 +171,43 @@ impl<'a> Generator<'a> {
         Id::func(name, index)
     }
 
-    fn funtion_type(&mut self, function: &TypedFunction) -> u32 {
-        let params: Vec<ValType> = function
-            .arguments
-            .iter()
-            .map(|t| self.val_type(&t.type_))
-            .collect();
-        let result = self.val_type(&function.return_type);
+    fn local_function(
+        &mut self,
+        name: EcoString,
+        type_: &Arc<Type>,
+        arguments: &[TypedArg],
+        body: &[TypedStatement],
+    ) -> Id {
+        if let Some(id) = find_global(&name, &self.globals) {
+            return id;
+        }
+
+        let index = self.next_function_id();
+        let _ = self.exports_section.export(&name, ExportKind::Func, index);
+        self.globals
+            .borrow_mut()
+            .push(Id::func(name.clone(), index));
+
+        let (_, return_) = type_.fn_types().unwrap();
+        let type_index = self.function_type(arguments, &return_);
+        let _ = self.functions_section.function(type_index);
+
+        let locals = Locals::new(self, arguments.len() as u32, body);
+        let mut code = Function::new(locals.val_types());
+        self.statements(
+            &mut code.instructions(),
+            Scope::with_params(self.globals.clone(), arguments),
+            &locals,
+            body,
+        );
+        let _ = code.instructions().end();
+        self.functions.push((index, code));
+        Id::func(name, index)
+    }
+
+    fn function_type(&mut self, arguments: &[TypedArg], return_: &Arc<Type>) -> u32 {
+        let params: Vec<ValType> = arguments.iter().map(|t| self.val_type(&t.type_)).collect();
+        let result = self.val_type(return_);
         self.function_type_index(params, Some(result))
     }
 
@@ -307,6 +338,18 @@ impl<'a> Generator<'a> {
                 let result = self.val_type(type_);
                 let index = self.function_type_index(params, Some(result));
                 let _ = instructions.call_ref(index);
+            }
+            TypedExpr::Fn {
+                location,
+                type_,
+                arguments,
+                body,
+                ..
+            } => {
+                let name: EcoString =
+                    format!("anonymous@{}-{}", location.start, location.end).into();
+                let id = self.local_function(name, type_, arguments, body);
+                let _ = instructions.ref_func(id.index);
             }
             _ => todo!(),
         };
@@ -556,66 +599,76 @@ impl Scope {
 struct Locals {
     skip: u32,
     locals: HashMap<SrcSpan, u32>,
+    val_types: Vec<ValType>,
     int_div: bool,
 }
 
 impl Locals {
-    fn new(num_params: u32, statements: &[TypedStatement]) -> Self {
+    fn new(generator: &mut Generator<'_>, num_params: u32, statements: &[TypedStatement]) -> Self {
         let mut locals = Locals {
             skip: num_params,
             locals: HashMap::new(),
             int_div: false,
+            val_types: vec![],
         };
-        locals.statements(statements);
+        locals.statements(generator, statements);
         locals
     }
 
-    fn statements(&mut self, statements: &[TypedStatement]) {
+    fn statements(&mut self, generator: &mut Generator<'_>, statements: &[TypedStatement]) {
         for statement in statements {
-            self.statement(statement);
+            self.statement(generator, statement);
         }
     }
 
-    fn statement(&mut self, statement: &TypedStatement) {
+    fn statement(&mut self, generator: &mut Generator<'_>, statement: &TypedStatement) {
         match statement {
-            Statement::Expression(expression) => self.expression(expression),
-            Statement::Assignment(assignment) => self.assignment(assignment),
+            Statement::Expression(expression) => self.expression(generator, expression),
+            Statement::Assignment(assignment) => self.assignment(generator, assignment),
             _ => todo!(),
         }
     }
 
-    fn expression(&mut self, expression: &TypedExpr) {
+    fn expression(&mut self, generator: &mut Generator<'_>, expression: &TypedExpr) {
         match expression {
             TypedExpr::BinOp {
                 name, left, right, ..
             } => {
-                self.expression(left);
-                self.expression(right);
+                self.expression(generator, left);
+                self.expression(generator, right);
                 if matches!(name, BinOp::DivInt) {
                     self.int_div = true;
                 }
             }
             TypedExpr::Block { statements, .. } => {
-                self.statements(statements);
+                self.statements(generator, statements);
             }
-            TypedExpr::Int { .. } | TypedExpr::Var { .. } => {}
+            TypedExpr::Int { .. } | TypedExpr::Var { .. } | TypedExpr::Fn { .. } => {}
             TypedExpr::Call { fun, arguments, .. } => {
-                self.expression(fun);
+                self.expression(generator, fun);
                 for arg in arguments {
-                    self.expression(&arg.value);
+                    self.expression(generator, &arg.value);
                 }
             }
             _ => todo!("{:?}", expression),
         }
     }
 
-    fn assignment(&mut self, assignment: &TypedAssignment) {
-        self.expression(&assignment.value);
+    fn assignment(&mut self, generator: &mut Generator<'_>, assignment: &TypedAssignment) {
+        self.expression(generator, &assignment.value);
         match &assignment.kind {
             AssignmentKind::Let => match &assignment.pattern {
                 Pattern::Variable {
-                    location, type_, ..
-                } => self.insert(location, type_),
+                    name,
+                    location,
+                    type_,
+                    ..
+                } => {
+                    if is_generic_type(type_) {
+                        panic!("Local function \"{name}\" cannot be generic.");
+                    }
+                    self.insert(generator, location, type_)
+                }
                 _ => todo!(),
             },
             AssignmentKind::Assert { .. } => match &assignment.pattern {
@@ -626,10 +679,10 @@ impl Locals {
         }
     }
 
-    fn insert(&mut self, location: &SrcSpan, type_: &Type) {
-        assert!(type_.is_int());
+    fn insert(&mut self, generator: &mut Generator<'_>, location: &SrcSpan, type_: &Arc<Type>) {
         let index = self.locals.len() as u32 + self.skip;
         let _ = self.locals.insert(*location, index);
+        self.val_types.push(generator.val_type(type_));
     }
 
     fn get(&self, location: &SrcSpan) -> u32 {
@@ -641,19 +694,28 @@ impl Locals {
         self.locals.len() as u32
     }
 
-    fn len(&self) -> u32 {
-        self.locals.len() as u32 + if self.int_div { 2 } else { 0 }
+    fn val_types(&self) -> Vec<(u32, ValType)> {
+        // FIXME: group locals by type
+        let mut val_types: Vec<_> = self.val_types.iter().map(|e| (1, *e)).collect();
+        if self.int_div {
+            val_types.push((2, INT.val_type()));
+        }
+        val_types
     }
 }
 
-fn is_generic_function(type_: &Type) -> bool {
-    type_.is_unbound()
-        || if let Some((params, return_)) = type_.fn_types() {
-            params.into_iter().any(|type_| is_generic_function(&type_))
-                || is_generic_function(&return_)
-        } else {
-            false
+fn is_generic_type(type_: &Arc<Type>) -> bool {
+    match &**type_ {
+        Type::Named { arguments, .. } => arguments.iter().any(is_generic_type),
+        Type::Fn { arguments, return_ } => {
+            arguments.iter().any(is_generic_type) || is_generic_type(return_)
         }
+        Type::Var { type_ } => match type_.borrow().deref() {
+            TypeVar::Unbound { .. } | TypeVar::Generic { .. } => true,
+            TypeVar::Link { type_ } => is_generic_type(type_),
+        },
+        Type::Tuple { elements } => elements.iter().any(is_generic_type),
+    }
 }
 
 fn monomorphize(
@@ -850,7 +912,7 @@ fn types_str(types: &[Arc<Type>], to: &mut String) {
     let _ = write!(to, ")");
 }
 
-fn function_type(function: &TypedFunction) -> Type {
+fn function_type(function: &TypedFunction) -> Arc<Type> {
     Type::Fn {
         arguments: function
             .arguments
@@ -859,6 +921,7 @@ fn function_type(function: &TypedFunction) -> Type {
             .collect(),
         return_: function.return_type.clone(),
     }
+    .into()
 }
 
 fn mangle(name: &EcoString, params: &[Arc<Type>], return_: &Arc<Type>) -> EcoString {
