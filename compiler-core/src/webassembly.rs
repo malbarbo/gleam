@@ -5,7 +5,7 @@ use ecow::EcoString;
 use num_bigint::BigInt;
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, ExportKind, ExportSection, Function, FunctionSection,
-    GlobalSection, GlobalType, InstructionSink, Module, TypeSection, ValType,
+    GlobalSection, GlobalType, InstructionSink, Module, StartSection, TypeSection, ValType,
 };
 
 use crate::{
@@ -17,6 +17,9 @@ use crate::{
     line_numbers::LineNumbers,
     type_::{Type, TypeVar},
 };
+
+const MAIN: &str = "main";
+const START: &str = "$start";
 
 pub fn module(module: &TypedModule, _line_numbers: &LineNumbers) -> Vec<u8> {
     let mut generator = Generator::new(module);
@@ -31,12 +34,16 @@ pub fn module(module: &TypedModule, _line_numbers: &LineNumbers) -> Vec<u8> {
         .section(&generator.types_section)
         .section(&generator.functions_section)
         .section(&generator.globals_sections)
-        .section(&generator.exports_section)
-        .section(&codes_section);
+        .section(&generator.exports_section);
+    if let Some(function_index) = generator.start {
+        let _ = module.section(&StartSection { function_index });
+    }
+    let _ = module.section(&codes_section);
     module.finish()
 }
 
 struct Generator<'a> {
+    start: Option<u32>,
     functions_types: HashMap<(Vec<ValType>, Vec<ValType>), u32>,
     functions: Vec<(u32, Function)>,
     next_function_id: u32,
@@ -55,6 +62,7 @@ fn find_global(name: &EcoString, globals: &RefCell<Vec<Id>>) -> Option<Id> {
 impl<'a> Generator<'a> {
     fn new(module: &'a TypedModule) -> Self {
         Generator {
+            start: None,
             functions_types: HashMap::new(),
             functions: vec![],
             next_function_id: 0,
@@ -79,13 +87,27 @@ impl<'a> Generator<'a> {
                     {
                         continue;
                     }
-                    let _ = self.function(function);
+                    let id = self.function(function);
+                    if is_main_funtion(function) {
+                        self.start(id);
+                    }
                 }
                 Definition::TypeAlias(_type_alias) => todo!(),
                 Definition::CustomType(_custom_type) => todo!(),
                 Definition::Import(_import) => todo!(),
             }
         }
+    }
+
+    fn start(&mut self, id: Id) {
+        let type_index = self.function_type_index(vec![], None);
+        let index = self.functions_section.len();
+        let _ = self.functions_section.function(type_index);
+        let mut code = Function::new([]);
+        let _ = code.instructions().call(id.index).drop().end();
+        self.functions.push((index, code));
+        let _ = self.exports_section.export(START, ExportKind::Func, index);
+        self.start = Some(index);
     }
 
     fn on_demand(&mut self, name: &EcoString, required_type: &Type) -> Id {
@@ -154,11 +176,11 @@ impl<'a> Generator<'a> {
             .map(|t| self.val_type(&t.type_))
             .collect();
         let result = self.val_type(&function.return_type);
-        self.function_type_index(params, result)
+        self.function_type_index(params, Some(result))
     }
 
-    fn function_type_index(&mut self, params: Vec<ValType>, result: ValType) -> u32 {
-        let results = vec![result];
+    fn function_type_index(&mut self, params: Vec<ValType>, result: Option<ValType>) -> u32 {
+        let results: Vec<_> = result.into_iter().collect();
         if let Some(index) = self.functions_types.get(&(params.clone(), results.clone())) {
             return *index;
         }
@@ -273,7 +295,7 @@ impl<'a> Generator<'a> {
                     .map(|arg| self.val_type(&arg.value.type_()))
                     .collect();
                 let result = self.val_type(type_);
-                let index = self.function_type_index(params, result);
+                let index = self.function_type_index(params, Some(result));
                 let _ = instructions.call_ref(index);
             }
             _ => todo!(),
@@ -342,6 +364,15 @@ impl<'a> Generator<'a> {
             _ => todo!(),
         }
     }
+}
+
+fn is_main_funtion(function: &TypedFunction) -> bool {
+    function
+        .name
+        .as_ref()
+        .map(|name| name.1 == MAIN)
+        .unwrap_or(false)
+        && function.arguments.is_empty()
 }
 
 #[allow(dead_code)]
