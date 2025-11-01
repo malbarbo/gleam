@@ -115,7 +115,7 @@ impl<'a> Generator<'a> {
     fn on_demand(&mut self, name: &EcoString, required_type: &Type) -> Id {
         for definition in &self.module.definitions {
             match definition {
-                Definition::ModuleConstant(module_constant) => {
+                Definition::ModuleConstant(module_constant) if &module_constant.name == name => {
                     assert!(required_type.same_as(&module_constant.type_));
                     return self.constant(module_constant);
                 }
@@ -233,6 +233,9 @@ impl<'a> Generator<'a> {
         if type_.is_bool() {
             return BOOL.val_type();
         }
+        if type_.is_float() {
+            return FLOAT.val_type();
+        }
         if let Some((params, return_)) = type_.fn_types() {
             let params: Vec<_> = params.iter().map(|type_| self.val_type(type_)).collect();
             let return_ = self.val_type(&return_);
@@ -242,7 +245,7 @@ impl<'a> Generator<'a> {
                 nullable: false,
             });
         }
-        panic!("{:?}", type_);
+        panic!("Type not supported: {:?}", type_);
     }
 
     fn statements(
@@ -294,6 +297,9 @@ impl<'a> Generator<'a> {
             TypedExpr::Int { int_value, .. } => {
                 let _ = instructions.int_const(int_value);
             }
+            TypedExpr::Float { value, .. } => {
+                let _ = instructions.float_const(value);
+            }
             TypedExpr::BinOp {
                 name, left, right, ..
             } => {
@@ -303,6 +309,7 @@ impl<'a> Generator<'a> {
                 }
 
                 let _ = match name {
+                    // Bool
                     BinOp::And => {
                         self.expression(locals, scope.clone(), instructions, left);
                         let _ = instructions.if_(BlockType::Result(BOOL.val_type()));
@@ -317,6 +324,9 @@ impl<'a> Generator<'a> {
                         self.expression(locals, scope, instructions, right);
                         instructions.end()
                     }
+                    BinOp::Eq if left.type_().is_bool() => instructions.bool_eq(),
+                    BinOp::NotEq if left.type_().is_bool() => instructions.bool_ne(),
+                    // Int
                     BinOp::AddInt => instructions.int_add(),
                     BinOp::SubInt => instructions.int_sub(),
                     BinOp::MultInt => instructions.int_mul(),
@@ -328,9 +338,17 @@ impl<'a> Generator<'a> {
                     BinOp::GtEqInt => instructions.int_ge(),
                     BinOp::Eq if left.type_().is_int() => instructions.int_eq(),
                     BinOp::NotEq if left.type_().is_int() => instructions.int_ne(),
-                    BinOp::Eq if left.type_().is_bool() => instructions.bool_eq(),
-                    BinOp::NotEq if left.type_().is_bool() => instructions.bool_ne(),
-
+                    // Float
+                    BinOp::AddFloat => instructions.float_add(),
+                    BinOp::SubFloat => instructions.float_sub(),
+                    BinOp::MultFloat => instructions.float_mul(),
+                    BinOp::DivFloat => instructions.float_div(locals.get_float_div()),
+                    BinOp::LtFloat => instructions.float_lt(),
+                    BinOp::LtEqFloat => instructions.float_le(),
+                    BinOp::GtFloat => instructions.float_gt(),
+                    BinOp::GtEqFloat => instructions.float_ge(),
+                    BinOp::Eq if left.type_().is_float() => instructions.float_eq(),
+                    BinOp::NotEq if left.type_().is_float() => instructions.float_ne(),
                     _ => todo!(),
                 };
             }
@@ -415,6 +433,16 @@ impl<'a> Generator<'a> {
                         .unreachable()
                         .end();
                 }
+                Pattern::Float { value, .. } => {
+                    let _ = instructions
+                        .float_const(value)
+                        .float_eq()
+                        .if_(BlockType::Result(FLOAT.val_type()))
+                        .float_const(value)
+                        .else_()
+                        .unreachable()
+                        .end();
+                }
                 Pattern::Constructor { name, type_, .. }
                     if (name == TRUE || name == FALSE) && type_.is_bool() =>
                 {
@@ -444,24 +472,18 @@ impl<'a> Generator<'a> {
     }
 
     fn constant(&mut self, module_constant: &TypedModuleConstant) -> Id {
-        let (global_type, expr) = match &*module_constant.value {
-            Constant::Int { int_value, .. } => (
-                GlobalType {
-                    val_type: INT.val_type(),
-                    mutable: false,
-                    shared: false,
-                },
-                INT.int_const(int_value),
-            ),
-            Constant::Record { name, type_, .. } if is_bool_const(name, type_) => (
-                GlobalType {
-                    val_type: BOOL.val_type(),
-                    mutable: false,
-                    shared: false,
-                },
-                BOOL.bool_const(name == TRUE),
-            ),
+        let (val_type, expr) = match &*module_constant.value {
+            Constant::Int { int_value, .. } => (INT.val_type(), INT.int_const(int_value)),
+            Constant::Float { value, .. } => (FLOAT.val_type(), FLOAT.float_const(value)),
+            Constant::Record { name, type_, .. } if is_bool_const(name, type_) => {
+                (BOOL.val_type(), BOOL.bool_const(name == TRUE))
+            }
             _ => todo!(),
+        };
+        let global_type = GlobalType {
+            val_type,
+            mutable: false,
+            shared: false,
         };
         let index = self.globals_sections.len();
         let _ = self.globals_sections.global(global_type, &expr);
@@ -622,6 +644,75 @@ impl<'a> IntInstructions for InstructionSink<'a> {
     int_op!(int_ge, i32_ge_s, i64_ge_s);
 }
 
+struct FloatType {}
+
+const FLOAT: FloatType = FloatType {};
+
+impl FloatType {
+    fn val_type(&self) -> ValType {
+        ValType::F64
+    }
+
+    fn float_const(&self, value: &EcoString) -> ConstExpr {
+        ConstExpr::f64_const(value.parse::<f64>().unwrap().into())
+    }
+}
+
+trait FloatInstructions {
+    fn float_const(&mut self, value: &str) -> &mut Self;
+    fn float_add(&mut self) -> &mut Self;
+    fn float_sub(&mut self) -> &mut Self;
+    fn float_mul(&mut self) -> &mut Self;
+    fn float_div(&mut self, local: u32) -> &mut Self;
+    fn float_eq(&mut self) -> &mut Self;
+    fn float_ne(&mut self) -> &mut Self;
+    fn float_lt(&mut self) -> &mut Self;
+    fn float_le(&mut self) -> &mut Self;
+    fn float_gt(&mut self) -> &mut Self;
+    fn float_ge(&mut self) -> &mut Self;
+}
+
+macro_rules! float_op {
+    ($name:ident, $f64:ident) => {
+        fn $name(&mut self) -> &mut Self {
+            self.$f64()
+        }
+    };
+}
+
+impl<'a> FloatInstructions for InstructionSink<'a> {
+    fn float_const(&mut self, value: &str) -> &mut Self {
+        self.f64_const(value.parse::<f64>().unwrap().into())
+    }
+
+    fn float_div(&mut self, local: u32) -> &mut Self {
+        let divisor = local;
+        let dividend = local + 1;
+        self.local_set(divisor)
+            .local_set(dividend)
+            .local_get(divisor)
+            .f64_const(0.0f64.into())
+            .f64_ne()
+            .if_(BlockType::Result(ValType::F64))
+            .local_get(dividend)
+            .local_get(divisor)
+            .f64_div()
+            .else_()
+            .f64_const(0.0f64.into())
+            .end()
+    }
+
+    float_op!(float_add, f64_add);
+    float_op!(float_sub, f64_sub);
+    float_op!(float_mul, f64_mul);
+    float_op!(float_eq, f64_eq);
+    float_op!(float_ne, f64_ne);
+    float_op!(float_lt, f64_lt);
+    float_op!(float_le, f64_le);
+    float_op!(float_gt, f64_gt);
+    float_op!(float_ge, f64_ge);
+}
+
 #[derive(Clone)]
 enum IdKind {
     Global,
@@ -698,6 +789,7 @@ struct Locals {
     locals: HashMap<SrcSpan, u32>,
     val_types: Vec<ValType>,
     int_div: bool,
+    float_div: bool,
 }
 
 impl Locals {
@@ -706,6 +798,7 @@ impl Locals {
             skip: num_params,
             locals: HashMap::new(),
             int_div: false,
+            float_div: false,
             val_types: vec![],
         };
         locals.statements(generator, statements);
@@ -736,11 +829,13 @@ impl Locals {
                 if matches!(name, BinOp::DivInt) {
                     self.int_div = true;
                 }
+                if matches!(name, BinOp::DivFloat) {
+                    self.float_div = true;
+                }
             }
             TypedExpr::Block { statements, .. } => {
                 self.statements(generator, statements);
             }
-            TypedExpr::Int { .. } | TypedExpr::Var { .. } | TypedExpr::Fn { .. } => {}
             TypedExpr::Call { fun, arguments, .. } => {
                 self.expression(generator, fun);
                 for arg in arguments {
@@ -755,6 +850,10 @@ impl Locals {
                     self.expression(generator, value);
                 }
             }
+            TypedExpr::Int { .. }
+            | TypedExpr::Float { .. }
+            | TypedExpr::Var { .. }
+            | TypedExpr::Fn { .. } => {}
             _ => todo!("{:?}", expression),
         }
     }
@@ -777,7 +876,7 @@ impl Locals {
                 _ => todo!(),
             },
             AssignmentKind::Assert { .. } => match &assignment.pattern {
-                Pattern::Int { .. } => {}
+                Pattern::Int { .. } | Pattern::Float { .. } => {}
                 Pattern::Constructor { name, type_, .. } if is_bool_const(name, type_) => {}
                 _ => todo!(),
             },
@@ -797,7 +896,13 @@ impl Locals {
 
     fn get_int_div(&self) -> u32 {
         assert!(self.int_div);
-        self.locals.len() as u32
+        self.locals.len() as u32 + self.skip
+    }
+
+    fn get_float_div(&self) -> u32 {
+        assert!(self.float_div);
+        let div = if self.int_div { 2 } else { 0 };
+        self.locals.len() as u32 + div + self.skip
     }
 
     fn val_types(&self) -> Vec<(u32, ValType)> {
@@ -805,6 +910,9 @@ impl Locals {
         let mut val_types: Vec<_> = self.val_types.iter().map(|e| (1, *e)).collect();
         if self.int_div {
             val_types.push((2, INT.val_type()));
+        }
+        if self.float_div {
+            val_types.push((2, FLOAT.val_type()));
         }
         val_types
     }
