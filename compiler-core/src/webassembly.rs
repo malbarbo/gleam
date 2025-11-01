@@ -11,9 +11,9 @@ use wasm_encoder::{
 
 use crate::{
     ast::{
-        AssignmentKind, BinOp, Constant, Definition, Pattern, SrcSpan, Statement, TypedArg,
-        TypedAssignment, TypedExpr, TypedFunction, TypedModule, TypedModuleConstant, TypedPattern,
-        TypedStatement,
+        AssignmentKind, BinOp, Constant, Definition, OperatorKind, Pattern, SrcSpan, Statement,
+        TypedArg, TypedAssignment, TypedExpr, TypedFunction, TypedModule, TypedModuleConstant,
+        TypedPattern, TypedStatement,
     },
     line_numbers::LineNumbers,
     type_::{Type, TypeVar},
@@ -21,6 +21,8 @@ use crate::{
 
 const MAIN: &str = "main";
 const START: &str = "$start";
+const TRUE: &str = "True";
+const FALSE: &str = "False";
 
 pub fn module(module: &TypedModule, _line_numbers: &LineNumbers) -> Vec<u8> {
     let mut generator = Generator::new(module);
@@ -228,6 +230,9 @@ impl<'a> Generator<'a> {
         if type_.is_int() {
             return INT.val_type();
         }
+        if type_.is_bool() {
+            return BOOL.val_type();
+        }
         if let Some((params, return_)) = type_.fn_types() {
             let params: Vec<_> = params.iter().map(|type_| self.val_type(type_)).collect();
             let return_ = self.val_type(&return_);
@@ -283,31 +288,66 @@ impl<'a> Generator<'a> {
         expression: &TypedExpr,
     ) {
         match expression {
+            TypedExpr::Todo { .. } | TypedExpr::Panic { .. } => {
+                let _ = instructions.unreachable();
+            }
             TypedExpr::Int { int_value, .. } => {
                 let _ = instructions.int_const(int_value);
             }
             TypedExpr::BinOp {
                 name, left, right, ..
             } => {
-                self.expression(locals, scope.clone(), instructions, left);
-                self.expression(locals, scope, instructions, right);
+                if name.operator_kind() != OperatorKind::BooleanLogic {
+                    self.expression(locals, scope.clone(), instructions, left);
+                    self.expression(locals, scope.clone(), instructions, right);
+                }
 
                 let _ = match name {
+                    BinOp::And => {
+                        self.expression(locals, scope.clone(), instructions, left);
+                        let _ = instructions.if_(BlockType::Result(BOOL.val_type()));
+                        self.expression(locals, scope, instructions, right);
+                        instructions.else_().bool_const(false).end()
+                    }
+                    BinOp::Or => {
+                        self.expression(locals, scope.clone(), instructions, left);
+                        let _ = instructions.if_(BlockType::Result(BOOL.val_type()));
+                        let _ = instructions.bool_const(true);
+                        let _ = instructions.else_();
+                        self.expression(locals, scope, instructions, right);
+                        instructions.end()
+                    }
                     BinOp::AddInt => instructions.int_add(),
                     BinOp::SubInt => instructions.int_sub(),
                     BinOp::MultInt => instructions.int_mul(),
                     BinOp::DivInt => instructions.int_div(locals.get_int_div()),
                     BinOp::RemainderInt => instructions.int_rem(),
+                    BinOp::LtInt => instructions.int_lt(),
+                    BinOp::LtEqInt => instructions.int_le(),
+                    BinOp::GtInt => instructions.int_gt(),
+                    BinOp::GtEqInt => instructions.int_ge(),
+                    BinOp::Eq if left.type_().is_int() => instructions.int_eq(),
+                    BinOp::NotEq if left.type_().is_int() => instructions.int_ne(),
+                    BinOp::Eq if left.type_().is_bool() => instructions.bool_eq(),
+                    BinOp::NotEq if left.type_().is_bool() => instructions.bool_ne(),
+
                     _ => todo!(),
                 };
             }
             TypedExpr::NegateInt { value, .. } => {
+                let _ = instructions.int_const(&0.into());
                 self.expression(locals, scope, instructions, value);
-                let _ = instructions.int_neg();
+                let _ = instructions.int_sub();
             }
-
+            TypedExpr::NegateBool { value, .. } => {
+                self.expression(locals, scope, instructions, value);
+                let _ = instructions.bool_neg();
+            }
             TypedExpr::Block { statements, .. } => {
                 self.statements(instructions, scope, locals, statements);
+            }
+            TypedExpr::Var { name, .. } if is_bool_const(name, &expression.type_()) => {
+                let _ = instructions.bool_const(name == TRUE);
             }
             TypedExpr::Var { name, .. } => {
                 let id = scope
@@ -375,6 +415,19 @@ impl<'a> Generator<'a> {
                         .unreachable()
                         .end();
                 }
+                Pattern::Constructor { name, type_, .. }
+                    if (name == TRUE || name == FALSE) && type_.is_bool() =>
+                {
+                    let value = name == TRUE;
+                    let _ = instructions
+                        .bool_const(value)
+                        .bool_eq()
+                        .if_(BlockType::Result(BOOL.val_type()))
+                        .bool_const(value)
+                        .else_()
+                        .unreachable()
+                        .end();
+                }
                 _ => todo!(),
             },
             AssignmentKind::Let => match &assignment.pattern {
@@ -391,31 +444,35 @@ impl<'a> Generator<'a> {
     }
 
     fn constant(&mut self, module_constant: &TypedModuleConstant) -> Id {
-        match &*module_constant.value {
-            Constant::Int { int_value, .. } => {
-                let index = self.globals_sections.len();
-                let _ = self.globals_sections.global(
-                    GlobalType {
-                        val_type: INT.val_type(),
-                        mutable: false,
-                        shared: false,
-                    },
-                    &INT.int_const(int_value),
-                );
-                if module_constant.publicity.is_public() {
-                    let _ = self.exports_section.export(
-                        &module_constant.name,
-                        ExportKind::Global,
-                        index,
-                    );
-                }
-                let id = Id::global(module_constant.name.clone(), index);
-                self.globals.borrow_mut().push(id.clone());
-                id
-            }
-
+        let (global_type, expr) = match &*module_constant.value {
+            Constant::Int { int_value, .. } => (
+                GlobalType {
+                    val_type: INT.val_type(),
+                    mutable: false,
+                    shared: false,
+                },
+                INT.int_const(int_value),
+            ),
+            Constant::Record { name, type_, .. } if is_bool_const(name, type_) => (
+                GlobalType {
+                    val_type: BOOL.val_type(),
+                    mutable: false,
+                    shared: false,
+                },
+                BOOL.bool_const(name == TRUE),
+            ),
             _ => todo!(),
+        };
+        let index = self.globals_sections.len();
+        let _ = self.globals_sections.global(global_type, &expr);
+        if module_constant.publicity.is_public() {
+            let _ = self
+                .exports_section
+                .export(&module_constant.name, ExportKind::Global, index);
         }
+        let id = Id::global(module_constant.name.clone(), index);
+        self.globals.borrow_mut().push(id.clone());
+        id
     }
 }
 
@@ -428,11 +485,51 @@ fn is_main_funtion(function: &TypedFunction) -> bool {
         && function.arguments.is_empty()
 }
 
+struct BoolType {}
+
+const BOOL: BoolType = BoolType {};
+
+impl BoolType {
+    fn val_type(&self) -> ValType {
+        ValType::I32
+    }
+
+    fn bool_const(&self, bool_: bool) -> ConstExpr {
+        ConstExpr::i32_const(bool_.into())
+    }
+}
+
+trait BoolInstructions {
+    fn bool_const(&mut self, value: bool) -> &mut Self;
+    fn bool_neg(&mut self) -> &mut Self;
+    fn bool_eq(&mut self) -> &mut Self;
+    fn bool_ne(&mut self) -> &mut Self;
+}
+
+impl<'a> BoolInstructions for InstructionSink<'a> {
+    fn bool_const(&mut self, value: bool) -> &mut Self {
+        self.i32_const(value as _)
+    }
+    fn bool_neg(&mut self) -> &mut Self {
+        self.i32_eqz()
+    }
+
+    fn bool_eq(&mut self) -> &mut Self {
+        self.i32_eq()
+    }
+
+    fn bool_ne(&mut self) -> &mut Self {
+        self.i32_ne()
+    }
+}
+
 #[allow(dead_code)]
 enum IntType {
     Int32,
     Int64,
 }
+
+const INT: IntType = IntType::Int32;
 
 impl IntType {
     fn val_type(&self) -> ValType {
@@ -450,8 +547,6 @@ impl IntType {
     }
 }
 
-const INT: IntType = IntType::Int32;
-
 trait IntInstructions {
     fn int_const(&mut self, value: &BigInt) -> &mut Self;
     fn int_add(&mut self) -> &mut Self;
@@ -459,8 +554,12 @@ trait IntInstructions {
     fn int_mul(&mut self) -> &mut Self;
     fn int_rem(&mut self) -> &mut Self;
     fn int_div(&mut self, local: u32) -> &mut Self;
-    fn int_neg(&mut self) -> &mut Self;
     fn int_eq(&mut self) -> &mut Self;
+    fn int_ne(&mut self) -> &mut Self;
+    fn int_lt(&mut self) -> &mut Self;
+    fn int_le(&mut self) -> &mut Self;
+    fn int_gt(&mut self) -> &mut Self;
+    fn int_ge(&mut self) -> &mut Self;
 }
 
 macro_rules! int_op {
@@ -511,18 +610,16 @@ impl<'a> IntInstructions for InstructionSink<'a> {
         }
     }
 
-    fn int_neg(&mut self) -> &mut Self {
-        match INT {
-            IntType::Int32 => self.i32_const(0).i32_sub(),
-            IntType::Int64 => self.i64_const(0).i64_sub(),
-        }
-    }
-
     int_op!(int_add, i32_add, i64_add);
     int_op!(int_sub, i32_sub, i64_sub);
     int_op!(int_mul, i32_mul, i64_mul);
     int_op!(int_rem, i32_rem_s, i64_rem_s);
     int_op!(int_eq, i32_eq, i64_eq);
+    int_op!(int_ne, i32_ne, i64_ne);
+    int_op!(int_lt, i32_lt_s, i64_lt_s);
+    int_op!(int_le, i32_le_s, i64_le_s);
+    int_op!(int_gt, i32_gt_s, i64_gt_s);
+    int_op!(int_ge, i32_ge_s, i64_ge_s);
 }
 
 #[derive(Clone)]
@@ -650,6 +747,14 @@ impl Locals {
                     self.expression(generator, &arg.value);
                 }
             }
+            TypedExpr::NegateInt { value, .. } | TypedExpr::NegateBool { value, .. } => {
+                self.expression(generator, value);
+            }
+            TypedExpr::Todo { message, .. } | TypedExpr::Panic { message, .. } => {
+                if let Some(value) = message {
+                    self.expression(generator, value);
+                }
+            }
             _ => todo!("{:?}", expression),
         }
     }
@@ -673,6 +778,7 @@ impl Locals {
             },
             AssignmentKind::Assert { .. } => match &assignment.pattern {
                 Pattern::Int { .. } => {}
+                Pattern::Constructor { name, type_, .. } if is_bool_const(name, type_) => {}
                 _ => todo!(),
             },
             AssignmentKind::Generated => todo!(),
@@ -702,6 +808,10 @@ impl Locals {
         }
         val_types
     }
+}
+
+fn is_bool_const(name: &str, type_: &Arc<Type>) -> bool {
+    (name == TRUE || name == FALSE) && type_.is_bool()
 }
 
 fn is_generic_type(type_: &Arc<Type>) -> bool {
