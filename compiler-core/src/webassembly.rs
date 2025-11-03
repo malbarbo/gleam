@@ -56,6 +56,9 @@ struct Generator<'a> {
     exports_section: ExportSection,
     globals: Rc<RefCell<Vec<Id>>>,
     module: &'a TypedModule,
+    bool_: BoolType,
+    int: IntType,
+    float: FloatType,
 }
 
 fn find_global(name: &EcoString, globals: &RefCell<Vec<Id>>) -> Option<Id> {
@@ -75,6 +78,9 @@ impl<'a> Generator<'a> {
             exports_section: ExportSection::new(),
             globals: Rc::default(),
             module,
+            bool_: BoolType {},
+            int: IntType::Int32,
+            float: FloatType {},
         }
     }
 
@@ -163,7 +169,7 @@ impl<'a> Generator<'a> {
         let locals = Locals::new(self, function.arguments.len() as u32, &function.body);
         let mut code = Function::new(locals.val_types());
         self.statements(
-            &mut code.instructions(),
+            &mut code.extend_instructions(self),
             Scope::with_params(self.globals.clone(), &function.arguments),
             &locals,
             &function.body,
@@ -197,7 +203,7 @@ impl<'a> Generator<'a> {
         let locals = Locals::new(self, arguments.len() as u32, body);
         let mut code = Function::new(locals.val_types());
         self.statements(
-            &mut code.instructions(),
+            &mut code.extend_instructions(self),
             Scope::with_params(self.globals.clone(), arguments),
             &locals,
             body,
@@ -228,13 +234,13 @@ impl<'a> Generator<'a> {
 
     fn val_type(&mut self, type_: &Type) -> ValType {
         if type_.is_int() {
-            return INT.val_type();
+            return self.int.val_type();
         }
         if type_.is_bool() {
-            return BOOL.val_type();
+            return self.bool_.val_type();
         }
         if type_.is_float() {
-            return FLOAT.val_type();
+            return self.float.val_type();
         }
         if let Some((params, return_)) = type_.fn_types() {
             let params: Vec<_> = params.iter().map(|type_| self.val_type(type_)).collect();
@@ -250,7 +256,7 @@ impl<'a> Generator<'a> {
 
     fn statements(
         &mut self,
-        instructions: &mut InstructionSink<'_>,
+        instructions: &mut ExtendedInstructionSink<'_>,
         mut scope: Scope,
         locals: &Locals,
         statements: &[TypedStatement],
@@ -265,7 +271,7 @@ impl<'a> Generator<'a> {
 
     fn statement(
         &mut self,
-        instructions: &mut InstructionSink<'_>,
+        instructions: &mut ExtendedInstructionSink<'_>,
         mut scope: Scope,
         locals: &Locals,
         statement: &TypedStatement,
@@ -287,7 +293,7 @@ impl<'a> Generator<'a> {
         &mut self,
         locals: &Locals,
         scope: Scope,
-        instructions: &mut InstructionSink<'_>,
+        instructions: &mut ExtendedInstructionSink<'_>,
         expression: &TypedExpr,
     ) {
         match expression {
@@ -312,13 +318,13 @@ impl<'a> Generator<'a> {
                     // Bool
                     BinOp::And => {
                         self.expression(locals, scope.clone(), instructions, left);
-                        let _ = instructions.if_(BlockType::Result(BOOL.val_type()));
+                        let _ = instructions.if_(BlockType::Result(self.bool_.val_type()));
                         self.expression(locals, scope, instructions, right);
                         instructions.else_().bool_const(false).end()
                     }
                     BinOp::Or => {
                         self.expression(locals, scope.clone(), instructions, left);
-                        let _ = instructions.if_(BlockType::Result(BOOL.val_type()));
+                        let _ = instructions.if_(BlockType::Result(self.bool_.val_type()));
                         let _ = instructions.bool_const(true);
                         let _ = instructions.else_();
                         self.expression(locals, scope, instructions, right);
@@ -417,7 +423,7 @@ impl<'a> Generator<'a> {
         &mut self,
         locals: &Locals,
         mut scope: Scope,
-        instructions: &mut InstructionSink<'_>,
+        instructions: &mut ExtendedInstructionSink<'_>,
         assignment: &TypedAssignment,
     ) -> Scope {
         self.expression(locals, scope.clone(), instructions, &assignment.value);
@@ -427,7 +433,7 @@ impl<'a> Generator<'a> {
                     let _ = instructions
                         .int_const(int_value)
                         .int_eq()
-                        .if_(BlockType::Result(INT.val_type()))
+                        .if_(BlockType::Result(self.int.val_type()))
                         .int_const(int_value)
                         .else_()
                         .unreachable()
@@ -437,7 +443,7 @@ impl<'a> Generator<'a> {
                     let _ = instructions
                         .float_const(value)
                         .float_eq()
-                        .if_(BlockType::Result(FLOAT.val_type()))
+                        .if_(BlockType::Result(self.float.val_type()))
                         .float_const(value)
                         .else_()
                         .unreachable()
@@ -450,7 +456,7 @@ impl<'a> Generator<'a> {
                     let _ = instructions
                         .bool_const(value)
                         .bool_eq()
-                        .if_(BlockType::Result(BOOL.val_type()))
+                        .if_(BlockType::Result(self.bool_.val_type()))
                         .bool_const(value)
                         .else_()
                         .unreachable()
@@ -473,10 +479,10 @@ impl<'a> Generator<'a> {
 
     fn constant(&mut self, module_constant: &TypedModuleConstant) -> Id {
         let (val_type, expr) = match &*module_constant.value {
-            Constant::Int { int_value, .. } => (INT.val_type(), INT.int_const(int_value)),
-            Constant::Float { value, .. } => (FLOAT.val_type(), FLOAT.float_const(value)),
+            Constant::Int { int_value, .. } => (self.int.val_type(), self.int.int_const(int_value)),
+            Constant::Float { value, .. } => (self.float.val_type(), self.float.float_const(value)),
             Constant::Record { name, type_, .. } if is_bool_const(name, type_) => {
-                (BOOL.val_type(), BOOL.bool_const(name == TRUE))
+                (self.bool_.val_type(), self.bool_.bool_const(name == TRUE))
             }
             _ => todo!(),
         };
@@ -507,9 +513,64 @@ fn is_main_funtion(function: &TypedFunction) -> bool {
         && function.arguments.is_empty()
 }
 
-struct BoolType {}
+#[allow(unused)]
+struct ExtendedInstructionSink<'a> {
+    bool_: BoolType,
+    int: IntType,
+    float: FloatType,
+    instructions: InstructionSink<'a>,
+}
 
-const BOOL: BoolType = BoolType {};
+trait NewExtendedInstructionSink {
+    fn extend_instructions<'a>(
+        &'a mut self,
+        generator: &Generator<'_>,
+    ) -> ExtendedInstructionSink<'a>;
+}
+
+impl NewExtendedInstructionSink for Function {
+    fn extend_instructions<'a>(
+        &'a mut self,
+        generator: &Generator<'_>,
+    ) -> ExtendedInstructionSink<'a> {
+        ExtendedInstructionSink {
+            bool_: generator.bool_,
+            int: generator.int,
+            float: generator.float,
+            instructions: self.instructions(),
+        }
+    }
+}
+
+macro_rules! delegate {
+    ($($name:ident ( $( $arg:ident : $typ:ty )? ) ),+ $(,)? ) => {
+        $(
+            fn $name(&mut self $(, $arg: $typ )? ) -> &mut Self {
+                let _ = self.instructions.$name($( $arg )?);
+                self
+            }
+        )+
+    };
+}
+
+// We do not implement Deref and DerefMut so we do not call "native" int and float instructions directly.
+impl<'a> ExtendedInstructionSink<'a> {
+    delegate! {
+        if_(bt: BlockType),
+        else_(),
+        end(),
+        unreachable(),
+        drop(),
+        local_set(index: u32),
+        local_get(index: u32),
+        global_get(index: u32),
+        ref_func(index: u32),
+        call_ref(index: u32),
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+struct BoolType {}
 
 impl BoolType {
     fn val_type(&self) -> ValType {
@@ -521,37 +582,34 @@ impl BoolType {
     }
 }
 
-trait BoolInstructions {
-    fn bool_const(&mut self, value: bool) -> &mut Self;
-    fn bool_neg(&mut self) -> &mut Self;
-    fn bool_eq(&mut self) -> &mut Self;
-    fn bool_ne(&mut self) -> &mut Self;
-}
-
-impl<'a> BoolInstructions for InstructionSink<'a> {
+impl<'a> ExtendedInstructionSink<'a> {
     fn bool_const(&mut self, value: bool) -> &mut Self {
-        self.i32_const(value as _)
+        let _ = self.instructions.i32_const(value as _);
+        self
     }
+
     fn bool_neg(&mut self) -> &mut Self {
-        self.i32_eqz()
+        let _ = self.instructions.i32_eqz();
+        self
     }
 
     fn bool_eq(&mut self) -> &mut Self {
-        self.i32_eq()
+        let _ = self.instructions.i32_eq();
+        self
     }
 
     fn bool_ne(&mut self) -> &mut Self {
-        self.i32_ne()
+        let _ = self.instructions.i32_ne();
+        self
     }
 }
 
-#[allow(dead_code)]
+#[allow(unused)]
+#[derive(Debug, Copy, Clone)]
 enum IntType {
     Int32,
     Int64,
 }
-
-const INT: IntType = IntType::Int32;
 
 impl IntType {
     fn val_type(&self) -> ValType {
@@ -569,45 +627,33 @@ impl IntType {
     }
 }
 
-trait IntInstructions {
-    fn int_const(&mut self, value: &BigInt) -> &mut Self;
-    fn int_add(&mut self) -> &mut Self;
-    fn int_sub(&mut self) -> &mut Self;
-    fn int_mul(&mut self) -> &mut Self;
-    fn int_rem(&mut self) -> &mut Self;
-    fn int_div(&mut self, local: u32) -> &mut Self;
-    fn int_eq(&mut self) -> &mut Self;
-    fn int_ne(&mut self) -> &mut Self;
-    fn int_lt(&mut self) -> &mut Self;
-    fn int_le(&mut self) -> &mut Self;
-    fn int_gt(&mut self) -> &mut Self;
-    fn int_ge(&mut self) -> &mut Self;
-}
-
 macro_rules! int_op {
     ($name:ident, $i32:ident, $i64:ident) => {
         fn $name(&mut self) -> &mut Self {
-            match INT {
-                IntType::Int32 => self.$i32(),
-                IntType::Int64 => self.$i64(),
-            }
+            let _ = match self.int {
+                IntType::Int32 => self.instructions.$i32(),
+                IntType::Int64 => self.instructions.$i64(),
+            };
+            self
         }
     };
 }
 
-impl<'a> IntInstructions for InstructionSink<'a> {
+impl<'a> ExtendedInstructionSink<'a> {
     fn int_const(&mut self, value: &BigInt) -> &mut Self {
-        match INT {
-            IntType::Int32 => self.i32_const(value.try_into().unwrap()),
-            IntType::Int64 => self.i64_const(value.try_into().unwrap()),
-        }
+        let _ = match self.int {
+            IntType::Int32 => self.instructions.i32_const(value.try_into().unwrap()),
+            IntType::Int64 => self.instructions.i64_const(value.try_into().unwrap()),
+        };
+        self
     }
 
     fn int_div(&mut self, local: u32) -> &mut Self {
         let divisor = local;
         let dividend = local + 1;
-        match INT {
+        let _ = match self.int {
             IntType::Int32 => self
+                .instructions
                 .local_set(divisor)
                 .local_set(dividend)
                 .local_get(divisor)
@@ -619,6 +665,7 @@ impl<'a> IntInstructions for InstructionSink<'a> {
                 .i32_const(0)
                 .end(),
             IntType::Int64 => self
+                .instructions
                 .local_set(divisor)
                 .local_set(dividend)
                 .local_get(divisor)
@@ -629,7 +676,8 @@ impl<'a> IntInstructions for InstructionSink<'a> {
                 .else_()
                 .i64_const(0)
                 .end(),
-        }
+        };
+        self
     }
 
     int_op!(int_add, i32_add, i64_add);
@@ -644,9 +692,17 @@ impl<'a> IntInstructions for InstructionSink<'a> {
     int_op!(int_ge, i32_ge_s, i64_ge_s);
 }
 
+#[derive(Debug, Copy, Clone)]
 struct FloatType {}
 
-const FLOAT: FloatType = FloatType {};
+macro_rules! float_op {
+    ($name:ident, $f64:ident) => {
+        fn $name(&mut self) -> &mut Self {
+            let _ = self.instructions.$f64();
+            self
+        }
+    };
+}
 
 impl FloatType {
     fn val_type(&self) -> ValType {
@@ -658,37 +714,20 @@ impl FloatType {
     }
 }
 
-trait FloatInstructions {
-    fn float_const(&mut self, value: &str) -> &mut Self;
-    fn float_add(&mut self) -> &mut Self;
-    fn float_sub(&mut self) -> &mut Self;
-    fn float_mul(&mut self) -> &mut Self;
-    fn float_div(&mut self, local: u32) -> &mut Self;
-    fn float_eq(&mut self) -> &mut Self;
-    fn float_ne(&mut self) -> &mut Self;
-    fn float_lt(&mut self) -> &mut Self;
-    fn float_le(&mut self) -> &mut Self;
-    fn float_gt(&mut self) -> &mut Self;
-    fn float_ge(&mut self) -> &mut Self;
-}
-
-macro_rules! float_op {
-    ($name:ident, $f64:ident) => {
-        fn $name(&mut self) -> &mut Self {
-            self.$f64()
-        }
-    };
-}
-
-impl<'a> FloatInstructions for InstructionSink<'a> {
+impl<'a> ExtendedInstructionSink<'a> {
     fn float_const(&mut self, value: &str) -> &mut Self {
-        self.f64_const(value.parse::<f64>().unwrap().into())
+        let _ = self
+            .instructions
+            .f64_const(value.parse::<f64>().unwrap().into());
+        self
     }
 
     fn float_div(&mut self, local: u32) -> &mut Self {
         let divisor = local;
         let dividend = local + 1;
-        self.local_set(divisor)
+        let _ = self
+            .instructions
+            .local_set(divisor)
             .local_set(dividend)
             .local_get(divisor)
             .f64_const(0.0f64.into())
@@ -699,7 +738,8 @@ impl<'a> FloatInstructions for InstructionSink<'a> {
             .f64_div()
             .else_()
             .f64_const(0.0f64.into())
-            .end()
+            .end();
+        self
     }
 
     float_op!(float_add, f64_add);
@@ -783,12 +823,14 @@ impl Scope {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct Locals {
     skip: u32,
     locals: HashMap<SrcSpan, u32>,
     val_types: Vec<ValType>,
+    int: IntType,
     int_div: bool,
+    float: FloatType,
     float_div: bool,
 }
 
@@ -797,7 +839,9 @@ impl Locals {
         let mut locals = Locals {
             skip: num_params,
             locals: HashMap::new(),
+            int: generator.int,
             int_div: false,
+            float: generator.float,
             float_div: false,
             val_types: vec![],
         };
@@ -909,10 +953,10 @@ impl Locals {
         // FIXME: group locals by type
         let mut val_types: Vec<_> = self.val_types.iter().map(|e| (1, *e)).collect();
         if self.int_div {
-            val_types.push((2, INT.val_type()));
+            val_types.push((2, self.int.val_type()));
         }
         if self.float_div {
-            val_types.push((2, FLOAT.val_type()));
+            val_types.push((2, self.float.val_type()));
         }
         val_types
     }
