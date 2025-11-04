@@ -4,9 +4,9 @@ use std::{cell::RefCell, collections::HashMap, fmt::Write, ops::Deref, rc::Rc, s
 use ecow::EcoString;
 use num_bigint::BigInt;
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, ExportKind, ExportSection, Function, FunctionSection,
-    GlobalSection, GlobalType, HeapType, InstructionSink, Module, RefType, StartSection,
-    TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, DataCountSection, DataSection, ExportKind, ExportSection,
+    Function, FunctionSection, GlobalSection, GlobalType, HeapType, InstructionSink, Module,
+    RefType, StartSection, StorageType, TypeSection, ValType,
 };
 
 use crate::{
@@ -20,7 +20,6 @@ use crate::{
 };
 
 const MAIN: &str = "main";
-const START: &str = "$start";
 const TRUE: &str = "True";
 const FALSE: &str = "False";
 
@@ -28,37 +27,109 @@ pub fn module(module: &TypedModule, _line_numbers: &LineNumbers) -> Vec<u8> {
     let mut generator = Generator::new(module);
     generator.all_pub();
     let mut module = Module::default();
-    let mut codes_section = CodeSection::new();
-    generator.functions.sort_by_key(|t| t.0);
-    for function in generator.functions {
-        let _ = codes_section.function(&function.1);
+
+    let start = generator.function_start();
+
+    // type section
+    let mut types: Vec<_> = generator.types.iter().collect();
+    types.sort_by_key(|t| t.1);
+    let mut type_section = TypeSection::new();
+    for (type_, _) in types {
+        match type_ {
+            WasmType::Array(storage_type) => type_section.ty().array(storage_type, true),
+            WasmType::Function(params, results) => {
+                type_section.ty().function(params.clone(), results.clone())
+            }
+        }
     }
-    let _ = module
-        .section(&generator.types_section)
-        .section(&generator.functions_section)
-        .section(&generator.globals_sections)
-        .section(&generator.exports_section);
-    if let Some(function_index) = generator.start {
-        let _ = module.section(&StartSection { function_index });
+    let _ = module.section(&type_section);
+
+    // function section
+    let _ = module.section(&generator.function_section);
+
+    // global section
+    let _ = module.section(&generator.global_section);
+
+    // export section
+    let _ = module.section(&generator.export_section);
+
+    // start section
+    let _ = module.section(&StartSection {
+        function_index: start,
+    });
+
+    // data count section
+    let _ = module.section(&DataCountSection {
+        count: generator.strings.len() as u32,
+    });
+
+    // code section
+    generator.functions.sort_by_key(|t| t.1);
+    let mut codes_section = CodeSection::new();
+    for function in generator.functions {
+        let _ = codes_section.function(&function.0);
     }
     let _ = module.section(&codes_section);
+
+    // data section
+    let _ = module.section(&generator.data_section);
+
+    // finalize
     module.finish()
 }
 
+#[derive(Hash, Eq, PartialEq)]
+enum WasmType {
+    Array(StorageType),
+    Function(Vec<ValType>, Vec<ValType>),
+}
+
+#[derive(Hash, PartialEq, Eq, Copy, Clone, Debug)]
+enum Builtins {
+    Start,
+    StringEq,
+    StringConcat,
+}
+
+impl Builtins {
+    fn name(&self) -> &'static str {
+        match self {
+            Builtins::Start => "$start",
+            Builtins::StringEq => "$string_eq",
+            Builtins::StringConcat => "$string_concat",
+        }
+    }
+    fn export(&self) -> bool {
+        match self {
+            Builtins::Start => true,
+            Builtins::StringEq | Builtins::StringConcat => false,
+        }
+    }
+}
+
 struct Generator<'a> {
-    start: Option<u32>,
-    functions_types: HashMap<(Vec<ValType>, Vec<ValType>), u32>,
-    functions: Vec<(u32, Function)>,
-    next_function_id: u32,
-    globals_sections: GlobalSection,
-    types_section: TypeSection,
-    functions_section: FunctionSection,
-    exports_section: ExportSection,
-    globals: Rc<RefCell<Vec<Id>>>,
+    // Wasm types and its indexes in the type section
+    types: HashMap<WasmType, u32>,
+    function_section: FunctionSection,
+    global_section: GlobalSection,
+    export_section: ExportSection,
+    // Function code and its index in the code section
+    functions: Vec<(Function, u32)>,
+    data_section: DataSection,
+    // String literals and its index in the global section
+    strings: HashMap<EcoString, u32>,
+    // The index in the global section for the const string name and
+    // the index in the global section for the string literal
+    const_strings: Vec<(u32, u32)>,
     module: &'a TypedModule,
+    main: Option<u32>,
+    next_function_id: u32,
+    globals: Rc<RefCell<Vec<Id>>>,
+    builtins: HashMap<Builtins, u32>,
     bool_: BoolType,
     int: IntType,
     float: FloatType,
+    string: StringType,
 }
 
 fn find_global(name: &EcoString, globals: &RefCell<Vec<Id>>) -> Option<Id> {
@@ -67,21 +138,29 @@ fn find_global(name: &EcoString, globals: &RefCell<Vec<Id>>) -> Option<Id> {
 
 impl<'a> Generator<'a> {
     fn new(module: &'a TypedModule) -> Self {
-        Generator {
-            start: None,
-            functions_types: HashMap::new(),
+        let mut generator = Generator {
+            types: HashMap::new(),
+            function_section: FunctionSection::new(),
+            global_section: GlobalSection::new(),
+            export_section: ExportSection::new(),
             functions: vec![],
-            next_function_id: 0,
-            globals_sections: GlobalSection::new(),
-            types_section: TypeSection::new(),
-            functions_section: FunctionSection::new(),
-            exports_section: ExportSection::new(),
-            globals: Rc::default(),
+            data_section: DataSection::new(),
+            strings: HashMap::new(),
+            const_strings: vec![],
             module,
+            main: None,
+            next_function_id: 0,
+            globals: Rc::default(),
+            builtins: HashMap::new(),
             bool_: BoolType {},
             int: IntType::Int32,
             float: FloatType {},
-        }
+            string: StringType { type_index: 0 },
+        };
+        let _ = generator
+            .types
+            .insert(WasmType::Array(StringType::store_type()), 0);
+        generator
     }
 
     fn all_pub(&mut self) {
@@ -97,7 +176,7 @@ impl<'a> Generator<'a> {
                     }
                     let id = self.function(function);
                     if is_main_funtion(function) {
-                        self.start(id);
+                        self.main = Some(id.index)
                     }
                 }
                 Definition::TypeAlias(_type_alias) => todo!(),
@@ -107,18 +186,63 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn start(&mut self, id: Id) {
-        let type_index = self.function_type_index(vec![], None);
-        let index = self.next_function_id();
-        let _ = self.functions_section.function(type_index);
-        let mut code = Function::new([]);
-        let _ = code.instructions().call(id.index).drop().end();
-        self.functions.push((index, code));
-        let _ = self.exports_section.export(START, ExportKind::Func, index);
-        self.start = Some(index);
+    fn val_type(&mut self, type_: &Type) -> ValType {
+        if type_.is_int() {
+            return self.int.val_type();
+        }
+        if type_.is_bool() {
+            return self.bool_.val_type();
+        }
+        if type_.is_float() {
+            return self.float.val_type();
+        }
+        if type_.is_string() {
+            return self.string.val_type();
+        }
+        if let Some((params, return_)) = type_.fn_types() {
+            let params: Vec<_> = params.iter().map(|type_| self.val_type(type_)).collect();
+            let return_ = self.val_type(&return_);
+            let type_index = self.function_type_index(params, Some(return_));
+            return ValType::Ref(RefType {
+                heap_type: HeapType::Concrete(type_index),
+                nullable: false,
+            });
+        }
+        panic!("Type not supported: {:#?}", type_);
     }
 
-    fn on_demand(&mut self, name: &EcoString, required_type: &Type) -> Id {
+    fn constant(&mut self, module_constant: &TypedModuleConstant) -> Id {
+        let (val_type, expr) = match &*module_constant.value {
+            Constant::Int { int_value, .. } => (self.int.val_type(), self.int.int_const(int_value)),
+            Constant::Float { value, .. } => (self.float.val_type(), self.float.float_const(value)),
+            Constant::String { .. } => (
+                self.string.val_type_nullable(),
+                ConstExpr::ref_null(HeapType::Concrete(self.string.type_index)),
+            ),
+
+            Constant::Record { name, type_, .. } if is_bool_const(name, type_) => {
+                (self.bool_.val_type(), self.bool_.bool_const(name == TRUE))
+            }
+            _ => todo!("Constant not supported: {:#?}", module_constant),
+        };
+
+        let id = self.add_global(
+            &module_constant.name,
+            val_type,
+            expr,
+            module_constant.publicity.is_public(),
+        );
+
+        if let Constant::String { value, .. } = &*module_constant.value {
+            // saved for lazy initialization in the start function
+            let from = self.string_index(value);
+            self.const_strings.push((id.index, from));
+        };
+
+        id
+    }
+
+    fn var(&mut self, name: &EcoString, required_type: &Type) -> Id {
         for definition in &self.module.definitions {
             match definition {
                 Definition::ModuleConstant(module_constant) if &module_constant.name == name => {
@@ -159,12 +283,12 @@ impl<'a> Generator<'a> {
         }
 
         let index = self.next_function_id();
-        let _ = self.exports_section.export(&name, ExportKind::Func, index);
+        let _ = self.export_section.export(&name, ExportKind::Func, index);
         self.globals
             .borrow_mut()
             .push(Id::func(name.clone(), index));
         let type_index = self.function_type(&function.arguments, &function.return_type);
-        let _ = self.functions_section.function(type_index);
+        let _ = self.function_section.function(type_index);
 
         let locals = Locals::new(self, function.arguments.len() as u32, &function.body);
         let mut code = Function::new(locals.val_types());
@@ -175,7 +299,7 @@ impl<'a> Generator<'a> {
             &function.body,
         );
         let _ = code.instructions().end();
-        self.functions.push((index, code));
+        self.functions.push((code, index));
         Id::func(name, index)
     }
 
@@ -191,14 +315,14 @@ impl<'a> Generator<'a> {
         }
 
         let index = self.next_function_id();
-        let _ = self.exports_section.export(&name, ExportKind::Func, index);
+        let _ = self.export_section.export(&name, ExportKind::Func, index);
         self.globals
             .borrow_mut()
             .push(Id::func(name.clone(), index));
 
         let (_, return_) = type_.fn_types().unwrap();
         let type_index = self.function_type(arguments, &return_);
-        let _ = self.functions_section.function(type_index);
+        let _ = self.function_section.function(type_index);
 
         let locals = Locals::new(self, arguments.len() as u32, body);
         let mut code = Function::new(locals.val_types());
@@ -209,7 +333,7 @@ impl<'a> Generator<'a> {
             body,
         );
         let _ = code.instructions().end();
-        self.functions.push((index, code));
+        self.functions.push((code, index));
         Id::func(name, index)
     }
 
@@ -220,38 +344,11 @@ impl<'a> Generator<'a> {
     }
 
     fn function_type_index(&mut self, params: Vec<ValType>, result: Option<ValType>) -> u32 {
-        let results: Vec<_> = result.into_iter().collect();
-        if let Some(index) = self.functions_types.get(&(params.clone(), results.clone())) {
-            return *index;
-        }
-        let index = self.functions_types.len() as u32;
-        let _ = self
-            .functions_types
-            .insert((params.clone(), results.clone()), index);
-        self.types_section.ty().function(params, results);
-        index
-    }
-
-    fn val_type(&mut self, type_: &Type) -> ValType {
-        if type_.is_int() {
-            return self.int.val_type();
-        }
-        if type_.is_bool() {
-            return self.bool_.val_type();
-        }
-        if type_.is_float() {
-            return self.float.val_type();
-        }
-        if let Some((params, return_)) = type_.fn_types() {
-            let params: Vec<_> = params.iter().map(|type_| self.val_type(type_)).collect();
-            let return_ = self.val_type(&return_);
-            let type_index = self.function_type_index(params, Some(return_));
-            return ValType::Ref(RefType {
-                heap_type: HeapType::Concrete(type_index),
-                nullable: false,
-            });
-        }
-        panic!("Type not supported: {:?}", type_);
+        let index = self.types.len() as u32;
+        *self
+            .types
+            .entry(WasmType::Function(params, result.into_iter().collect()))
+            .or_insert(index)
     }
 
     fn statements(
@@ -278,13 +375,12 @@ impl<'a> Generator<'a> {
     ) -> Scope {
         match statement {
             Statement::Expression(expression) => {
-                self.expression(locals, scope.clone(), instructions, expression)
+                self.expression(locals, scope.clone(), instructions, expression);
             }
             Statement::Assignment(assignment) => {
                 scope = self.assigment(locals, scope, instructions, assignment);
             }
-            Statement::Use(_) => todo!(),
-            Statement::Assert(_assert) => todo!(),
+            _ => todo!("Statement not supported: {:#?}", statement),
         }
         scope
     }
@@ -305,6 +401,10 @@ impl<'a> Generator<'a> {
             }
             TypedExpr::Float { value, .. } => {
                 let _ = instructions.float_const(value);
+            }
+            TypedExpr::String { value, .. } => {
+                let index = self.string_index(value);
+                let _ = instructions.string_get(index);
             }
             TypedExpr::BinOp {
                 name, left, right, ..
@@ -355,7 +455,20 @@ impl<'a> Generator<'a> {
                     BinOp::GtEqFloat => instructions.float_ge(),
                     BinOp::Eq if left.type_().is_float() => instructions.float_eq(),
                     BinOp::NotEq if left.type_().is_float() => instructions.float_ne(),
-                    _ => todo!(),
+                    // String
+                    BinOp::Concatenate => {
+                        let concat = self.function_string_concat();
+                        instructions.call(concat)
+                    }
+                    BinOp::Eq if left.type_().is_string() => {
+                        let eq = self.function_string_eq();
+                        instructions.call(eq)
+                    }
+                    BinOp::NotEq if left.type_().is_string() => {
+                        let eq = self.function_string_eq();
+                        instructions.call(eq).bool_neg()
+                    }
+                    _ => todo!("Expression not supported: {:#?}", expression),
                 };
             }
             TypedExpr::NegateInt { value, .. } => {
@@ -376,10 +489,13 @@ impl<'a> Generator<'a> {
             TypedExpr::Var { name, .. } => {
                 let id = scope
                     .find(name)
-                    .unwrap_or_else(|| self.on_demand(name, &expression.type_()));
+                    .unwrap_or_else(|| self.var(name, &expression.type_()));
 
                 let _ = match id.kind {
                     IdKind::Func => instructions.ref_func(id.index),
+                    IdKind::Global if expression.type_().is_string() => {
+                        instructions.string_get(id.index)
+                    }
                     IdKind::Global => instructions.global_get(id.index),
                     IdKind::Local => instructions.local_get(id.index),
                 };
@@ -449,6 +565,18 @@ impl<'a> Generator<'a> {
                         .unreachable()
                         .end();
                 }
+                Pattern::String { value, .. } => {
+                    let eq = self.function_string_eq();
+                    let index = self.string_index(value);
+                    let _ = instructions
+                        .string_get(index)
+                        .call(eq)
+                        .if_(BlockType::Result(self.string.val_type()))
+                        .string_get(index)
+                        .else_()
+                        .unreachable()
+                        .end();
+                }
                 Pattern::Constructor { name, type_, .. }
                     if (name == TRUE || name == FALSE) && type_.is_bool() =>
                 {
@@ -477,30 +605,290 @@ impl<'a> Generator<'a> {
         scope
     }
 
-    fn constant(&mut self, module_constant: &TypedModuleConstant) -> Id {
-        let (val_type, expr) = match &*module_constant.value {
-            Constant::Int { int_value, .. } => (self.int.val_type(), self.int.int_const(int_value)),
-            Constant::Float { value, .. } => (self.float.val_type(), self.float.float_const(value)),
-            Constant::Record { name, type_, .. } if is_bool_const(name, type_) => {
-                (self.bool_.val_type(), self.bool_.bool_const(name == TRUE))
-            }
-            _ => todo!(),
-        };
-        let global_type = GlobalType {
-            val_type,
-            mutable: false,
-            shared: false,
-        };
-        let index = self.globals_sections.len();
-        let _ = self.globals_sections.global(global_type, &expr);
-        if module_constant.publicity.is_public() {
-            let _ = self
-                .exports_section
-                .export(&module_constant.name, ExportKind::Global, index);
+    fn add_global(
+        &mut self,
+        name: &EcoString,
+        val_type: ValType,
+        expr: ConstExpr,
+        export: bool,
+    ) -> Id {
+        let index = self.global_section.len();
+        let _ = self.global_section.global(
+            GlobalType {
+                val_type,
+                mutable: self.string.val_type_nullable() == val_type,
+                shared: false,
+            },
+            &expr,
+        );
+        if export {
+            let _ = self.export_section.export(name, ExportKind::Global, index);
         }
-        let id = Id::global(module_constant.name.clone(), index);
+        let id = Id::global(name.clone(), index);
         self.globals.borrow_mut().push(id.clone());
         id
+    }
+
+    fn function_start(&mut self) -> u32 {
+        let function = self.code_start();
+        self.add_builtins(Builtins::Start, function)
+    }
+
+    fn code_start(&mut self) -> Function {
+        let mut function = Function::new(vec![]);
+        let mut instructions = function.instructions();
+        for (string, index) in &self.strings {
+            let data_segment = self.data_section.len();
+            let _ = self.data_section.passive(string.as_bytes().iter().cloned());
+            let _ = instructions
+                .i32_const(0)
+                .i32_const(string.len() as i32)
+                .array_new_data(self.string.type_index, data_segment)
+                .ref_as_non_null()
+                .global_set(*index);
+        }
+        for (to, from) in &self.const_strings {
+            let _ = instructions.global_get(*from).global_set(*to);
+        }
+        if let Some(main) = &self.main {
+            let _ = instructions.call(*main).drop();
+        }
+        let _ = instructions.end();
+        function
+    }
+
+    fn string_index(&mut self, string: &EcoString) -> u32 {
+        let index = self.global_section.len();
+        *self.strings.entry(string.into()).or_insert_with(|| {
+            let _ = self.global_section.global(
+                GlobalType {
+                    val_type: self.string.val_type_nullable(),
+                    mutable: true,
+                    shared: false,
+                },
+                &ConstExpr::ref_null(self.string.heap_type()),
+            );
+            index
+        })
+    }
+
+    fn function_string_eq(&mut self) -> u32 {
+        if let Some(index) = self.builtins.get(&Builtins::StringEq) {
+            return *index;
+        }
+        let function = self.code_string_eq();
+        self.add_builtins(Builtins::StringEq, function)
+    }
+
+    fn code_string_eq(&mut self) -> Function {
+        let mut function = Function::new(vec![(2, ValType::I32)]);
+        let a = 0;
+        let b = 1;
+        let i = 2;
+        let len = 3;
+        let _ = function
+            .instructions()
+            .local_get(a)
+            .local_get(b)
+            .ref_eq()
+            // if a == b
+            .if_(BlockType::Empty);
+        let _ = function
+            .extend_instructions(self)
+            .bool_const(true)
+            .return_()
+            .end();
+        let _ = function
+            .instructions()
+            // len = a.len; len
+            .local_get(a)
+            .array_len()
+            .local_tee(len)
+            // b.len
+            .local_get(b)
+            .array_len()
+            .i32_ne()
+            // if a.len != b.len
+            .if_(BlockType::Empty);
+        let _ = function
+            .extend_instructions(self)
+            .bool_const(false)
+            .return_()
+            // end if
+            .end();
+        let _ = function
+            .instructions()
+            // i = 0
+            .i32_const(0)
+            .local_set(i)
+            // loop
+            .loop_(BlockType::Empty)
+            .local_get(i)
+            .local_get(len)
+            .i32_ge_u()
+            // if i >= len
+            .if_(BlockType::Empty);
+        let _ = function
+            .extend_instructions(self)
+            .bool_const(true)
+            .return_()
+            // end if
+            .end();
+        let _ = function
+            .instructions()
+            // a[i]
+            .local_get(a)
+            .local_get(i)
+            .array_get_u(self.string.type_index)
+            // b[i]
+            .local_get(b)
+            .local_get(i)
+            .array_get_u(self.string.type_index)
+            // if a[i] != b[i]
+            .i32_ne()
+            .if_(BlockType::Empty);
+        let _ = function
+            .extend_instructions(self)
+            .bool_const(false)
+            .return_()
+            // end if
+            .end();
+        let _ = function
+            .instructions()
+            // i = i + 1
+            .local_get(i)
+            .i32_const(1)
+            .i32_add()
+            .local_set(i)
+            // loop
+            .br(0)
+            // end loop
+            .end();
+        let _ = function
+            .extend_instructions(self)
+            .bool_const(true)
+            // end function
+            .end();
+        function
+    }
+
+    fn function_string_concat(&mut self) -> u32 {
+        if let Some(index) = self.builtins.get(&Builtins::StringConcat) {
+            return *index;
+        }
+        let function = self.code_string_concat();
+        self.add_builtins(Builtins::StringConcat, function)
+    }
+
+    fn code_string_concat(&mut self) -> Function {
+        let mut function = Function::new(vec![(3, ValType::I32), (1, self.string.val_type())]);
+        let mut instructions = function.instructions();
+        let a = 0;
+        let b = 1;
+        let len_a = 2;
+        let len_b = 3;
+        let i = 4;
+        let r = 5;
+        let _ = instructions
+            // len_a = a.len; len_a
+            .local_get(a)
+            .array_len()
+            .local_tee(len_a)
+            // len_b = b.len; len_b
+            .local_get(b)
+            .array_len()
+            .local_tee(len_b)
+            // r = array.new_default(len_a + len_b)
+            .i32_add()
+            .array_new_default(self.string.type_index)
+            .local_set(r)
+            // i = 0
+            .i32_const(0)
+            .local_set(i)
+            // loop
+            .loop_(BlockType::Empty)
+            // if i >= len_a
+            .local_get(i)
+            .local_get(len_a)
+            .i32_lt_u()
+            .if_(BlockType::Empty)
+            // r[i] = a[i]
+            .local_get(r)
+            .local_get(i)
+            .local_get(a)
+            .local_get(i)
+            .array_get_u(self.string.type_index)
+            .array_set(self.string.type_index)
+            // i = i + 1
+            .local_get(i)
+            .i32_const(1)
+            .i32_add()
+            .local_set(i)
+            // loop
+            .br(1)
+            // end if
+            .end()
+            // end loop
+            .end()
+            // i = 0
+            .i32_const(0)
+            .local_set(i)
+            // loop
+            .loop_(BlockType::Empty)
+            // if i >= len_b
+            .local_get(i)
+            .local_get(len_b)
+            .i32_lt_u()
+            .if_(BlockType::Empty)
+            // r[len_a + i] = b[i]
+            .local_get(r)
+            .local_get(len_a)
+            .local_get(i)
+            .i32_add()
+            .local_get(b)
+            .local_get(i)
+            .array_get_u(self.string.type_index)
+            .array_set(self.string.type_index)
+            // i = i + 1
+            .local_get(i)
+            .i32_const(1)
+            .i32_add()
+            .local_set(i)
+            // loop
+            .br(1)
+            // end if
+            .end()
+            // end loop
+            .end()
+            // return r
+            .local_get(r)
+            .end();
+        function
+    }
+
+    fn add_builtins(&mut self, builtin: Builtins, function: Function) -> u32 {
+        let (params, result) = match builtin {
+            Builtins::Start => (vec![], None),
+            Builtins::StringEq => (
+                vec![self.string.val_type(), self.string.val_type()],
+                Some(self.bool_.val_type()),
+            ),
+            Builtins::StringConcat => (
+                vec![self.string.val_type(), self.string.val_type()],
+                Some(self.string.val_type()),
+            ),
+        };
+        let type_index = self.function_type_index(params, result);
+        let _ = self.function_section.function(type_index);
+        let index = self.next_function_id();
+        self.functions.push((function, index));
+        let _ = self.builtins.insert(builtin, index);
+        if builtin.export() {
+            let _ = self
+                .export_section
+                .export(builtin.name(), ExportKind::Func, index);
+        }
+        index
     }
 }
 
@@ -543,10 +931,10 @@ impl NewExtendedInstructionSink for Function {
 }
 
 macro_rules! delegate {
-    ($($name:ident ( $( $arg:ident : $typ:ty )? ) ),+ $(,)? ) => {
+    ($($name:ident ( $( $arg:ident : $typ:ty ),* ) ),+ $(,)? ) => {
         $(
-            fn $name(&mut self $(, $arg: $typ )? ) -> &mut Self {
-                let _ = self.instructions.$name($( $arg )?);
+            fn $name(&mut self $(, $arg: $typ )* ) -> &mut Self {
+                let _ = self.instructions.$name($( $arg, )*);
                 self
             }
         )+
@@ -555,6 +943,11 @@ macro_rules! delegate {
 
 // We do not implement Deref and DerefMut so we do not call "native" int and float instructions directly.
 impl<'a> ExtendedInstructionSink<'a> {
+    fn string_get(&mut self, index: u32) -> &mut Self {
+        let _ = self.instructions.global_get(index).ref_as_non_null();
+        self
+    }
+
     delegate! {
         if_(bt: BlockType),
         else_(),
@@ -566,6 +959,8 @@ impl<'a> ExtendedInstructionSink<'a> {
         global_get(index: u32),
         ref_func(index: u32),
         call_ref(index: u32),
+        call(index: u32),
+        return_(),
     }
 }
 
@@ -753,6 +1148,34 @@ impl<'a> ExtendedInstructionSink<'a> {
     float_op!(float_ge, f64_ge);
 }
 
+struct StringType {
+    type_index: u32,
+}
+
+impl StringType {
+    fn store_type() -> StorageType {
+        StorageType::I8
+    }
+
+    fn val_type(&self) -> ValType {
+        ValType::Ref(RefType {
+            heap_type: self.heap_type(),
+            nullable: false,
+        })
+    }
+
+    fn val_type_nullable(&self) -> ValType {
+        ValType::Ref(RefType {
+            heap_type: self.heap_type(),
+            nullable: true,
+        })
+    }
+
+    fn heap_type(&self) -> HeapType {
+        HeapType::Concrete(self.type_index)
+    }
+}
+
 #[derive(Clone)]
 enum IdKind {
     Global,
@@ -896,6 +1319,7 @@ impl Locals {
             }
             TypedExpr::Int { .. }
             | TypedExpr::Float { .. }
+            | TypedExpr::String { .. }
             | TypedExpr::Var { .. }
             | TypedExpr::Fn { .. } => {}
             _ => todo!("{:?}", expression),
@@ -920,11 +1344,11 @@ impl Locals {
                 _ => todo!(),
             },
             AssignmentKind::Assert { .. } => match &assignment.pattern {
-                Pattern::Int { .. } | Pattern::Float { .. } => {}
+                Pattern::Int { .. } | Pattern::Float { .. } | Pattern::String { .. } => {}
                 Pattern::Constructor { name, type_, .. } if is_bool_const(name, type_) => {}
-                _ => todo!(),
+                _ => todo!("Assignment not supported: {:#?}", assignment),
             },
-            AssignmentKind::Generated => todo!(),
+            AssignmentKind::Generated => todo!("Assignment not supported: {:#?}", assignment),
         }
     }
 
