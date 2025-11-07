@@ -5,18 +5,18 @@ use ecow::EcoString;
 use num_bigint::BigInt;
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataCountSection, DataSection, ExportKind, ExportSection,
-    Function, FunctionSection, GlobalSection, GlobalType, HeapType, InstructionSink, Module,
-    RefType, StartSection, StorageType, TypeSection, ValType,
+    FieldType, Function, FunctionSection, GlobalSection, GlobalType, HeapType, InstructionSink,
+    Module, RefType, StartSection, StorageType, TypeSection, ValType,
 };
 
 use crate::{
     ast::{
         AssignmentKind, BinOp, Constant, Definition, OperatorKind, Pattern, SrcSpan, Statement,
-        TypedArg, TypedAssignment, TypedExpr, TypedFunction, TypedModule, TypedModuleConstant,
-        TypedPattern, TypedStatement,
+        TypedArg, TypedAssignment, TypedConstant, TypedExpr, TypedFunction, TypedModule,
+        TypedModuleConstant, TypedPattern, TypedStatement,
     },
     line_numbers::LineNumbers,
-    type_::{Type, TypeVar},
+    type_::{LIST, PRELUDE_MODULE_NAME, PRELUDE_PACKAGE_NAME, Type, TypeVar},
 };
 
 const MAIN: &str = "main";
@@ -34,11 +34,24 @@ pub fn module(module: &TypedModule, _line_numbers: &LineNumbers) -> Vec<u8> {
     let mut types: Vec<_> = generator.types.iter().collect();
     types.sort_by_key(|t| t.1);
     let mut type_section = TypeSection::new();
-    for (type_, _) in types {
+    for (type_, type_index) in types {
         match type_ {
             WasmType::Array(storage_type) => type_section.ty().array(storage_type, true),
             WasmType::Function(params, results) => {
                 type_section.ty().function(params.clone(), results.clone())
+            }
+            WasmType::List(val_type) => {
+                let list_val_type = generator.list_val_type(*type_index);
+                type_section.ty().struct_(vec![
+                    FieldType {
+                        element_type: StorageType::Val(list_val_type),
+                        mutable: false,
+                    },
+                    FieldType {
+                        element_type: StorageType::Val(*val_type),
+                        mutable: false,
+                    },
+                ]);
             }
         }
     }
@@ -82,6 +95,7 @@ pub fn module(module: &TypedModule, _line_numbers: &LineNumbers) -> Vec<u8> {
 enum WasmType {
     Array(StorageType),
     Function(Vec<ValType>, Vec<ValType>),
+    List(ValType),
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug)]
@@ -99,12 +113,28 @@ impl Builtins {
             Builtins::StringConcat => "$string_concat",
         }
     }
+
     fn export(&self) -> bool {
         match self {
             Builtins::Start => true,
             Builtins::StringEq | Builtins::StringConcat => false,
         }
     }
+}
+
+#[derive(Clone)]
+enum Const {
+    // The index in the global section for the const string name and
+    // the index in the global section for the string literal
+    String {
+        from: u32,
+        to: u32,
+    },
+    List {
+        global_index: u32,
+        type_index: u32,
+        elements: Vec<TypedConstant>,
+    },
 }
 
 struct Generator<'a> {
@@ -118,14 +148,13 @@ struct Generator<'a> {
     data_section: DataSection,
     // String literals and its index in the global section
     strings: HashMap<EcoString, u32>,
-    // The index in the global section for the const string name and
-    // the index in the global section for the string literal
-    const_strings: Vec<(u32, u32)>,
+    consts: Vec<Const>,
     module: &'a TypedModule,
     main: Option<u32>,
     next_function_id: u32,
     globals: Rc<RefCell<Vec<Id>>>,
     builtins: HashMap<Builtins, u32>,
+    eq: HashMap<u32, u32>,
     bool_: BoolType,
     int: IntType,
     float: FloatType,
@@ -146,12 +175,13 @@ impl<'a> Generator<'a> {
             functions: vec![],
             data_section: DataSection::new(),
             strings: HashMap::new(),
-            const_strings: vec![],
+            consts: vec![],
             module,
             main: None,
             next_function_id: 0,
             globals: Rc::default(),
             builtins: HashMap::new(),
+            eq: HashMap::new(),
             bool_: BoolType {},
             int: IntType::Int32,
             float: FloatType {},
@@ -167,7 +197,7 @@ impl<'a> Generator<'a> {
         for definition in &self.module.definitions {
             match definition {
                 Definition::ModuleConstant(module_constant) => {
-                    let _ = self.constant(module_constant);
+                    let _ = self.module_constant(module_constant);
                 }
                 Definition::Function(function) => {
                     if !function.publicity.is_public() || is_generic_type(&function_type(function))
@@ -186,7 +216,7 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn val_type(&mut self, type_: &Type) -> ValType {
+    fn val_type(&mut self, type_: &Arc<Type>) -> ValType {
         if type_.is_int() {
             return self.int.val_type();
         }
@@ -199,19 +229,36 @@ impl<'a> Generator<'a> {
         if type_.is_string() {
             return self.string.val_type();
         }
+        if let Some(item_type) = list_item_type(type_) {
+            let type_index = self.list_type(&item_type);
+            return self.list_val_type(type_index);
+        }
         if let Some((params, return_)) = type_.fn_types() {
             let params: Vec<_> = params.iter().map(|type_| self.val_type(type_)).collect();
             let return_ = self.val_type(&return_);
             let type_index = self.function_type_index(params, Some(return_));
-            return ValType::Ref(RefType {
-                heap_type: HeapType::Concrete(type_index),
-                nullable: false,
-            });
+            return self.function_val_type(type_index);
         }
-        panic!("Type not supported: {:#?}", type_);
+        todo!("Type not supported: {:#?}", type_);
     }
 
-    fn constant(&mut self, module_constant: &TypedModuleConstant) -> Id {
+    fn function_val_type(&self, type_index: u32) -> ValType {
+        RefType {
+            heap_type: HeapType::Concrete(type_index),
+            nullable: false,
+        }
+        .into()
+    }
+
+    fn list_val_type(&self, type_index: u32) -> ValType {
+        RefType {
+            heap_type: HeapType::Concrete(type_index),
+            nullable: true,
+        }
+        .into()
+    }
+
+    fn module_constant(&mut self, module_constant: &TypedModuleConstant) -> Id {
         let (val_type, expr) = match &*module_constant.value {
             Constant::Int { int_value, .. } => (self.int.val_type(), self.int.int_const(int_value)),
             Constant::Float { value, .. } => (self.float.val_type(), self.float.float_const(value)),
@@ -219,11 +266,18 @@ impl<'a> Generator<'a> {
                 self.string.val_type_nullable(),
                 ConstExpr::ref_null(HeapType::Concrete(self.string.type_index)),
             ),
-
+            Constant::List { type_, .. } => {
+                let item_type = list_item_type(type_).unwrap();
+                let type_index = self.list_type(&item_type);
+                (
+                    self.list_val_type(type_index),
+                    ConstExpr::ref_null(HeapType::Concrete(type_index)),
+                )
+            }
             Constant::Record { name, type_, .. } if is_bool_const(name, type_) => {
                 (self.bool_.val_type(), self.bool_.bool_const(name == TRUE))
             }
-            _ => todo!("Constant not supported: {:#?}", module_constant),
+            _ => todo!("Module constant not supported: {:#?}", module_constant),
         };
 
         let id = self.add_global(
@@ -233,13 +287,53 @@ impl<'a> Generator<'a> {
             module_constant.publicity.is_public(),
         );
 
-        if let Constant::String { value, .. } = &*module_constant.value {
-            // saved for lazy initialization in the start function
-            let from = self.string_index(value);
-            self.const_strings.push((id.index, from));
+        match &*module_constant.value {
+            Constant::String { value, .. } => {
+                let from = self.string_index(value);
+                self.consts.push(Const::String { from, to: id.index });
+            }
+            Constant::List {
+                elements, type_, ..
+            } => {
+                let item_type = list_item_type(type_).unwrap();
+                let type_index = self.list_type(&item_type);
+                self.consts.push(Const::List {
+                    global_index: id.index,
+                    type_index,
+                    elements: elements.clone(),
+                });
+            }
+            _ => {}
         };
 
         id
+    }
+
+    fn constant(&mut self, instructions: &mut ExtendedInstructionSink<'_>, const_: &TypedConstant) {
+        match const_ {
+            Constant::Int { int_value, .. } => {
+                let _ = instructions.int_const(int_value);
+            }
+            Constant::Float { value, .. } => {
+                let _ = instructions.float_const(value);
+            }
+            Constant::String { value, .. } => {
+                let index = self.string_index(value);
+                let _ = instructions.string_get(index);
+            }
+            Constant::List {
+                elements, type_, ..
+            } => {
+                let item_type = list_item_type(type_).unwrap();
+                let type_index = self.list_type(&item_type);
+                let _ = instructions.list_null(type_index);
+                for element in elements.iter().rev() {
+                    self.constant(instructions, element);
+                    let _ = instructions.struct_new(type_index);
+                }
+            }
+            _ => todo!("Constant not supported: {:#?}", const_),
+        }
     }
 
     fn var(&mut self, name: &EcoString, required_type: &Type) -> Id {
@@ -247,7 +341,7 @@ impl<'a> Generator<'a> {
             match definition {
                 Definition::ModuleConstant(module_constant) if &module_constant.name == name => {
                     assert!(required_type.same_as(&module_constant.type_));
-                    return self.constant(module_constant);
+                    return self.module_constant(module_constant);
                 }
                 Definition::Function(function) if &function.name.as_ref().unwrap().1 == name => {
                     let (params, return_) = required_type.fn_types().unwrap();
@@ -264,7 +358,7 @@ impl<'a> Generator<'a> {
                 _ => {}
             }
         }
-        panic!(
+        todo!(
             "Name not found: {:?}. Are you using closures? They are not supporte yet.",
             name
         );
@@ -406,6 +500,24 @@ impl<'a> Generator<'a> {
                 let index = self.string_index(value);
                 let _ = instructions.string_get(index);
             }
+            TypedExpr::List {
+                type_,
+                elements,
+                tail,
+                ..
+            } => {
+                let item_type = list_item_type(type_).unwrap();
+                let type_index = self.list_type(&item_type);
+                if let Some(rest) = tail {
+                    self.expression(locals, scope.clone(), instructions, rest);
+                } else {
+                    let _ = instructions.list_null(type_index);
+                }
+                for element in elements.iter().rev() {
+                    self.expression(locals, scope.clone(), instructions, element);
+                    let _ = instructions.list_new(type_index);
+                }
+            }
             TypedExpr::BinOp {
                 name, left, right, ..
             } => {
@@ -467,6 +579,15 @@ impl<'a> Generator<'a> {
                     BinOp::NotEq if left.type_().is_string() => {
                         let eq = self.function_string_eq();
                         instructions.call(eq).bool_neg()
+                    }
+                    // List
+                    BinOp::Eq | BinOp::NotEq if left.type_().is_list() => {
+                        let eq = self.function_list_eq(&left.type_());
+                        let _ = instructions.call(eq);
+                        if let BinOp::NotEq = name {
+                            let _ = instructions.bool_neg();
+                        }
+                        instructions
                     }
                     _ => todo!("Expression not supported: {:#?}", expression),
                 };
@@ -544,63 +665,143 @@ impl<'a> Generator<'a> {
     ) -> Scope {
         self.expression(locals, scope.clone(), instructions, &assignment.value);
         match assignment.kind {
-            AssignmentKind::Assert { .. } => match &assignment.pattern {
-                Pattern::Int { int_value, .. } => {
-                    let _ = instructions
-                        .int_const(int_value)
-                        .int_eq()
-                        .if_(BlockType::Result(self.int.val_type()))
-                        .int_const(int_value)
-                        .else_()
-                        .unreachable()
-                        .end();
-                }
-                Pattern::Float { value, .. } => {
-                    let _ = instructions
-                        .float_const(value)
-                        .float_eq()
-                        .if_(BlockType::Result(self.float.val_type()))
-                        .float_const(value)
-                        .else_()
-                        .unreachable()
-                        .end();
-                }
-                Pattern::String { value, .. } => {
-                    let eq = self.function_string_eq();
-                    let index = self.string_index(value);
-                    let _ = instructions
-                        .string_get(index)
-                        .call(eq)
-                        .if_(BlockType::Result(self.string.val_type()))
-                        .string_get(index)
-                        .else_()
-                        .unreachable()
-                        .end();
-                }
-                Pattern::Constructor { name, type_, .. }
-                    if (name == TRUE || name == FALSE) && type_.is_bool() =>
-                {
-                    let value = name == TRUE;
-                    let _ = instructions
-                        .bool_const(value)
-                        .bool_eq()
-                        .if_(BlockType::Result(self.bool_.val_type()))
-                        .bool_const(value)
-                        .else_()
-                        .unreachable()
-                        .end();
-                }
-                _ => todo!(),
-            },
+            AssignmentKind::Assert { .. } => {
+                scope = self.assignment_assert_pattern(
+                    locals,
+                    scope,
+                    instructions,
+                    &assignment.pattern,
+                );
+            }
             AssignmentKind::Let => match &assignment.pattern {
                 Pattern::Variable { name, location, .. } => {
                     let index = locals.get(location);
                     scope = scope.insert_local(name.clone(), index);
                     let _ = instructions.local_set(index).local_get(index);
                 }
-                _ => todo!(),
+                _ => todo!("Let Pattern not implemented: {:#?}", assignment.pattern),
             },
-            AssignmentKind::Generated => todo!(),
+            AssignmentKind::Generated => {
+                todo!("Generated Assignment not implemented: {:#?}", assignment)
+            }
+        }
+        scope
+    }
+
+    fn assignment_assert_pattern(
+        &mut self,
+        locals: &Locals,
+        mut scope: Scope,
+        instructions: &mut ExtendedInstructionSink<'_>,
+        pattern: &TypedPattern,
+    ) -> Scope {
+        match pattern {
+            Pattern::Discard { .. } => {
+                let _ = instructions.drop();
+            }
+            Pattern::Int { int_value, .. } => {
+                let _ = instructions
+                    .int_const(int_value)
+                    .int_eq()
+                    .if_(BlockType::Result(self.int.val_type()))
+                    .int_const(int_value)
+                    .else_()
+                    .unreachable()
+                    .end();
+            }
+            Pattern::Float { value, .. } => {
+                let _ = instructions
+                    .float_const(value)
+                    .float_eq()
+                    .if_(BlockType::Result(self.float.val_type()))
+                    .float_const(value)
+                    .else_()
+                    .unreachable()
+                    .end();
+            }
+            Pattern::String { value, .. } => {
+                let eq = self.function_string_eq();
+                let index = self.string_index(value);
+                let _ = instructions
+                    .string_get(index)
+                    .call(eq)
+                    .if_(BlockType::Result(self.string.val_type()))
+                    .string_get(index)
+                    .else_()
+                    .unreachable()
+                    .end();
+            }
+            Pattern::List {
+                elements,
+                tail,
+                location,
+                type_,
+            } => {
+                let item_type = list_item_type(type_).unwrap();
+                let type_index = self.list_type(&item_type);
+                let right = locals.get(location);
+                if let Some((first, rest)) = elements.split_first() {
+                    // [first, rest..., ..tail] = right@[b, ..new_right]
+                    // stack: right
+                    let _ = instructions.local_tee(right).local_get(right);
+                    // stack: right, right
+                    let _ = instructions
+                        .ref_is_null()
+                        .if_(BlockType::Empty)
+                        .unreachable()
+                        .end()
+                        .local_get(right)
+                        .struct_get(type_index, 1)
+                        .local_get(right)
+                        .struct_get(type_index, 0);
+                    // stack: right, b, new_right
+                    let pattern = Pattern::List {
+                        location: *location,
+                        elements: rest.to_vec(),
+                        tail: tail.clone(),
+                        type_: type_.clone(),
+                    };
+                    scope = self.assignment_assert_pattern(locals, scope, instructions, &pattern);
+                    // stack: right, b, right
+                    let _ = instructions.drop();
+                    scope = self.assignment_assert_pattern(locals, scope, instructions, first);
+                    let _ = instructions.drop();
+                    // stack: right
+                } else if let Some(tail) = tail {
+                    scope =
+                        self.assignment_assert_pattern(locals, scope, instructions, &tail.pattern);
+                } else {
+                    // stack: right
+                    let _ = instructions.local_tee(right).local_get(right);
+                    // stack: right, right
+                    let _ = instructions
+                        .ref_is_null()
+                        .if_(BlockType::Empty)
+                        .else_()
+                        .unreachable()
+                        .end();
+                    // stack: right
+                }
+            }
+            Pattern::Constructor { name, type_, .. }
+                if (name == TRUE || name == FALSE) && type_.is_bool() =>
+            {
+                let value = name == TRUE;
+                let _ = instructions
+                    .bool_const(value)
+                    .bool_eq()
+                    .if_(BlockType::Result(self.bool_.val_type()))
+                    .bool_const(value)
+                    .else_()
+                    .unreachable()
+                    .end();
+            }
+            Pattern::Variable { name, location, .. } => {
+                let index = locals.get(location);
+                scope = scope.insert_local(name.clone(), index);
+                let _ = instructions.local_set(index).local_get(index);
+            }
+            _ => todo!("Assigment Assert Pattern not implemented: {:#?}", pattern),
         }
         scope
     }
@@ -616,7 +817,7 @@ impl<'a> Generator<'a> {
         let _ = self.global_section.global(
             GlobalType {
                 val_type,
-                mutable: self.string.val_type_nullable() == val_type,
+                mutable: val_type.is_reference(),
                 shared: false,
             },
             &expr,
@@ -629,6 +830,16 @@ impl<'a> Generator<'a> {
         id
     }
 
+    fn list_type(&mut self, item_type: &Arc<Type>) -> u32 {
+        let item_val_type = self.val_type(item_type);
+        if let Some(index) = self.types.get(&WasmType::List(item_val_type)) {
+            return *index;
+        }
+        let index = self.types.len() as u32;
+        let _ = self.types.insert(WasmType::List(item_val_type), index);
+        index
+    }
+
     fn function_start(&mut self) -> u32 {
         let function = self.code_start();
         self.add_builtins(Builtins::Start, function)
@@ -636,24 +847,46 @@ impl<'a> Generator<'a> {
 
     fn code_start(&mut self) -> Function {
         let mut function = Function::new(vec![]);
-        let mut instructions = function.instructions();
+        // string data
         for (string, index) in &self.strings {
             let data_segment = self.data_section.len();
             let _ = self.data_section.passive(string.as_bytes().iter().cloned());
-            let _ = instructions
+            let _ = function
+                .instructions()
                 .i32_const(0)
                 .i32_const(string.len() as i32)
                 .array_new_data(self.string.type_index, data_segment)
                 .ref_as_non_null()
                 .global_set(*index);
         }
-        for (to, from) in &self.const_strings {
-            let _ = instructions.global_get(*from).global_set(*to);
+        // string consts
+        for const_ in &self.consts {
+            if let Const::String { from, to } = const_ {
+                let _ = function.instructions().global_get(*from).global_set(*to);
+            }
         }
+        // list consts
+        for const_ in self.consts.clone() {
+            if let Const::List {
+                global_index,
+                type_index,
+                elements,
+            } = const_
+            {
+                let mut instructions = function.extend_instructions(self);
+                let _ = instructions.global_get(global_index);
+                for element in elements.iter().rev() {
+                    self.constant(&mut instructions, element);
+                    let _ = instructions.struct_new(type_index);
+                }
+                let _ = instructions.global_set(global_index);
+            }
+        }
+        // main
         if let Some(main) = &self.main {
-            let _ = instructions.call(*main).drop();
+            let _ = function.instructions().call(*main).drop();
         }
-        let _ = instructions.end();
+        let _ = function.instructions().end();
         function
     }
 
@@ -691,16 +924,17 @@ impl<'a> Generator<'a> {
             .local_get(a)
             .local_get(b)
             .ref_eq()
-            // if a == b
+            // if ref a == ref b
             .if_(BlockType::Empty);
         let _ = function
             .extend_instructions(self)
             .bool_const(true)
             .return_()
+            // end if ref a == ref b
             .end();
         let _ = function
             .instructions()
-            // len = a.len; len
+            // len = a.len; push len
             .local_get(a)
             .array_len()
             .local_tee(len)
@@ -714,7 +948,7 @@ impl<'a> Generator<'a> {
             .extend_instructions(self)
             .bool_const(false)
             .return_()
-            // end if
+            // end if a.len != b.len
             .end();
         let _ = function
             .instructions()
@@ -732,7 +966,7 @@ impl<'a> Generator<'a> {
             .extend_instructions(self)
             .bool_const(true)
             .return_()
-            // end if
+            // end if i >= len
             .end();
         let _ = function
             .instructions()
@@ -751,7 +985,7 @@ impl<'a> Generator<'a> {
             .extend_instructions(self)
             .bool_const(false)
             .return_()
-            // end if
+            // end if a[i] != b[i]
             .end();
         let _ = function
             .instructions()
@@ -790,11 +1024,11 @@ impl<'a> Generator<'a> {
         let i = 4;
         let r = 5;
         let _ = instructions
-            // len_a = a.len; len_a
+            // len_a = a.len; push len_a
             .local_get(a)
             .array_len()
             .local_tee(len_a)
-            // len_b = b.len; len_b
+            // len_b = b.len; push len_b
             .local_get(b)
             .array_len()
             .local_tee(len_b)
@@ -807,7 +1041,7 @@ impl<'a> Generator<'a> {
             .local_set(i)
             // loop
             .loop_(BlockType::Empty)
-            // if i >= len_a
+            // if i <= len_a
             .local_get(i)
             .local_get(len_a)
             .i32_lt_u()
@@ -826,7 +1060,7 @@ impl<'a> Generator<'a> {
             .local_set(i)
             // loop
             .br(1)
-            // end if
+            // end if i <= len_a
             .end()
             // end loop
             .end()
@@ -835,7 +1069,7 @@ impl<'a> Generator<'a> {
             .local_set(i)
             // loop
             .loop_(BlockType::Empty)
-            // if i >= len_b
+            // if i <= len_b
             .local_get(i)
             .local_get(len_b)
             .i32_lt_u()
@@ -856,12 +1090,121 @@ impl<'a> Generator<'a> {
             .local_set(i)
             // loop
             .br(1)
-            // end if
+            // end if i <= len_b
             .end()
             // end loop
             .end()
             // return r
             .local_get(r)
+            .end();
+        function
+    }
+
+    fn function_eq(&mut self, type_: &Arc<Type>) -> Eq {
+        if type_.is_int() {
+            Eq::Int
+        } else if type_.is_float() {
+            Eq::Float
+        } else if type_.is_bool() {
+            Eq::Bool
+        } else if type_.is_string() {
+            Eq::Call(self.function_string_eq())
+        } else if type_.is_list() {
+            Eq::Call(self.function_list_eq(type_))
+        } else {
+            panic!();
+        }
+    }
+
+    fn function_list_eq(&mut self, type_: &Arc<Type>) -> u32 {
+        let item_type = list_item_type(type_).unwrap();
+        let type_index = self.list_type(&item_type);
+        if let Some(index) = self.eq.get(&type_index) {
+            return *index;
+        }
+        let eq = self.function_eq(&item_type);
+        let function = self.code_list_eq(type_index, eq);
+        let val_type = self.list_val_type(type_index);
+        let index = self.add_function(
+            None,
+            vec![val_type, val_type],
+            Some(self.bool_.val_type()),
+            function,
+        );
+        let _ = self.eq.insert(type_index, index);
+        index
+    }
+
+    fn code_list_eq(&mut self, type_index: u32, eq: Eq) -> Function {
+        let mut function = Function::new(vec![]);
+        let mut instructions = function.extend_instructions(self);
+        let rest_index = 0;
+        let value_index = 1;
+        let a = 0;
+        let b = 1;
+        let _ = instructions
+            .loop_(BlockType::Empty)
+            // if a == null
+            .local_get(a)
+            .ref_is_null()
+            .if_(BlockType::Empty)
+            // if b == null
+            .local_get(b)
+            .ref_is_null()
+            .if_(BlockType::Empty)
+            // return true
+            .bool_const(true)
+            .return_()
+            // else b == null
+            .else_()
+            // return false
+            .bool_const(false)
+            .return_()
+            // end if b == null
+            .end()
+            // else a == null
+            .else_()
+            // if b == null
+            .local_get(b)
+            .ref_is_null()
+            .if_(BlockType::Empty)
+            // return false
+            .bool_const(false)
+            .return_()
+            // else b == null
+            .else_()
+            // a.value
+            .local_get(a)
+            .struct_get(type_index, value_index)
+            // b.value
+            .local_get(b)
+            .struct_get(type_index, value_index)
+            .eq(eq)
+            // if a.value == b.value
+            .if_(BlockType::Empty)
+            // a = a.rest
+            .local_get(a)
+            .struct_get(type_index, rest_index)
+            .local_set(a)
+            // b = b.rest
+            .local_get(b)
+            .struct_get(type_index, rest_index)
+            .local_set(b)
+            .else_()
+            // return false
+            .bool_const(false)
+            .return_()
+            // end if a.value == b.value
+            .end()
+            // end if b == null
+            .end()
+            // end if a == null
+            .end()
+            .br(0)
+            // end loop
+            .end()
+            .bool_const(false)
+            // end function
             .end();
         function
     }
@@ -878,15 +1221,27 @@ impl<'a> Generator<'a> {
                 Some(self.string.val_type()),
             ),
         };
+        let export_name = if builtin.export() {
+            Some(builtin.name())
+        } else {
+            None
+        };
+        self.add_function(export_name, params, result, function)
+    }
+
+    fn add_function(
+        &mut self,
+        export_name: Option<&str>,
+        params: Vec<ValType>,
+        result: Option<ValType>,
+        function: Function,
+    ) -> u32 {
         let type_index = self.function_type_index(params, result);
         let _ = self.function_section.function(type_index);
         let index = self.next_function_id();
         self.functions.push((function, index));
-        let _ = self.builtins.insert(builtin, index);
-        if builtin.export() {
-            let _ = self
-                .export_section
-                .export(builtin.name(), ExportKind::Func, index);
+        if let Some(name) = export_name {
+            let _ = self.export_section.export(name, ExportKind::Func, index);
         }
         index
     }
@@ -907,6 +1262,14 @@ struct ExtendedInstructionSink<'a> {
     int: IntType,
     float: FloatType,
     instructions: InstructionSink<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum Eq {
+    Int,
+    Float,
+    Bool,
+    Call(u32),
 }
 
 trait NewExtendedInstructionSink {
@@ -944,20 +1307,45 @@ macro_rules! delegate {
 // We do not implement Deref and DerefMut so we do not call "native" int and float instructions directly.
 impl<'a> ExtendedInstructionSink<'a> {
     fn string_get(&mut self, index: u32) -> &mut Self {
-        let _ = self.instructions.global_get(index).ref_as_non_null();
-        self
+        self.global_get(index).ref_as_non_null()
+    }
+
+    fn list_null(&mut self, type_index: u32) -> &mut Self {
+        self.ref_null(HeapType::Concrete(type_index))
+    }
+
+    fn list_new(&mut self, type_index: u32) -> &mut Self {
+        self.struct_new(type_index)
+    }
+
+    fn eq(&mut self, eq: Eq) -> &mut Self {
+        match eq {
+            Eq::Int => self.int_eq(),
+            Eq::Float => self.float_eq(),
+            Eq::Bool => self.bool_eq(),
+            Eq::Call(index) => self.call(index),
+        }
     }
 
     delegate! {
         if_(bt: BlockType),
         else_(),
         end(),
+        loop_(bt: BlockType),
+        br(l: u32),
         unreachable(),
         drop(),
         local_set(index: u32),
         local_get(index: u32),
+        local_tee(index: u32),
+        global_set(index: u32),
         global_get(index: u32),
+        struct_new(struct_type_index: u32),
+        struct_get(struct_type_index: u32, field_index: u32),
         ref_func(index: u32),
+        ref_null(ht: HeapType),
+        ref_is_null(),
+        ref_as_non_null(),
         call_ref(index: u32),
         call(index: u32),
         return_(),
@@ -1322,6 +1710,14 @@ impl Locals {
             | TypedExpr::String { .. }
             | TypedExpr::Var { .. }
             | TypedExpr::Fn { .. } => {}
+            TypedExpr::List { elements, tail, .. } => {
+                for element in elements {
+                    self.expression(generator, element);
+                }
+                if let Some(tail) = tail {
+                    self.expression(generator, tail);
+                }
+            }
             _ => todo!("{:?}", expression),
         }
     }
@@ -1343,12 +1739,38 @@ impl Locals {
                 }
                 _ => todo!(),
             },
-            AssignmentKind::Assert { .. } => match &assignment.pattern {
-                Pattern::Int { .. } | Pattern::Float { .. } | Pattern::String { .. } => {}
-                Pattern::Constructor { name, type_, .. } if is_bool_const(name, type_) => {}
-                _ => todo!("Assignment not supported: {:#?}", assignment),
-            },
+            AssignmentKind::Assert { message, .. } => {
+                self.assignment_assert_pattern(generator, &assignment.pattern);
+                if let Some(message) = message {
+                    self.expression(generator, message);
+                }
+            }
             AssignmentKind::Generated => todo!("Assignment not supported: {:#?}", assignment),
+        }
+    }
+
+    fn assignment_assert_pattern(&mut self, generator: &mut Generator<'_>, pattern: &TypedPattern) {
+        match pattern {
+            Pattern::Int { .. } | Pattern::Float { .. } | Pattern::String { .. } => {}
+            Pattern::Constructor { name, type_, .. } if is_bool_const(name, type_) => {}
+            Pattern::List {
+                elements,
+                tail,
+                location,
+                type_,
+            } => {
+                self.insert(generator, location, type_);
+                for element in elements {
+                    self.assignment_assert_pattern(generator, element);
+                }
+                if let Some(tail) = tail {
+                    self.assignment_assert_pattern(generator, &tail.pattern)
+                }
+            }
+            Pattern::Variable {
+                location, type_, ..
+            } => self.insert(generator, location, type_),
+            _ => todo!("Pattern not supported: {:#?}", pattern),
         }
     }
 
@@ -1579,7 +2001,7 @@ fn type_str(type_: &Arc<Type>, to: &mut String) {
             if let TypeVar::Link { type_ } = type_.borrow().deref() {
                 type_str(type_, to);
             } else {
-                panic!("{:#?}", type_);
+                panic!("Cannot mangle TypeVar that is not a Link: {:#?}", type_);
             }
         }
         Type::Tuple { .. } => todo!(),
@@ -1616,4 +2038,27 @@ fn mangle(name: &EcoString, params: &[Arc<Type>], return_: &Arc<Type>) -> EcoStr
     let _ = write!(&mut name, "->");
     type_str(return_, &mut name);
     name.into()
+}
+
+pub fn list_item_type(type_: &Arc<Type>) -> Option<Arc<Type>> {
+    match &**type_ {
+        // FIXME: use constants
+        Type::Named {
+            package,
+            module,
+            name,
+            arguments,
+            ..
+        } if package == PRELUDE_PACKAGE_NAME && module == PRELUDE_MODULE_NAME && name == LIST => {
+            match arguments.as_slice() {
+                [inner_type] => Some(inner_type.clone()),
+                [] | [_, _, ..] => None,
+            }
+        }
+        Type::Var { type_ } => match &*type_.borrow() {
+            TypeVar::Link { type_ } => list_item_type(type_),
+            _ => None,
+        },
+        _ => None,
+    }
 }
