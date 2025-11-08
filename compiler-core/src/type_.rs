@@ -230,6 +230,7 @@ impl Type {
                     [] | [_, _, ..] => None,
                 }
             }
+            Type::Var { type_ } => type_.borrow().list_type(),
             _ => None,
         }
     }
@@ -324,6 +325,14 @@ impl Type {
         match self {
             Self::Named { module, name, .. } if "List" == name && is_prelude_module(module) => true,
             Self::Var { type_ } => type_.borrow().is_list(),
+            _ => false,
+        }
+    }
+
+    pub fn is_tuple(&self) -> bool {
+        match self {
+            Self::Tuple { .. } => true,
+            Self::Var { type_ } => type_.borrow().is_tuple(),
             _ => false,
         }
     }
@@ -1238,6 +1247,13 @@ impl TypeVar {
         }
     }
 
+    pub fn list_type(&self) -> Option<Arc<Type>> {
+        match self {
+            Self::Link { type_ } => type_.list_type(),
+            Self::Unbound { .. } | Self::Generic { .. } => None,
+        }
+    }
+
     pub fn custom_type_inferred_variant(&self) -> Option<u16> {
         match self {
             Self::Link { type_ } => type_.custom_type_inferred_variant(),
@@ -1255,6 +1271,13 @@ impl TypeVar {
     pub fn is_list(&self) -> bool {
         match self {
             TypeVar::Link { type_ } => type_.is_list(),
+            TypeVar::Unbound { .. } | TypeVar::Generic { .. } => false,
+        }
+    }
+
+    pub fn is_tuple(&self) -> bool {
+        match self {
+            TypeVar::Link { type_ } => type_.is_tuple(),
             TypeVar::Unbound { .. } | TypeVar::Generic { .. } => false,
         }
     }
