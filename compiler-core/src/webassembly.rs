@@ -662,7 +662,8 @@ impl<'a> Generator<'a> {
                     BinOp::AddInt => instructions.int_add(),
                     BinOp::SubInt => instructions.int_sub(),
                     BinOp::MultInt => instructions.int_mul(),
-                    BinOp::DivInt => instructions.int_div(locals.get_int_div()),
+                    BinOp::DivInt => instructions
+                        .int_div(locals.get(&left.location()), locals.get(&right.location())),
                     BinOp::RemainderInt => instructions.int_rem(),
                     BinOp::LtInt => instructions.int_lt(),
                     BinOp::LtEqInt => instructions.int_le(),
@@ -674,7 +675,8 @@ impl<'a> Generator<'a> {
                     BinOp::AddFloat => instructions.float_add(),
                     BinOp::SubFloat => instructions.float_sub(),
                     BinOp::MultFloat => instructions.float_mul(),
-                    BinOp::DivFloat => instructions.float_div(locals.get_float_div()),
+                    BinOp::DivFloat => instructions
+                        .float_div(locals.get(&left.location()), locals.get(&right.location())),
                     BinOp::LtFloat => instructions.float_lt(),
                     BinOp::LtEqFloat => instructions.float_le(),
                     BinOp::GtFloat => instructions.float_gt(),
@@ -1627,9 +1629,7 @@ impl<'a> ExtendedInstructionSink<'a> {
         self
     }
 
-    fn int_div(&mut self, local: u32) -> &mut Self {
-        let divisor = local;
-        let dividend = local + 1;
+    fn int_div(&mut self, dividend: u32, divisor: u32) -> &mut Self {
         let _ = match self.int {
             IntType::Int32 => self
                 .instructions
@@ -1701,9 +1701,7 @@ impl<'a> ExtendedInstructionSink<'a> {
         self
     }
 
-    fn float_div(&mut self, local: u32) -> &mut Self {
-        let divisor = local;
-        let dividend = local + 1;
+    fn float_div(&mut self, dividend: u32, divisor: u32) -> &mut Self {
         let _ = self
             .instructions
             .local_set(divisor)
@@ -1835,10 +1833,6 @@ struct Locals {
     skip: u32,
     locals: HashMap<SrcSpan, u32>,
     val_types: Vec<ValType>,
-    int: IntType,
-    int_div: bool,
-    float: FloatType,
-    float_div: bool,
 }
 
 impl Locals {
@@ -1846,10 +1840,6 @@ impl Locals {
         let mut locals = Locals {
             skip: num_params,
             locals: HashMap::new(),
-            int: generator.int,
-            int_div: false,
-            float: generator.float,
-            float_div: false,
             val_types: vec![],
         };
         locals.statements(generator, statements);
@@ -1873,15 +1863,17 @@ impl Locals {
     fn expression(&mut self, generator: &mut Generator<'_>, expression: &TypedExpr) {
         match expression {
             TypedExpr::BinOp {
-                name, left, right, ..
+                name,
+                left,
+                right,
+                type_,
+                ..
             } => {
                 self.expression(generator, left);
                 self.expression(generator, right);
-                if matches!(name, BinOp::DivInt) {
-                    self.int_div = true;
-                }
-                if matches!(name, BinOp::DivFloat) {
-                    self.float_div = true;
+                if matches!(name, BinOp::DivInt | BinOp::DivFloat) {
+                    self.insert(generator, &left.location(), type_);
+                    self.insert(generator, &right.location(), type_);
                 }
             }
             TypedExpr::Block { statements, .. } => {
@@ -1997,27 +1989,9 @@ impl Locals {
         *self.locals.get(location).unwrap()
     }
 
-    fn get_int_div(&self) -> u32 {
-        assert!(self.int_div);
-        self.locals.len() as u32 + self.skip
-    }
-
-    fn get_float_div(&self) -> u32 {
-        assert!(self.float_div);
-        let div = if self.int_div { 2 } else { 0 };
-        self.locals.len() as u32 + div + self.skip
-    }
-
     fn val_types(&self) -> Vec<(u32, ValType)> {
         // FIXME: group locals by type
-        let mut val_types: Vec<_> = self.val_types.iter().map(|e| (1, *e)).collect();
-        if self.int_div {
-            val_types.push((2, self.int.val_type()));
-        }
-        if self.float_div {
-            val_types.push((2, self.float.val_type()));
-        }
-        val_types
+        self.val_types.iter().map(|e| (1, *e)).collect()
     }
 }
 
