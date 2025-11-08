@@ -16,7 +16,7 @@ use crate::{
         TypedModuleConstant, TypedPattern, TypedStatement,
     },
     line_numbers::LineNumbers,
-    type_::{LIST, PRELUDE_MODULE_NAME, PRELUDE_PACKAGE_NAME, Type, TypeVar},
+    type_::{Type, TypeVar},
 };
 
 const MAIN: &str = "main";
@@ -52,6 +52,14 @@ pub fn module(module: &TypedModule, _line_numbers: &LineNumbers) -> Vec<u8> {
                         mutable: false,
                     },
                 ]);
+            }
+            WasmType::Tuple(val_types) => {
+                type_section
+                    .ty()
+                    .struct_(val_types.iter().map(|val_type| FieldType {
+                        element_type: StorageType::Val(*val_type),
+                        mutable: false,
+                    }));
             }
         }
     }
@@ -96,6 +104,7 @@ enum WasmType {
     Array(StorageType),
     Function(Vec<ValType>, Vec<ValType>),
     List(ValType),
+    Tuple(Vec<ValType>),
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug)]
@@ -131,6 +140,11 @@ enum Const {
         to: u32,
     },
     List {
+        global_index: u32,
+        type_index: u32,
+        elements: Vec<TypedConstant>,
+    },
+    Tuple {
         global_index: u32,
         type_index: u32,
         elements: Vec<TypedConstant>,
@@ -209,9 +223,7 @@ impl<'a> Generator<'a> {
                         self.main = Some(id.index)
                     }
                 }
-                Definition::TypeAlias(_type_alias) => todo!(),
-                Definition::CustomType(_custom_type) => todo!(),
-                Definition::Import(_import) => todo!(),
+                _ => todo!("Definition not supported: {:#?}", definition),
             }
         }
     }
@@ -229,20 +241,22 @@ impl<'a> Generator<'a> {
         if type_.is_string() {
             return self.string.val_type();
         }
-        if let Some(item_type) = list_item_type(type_) {
+        if let Some(item_type) = type_.list_type() {
             let type_index = self.list_type(&item_type);
             return self.list_val_type(type_index);
         }
+        if let Some(types) = type_.tuple_types() {
+            let type_index = self.tuple_type(types);
+            return self.tuple_val_type(type_index);
+        }
         if let Some((params, return_)) = type_.fn_types() {
-            let params: Vec<_> = params.iter().map(|type_| self.val_type(type_)).collect();
-            let return_ = self.val_type(&return_);
-            let type_index = self.function_type_index(params, Some(return_));
+            let type_index = self.function_type(params, Some(return_));
             return self.function_val_type(type_index);
         }
         todo!("Type not supported: {:#?}", type_);
     }
 
-    fn function_val_type(&self, type_index: u32) -> ValType {
+    fn val_type_ref(&self, type_index: u32) -> ValType {
         RefType {
             heap_type: HeapType::Concrete(type_index),
             nullable: false,
@@ -250,7 +264,7 @@ impl<'a> Generator<'a> {
         .into()
     }
 
-    fn list_val_type(&self, type_index: u32) -> ValType {
+    fn val_type_ref_nullable(&self, type_index: u32) -> ValType {
         RefType {
             heap_type: HeapType::Concrete(type_index),
             nullable: true,
@@ -258,7 +272,63 @@ impl<'a> Generator<'a> {
         .into()
     }
 
+    fn function_type(
+        &mut self,
+        arguments: impl IntoIterator<Item = Arc<Type>>,
+        return_: Option<Arc<Type>>,
+    ) -> u32 {
+        let params: Vec<_> = arguments
+            .into_iter()
+            .map(|type_| self.val_type(&type_))
+            .collect();
+        let result = return_.map(|return_| self.val_type(&return_));
+        self.function_type_with_val_types(params, result.into_iter().collect())
+    }
+
+    fn function_type_with_val_types(&mut self, params: Vec<ValType>, result: Vec<ValType>) -> u32 {
+        let index = self.types.len() as u32;
+        *self
+            .types
+            .entry(WasmType::Function(params, result))
+            .or_insert(index)
+    }
+
+    fn function_val_type(&self, type_index: u32) -> ValType {
+        self.val_type_ref(type_index)
+    }
+
+    fn list_type(&mut self, item_type: &Arc<Type>) -> u32 {
+        let item_val_type = self.val_type(item_type);
+        let index = self.types.len() as u32;
+        *self
+            .types
+            .entry(WasmType::List(item_val_type))
+            .or_insert(index)
+    }
+
+    fn list_val_type(&self, type_index: u32) -> ValType {
+        self.val_type_ref_nullable(type_index)
+    }
+
+    fn tuple_type(&mut self, types: impl IntoIterator<Item = Arc<Type>>) -> u32 {
+        let types: Vec<_> = types
+            .into_iter()
+            .map(|type_| self.val_type(&type_))
+            .collect();
+        let index = self.types.len() as u32;
+        *self.types.entry(WasmType::Tuple(types)).or_insert(index)
+    }
+
+    fn tuple_val_type(&self, type_index: u32) -> ValType {
+        self.val_type_ref(type_index)
+    }
+
+    fn tuple_val_type_nullable(&self, type_index: u32) -> ValType {
+        self.val_type_ref_nullable(type_index)
+    }
+
     fn module_constant(&mut self, module_constant: &TypedModuleConstant) -> Id {
+        self.register_string_const(&module_constant.value);
         let (val_type, expr) = match &*module_constant.value {
             Constant::Int { int_value, .. } => (self.int.val_type(), self.int.int_const(int_value)),
             Constant::Float { value, .. } => (self.float.val_type(), self.float.float_const(value)),
@@ -267,10 +337,17 @@ impl<'a> Generator<'a> {
                 ConstExpr::ref_null(HeapType::Concrete(self.string.type_index)),
             ),
             Constant::List { type_, .. } => {
-                let item_type = list_item_type(type_).unwrap();
+                let item_type = type_.list_type().unwrap();
                 let type_index = self.list_type(&item_type);
                 (
                     self.list_val_type(type_index),
+                    ConstExpr::ref_null(HeapType::Concrete(type_index)),
+                )
+            }
+            Constant::Tuple { elements, .. } => {
+                let type_index = self.tuple_type(elements.iter().map(|element| element.type_()));
+                (
+                    self.tuple_val_type_nullable(type_index),
                     ConstExpr::ref_null(HeapType::Concrete(type_index)),
                 )
             }
@@ -295,9 +372,17 @@ impl<'a> Generator<'a> {
             Constant::List {
                 elements, type_, ..
             } => {
-                let item_type = list_item_type(type_).unwrap();
+                let item_type = type_.list_type().unwrap();
                 let type_index = self.list_type(&item_type);
                 self.consts.push(Const::List {
+                    global_index: id.index,
+                    type_index,
+                    elements: elements.clone(),
+                });
+            }
+            Constant::Tuple { elements, .. } => {
+                let type_index = self.tuple_type(elements.iter().map(|e| e.type_()));
+                self.consts.push(Const::Tuple {
                     global_index: id.index,
                     type_index,
                     elements: elements.clone(),
@@ -307,6 +392,22 @@ impl<'a> Generator<'a> {
         };
 
         id
+    }
+
+    fn register_string_const(&mut self, const_: &TypedConstant) {
+        match const_ {
+            Constant::String { value, .. } => {
+                let _ = self.string_index(value);
+            }
+            Constant::Tuple { elements, .. } | Constant::List { elements, .. } => {
+                for element in elements {
+                    self.register_string_const(element);
+                }
+            }
+            Constant::Int { .. } | Constant::Float { .. } => {}
+            Constant::Record { type_, .. } if type_.is_bool() => {}
+            _ => todo!("Constant not supported: {:#?}", const_),
+        }
     }
 
     fn constant(&mut self, instructions: &mut ExtendedInstructionSink<'_>, const_: &TypedConstant) {
@@ -319,18 +420,28 @@ impl<'a> Generator<'a> {
             }
             Constant::String { value, .. } => {
                 let index = self.string_index(value);
-                let _ = instructions.string_get(index);
+                let _ = instructions.global_as_non_null(index);
             }
             Constant::List {
                 elements, type_, ..
             } => {
-                let item_type = list_item_type(type_).unwrap();
+                let item_type = type_.list_type().unwrap();
                 let type_index = self.list_type(&item_type);
                 let _ = instructions.list_null(type_index);
                 for element in elements.iter().rev() {
                     self.constant(instructions, element);
                     let _ = instructions.struct_new(type_index);
                 }
+            }
+            Constant::Tuple { elements, .. } => {
+                let type_index = self.tuple_type(elements.iter().map(|e| e.type_()));
+                for element in elements {
+                    self.constant(instructions, element);
+                }
+                let _ = instructions.struct_new(type_index);
+            }
+            Constant::Record { name, .. } if const_.type_().is_bool() => {
+                let _ = instructions.bool_const(name == TRUE);
             }
             _ => todo!("Constant not supported: {:#?}", const_),
         }
@@ -343,7 +454,9 @@ impl<'a> Generator<'a> {
                     assert!(required_type.same_as(&module_constant.type_));
                     return self.module_constant(module_constant);
                 }
-                Definition::Function(function) if &function.name.as_ref().unwrap().1 == name => {
+                Definition::Function(function)
+                    if function.name.as_ref().map(|s| &s.1) == Some(name) =>
+                {
                     let (params, return_) = required_type.fn_types().unwrap();
                     let declared_type = function_type(function);
                     return if is_generic_type(&declared_type) {
@@ -381,7 +494,10 @@ impl<'a> Generator<'a> {
         self.globals
             .borrow_mut()
             .push(Id::func(name.clone(), index));
-        let type_index = self.function_type(&function.arguments, &function.return_type);
+        let type_index = self.function_type(
+            function.arguments.iter().map(|arg| arg.type_.clone()),
+            Some(function.return_type.clone()),
+        );
         let _ = self.function_section.function(type_index);
 
         let locals = Locals::new(self, function.arguments.len() as u32, &function.body);
@@ -414,8 +530,8 @@ impl<'a> Generator<'a> {
             .borrow_mut()
             .push(Id::func(name.clone(), index));
 
-        let (_, return_) = type_.fn_types().unwrap();
-        let type_index = self.function_type(arguments, &return_);
+        let (params, return_) = type_.fn_types().unwrap();
+        let type_index = self.function_type(params, Some(return_));
         let _ = self.function_section.function(type_index);
 
         let locals = Locals::new(self, arguments.len() as u32, body);
@@ -429,20 +545,6 @@ impl<'a> Generator<'a> {
         let _ = code.instructions().end();
         self.functions.push((code, index));
         Id::func(name, index)
-    }
-
-    fn function_type(&mut self, arguments: &[TypedArg], return_: &Arc<Type>) -> u32 {
-        let params: Vec<ValType> = arguments.iter().map(|t| self.val_type(&t.type_)).collect();
-        let result = self.val_type(return_);
-        self.function_type_index(params, Some(result))
-    }
-
-    fn function_type_index(&mut self, params: Vec<ValType>, result: Option<ValType>) -> u32 {
-        let index = self.types.len() as u32;
-        *self
-            .types
-            .entry(WasmType::Function(params, result.into_iter().collect()))
-            .or_insert(index)
     }
 
     fn statements(
@@ -498,7 +600,7 @@ impl<'a> Generator<'a> {
             }
             TypedExpr::String { value, .. } => {
                 let index = self.string_index(value);
-                let _ = instructions.string_get(index);
+                let _ = instructions.global_as_non_null(index);
             }
             TypedExpr::List {
                 type_,
@@ -506,7 +608,7 @@ impl<'a> Generator<'a> {
                 tail,
                 ..
             } => {
-                let item_type = list_item_type(type_).unwrap();
+                let item_type = type_.list_type().unwrap();
                 let type_index = self.list_type(&item_type);
                 if let Some(rest) = tail {
                     self.expression(locals, scope.clone(), instructions, rest);
@@ -517,6 +619,18 @@ impl<'a> Generator<'a> {
                     self.expression(locals, scope.clone(), instructions, element);
                     let _ = instructions.list_new(type_index);
                 }
+            }
+            TypedExpr::Tuple { elements, .. } => {
+                for element in elements {
+                    self.expression(locals, scope.clone(), instructions, element);
+                }
+                let type_index = self.tuple_type(elements.iter().map(|e| e.type_()));
+                let _ = instructions.struct_new(type_index);
+            }
+            TypedExpr::TupleIndex { index, tuple, .. } => {
+                self.expression(locals, scope.clone(), instructions, tuple);
+                let type_index = self.tuple_type(tuple.type_().tuple_types().unwrap());
+                let _ = instructions.struct_get(type_index, *index as u32);
             }
             TypedExpr::BinOp {
                 name, left, right, ..
@@ -572,23 +686,37 @@ impl<'a> Generator<'a> {
                         let concat = self.function_string_concat();
                         instructions.call(concat)
                     }
-                    BinOp::Eq if left.type_().is_string() => {
+                    BinOp::Eq | BinOp::NotEq if left.type_().is_string() => {
                         let eq = self.function_string_eq();
-                        instructions.call(eq)
-                    }
-                    BinOp::NotEq if left.type_().is_string() => {
-                        let eq = self.function_string_eq();
-                        instructions.call(eq).bool_neg()
-                    }
-                    // List
-                    BinOp::Eq | BinOp::NotEq if left.type_().is_list() => {
-                        let eq = self.function_list_eq(&left.type_());
                         let _ = instructions.call(eq);
                         if let BinOp::NotEq = name {
                             let _ = instructions.bool_neg();
                         }
                         instructions
                     }
+                    // List
+                    BinOp::Eq | BinOp::NotEq if left.type_().is_list() => {
+                        // FIXME: remove unwrap when if let guard stabilize
+                        // https://github.com/rust-lang/rust/issues/51114
+                        let eq = self.function_list_eq(&left.type_().list_type().unwrap());
+                        let _ = instructions.call(eq);
+                        if let BinOp::NotEq = name {
+                            let _ = instructions.bool_neg();
+                        }
+                        instructions
+                    }
+                    // Tuple
+                    BinOp::Eq | BinOp::NotEq if left.type_().is_tuple() => {
+                        // FIXME: remove unwrap when if let guard stabilize
+                        // https://github.com/rust-lang/rust/issues/51114
+                        let eq = self.function_tuple_eq(left.type_().tuple_types().unwrap());
+                        let _ = instructions.call(eq);
+                        if let BinOp::NotEq = name {
+                            let _ = instructions.bool_neg();
+                        }
+                        instructions
+                    }
+                    // FIXME: add function eq
                     _ => todo!("Expression not supported: {:#?}", expression),
                 };
             }
@@ -611,11 +739,12 @@ impl<'a> Generator<'a> {
                 let id = scope
                     .find(name)
                     .unwrap_or_else(|| self.var(name, &expression.type_()));
+                let type_ = expression.type_();
 
                 let _ = match id.kind {
                     IdKind::Func => instructions.ref_func(id.index),
-                    IdKind::Global if expression.type_().is_string() => {
-                        instructions.string_get(id.index)
+                    IdKind::Global if type_.is_string() || type_.tuple_types().is_some() => {
+                        instructions.global_as_non_null(id.index)
                     }
                     IdKind::Global => instructions.global_get(id.index),
                     IdKind::Local => instructions.local_get(id.index),
@@ -632,12 +761,10 @@ impl<'a> Generator<'a> {
                     self.expression(locals, scope.clone(), instructions, &arg.value);
                 }
                 self.expression(locals, scope, instructions, fun);
-                let params: Vec<ValType> = arguments
-                    .iter()
-                    .map(|arg| self.val_type(&arg.value.type_()))
-                    .collect();
-                let result = self.val_type(type_);
-                let index = self.function_type_index(params, Some(result));
+                let index = self.function_type(
+                    arguments.iter().map(|arg| arg.value.type_().clone()),
+                    Some(type_.clone()),
+                );
                 let _ = instructions.call_ref(index);
             }
             TypedExpr::Fn {
@@ -652,7 +779,7 @@ impl<'a> Generator<'a> {
                 let id = self.local_function(name, type_, arguments, body);
                 let _ = instructions.ref_func(id.index);
             }
-            _ => todo!(),
+            _ => todo!("Expression not supported: {:#?}", expression),
         };
     }
 
@@ -723,10 +850,10 @@ impl<'a> Generator<'a> {
                 let eq = self.function_string_eq();
                 let index = self.string_index(value);
                 let _ = instructions
-                    .string_get(index)
+                    .global_as_non_null(index)
                     .call(eq)
                     .if_(BlockType::Result(self.string.val_type()))
-                    .string_get(index)
+                    .global_as_non_null(index)
                     .else_()
                     .unreachable()
                     .end();
@@ -737,7 +864,7 @@ impl<'a> Generator<'a> {
                 location,
                 type_,
             } => {
-                let item_type = list_item_type(type_).unwrap();
+                let item_type = type_.list_type().unwrap();
                 let type_index = self.list_type(&item_type);
                 let right = locals.get(location);
                 if let Some((first, rest)) = elements.split_first() {
@@ -781,6 +908,21 @@ impl<'a> Generator<'a> {
                         .unreachable()
                         .end();
                     // stack: right
+                }
+            }
+            Pattern::Tuple { location, elements } => {
+                let type_index = self.tuple_type(elements.iter().map(|element| element.type_()));
+                let right = locals.get(location);
+                let _ = instructions.local_tee(right);
+                // stack: rigth
+                for (field_index, element) in elements.iter().enumerate() {
+                    let _ = instructions
+                        .local_get(right)
+                        .struct_get(type_index, field_index as u32);
+                    // stack: rigth element.field
+                    scope = self.assignment_assert_pattern(locals, scope, instructions, element);
+                    let _ = instructions.drop();
+                    // stack: rigth
                 }
             }
             Pattern::Constructor { name, type_, .. }
@@ -830,16 +972,6 @@ impl<'a> Generator<'a> {
         id
     }
 
-    fn list_type(&mut self, item_type: &Arc<Type>) -> u32 {
-        let item_val_type = self.val_type(item_type);
-        if let Some(index) = self.types.get(&WasmType::List(item_val_type)) {
-            return *index;
-        }
-        let index = self.types.len() as u32;
-        let _ = self.types.insert(WasmType::List(item_val_type), index);
-        index
-    }
-
     fn function_start(&mut self) -> u32 {
         let function = self.code_start();
         self.add_builtins(Builtins::Start, function)
@@ -859,27 +991,36 @@ impl<'a> Generator<'a> {
                 .ref_as_non_null()
                 .global_set(*index);
         }
-        // string consts
-        for const_ in &self.consts {
-            if let Const::String { from, to } = const_ {
-                let _ = function.instructions().global_get(*from).global_set(*to);
-            }
-        }
-        // list consts
+        // constants
         for const_ in self.consts.clone() {
-            if let Const::List {
-                global_index,
-                type_index,
-                elements,
-            } = const_
-            {
-                let mut instructions = function.extend_instructions(self);
-                let _ = instructions.global_get(global_index);
-                for element in elements.iter().rev() {
-                    self.constant(&mut instructions, element);
-                    let _ = instructions.struct_new(type_index);
+            match const_ {
+                Const::String { from, to } => {
+                    let _ = function.instructions().global_get(from).global_set(to);
                 }
-                let _ = instructions.global_set(global_index);
+                Const::List {
+                    global_index,
+                    type_index,
+                    elements,
+                } => {
+                    let mut instructions = function.extend_instructions(self);
+                    let _ = instructions.global_get(global_index);
+                    for element in elements.iter().rev() {
+                        self.constant(&mut instructions, element);
+                        let _ = instructions.struct_new(type_index);
+                    }
+                    let _ = instructions.global_set(global_index);
+                }
+                Const::Tuple {
+                    global_index,
+                    type_index,
+                    elements,
+                } => {
+                    let mut instructions = function.extend_instructions(self);
+                    for element in elements {
+                        self.constant(&mut instructions, &element);
+                    }
+                    let _ = instructions.struct_new(type_index).global_set(global_index);
+                }
             }
         }
         // main
@@ -1109,20 +1250,21 @@ impl<'a> Generator<'a> {
             Eq::Bool
         } else if type_.is_string() {
             Eq::Call(self.function_string_eq())
-        } else if type_.is_list() {
-            Eq::Call(self.function_list_eq(type_))
+        } else if let Some(item_type) = type_.list_type() {
+            Eq::Call(self.function_list_eq(&item_type))
+        } else if let Some(types) = type_.tuple_types() {
+            Eq::Call(self.function_tuple_eq(types))
         } else {
             panic!();
         }
     }
 
-    fn function_list_eq(&mut self, type_: &Arc<Type>) -> u32 {
-        let item_type = list_item_type(type_).unwrap();
-        let type_index = self.list_type(&item_type);
+    fn function_list_eq(&mut self, item_type: &Arc<Type>) -> u32 {
+        let type_index = self.list_type(item_type);
         if let Some(index) = self.eq.get(&type_index) {
             return *index;
         }
-        let eq = self.function_eq(&item_type);
+        let eq = self.function_eq(item_type);
         let function = self.code_list_eq(type_index, eq);
         let val_type = self.list_val_type(type_index);
         let index = self.add_function(
@@ -1209,6 +1351,59 @@ impl<'a> Generator<'a> {
         function
     }
 
+    fn function_tuple_eq(&mut self, types: impl IntoIterator<Item = Arc<Type>> + Clone) -> u32 {
+        let type_index = self.tuple_type(types.clone());
+        if let Some(index) = self.eq.get(&type_index) {
+            return *index;
+        }
+        let function = self.code_tuple_eq(type_index, types);
+        let val_type = self.tuple_val_type(type_index);
+        let index = self.add_function(
+            None,
+            vec![val_type, val_type],
+            Some(self.bool_.val_type()),
+            function,
+        );
+        let _ = self.eq.insert(type_index, index);
+        index
+    }
+
+    fn code_tuple_eq(
+        &mut self,
+        type_index: u32,
+        types: impl IntoIterator<Item = Arc<Type>>,
+    ) -> Function {
+        let mut function = Function::new(vec![]);
+        let mut instructions = function.extend_instructions(self);
+        let a = 0;
+        let b = 1;
+
+        let _ = instructions
+            .local_get(a)
+            .local_get(b)
+            .ref_eq()
+            .if_(BlockType::Empty)
+            .bool_const(true)
+            .return_()
+            .end();
+
+        for (field_index, type_) in types.into_iter().enumerate() {
+            let _ = instructions
+                .local_get(a)
+                .struct_get(type_index, field_index as u32)
+                .local_get(b)
+                .struct_get(type_index, field_index as u32)
+                .eq(self.function_eq(&type_))
+                .if_(BlockType::Empty)
+                .else_()
+                .bool_const(false)
+                .return_()
+                .end();
+        }
+        let _ = instructions.bool_const(true).end();
+        function
+    }
+
     fn add_builtins(&mut self, builtin: Builtins, function: Function) -> u32 {
         let (params, result) = match builtin {
             Builtins::Start => (vec![], None),
@@ -1236,7 +1431,7 @@ impl<'a> Generator<'a> {
         result: Option<ValType>,
         function: Function,
     ) -> u32 {
-        let type_index = self.function_type_index(params, result);
+        let type_index = self.function_type_with_val_types(params, result.into_iter().collect());
         let _ = self.function_section.function(type_index);
         let index = self.next_function_id();
         self.functions.push((function, index));
@@ -1266,9 +1461,9 @@ struct ExtendedInstructionSink<'a> {
 
 #[derive(Clone, Copy)]
 enum Eq {
+    Bool,
     Int,
     Float,
-    Bool,
     Call(u32),
 }
 
@@ -1306,7 +1501,7 @@ macro_rules! delegate {
 
 // We do not implement Deref and DerefMut so we do not call "native" int and float instructions directly.
 impl<'a> ExtendedInstructionSink<'a> {
-    fn string_get(&mut self, index: u32) -> &mut Self {
+    fn global_as_non_null(&mut self, index: u32) -> &mut Self {
         self.global_get(index).ref_as_non_null()
     }
 
@@ -1320,9 +1515,9 @@ impl<'a> ExtendedInstructionSink<'a> {
 
     fn eq(&mut self, eq: Eq) -> &mut Self {
         match eq {
+            Eq::Bool => self.bool_eq(),
             Eq::Int => self.int_eq(),
             Eq::Float => self.float_eq(),
-            Eq::Bool => self.bool_eq(),
             Eq::Call(index) => self.call(index),
         }
     }
@@ -1346,6 +1541,7 @@ impl<'a> ExtendedInstructionSink<'a> {
         ref_null(ht: HeapType),
         ref_is_null(),
         ref_as_non_null(),
+        ref_eq(),
         call_ref(index: u32),
         call(index: u32),
         return_(),
@@ -1670,7 +1866,7 @@ impl Locals {
         match statement {
             Statement::Expression(expression) => self.expression(generator, expression),
             Statement::Assignment(assignment) => self.assignment(generator, assignment),
-            _ => todo!(),
+            _ => todo!("Statement not supported: {:#?}", statement),
         }
     }
 
@@ -1705,11 +1901,6 @@ impl Locals {
                     self.expression(generator, value);
                 }
             }
-            TypedExpr::Int { .. }
-            | TypedExpr::Float { .. }
-            | TypedExpr::String { .. }
-            | TypedExpr::Var { .. }
-            | TypedExpr::Fn { .. } => {}
             TypedExpr::List { elements, tail, .. } => {
                 for element in elements {
                     self.expression(generator, element);
@@ -1718,7 +1909,20 @@ impl Locals {
                     self.expression(generator, tail);
                 }
             }
-            _ => todo!("{:?}", expression),
+            TypedExpr::Tuple { elements, .. } => {
+                for element in elements {
+                    self.expression(generator, element);
+                }
+            }
+            TypedExpr::TupleIndex { tuple, .. } => {
+                self.expression(generator, tuple);
+            }
+            TypedExpr::Int { .. }
+            | TypedExpr::Float { .. }
+            | TypedExpr::String { .. }
+            | TypedExpr::Var { .. }
+            | TypedExpr::Fn { .. } => {}
+            _ => todo!("Expression not supported: {:#?}", expression),
         }
     }
 
@@ -1737,7 +1941,7 @@ impl Locals {
                     }
                     self.insert(generator, location, type_)
                 }
-                _ => todo!(),
+                _ => todo!("Let Assignment not supported: {:#?}", assignment),
             },
             AssignmentKind::Assert { message, .. } => {
                 self.assignment_assert_pattern(generator, &assignment.pattern);
@@ -1765,6 +1969,15 @@ impl Locals {
                 }
                 if let Some(tail) = tail {
                     self.assignment_assert_pattern(generator, &tail.pattern)
+                }
+            }
+            Pattern::Tuple { location, elements } => {
+                let type_ = Type::Tuple {
+                    elements: elements.iter().map(|element| element.type_()).collect(),
+                };
+                self.insert(generator, location, &type_.into());
+                for element in elements {
+                    self.assignment_assert_pattern(generator, element);
                 }
             }
             Pattern::Variable {
@@ -1877,8 +2090,7 @@ fn monomorphize_statement(statement: &mut TypedStatement, map: &[(&Arc<Type>, &A
             }
             monomorphize_pattern(&mut assignment.pattern, map);
         }
-        Statement::Use(_) => todo!(),
-        Statement::Assert(_assert) => todo!(),
+        _ => todo!("Statement not supported: {:#?}", statement),
     }
 }
 
@@ -1921,19 +2133,7 @@ fn monomorphize_expression(expression: &mut TypedExpr, map: &[(&Arc<Type>, &Arc<
         | TypedExpr::NegateBool { .. }
         | TypedExpr::NegateInt { .. } => {}
 
-        TypedExpr::Pipeline { .. } => todo!(),
-        TypedExpr::List { .. } => todo!(),
-        TypedExpr::Case { .. } => todo!(),
-        TypedExpr::RecordAccess { .. } => todo!(),
-        TypedExpr::ModuleSelect { .. } => todo!(),
-        TypedExpr::Tuple { .. } => todo!(),
-        TypedExpr::TupleIndex { .. } => todo!(),
-        TypedExpr::Todo { .. } => todo!(),
-        TypedExpr::Panic { .. } => todo!(),
-        TypedExpr::Echo { .. } => todo!(),
-        TypedExpr::BitArray { .. } => todo!(),
-        TypedExpr::RecordUpdate { .. } => todo!(),
-        TypedExpr::Invalid { .. } => todo!(),
+        _ => todo!("Expression not supported: {:#?}", expression),
     }
 }
 
@@ -2004,7 +2204,13 @@ fn type_str(type_: &Arc<Type>, to: &mut String) {
                 panic!("Cannot mangle TypeVar that is not a Link: {:#?}", type_);
             }
         }
-        Type::Tuple { .. } => todo!(),
+        Type::Tuple { elements, .. } => {
+            let _ = write!(to, "#(");
+            for element in elements {
+                type_str(element, to);
+            }
+            let _ = write!(to, ")");
+        }
     }
 }
 
@@ -2038,27 +2244,4 @@ fn mangle(name: &EcoString, params: &[Arc<Type>], return_: &Arc<Type>) -> EcoStr
     let _ = write!(&mut name, "->");
     type_str(return_, &mut name);
     name.into()
-}
-
-pub fn list_item_type(type_: &Arc<Type>) -> Option<Arc<Type>> {
-    match &**type_ {
-        // FIXME: use constants
-        Type::Named {
-            package,
-            module,
-            name,
-            arguments,
-            ..
-        } if package == PRELUDE_PACKAGE_NAME && module == PRELUDE_MODULE_NAME && name == LIST => {
-            match arguments.as_slice() {
-                [inner_type] => Some(inner_type.clone()),
-                [] | [_, _, ..] => None,
-            }
-        }
-        Type::Var { type_ } => match &*type_.borrow() {
-            TypeVar::Link { type_ } => list_item_type(type_),
-            _ => None,
-        },
-        _ => None,
-    }
 }
