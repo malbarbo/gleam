@@ -574,7 +574,7 @@ impl<'a> Generator<'a> {
                 self.expression(locals, scope.clone(), instructions, expression);
             }
             Statement::Assignment(assignment) => {
-                scope = self.assigment(locals, scope, instructions, assignment);
+                scope = self.assignment(locals, scope, instructions, assignment);
             }
             _ => todo!("Statement not supported: {:#?}", statement),
         }
@@ -785,7 +785,7 @@ impl<'a> Generator<'a> {
         };
     }
 
-    fn assigment(
+    fn assignment(
         &mut self,
         locals: &Locals,
         mut scope: Scope,
@@ -793,23 +793,23 @@ impl<'a> Generator<'a> {
         assignment: &TypedAssignment,
     ) -> Scope {
         self.expression(locals, scope.clone(), instructions, &assignment.value);
+        let right = locals.get(&assignment.value.location());
+        let _ = instructions.local_tee(right);
         match assignment.kind {
             AssignmentKind::Assert { .. } => {
-                scope = self.assignment_assert_pattern(
-                    locals,
-                    scope,
-                    instructions,
-                    &assignment.pattern,
-                );
+                scope = self.pattern(locals, scope, instructions, &assignment.pattern);
+                #[rustfmt::skip]
+                let _ = instructions
+                    .if_(BlockType::Result(self.val_type(&assignment.value.type_())))
+                      .local_get(right)
+                    .else_()
+                      .unreachable()
+                    .end();
             }
-            AssignmentKind::Let => match &assignment.pattern {
-                Pattern::Variable { name, location, .. } => {
-                    let index = locals.get(location);
-                    scope = scope.insert_local(name.clone(), index);
-                    let _ = instructions.local_set(index).local_get(index);
-                }
-                _ => todo!("Let Pattern not implemented: {:#?}", assignment.pattern),
-            },
+            AssignmentKind::Let => {
+                scope = self.pattern(locals, scope, instructions, &assignment.pattern);
+                let _ = instructions.drop().local_get(right);
+            }
             AssignmentKind::Generated => {
                 todo!("Generated Assignment not implemented: {:#?}", assignment)
             }
@@ -817,7 +817,7 @@ impl<'a> Generator<'a> {
         scope
     }
 
-    fn assignment_assert_pattern(
+    fn pattern(
         &mut self,
         locals: &Locals,
         mut scope: Scope,
@@ -826,39 +826,18 @@ impl<'a> Generator<'a> {
     ) -> Scope {
         match pattern {
             Pattern::Discard { .. } => {
-                let _ = instructions.drop();
+                let _ = instructions.drop().bool_const(true);
             }
             Pattern::Int { int_value, .. } => {
-                let _ = instructions
-                    .int_const(int_value)
-                    .int_eq()
-                    .if_(BlockType::Result(self.int.val_type()))
-                    .int_const(int_value)
-                    .else_()
-                    .unreachable()
-                    .end();
+                let _ = instructions.int_const(int_value).int_eq();
             }
             Pattern::Float { value, .. } => {
-                let _ = instructions
-                    .float_const(value)
-                    .float_eq()
-                    .if_(BlockType::Result(self.float.val_type()))
-                    .float_const(value)
-                    .else_()
-                    .unreachable()
-                    .end();
+                let _ = instructions.float_const(value).float_eq();
             }
             Pattern::String { value, .. } => {
                 let eq = self.function_string_eq();
                 let index = self.string_index(value);
-                let _ = instructions
-                    .global_as_non_null(index)
-                    .call(eq)
-                    .if_(BlockType::Result(self.string.val_type()))
-                    .global_as_non_null(index)
-                    .else_()
-                    .unreachable()
-                    .end();
+                let _ = instructions.global_as_non_null(index).call(eq);
             }
             Pattern::List {
                 elements,
@@ -869,81 +848,78 @@ impl<'a> Generator<'a> {
                 let item_type = type_.list_type().unwrap();
                 let type_index = self.list_type(&item_type);
                 let right = locals.get(location);
-                if let Some((first, rest)) = elements.split_first() {
-                    // [first, rest..., ..tail] = right@[b, ..new_right]
-                    // stack: right
-                    let _ = instructions.local_tee(right).local_get(right);
-                    // stack: right, right
+                let _ = instructions
+                    .local_set(right)
+                    .block(BlockType::Result(self.bool_.val_type()));
+                for element in elements {
+                    let _ = instructions.local_get(right).struct_get(type_index, 1);
+                    scope = self.pattern(locals, scope, instructions, element);
+                    #[rustfmt::skip]
                     let _ = instructions
-                        .ref_is_null()
+                        .bool_neg()
                         .if_(BlockType::Empty)
-                        .unreachable()
+                          .bool_const(false)
+                          .br(1)
                         .end()
                         .local_get(right)
-                        .struct_get(type_index, 1)
-                        .local_get(right)
-                        .struct_get(type_index, 0);
-                    // stack: right, b, new_right
-                    let pattern = Pattern::List {
-                        location: *location,
-                        elements: rest.to_vec(),
-                        tail: tail.clone(),
-                        type_: type_.clone(),
-                    };
-                    scope = self.assignment_assert_pattern(locals, scope, instructions, &pattern);
-                    // stack: right, b, right
-                    let _ = instructions.drop();
-                    scope = self.assignment_assert_pattern(locals, scope, instructions, first);
-                    let _ = instructions.drop();
-                    // stack: right
-                } else if let Some(tail) = tail {
-                    scope =
-                        self.assignment_assert_pattern(locals, scope, instructions, &tail.pattern);
-                } else {
-                    // stack: right
-                    let _ = instructions.local_tee(right).local_get(right);
-                    // stack: right, right
-                    let _ = instructions
-                        .ref_is_null()
-                        .if_(BlockType::Empty)
-                        .else_()
-                        .unreachable()
-                        .end();
-                    // stack: right
+                        .struct_get(type_index, 0)
+                        .local_set(right);
                 }
+
+                if let Some(tail) = tail {
+                    let _ = instructions.local_get(right);
+                    scope = self.pattern(locals, scope, instructions, &tail.pattern);
+                    #[rustfmt::skip]
+                    let _ = instructions
+                        .bool_neg()
+                        .if_(BlockType::Empty)
+                          .bool_const(false)
+                          .br(1)
+                        .end();
+                } else {
+                    #[rustfmt::skip]
+                    let _ = instructions
+                        .local_get(right)
+                        .ref_is_null()
+                        .bool_neg()
+                        .if_(BlockType::Empty)
+                          .bool_const(false)
+                          .br(1)
+                        .end();
+                }
+
+                let _ = instructions.bool_const(true).end();
             }
             Pattern::Tuple { location, elements } => {
                 let type_index = self.tuple_type(elements.iter().map(|element| element.type_()));
                 let right = locals.get(location);
-                let _ = instructions.local_tee(right);
-                // stack: rigth
+                let _ = instructions
+                    .local_set(right)
+                    .block(BlockType::Result(self.bool_.val_type()));
                 for (field_index, element) in elements.iter().enumerate() {
                     let _ = instructions
                         .local_get(right)
                         .struct_get(type_index, field_index as u32);
-                    // stack: rigth element.field
-                    scope = self.assignment_assert_pattern(locals, scope, instructions, element);
-                    let _ = instructions.drop();
-                    // stack: rigth
+                    scope = self.pattern(locals, scope, instructions, element);
+                    #[rustfmt::skip]
+                    let _ = instructions
+                        .bool_neg()
+                        .if_(BlockType::Empty)
+                          .bool_const(false)
+                          .br(1)
+                        .end();
                 }
+                let _ = instructions.bool_const(true).end();
             }
             Pattern::Constructor { name, type_, .. }
                 if (name == TRUE || name == FALSE) && type_.is_bool() =>
             {
-                let value = name == TRUE;
-                let _ = instructions
-                    .bool_const(value)
-                    .bool_eq()
-                    .if_(BlockType::Result(self.bool_.val_type()))
-                    .bool_const(value)
-                    .else_()
-                    .unreachable()
-                    .end();
+                let _ = instructions.bool_const(name == TRUE).bool_eq();
             }
             Pattern::Variable { name, location, .. } => {
-                let index = locals.get(location);
-                scope = scope.insert_local(name.clone(), index);
-                let _ = instructions.local_set(index).local_get(index);
+                let right = locals.get(location);
+                scope = scope.insert_local(name.clone(), right);
+                let _ = instructions.local_set(right).bool_const(true);
             }
             _ => todo!("Assigment Assert Pattern not implemented: {:#?}", pattern),
         }
@@ -1058,25 +1034,21 @@ impl<'a> Generator<'a> {
 
     fn code_string_eq(&mut self) -> Function {
         let mut function = Function::new(vec![(2, ValType::I32)]);
+        let mut instructions = function.extend_instructions(self);
         let a = 0;
         let b = 1;
         let i = 2;
         let len = 3;
-        let _ = function
-            .instructions()
+        #[rustfmt::skip]
+        let _ = instructions
             .local_get(a)
             .local_get(b)
             .ref_eq()
             // if ref a == ref b
-            .if_(BlockType::Empty);
-        let _ = function
-            .extend_instructions(self)
-            .bool_const(true)
-            .return_()
-            // end if ref a == ref b
-            .end();
-        let _ = function
-            .instructions()
+            .if_(BlockType::Empty)
+              .bool_const(true)
+              .return_()
+            .end()
             // len = a.len; push len
             .local_get(a)
             .array_len()
@@ -1086,63 +1058,46 @@ impl<'a> Generator<'a> {
             .array_len()
             .i32_ne()
             // if a.len != b.len
-            .if_(BlockType::Empty);
-        let _ = function
-            .extend_instructions(self)
-            .bool_const(false)
-            .return_()
-            // end if a.len != b.len
-            .end();
-        let _ = function
-            .instructions()
+            .if_(BlockType::Empty)
+              .bool_const(false)
+              .return_()
+            .end()
             // i = 0
             .i32_const(0)
             .local_set(i)
             // loop
             .loop_(BlockType::Empty)
-            .local_get(i)
-            .local_get(len)
-            .i32_ge_u()
-            // if i >= len
-            .if_(BlockType::Empty);
-        let _ = function
-            .extend_instructions(self)
-            .bool_const(true)
-            .return_()
-            // end if i >= len
-            .end();
-        let _ = function
-            .instructions()
-            // a[i]
-            .local_get(a)
-            .local_get(i)
-            .array_get_u(self.string.type_index)
-            // b[i]
-            .local_get(b)
-            .local_get(i)
-            .array_get_u(self.string.type_index)
-            // if a[i] != b[i]
-            .i32_ne()
-            .if_(BlockType::Empty);
-        let _ = function
-            .extend_instructions(self)
-            .bool_const(false)
-            .return_()
-            // end if a[i] != b[i]
-            .end();
-        let _ = function
-            .instructions()
-            // i = i + 1
-            .local_get(i)
-            .i32_const(1)
-            .i32_add()
-            .local_set(i)
-            // loop
-            .br(0)
+              .local_get(i)
+              .local_get(len)
+              .i32_ge_u()
+              // if i >= len
+              .if_(BlockType::Empty)
+                .bool_const(true)
+                .return_()
+              .end()
+              // a[i]
+              .local_get(a)
+              .local_get(i)
+              .array_get_u(self.string.type_index)
+              // b[i]
+              .local_get(b)
+              .local_get(i)
+              .array_get_u(self.string.type_index)
+              .i32_ne()
+              // if a[i] != b[i]
+              .if_(BlockType::Empty)
+                .bool_const(false)
+                .return_()
+              .end()
+              // i = i + 1
+              .local_get(i)
+              .i32_const(1)
+              .i32_add()
+              .local_set(i)
+              // loop
+              .br(0)
             // end loop
-            .end();
-        let _ = function
-            .extend_instructions(self)
+            .end()
             .bool_const(true)
             // end function
             .end();
@@ -1159,13 +1114,14 @@ impl<'a> Generator<'a> {
 
     fn code_string_concat(&mut self) -> Function {
         let mut function = Function::new(vec![(3, ValType::I32), (1, self.string.val_type())]);
-        let mut instructions = function.instructions();
+        let mut instructions = function.extend_instructions(self);
         let a = 0;
         let b = 1;
         let len_a = 2;
         let len_b = 3;
         let i = 4;
         let r = 5;
+        #[rustfmt::skip]
         let _ = instructions
             // len_a = a.len; push len_a
             .local_get(a)
@@ -1182,63 +1138,64 @@ impl<'a> Generator<'a> {
             // i = 0
             .i32_const(0)
             .local_set(i)
-            // loop
+            // loop copy a to r[0..len_a]
             .loop_(BlockType::Empty)
-            // if i <= len_a
-            .local_get(i)
-            .local_get(len_a)
-            .i32_lt_u()
-            .if_(BlockType::Empty)
-            // r[i] = a[i]
-            .local_get(r)
-            .local_get(i)
-            .local_get(a)
-            .local_get(i)
-            .array_get_u(self.string.type_index)
-            .array_set(self.string.type_index)
-            // i = i + 1
-            .local_get(i)
-            .i32_const(1)
-            .i32_add()
-            .local_set(i)
-            // loop
-            .br(1)
-            // end if i <= len_a
-            .end()
+              // if i <= len_a
+              .local_get(i)
+              .local_get(len_a)
+              .i32_lt_u()
+              .if_(BlockType::Empty)
+                // r[i] = a[i]
+                .local_get(r)
+                .local_get(i)
+                .local_get(a)
+                .local_get(i)
+                .array_get_u(self.string.type_index)
+                .array_set(self.string.type_index)
+                // i = i + 1
+                .local_get(i)
+                .i32_const(1)
+                .i32_add()
+                .local_set(i)
+                // loop
+                .br(1)
+              // end if i <= len_a
+              .end()
             // end loop
             .end()
             // i = 0
             .i32_const(0)
             .local_set(i)
-            // loop
+            // loop copy b to r[len_a..len_a+len_b]
             .loop_(BlockType::Empty)
-            // if i <= len_b
-            .local_get(i)
-            .local_get(len_b)
-            .i32_lt_u()
-            .if_(BlockType::Empty)
-            // r[len_a + i] = b[i]
-            .local_get(r)
-            .local_get(len_a)
-            .local_get(i)
-            .i32_add()
-            .local_get(b)
-            .local_get(i)
-            .array_get_u(self.string.type_index)
-            .array_set(self.string.type_index)
-            // i = i + 1
-            .local_get(i)
-            .i32_const(1)
-            .i32_add()
-            .local_set(i)
-            // loop
-            .br(1)
-            // end if i <= len_b
-            .end()
+              // if i <= len_b
+              .local_get(i)
+              .local_get(len_b)
+              .i32_lt_u()
+              .if_(BlockType::Empty)
+                // r[len_a + i] = b[i]
+                .local_get(r)
+                .local_get(len_a)
+                .local_get(i)
+                .i32_add()
+                .local_get(b)
+                .local_get(i)
+                .array_get_u(self.string.type_index)
+                .array_set(self.string.type_index)
+                // i = i + 1
+                .local_get(i)
+                .i32_const(1)
+                .i32_add()
+                .local_set(i)
+                // loop
+                .br(1)
+              // end if i <= len_b
+              .end()
             // end loop
             .end()
             // return r
             .local_get(r)
+            // function
             .end();
         function
     }
@@ -1286,70 +1243,80 @@ impl<'a> Generator<'a> {
         let value_index = 1;
         let a = 0;
         let b = 1;
+        #[rustfmt::skip]
         let _ = instructions
             .loop_(BlockType::Empty)
-            // if a == null
-            .local_get(a)
-            .ref_is_null()
-            .if_(BlockType::Empty)
-            // if b == null
-            .local_get(b)
-            .ref_is_null()
-            .if_(BlockType::Empty)
-            // return true
-            .bool_const(true)
-            .return_()
-            // else b == null
-            .else_()
-            // return false
-            .bool_const(false)
-            .return_()
-            // end if b == null
-            .end()
-            // else a == null
-            .else_()
-            // if b == null
-            .local_get(b)
-            .ref_is_null()
-            .if_(BlockType::Empty)
-            // return false
-            .bool_const(false)
-            .return_()
-            // else b == null
-            .else_()
-            // a.value
-            .local_get(a)
-            .struct_get(type_index, value_index)
-            // b.value
-            .local_get(b)
-            .struct_get(type_index, value_index)
-            .eq(eq)
-            // if a.value == b.value
-            .if_(BlockType::Empty)
-            // a = a.rest
-            .local_get(a)
-            .struct_get(type_index, rest_index)
-            .local_set(a)
-            // b = b.rest
-            .local_get(b)
-            .struct_get(type_index, rest_index)
-            .local_set(b)
-            .else_()
-            // return false
-            .bool_const(false)
-            .return_()
-            // end if a.value == b.value
-            .end()
-            // end if b == null
-            .end()
-            // end if a == null
-            .end()
+              // if ref a == ref b
+              .local_get(a)
+              .local_get(b)
+              .ref_eq()
+              .if_(BlockType::Empty)
+                .bool_const(true)
+                .return_()
+              .end()
+              // if a == null
+              .local_get(a)
+              .ref_is_null()
+              .if_(BlockType::Empty)
+                // a == null
+                // if b == null
+                .local_get(b)
+                .ref_is_null()
+                .if_(BlockType::Empty)
+                  // a == null and b == bull
+                  .bool_const(true)
+                  .return_()
+                .else_()
+                  // a != null and b == null
+                  .bool_const(false)
+                  .return_()
+                // end if b == null
+                .end()
+              .else_()
+                // a == null
+                // if b == null
+                .local_get(b)
+                .ref_is_null()
+                .if_(BlockType::Empty)
+                  // a != null and b == null
+                  .bool_const(false)
+                  .return_()
+                .else_()
+                  // a != null and b != null
+                  // a.value
+                  .local_get(a)
+                  .struct_get(type_index, value_index)
+                  // b.value
+                  .local_get(b)
+                  .struct_get(type_index, value_index)
+                  .eq(eq)
+                  // if a.value == b.value
+                  .if_(BlockType::Empty)
+                    // a = a.rest
+                    .local_get(a)
+                    .struct_get(type_index, rest_index)
+                    .local_set(a)
+                    // b = b.rest
+                    .local_get(b)
+                    .struct_get(type_index, rest_index)
+                    .local_set(b)
+                  .else_()
+                    // a.value != b.value
+                    .bool_const(false)
+                    .return_()
+                  // end if a.value == b.value
+                  .end()
+                // end if b == null
+                .end()
+               // end if a == null
+               .end()
+            // loop with a = a.rest and b = b.rest
             .br(0)
-            // end loop
-            .end()
-            .bool_const(false)
-            // end function
-            .end();
+          // end loop
+          .end()
+          .bool_const(false)
+          // end function
+          .end();
         function
     }
 
@@ -1379,27 +1346,28 @@ impl<'a> Generator<'a> {
         let mut instructions = function.extend_instructions(self);
         let a = 0;
         let b = 1;
-
+        #[rustfmt::skip]
         let _ = instructions
             .local_get(a)
             .local_get(b)
             .ref_eq()
             .if_(BlockType::Empty)
-            .bool_const(true)
-            .return_()
+              .bool_const(true)
+              .return_()
             .end();
 
         for (field_index, type_) in types.into_iter().enumerate() {
+            #[rustfmt::skip]
             let _ = instructions
                 .local_get(a)
                 .struct_get(type_index, field_index as u32)
                 .local_get(b)
                 .struct_get(type_index, field_index as u32)
                 .eq(self.function_eq(&type_))
+                .bool_neg()
                 .if_(BlockType::Empty)
-                .else_()
-                .bool_const(false)
-                .return_()
+                  .bool_const(false)
+                  .return_()
                 .end();
         }
         let _ = instructions.bool_const(true).end();
@@ -1529,6 +1497,7 @@ impl<'a> ExtendedInstructionSink<'a> {
         else_(),
         end(),
         loop_(bt: BlockType),
+        block(bt: BlockType),
         br(l: u32),
         unreachable(),
         drop(),
@@ -1546,7 +1515,16 @@ impl<'a> ExtendedInstructionSink<'a> {
         ref_eq(),
         call_ref(index: u32),
         call(index: u32),
+        array_new_default(type_index: u32),
+        array_len(),
+        array_get_u(type_index: u32),
+        array_set(type_index: u32),
         return_(),
+        i32_const(x: i32),
+        i32_ne(),
+        i32_ge_u(),
+        i32_lt_u(),
+        i32_add(),
     }
 }
 
@@ -1919,24 +1897,18 @@ impl Locals {
     }
 
     fn assignment(&mut self, generator: &mut Generator<'_>, assignment: &TypedAssignment) {
+        self.insert(
+            generator,
+            &assignment.value.location(),
+            &assignment.value.type_(),
+        );
         self.expression(generator, &assignment.value);
         match &assignment.kind {
-            AssignmentKind::Let => match &assignment.pattern {
-                Pattern::Variable {
-                    name,
-                    location,
-                    type_,
-                    ..
-                } => {
-                    if is_generic_type(type_) {
-                        panic!("Local function \"{name}\" cannot be generic.");
-                    }
-                    self.insert(generator, location, type_)
-                }
-                _ => todo!("Let Assignment not supported: {:#?}", assignment),
-            },
+            AssignmentKind::Let => {
+                self.pattern(generator, &assignment.pattern);
+            }
             AssignmentKind::Assert { message, .. } => {
-                self.assignment_assert_pattern(generator, &assignment.pattern);
+                self.pattern(generator, &assignment.pattern);
                 if let Some(message) = message {
                     self.expression(generator, message);
                 }
@@ -1945,9 +1917,12 @@ impl Locals {
         }
     }
 
-    fn assignment_assert_pattern(&mut self, generator: &mut Generator<'_>, pattern: &TypedPattern) {
+    fn pattern(&mut self, generator: &mut Generator<'_>, pattern: &TypedPattern) {
         match pattern {
-            Pattern::Int { .. } | Pattern::Float { .. } | Pattern::String { .. } => {}
+            Pattern::Int { .. }
+            | Pattern::Float { .. }
+            | Pattern::String { .. }
+            | Pattern::Discard { .. } => {}
             Pattern::Constructor { name, type_, .. } if is_bool_const(name, type_) => {}
             Pattern::List {
                 elements,
@@ -1957,10 +1932,10 @@ impl Locals {
             } => {
                 self.insert(generator, location, type_);
                 for element in elements {
-                    self.assignment_assert_pattern(generator, element);
+                    self.pattern(generator, element);
                 }
                 if let Some(tail) = tail {
-                    self.assignment_assert_pattern(generator, &tail.pattern)
+                    self.pattern(generator, &tail.pattern)
                 }
             }
             Pattern::Tuple { location, elements } => {
@@ -1969,12 +1944,20 @@ impl Locals {
                 };
                 self.insert(generator, location, &type_.into());
                 for element in elements {
-                    self.assignment_assert_pattern(generator, element);
+                    self.pattern(generator, element);
                 }
             }
             Pattern::Variable {
-                location, type_, ..
-            } => self.insert(generator, location, type_),
+                name,
+                location,
+                type_,
+                ..
+            } => {
+                self.insert(generator, location, type_);
+                if is_generic_type(type_) {
+                    panic!("Local function \"{name}\" cannot be generic.");
+                }
+            }
             _ => todo!("Pattern not supported: {:#?}", pattern),
         }
     }
