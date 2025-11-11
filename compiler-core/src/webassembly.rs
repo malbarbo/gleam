@@ -1,5 +1,5 @@
 #![allow(clippy::todo, clippy::unwrap_used)]
-use std::{cell::RefCell, collections::HashMap, fmt::Write, ops::Deref, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, fmt::Write, iter, ops::Deref, rc::Rc, sync::Arc};
 
 use ecow::EcoString;
 use num_bigint::BigInt;
@@ -11,9 +11,9 @@ use wasm_encoder::{
 
 use crate::{
     ast::{
-        AssignmentKind, BinOp, Constant, Definition, OperatorKind, Pattern, SrcSpan, Statement,
-        TypedArg, TypedAssignment, TypedConstant, TypedExpr, TypedFunction, TypedModule,
-        TypedModuleConstant, TypedPattern, TypedStatement,
+        AssignmentKind, BinOp, ClauseGuard, Constant, Definition, OperatorKind, Pattern, SrcSpan,
+        Statement, TypedArg, TypedAssignment, TypedClause, TypedClauseGuard, TypedConstant,
+        TypedExpr, TypedFunction, TypedModule, TypedModuleConstant, TypedPattern, TypedStatement,
     },
     line_numbers::LineNumbers,
     type_::{self, Type, TypeVar},
@@ -724,7 +724,7 @@ impl<'a> Generator<'a> {
                         let eq = self.function_eq(&left.type_());
                         let _ = instructions.eq(eq);
                         if let BinOp::NotEq = name {
-                            let _ = instructions.bool_neg();
+                            let _ = instructions.bool_not();
                         }
                         instructions
                     }
@@ -739,7 +739,7 @@ impl<'a> Generator<'a> {
             TypedExpr::NegateBool { value, .. } => {
                 let _ = instructions
                     .expression(self, locals, scope, value)
-                    .bool_neg();
+                    .bool_not();
             }
             TypedExpr::Block { statements, .. } => {
                 self.statements(instructions, scope, locals, statements);
@@ -748,19 +748,7 @@ impl<'a> Generator<'a> {
                 let _ = instructions.bool_const(name == TRUE);
             }
             TypedExpr::Var { name, .. } => {
-                let id = scope
-                    .find(name)
-                    .unwrap_or_else(|| self.var(name, &expression.type_()));
-                let type_ = expression.type_();
-
-                let _ = match id.kind {
-                    IdKind::Func => instructions.ref_func(id.index),
-                    IdKind::Global if type_.is_string() || type_.tuple_types().is_some() => {
-                        instructions.global_as_non_null(id.index)
-                    }
-                    IdKind::Global => instructions.global_get(id.index),
-                    IdKind::Local => instructions.local_get(id.index),
-                };
+                self.expression_var(&scope, instructions, name, &expression.type_());
             }
             TypedExpr::Call {
                 type_,
@@ -788,7 +776,108 @@ impl<'a> Generator<'a> {
                 let id = self.local_function(name, type_, arguments, body);
                 let _ = instructions.ref_func(id.index);
             }
+            TypedExpr::Case {
+                type_,
+                subjects,
+                clauses,
+                ..
+            } => {
+                self.expression_case(locals, scope, instructions, type_, subjects, clauses);
+            }
             _ => todo!("Expression not supported: {:#?}", expression),
+        };
+    }
+
+    fn expression_case(
+        &mut self,
+        locals: &Locals,
+        scope: Scope,
+        instructions: &mut ExtendedInstructionSink<'_>,
+        type_: &Arc<Type>,
+        subjects: &[TypedExpr],
+        clauses: &[TypedClause],
+    ) {
+        let mut subjects_locals = vec![];
+        for subject in subjects {
+            let index = locals.get(&subject.location());
+            subjects_locals.push(index);
+            // evaluate and save each subject
+            let _ = instructions
+                .expression(self, locals, scope.clone(), subject)
+                .local_set(index);
+        }
+        // block case
+        let _ = instructions.block(BlockType::Result(self.val_type(type_)));
+        for clause in clauses {
+            // block clause
+            let _ = instructions.block(BlockType::Result(self.bool_.val_type()));
+            let mut scope = scope.clone();
+            for patterns in iter::once(&clause.pattern).chain(&clause.alternative_patterns) {
+                // block patterns
+                let _ = instructions.block(BlockType::Result(self.bool_.val_type()));
+                for (pattern, subject_local) in patterns.iter().zip(&subjects_locals) {
+                    #[rustfmt::skip]
+                    let _ = instructions
+                        .local_get(*subject_local)
+                        .pattern(self, locals, &mut scope, pattern)
+                        .bool_not()
+                        .if_(BlockType::Empty)
+                          .bool_const(false)
+                          // exit block patterns
+                          .br(1)
+                        .end();
+                }
+                let _ = instructions
+                    // none of the patterns failed to match
+                    .bool_const(true)
+                    // end block patterns
+                    .end()
+                    // if matches
+                    .if_(BlockType::Empty);
+                if let Some(guard) = &clause.guard {
+                    #[rustfmt::skip]
+                    let _ = instructions
+                        .clause_guard(self, locals, &scope, guard)
+                        .if_(BlockType::Empty)
+                          .bool_const(true)
+                          .br(2) // exit block clause
+                        .end();
+                } else {
+                    // exit block clause
+                    let _ = instructions.bool_const(true).br(1);
+                }
+                // end if matches
+                let _ = instructions.end();
+            }
+            #[rustfmt::skip]
+            let _ = instructions
+                .bool_const(false)
+                // end block clause
+                .end()
+                .if_(BlockType::Empty)
+                  .expression(self, locals, scope, &clause.then)
+                  .br(1) // exit block case
+                .end();
+        }
+        // end block case
+        let _ = instructions.unreachable().end();
+    }
+
+    fn expression_var(
+        &mut self,
+        scope: &Scope,
+        instructions: &mut ExtendedInstructionSink<'_>,
+        name: &EcoString,
+        type_: &Arc<Type>,
+    ) {
+        let id = scope.find(name).unwrap_or_else(|| self.var(name, type_));
+        let _ = match id.kind {
+            IdKind::Func => instructions.ref_func(id.index),
+            IdKind::Global if type_.is_string() || type_.tuple_types().is_some() => {
+                instructions.global_as_non_null(id.index)
+            }
+            IdKind::Global => instructions.global_get(id.index),
+            IdKind::Local => instructions.local_get(id.index),
         };
     }
 
@@ -867,7 +956,7 @@ impl<'a> Generator<'a> {
                         .local_get(right)
                         .struct_get(type_index, 1)
                         .pattern(self, locals, &mut scope, element)
-                        .bool_neg()
+                        .bool_not()
                         .if_(BlockType::Empty)
                           .bool_const(false)
                           .br(1)
@@ -881,7 +970,7 @@ impl<'a> Generator<'a> {
                     let _ = instructions
                         .local_get(right)
                         .pattern(self, locals, &mut scope, &tail.pattern)
-                        .bool_neg()
+                        .bool_not()
                         .if_(BlockType::Empty)
                           .bool_const(false)
                           .br(1)
@@ -891,7 +980,7 @@ impl<'a> Generator<'a> {
                     let _ = instructions
                         .local_get(right)
                         .ref_is_null()
-                        .bool_neg()
+                        .bool_not()
                         .if_(BlockType::Empty)
                           .bool_const(false)
                           .br(1)
@@ -911,7 +1000,7 @@ impl<'a> Generator<'a> {
                         .local_get(right)
                         .struct_get(type_index, field_index as u32)
                         .pattern(self, locals, &mut scope, element)
-                        .bool_neg()
+                        .bool_not()
                         .if_(BlockType::Empty)
                           .bool_const(false)
                           .br(1)
@@ -930,6 +1019,177 @@ impl<'a> Generator<'a> {
             _ => todo!("Assigment Assert Pattern not implemented: {:#?}", pattern),
         }
         scope
+    }
+
+    fn _clause_guard(
+        &mut self,
+        locals: &Locals,
+        scope: &Scope,
+        instructions: &mut ExtendedInstructionSink<'_>,
+        guard: &TypedClauseGuard,
+    ) {
+        match guard {
+            // Bool
+            ClauseGuard::Or { left, right, .. } => {
+                #[rustfmt::skip]
+                let _ = instructions
+                    .clause_guard(self, locals, scope, left)
+                    .if_(BlockType::Result(self.bool_.val_type()))
+                      .bool_const(true)
+                    .else_()
+                      .clause_guard(self, locals, scope, right)
+                    .end();
+            }
+            ClauseGuard::And { left, right, .. } => {
+                #[rustfmt::skip]
+                let _ = instructions
+                    .clause_guard(self, locals, scope, left)
+                    .if_(BlockType::Result(self.bool_.val_type()))
+                      .clause_guard(self, locals, scope, right)
+                    .else_()
+                      .bool_const(false)
+                    .end();
+            }
+            ClauseGuard::Not { expression, .. } => {
+                let _ = instructions
+                    .clause_guard(self, locals, scope, expression)
+                    .bool_not();
+            }
+            ClauseGuard::Equals { left, right, .. } if left.type_().is_bool() => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .bool_eq();
+            }
+            ClauseGuard::NotEquals { left, right, .. } if left.type_().is_bool() => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .bool_ne();
+            }
+            // Int
+            ClauseGuard::AddInt { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .int_add();
+            }
+            ClauseGuard::SubInt { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .int_sub();
+            }
+            ClauseGuard::MultInt { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .int_mul();
+            }
+            ClauseGuard::RemainderInt { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .int_rem();
+            }
+            ClauseGuard::DivInt { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .int_div(locals.get(&left.location()), locals.get(&right.location()));
+            }
+            ClauseGuard::GtInt { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .int_gt();
+            }
+            ClauseGuard::GtEqInt { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .int_ge();
+            }
+            ClauseGuard::LtInt { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .int_lt();
+            }
+            ClauseGuard::LtEqInt { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .int_le();
+            }
+            ClauseGuard::Equals { left, right, .. } if left.type_().is_int() => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .int_eq();
+            }
+            ClauseGuard::NotEquals { left, right, .. } if left.type_().is_int() => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .int_ne();
+            }
+            // Float
+            ClauseGuard::AddFloat { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .float_add();
+            }
+            ClauseGuard::SubFloat { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .float_sub();
+            }
+            ClauseGuard::MultFloat { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .float_mul();
+            }
+            ClauseGuard::DivFloat { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .float_div(locals.get(&left.location()), locals.get(&right.location()));
+            }
+            ClauseGuard::GtFloat { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .float_gt();
+            }
+            ClauseGuard::GtEqFloat { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .float_ge();
+            }
+            ClauseGuard::LtFloat { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .float_lt();
+            }
+            ClauseGuard::LtEqFloat { left, right, .. } => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .float_le();
+            }
+            ClauseGuard::Equals { left, right, .. } if left.type_().is_float() => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .float_eq();
+            }
+            ClauseGuard::NotEquals { left, right, .. } if left.type_().is_float() => {
+                let _ = instructions
+                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                    .float_ne();
+            }
+            // Others
+            ClauseGuard::Constant(constant) => {
+                let _ = instructions.constant(self, constant);
+            }
+            ClauseGuard::Block { value, .. } => {
+                let _ = instructions.clause_guard(self, locals, scope, value);
+            }
+            ClauseGuard::Var { name, type_, .. } => {
+                self.expression_var(scope, instructions, name, type_);
+            }
+            ClauseGuard::TupleIndex { tuple, index, .. } => {
+                let type_index = self.tuple_type(tuple.type_().tuple_types().unwrap());
+                let _ = instructions
+                    .clause_guard(self, locals, scope, tuple)
+                    .struct_get(type_index, *index as u32);
+            }
+            _ => todo!("Guard: {:#?}", guard),
+        }
     }
 
     fn add_global(
@@ -1366,7 +1626,7 @@ impl<'a> Generator<'a> {
                 .local_get(b)
                 .struct_get(type_index, field_index as u32)
                 .eq(self.function_eq(&type_))
-                .bool_neg()
+                .bool_not()
                 .if_(BlockType::Empty)
                   .bool_const(false)
                   .return_()
@@ -1541,6 +1801,30 @@ impl<'a> ExtendedInstructionSink<'a> {
         self
     }
 
+    fn clause_guard(
+        &mut self,
+        generator: &mut Generator<'_>,
+        locals: &Locals,
+        scope: &Scope,
+        guard: &TypedClauseGuard,
+    ) -> &mut Self {
+        generator._clause_guard(locals, scope, self, guard);
+        self
+    }
+
+    fn clause_guards<'b, 'c>(
+        &mut self,
+        generator: &mut Generator<'b>,
+        locals: &Locals,
+        scope: &Scope,
+        guards: impl IntoIterator<Item = &'c TypedClauseGuard>,
+    ) -> &mut Self {
+        for guard in guards {
+            generator._clause_guard(locals, scope, self, guard);
+        }
+        self
+    }
+
     delegate! {
         if_(bt: BlockType),
         else_(),
@@ -1597,7 +1881,7 @@ impl<'a> ExtendedInstructionSink<'a> {
         self
     }
 
-    fn bool_neg(&mut self) -> &mut Self {
+    fn bool_not(&mut self) -> &mut Self {
         let _ = self.instructions.i32_eqz();
         self
     }
@@ -1897,6 +2181,16 @@ impl Locals {
         }
     }
 
+    fn expressions<'a>(
+        &mut self,
+        generator: &mut Generator<'_>,
+        expressions: impl IntoIterator<Item = &'a TypedExpr>,
+    ) {
+        for expression in expressions {
+            self.expression(generator, expression);
+        }
+    }
+
     fn expression(&mut self, generator: &mut Generator<'_>, expression: &TypedExpr) {
         match expression {
             TypedExpr::BinOp {
@@ -1918,9 +2212,7 @@ impl Locals {
             }
             TypedExpr::Call { fun, arguments, .. } => {
                 self.expression(generator, fun);
-                for arg in arguments {
-                    self.expression(generator, &arg.value);
-                }
+                self.expressions(generator, arguments.iter().map(|arg| &arg.value));
             }
             TypedExpr::NegateInt { value, .. } | TypedExpr::NegateBool { value, .. } => {
                 self.expression(generator, value);
@@ -1931,20 +2223,34 @@ impl Locals {
                 }
             }
             TypedExpr::List { elements, tail, .. } => {
-                for element in elements {
-                    self.expression(generator, element);
-                }
+                self.expressions(generator, elements);
                 if let Some(tail) = tail {
                     self.expression(generator, tail);
                 }
             }
             TypedExpr::Tuple { elements, .. } => {
-                for element in elements {
-                    self.expression(generator, element);
-                }
+                self.expressions(generator, elements);
             }
             TypedExpr::TupleIndex { tuple, .. } => {
                 self.expression(generator, tuple);
+            }
+            TypedExpr::Case {
+                clauses, subjects, ..
+            } => {
+                for subject in subjects {
+                    self.insert(generator, &subject.location(), &subject.type_());
+                }
+                self.expressions(generator, subjects);
+                for clause in clauses {
+                    self.patterns(generator, &clause.pattern);
+                    for pattern in &clause.alternative_patterns {
+                        self.patterns(generator, pattern);
+                    }
+                    if let Some(guard) = &clause.guard {
+                        self.guard(generator, guard);
+                    }
+                    self.expression(generator, &clause.then);
+                }
             }
             TypedExpr::Int { .. }
             | TypedExpr::Float { .. }
@@ -1953,6 +2259,49 @@ impl Locals {
             | TypedExpr::Fn { .. } => {}
             _ => todo!("Expression not supported: {:#?}", expression),
         }
+    }
+
+    fn guard(&mut self, generator: &mut Generator<'_>, guard: &TypedClauseGuard) {
+        match guard {
+            ClauseGuard::Block { value, .. } => self.guard(generator, value),
+            ClauseGuard::Constant(constant) => self.constant(generator, constant),
+            ClauseGuard::Equals { left, right, .. }
+            | ClauseGuard::NotEquals { left, right, .. }
+            | ClauseGuard::GtInt { left, right, .. }
+            | ClauseGuard::GtEqInt { left, right, .. }
+            | ClauseGuard::LtInt { left, right, .. }
+            | ClauseGuard::LtEqInt { left, right, .. }
+            | ClauseGuard::GtFloat { left, right, .. }
+            | ClauseGuard::GtEqFloat { left, right, .. }
+            | ClauseGuard::LtFloat { left, right, .. }
+            | ClauseGuard::LtEqFloat { left, right, .. }
+            | ClauseGuard::AddInt { left, right, .. }
+            | ClauseGuard::AddFloat { left, right, .. }
+            | ClauseGuard::SubInt { left, right, .. }
+            | ClauseGuard::SubFloat { left, right, .. }
+            | ClauseGuard::MultInt { left, right, .. }
+            | ClauseGuard::MultFloat { left, right, .. }
+            | ClauseGuard::RemainderInt { left, right, .. }
+            | ClauseGuard::Or { left, right, .. }
+            | ClauseGuard::And { left, right, .. } => {
+                self.guard(generator, left);
+                self.guard(generator, right);
+            }
+            ClauseGuard::DivInt { left, right, .. } | ClauseGuard::DivFloat { left, right, .. } => {
+                self.guard(generator, left);
+                self.guard(generator, right);
+                self.insert(generator, &left.location(), &left.type_());
+                self.insert(generator, &right.location(), &left.type_());
+            }
+            ClauseGuard::Not { expression, .. } => self.guard(generator, expression),
+            ClauseGuard::Var { .. } => {}
+            ClauseGuard::TupleIndex { tuple, .. } => self.guard(generator, tuple),
+            _ => todo!("Guard: {:#?}", guard),
+        }
+    }
+
+    fn constant(&mut self, _generator: &mut Generator<'_>, _constant: &TypedConstant) {
+        // We don't need any local for constants, do we?
     }
 
     fn assignment(&mut self, generator: &mut Generator<'_>, assignment: &TypedAssignment) {
@@ -1976,20 +2325,25 @@ impl Locals {
         }
     }
 
+    fn patterns<'a>(
+        &mut self,
+        generator: &mut Generator<'_>,
+        patterns: impl IntoIterator<Item = &'a TypedPattern>,
+    ) {
+        for pattern in patterns {
+            self.pattern(generator, pattern);
+        }
+    }
+
     fn pattern(&mut self, generator: &mut Generator<'_>, pattern: &TypedPattern) {
+        self.insert(generator, &pattern.location(), &pattern.type_());
         match pattern {
             Pattern::Int { .. }
             | Pattern::Float { .. }
             | Pattern::String { .. }
             | Pattern::Discard { .. } => {}
             Pattern::Constructor { name, type_, .. } if is_bool_const(name, type_) => {}
-            Pattern::List {
-                elements,
-                tail,
-                location,
-                type_,
-            } => {
-                self.insert(generator, location, type_);
+            Pattern::List { elements, tail, .. } => {
                 for element in elements {
                     self.pattern(generator, element);
                 }
@@ -1997,22 +2351,10 @@ impl Locals {
                     self.pattern(generator, &tail.pattern)
                 }
             }
-            Pattern::Tuple { location, elements } => {
-                let type_ = Type::Tuple {
-                    elements: elements.iter().map(|element| element.type_()).collect(),
-                };
-                self.insert(generator, location, &type_.into());
-                for element in elements {
-                    self.pattern(generator, element);
-                }
+            Pattern::Tuple { elements, .. } => {
+                self.patterns(generator, elements);
             }
-            Pattern::Variable {
-                name,
-                location,
-                type_,
-                ..
-            } => {
-                self.insert(generator, location, type_);
+            Pattern::Variable { name, type_, .. } => {
                 if is_generic_type(type_) {
                     panic!("Local function \"{name}\" cannot be generic.");
                 }
