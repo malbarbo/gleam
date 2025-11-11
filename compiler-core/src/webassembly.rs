@@ -410,7 +410,11 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn constant(&mut self, instructions: &mut ExtendedInstructionSink<'_>, const_: &TypedConstant) {
+    fn _constant(
+        &mut self,
+        instructions: &mut ExtendedInstructionSink<'_>,
+        const_: &TypedConstant,
+    ) {
         match const_ {
             Constant::Int { int_value, .. } => {
                 let _ = instructions.int_const(int_value);
@@ -429,16 +433,14 @@ impl<'a> Generator<'a> {
                 let type_index = self.list_type(&item_type);
                 let _ = instructions.list_null(type_index);
                 for element in elements.iter().rev() {
-                    self.constant(instructions, element);
-                    let _ = instructions.struct_new(type_index);
+                    let _ = instructions.constant(self, element).struct_new(type_index);
                 }
             }
             Constant::Tuple { elements, .. } => {
                 let type_index = self.tuple_type(elements.iter().map(|e| e.type_()));
-                for element in elements {
-                    self.constant(instructions, element);
-                }
-                let _ = instructions.struct_new(type_index);
+                let _ = instructions
+                    .constants(self, elements)
+                    .struct_new(type_index);
             }
             Constant::Record { name, .. } if const_.type_().is_bool() => {
                 let _ = instructions.bool_const(name == TRUE);
@@ -571,7 +573,7 @@ impl<'a> Generator<'a> {
     ) -> Scope {
         match statement {
             Statement::Expression(expression) => {
-                self.expression(locals, scope.clone(), instructions, expression);
+                let _ = instructions.expression(self, locals, scope.clone(), expression);
             }
             Statement::Assignment(assignment) => {
                 scope = self.assignment(locals, scope, instructions, assignment);
@@ -581,7 +583,7 @@ impl<'a> Generator<'a> {
         scope
     }
 
-    fn expression(
+    fn _expression(
         &mut self,
         locals: &Locals,
         scope: Scope,
@@ -611,51 +613,55 @@ impl<'a> Generator<'a> {
                 let item_type = type_.list_type().unwrap();
                 let type_index = self.list_type(&item_type);
                 if let Some(rest) = tail {
-                    self.expression(locals, scope.clone(), instructions, rest);
+                    let _ = instructions.expression(self, locals, scope.clone(), rest);
                 } else {
                     let _ = instructions.list_null(type_index);
                 }
                 for element in elements.iter().rev() {
-                    self.expression(locals, scope.clone(), instructions, element);
-                    let _ = instructions.list_new(type_index);
+                    let _ = instructions
+                        .expression(self, locals, scope.clone(), element)
+                        .struct_new(type_index);
                 }
             }
             TypedExpr::Tuple { elements, .. } => {
-                for element in elements {
-                    self.expression(locals, scope.clone(), instructions, element);
-                }
                 let type_index = self.tuple_type(elements.iter().map(|e| e.type_()));
-                let _ = instructions.struct_new(type_index);
+                let _ = instructions
+                    .expressions(self, locals, scope.clone(), elements)
+                    .struct_new(type_index);
             }
             TypedExpr::TupleIndex { index, tuple, .. } => {
-                self.expression(locals, scope.clone(), instructions, tuple);
                 let type_index = self.tuple_type(tuple.type_().tuple_types().unwrap());
-                let _ = instructions.struct_get(type_index, *index as u32);
+                let _ = instructions
+                    .expression(self, locals, scope.clone(), tuple)
+                    .struct_get(type_index, *index as u32);
             }
             TypedExpr::BinOp {
                 name, left, right, ..
             } => {
                 if name.operator_kind() != OperatorKind::BooleanLogic {
-                    self.expression(locals, scope.clone(), instructions, left);
-                    self.expression(locals, scope.clone(), instructions, right);
+                    let _ = instructions
+                        .expression(self, locals, scope.clone(), left)
+                        .expression(self, locals, scope.clone(), right);
                 }
 
                 let _ = match name {
                     // Bool
-                    BinOp::And => {
-                        self.expression(locals, scope.clone(), instructions, left);
-                        let _ = instructions.if_(BlockType::Result(self.bool_.val_type()));
-                        self.expression(locals, scope, instructions, right);
-                        instructions.else_().bool_const(false).end()
-                    }
-                    BinOp::Or => {
-                        self.expression(locals, scope.clone(), instructions, left);
-                        let _ = instructions.if_(BlockType::Result(self.bool_.val_type()));
-                        let _ = instructions.bool_const(true);
-                        let _ = instructions.else_();
-                        self.expression(locals, scope, instructions, right);
-                        instructions.end()
-                    }
+                    #[rustfmt::skip]
+                    BinOp::And => instructions
+                        .expression(self, locals, scope.clone(), left)
+                        .if_(BlockType::Result(self.bool_.val_type()))
+                          .expression(self, locals, scope, right)
+                        .else_()
+                          .bool_const(false)
+                        .end(),
+                    #[rustfmt::skip]
+                    BinOp::Or => instructions
+                        .expression(self, locals, scope.clone(), left)
+                        .if_(BlockType::Result(self.bool_.val_type()))
+                          .bool_const(true)
+                        .else_()
+                          .expression(self, locals, scope, right)
+                        .end(),
                     BinOp::Eq if left.type_().is_bool() => instructions.bool_eq(),
                     BinOp::NotEq if left.type_().is_bool() => instructions.bool_ne(),
                     // Int
@@ -723,13 +729,15 @@ impl<'a> Generator<'a> {
                 };
             }
             TypedExpr::NegateInt { value, .. } => {
-                let _ = instructions.int_const(&0.into());
-                self.expression(locals, scope, instructions, value);
-                let _ = instructions.int_sub();
+                let _ = instructions
+                    .int_const(&0.into())
+                    .expression(self, locals, scope, value)
+                    .int_sub();
             }
             TypedExpr::NegateBool { value, .. } => {
-                self.expression(locals, scope, instructions, value);
-                let _ = instructions.bool_neg();
+                let _ = instructions
+                    .expression(self, locals, scope, value)
+                    .bool_neg();
             }
             TypedExpr::Block { statements, .. } => {
                 self.statements(instructions, scope, locals, statements);
@@ -759,15 +767,13 @@ impl<'a> Generator<'a> {
                 ..
             } => {
                 // FIXME: function must be evaluated first
-                for arg in arguments {
-                    self.expression(locals, scope.clone(), instructions, &arg.value);
-                }
-                self.expression(locals, scope, instructions, fun);
-                let index = self.function_type(
-                    arguments.iter().map(|arg| arg.value.type_().clone()),
-                    Some(type_.clone()),
-                );
-                let _ = instructions.call_ref(index);
+                let args_types = arguments.iter().map(|arg| arg.value.type_().clone());
+                let index = self.function_type(args_types, Some(type_.clone()));
+                let args = arguments.iter().map(|arg| &arg.value);
+                let _ = instructions
+                    .expressions(self, locals, scope.clone(), args)
+                    .expression(self, locals, scope, fun)
+                    .call_ref(index);
             }
             TypedExpr::Fn {
                 location,
@@ -792,14 +798,15 @@ impl<'a> Generator<'a> {
         instructions: &mut ExtendedInstructionSink<'_>,
         assignment: &TypedAssignment,
     ) -> Scope {
-        self.expression(locals, scope.clone(), instructions, &assignment.value);
         let right = locals.get(&assignment.value.location());
-        let _ = instructions.local_tee(right);
+        let _ = instructions
+            .expression(self, locals, scope.clone(), &assignment.value)
+            .local_tee(right);
         match assignment.kind {
             AssignmentKind::Assert { .. } => {
-                scope = self.pattern(locals, scope, instructions, &assignment.pattern);
                 #[rustfmt::skip]
                 let _ = instructions
+                    .pattern(self, locals, &mut scope, &assignment.pattern)
                     .if_(BlockType::Result(self.val_type(&assignment.value.type_())))
                       .local_get(right)
                     .else_()
@@ -807,8 +814,10 @@ impl<'a> Generator<'a> {
                     .end();
             }
             AssignmentKind::Let => {
-                scope = self.pattern(locals, scope, instructions, &assignment.pattern);
-                let _ = instructions.drop().local_get(right);
+                let _ = instructions
+                    .pattern(self, locals, &mut scope, &assignment.pattern)
+                    .drop()
+                    .local_get(right);
             }
             AssignmentKind::Generated => {
                 todo!("Generated Assignment not implemented: {:#?}", assignment)
@@ -817,7 +826,7 @@ impl<'a> Generator<'a> {
         scope
     }
 
-    fn pattern(
+    fn _pattern(
         &mut self,
         locals: &Locals,
         mut scope: Scope,
@@ -852,10 +861,11 @@ impl<'a> Generator<'a> {
                     .local_set(right)
                     .block(BlockType::Result(self.bool_.val_type()));
                 for element in elements {
-                    let _ = instructions.local_get(right).struct_get(type_index, 1);
-                    scope = self.pattern(locals, scope, instructions, element);
                     #[rustfmt::skip]
                     let _ = instructions
+                        .local_get(right)
+                        .struct_get(type_index, 1)
+                        .pattern(self, locals, &mut scope, element)
                         .bool_neg()
                         .if_(BlockType::Empty)
                           .bool_const(false)
@@ -865,12 +875,11 @@ impl<'a> Generator<'a> {
                         .struct_get(type_index, 0)
                         .local_set(right);
                 }
-
                 if let Some(tail) = tail {
-                    let _ = instructions.local_get(right);
-                    scope = self.pattern(locals, scope, instructions, &tail.pattern);
                     #[rustfmt::skip]
                     let _ = instructions
+                        .local_get(right)
+                        .pattern(self, locals, &mut scope, &tail.pattern)
                         .bool_neg()
                         .if_(BlockType::Empty)
                           .bool_const(false)
@@ -887,7 +896,6 @@ impl<'a> Generator<'a> {
                           .br(1)
                         .end();
                 }
-
                 let _ = instructions.bool_const(true).end();
             }
             Pattern::Tuple { location, elements } => {
@@ -897,12 +905,11 @@ impl<'a> Generator<'a> {
                     .local_set(right)
                     .block(BlockType::Result(self.bool_.val_type()));
                 for (field_index, element) in elements.iter().enumerate() {
-                    let _ = instructions
-                        .local_get(right)
-                        .struct_get(type_index, field_index as u32);
-                    scope = self.pattern(locals, scope, instructions, element);
                     #[rustfmt::skip]
                     let _ = instructions
+                        .local_get(right)
+                        .struct_get(type_index, field_index as u32)
+                        .pattern(self, locals, &mut scope, element)
                         .bool_neg()
                         .if_(BlockType::Empty)
                           .bool_const(false)
@@ -911,9 +918,7 @@ impl<'a> Generator<'a> {
                 }
                 let _ = instructions.bool_const(true).end();
             }
-            Pattern::Constructor { name, type_, .. }
-                if (name == TRUE || name == FALSE) && type_.is_bool() =>
-            {
+            Pattern::Constructor { name, type_, .. } if is_bool_const(name, type_) => {
                 let _ = instructions.bool_const(name == TRUE).bool_eq();
             }
             Pattern::Variable { name, location, .. } => {
@@ -957,12 +962,12 @@ impl<'a> Generator<'a> {
 
     fn code_start(&mut self) -> Function {
         let mut function = Function::new(vec![]);
+        let mut instructions = function.extend_instructions(self);
         // string data
         for (string, index) in &self.strings {
             let data_segment = self.data_section.len();
             let _ = self.data_section.passive(string.as_bytes().iter().cloned());
-            let _ = function
-                .instructions()
+            let _ = instructions
                 .i32_const(0)
                 .i32_const(string.len() as i32)
                 .array_new_data(self.string.type_index, data_segment)
@@ -973,18 +978,16 @@ impl<'a> Generator<'a> {
         for const_ in self.consts.clone() {
             match const_ {
                 Const::String { from, to } => {
-                    let _ = function.instructions().global_get(from).global_set(to);
+                    let _ = instructions.global_get(from).global_set(to);
                 }
                 Const::List {
                     global_index,
                     type_index,
                     elements,
                 } => {
-                    let mut instructions = function.extend_instructions(self);
                     let _ = instructions.global_get(global_index);
                     for element in elements.iter().rev() {
-                        self.constant(&mut instructions, element);
-                        let _ = instructions.struct_new(type_index);
+                        let _ = instructions.constant(self, element).struct_new(type_index);
                     }
                     let _ = instructions.global_set(global_index);
                 }
@@ -993,11 +996,10 @@ impl<'a> Generator<'a> {
                     type_index,
                     elements,
                 } => {
-                    let mut instructions = function.extend_instructions(self);
-                    for element in elements {
-                        self.constant(&mut instructions, &element);
-                    }
-                    let _ = instructions.struct_new(type_index).global_set(global_index);
+                    let _ = instructions
+                        .constants(self, &elements)
+                        .struct_new(type_index)
+                        .global_set(global_index);
                 }
             }
         }
@@ -1355,7 +1357,6 @@ impl<'a> Generator<'a> {
               .bool_const(true)
               .return_()
             .end();
-
         for (field_index, type_) in types.into_iter().enumerate() {
             #[rustfmt::skip]
             let _ = instructions
@@ -1479,10 +1480,6 @@ impl<'a> ExtendedInstructionSink<'a> {
         self.ref_null(HeapType::Concrete(type_index))
     }
 
-    fn list_new(&mut self, type_index: u32) -> &mut Self {
-        self.struct_new(type_index)
-    }
-
     fn eq(&mut self, eq: Eq) -> &mut Self {
         match eq {
             Eq::Bool => self.bool_eq(),
@@ -1490,6 +1487,57 @@ impl<'a> ExtendedInstructionSink<'a> {
             Eq::Float => self.float_eq(),
             Eq::Call(index) => self.call(index),
         }
+    }
+
+    fn constant(&mut self, generator: &mut Generator<'_>, const_: &TypedConstant) -> &mut Self {
+        generator._constant(self, const_);
+        self
+    }
+
+    fn constants<'b, 'c>(
+        &mut self,
+        generator: &mut Generator<'b>,
+        consts: impl IntoIterator<Item = &'c TypedConstant>,
+    ) -> &mut Self {
+        for const_ in consts {
+            generator._constant(self, const_);
+        }
+        self
+    }
+
+    fn expression(
+        &mut self,
+        generator: &mut Generator<'_>,
+        locals: &Locals,
+        scope: Scope,
+        expression: &TypedExpr,
+    ) -> &mut Self {
+        generator._expression(locals, scope, self, expression);
+        self
+    }
+
+    fn expressions<'b, 'c>(
+        &mut self,
+        generator: &mut Generator<'b>,
+        locals: &Locals,
+        scope: Scope,
+        expressions: impl IntoIterator<Item = &'c TypedExpr>,
+    ) -> &mut Self {
+        for expression in expressions {
+            generator._expression(locals, scope.clone(), self, expression);
+        }
+        self
+    }
+
+    fn pattern(
+        &mut self,
+        generator: &mut Generator<'_>,
+        locals: &Locals,
+        scope: &mut Scope,
+        pattern: &TypedPattern,
+    ) -> &mut Self {
+        *scope = generator._pattern(locals, scope.clone(), self, pattern);
+        self
     }
 
     delegate! {
@@ -1516,6 +1564,7 @@ impl<'a> ExtendedInstructionSink<'a> {
         call_ref(index: u32),
         call(index: u32),
         array_new_default(type_index: u32),
+        array_new_data(type_index: u32, data_segment: u32),
         array_len(),
         array_get_u(type_index: u32),
         array_set(type_index: u32),
@@ -1608,6 +1657,7 @@ impl<'a> ExtendedInstructionSink<'a> {
     }
 
     fn int_div(&mut self, dividend: u32, divisor: u32) -> &mut Self {
+        #[rustfmt::skip]
         let _ = match self.int {
             IntType::Int32 => self
                 .instructions
@@ -1615,11 +1665,11 @@ impl<'a> ExtendedInstructionSink<'a> {
                 .local_set(dividend)
                 .local_get(divisor)
                 .if_(BlockType::Result(ValType::I32))
-                .local_get(dividend)
-                .local_get(divisor)
-                .i32_div_s()
+                  .local_get(dividend)
+                  .local_get(divisor)
+                  .i32_div_s()
                 .else_()
-                .i32_const(0)
+                  .i32_const(0)
                 .end(),
             IntType::Int64 => self
                 .instructions
@@ -1627,11 +1677,11 @@ impl<'a> ExtendedInstructionSink<'a> {
                 .local_set(dividend)
                 .local_get(divisor)
                 .if_(BlockType::Result(ValType::I64))
-                .local_get(dividend)
-                .local_get(divisor)
-                .i64_div_s()
+                  .local_get(dividend)
+                  .local_get(divisor)
+                  .i64_div_s()
                 .else_()
-                .i64_const(0)
+                  .i64_const(0)
                 .end(),
         };
         self
@@ -1680,6 +1730,7 @@ impl<'a> ExtendedInstructionSink<'a> {
     }
 
     fn float_div(&mut self, dividend: u32, divisor: u32) -> &mut Self {
+        #[rustfmt::skip]
         let _ = self
             .instructions
             .local_set(divisor)
@@ -1688,11 +1739,11 @@ impl<'a> ExtendedInstructionSink<'a> {
             .f64_const(0.0f64.into())
             .f64_ne()
             .if_(BlockType::Result(ValType::F64))
-            .local_get(dividend)
-            .local_get(divisor)
-            .f64_div()
+              .local_get(dividend)
+              .local_get(divisor)
+              .f64_div()
             .else_()
-            .f64_const(0.0f64.into())
+              .f64_const(0.0f64.into())
             .end();
         self
     }
