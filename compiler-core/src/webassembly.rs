@@ -16,7 +16,7 @@ use crate::{
         TypedModuleConstant, TypedPattern, TypedStatement,
     },
     line_numbers::LineNumbers,
-    type_::{Type, TypeVar},
+    type_::{self, Type, TypeVar},
 };
 
 const MAIN: &str = "main";
@@ -449,7 +449,10 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn var(&mut self, name: &EcoString, required_type: &Type) -> Id {
+    fn var(&mut self, name: &EcoString, required_type: &Arc<Type>) -> Id {
+        if is_generic_type(required_type) {
+            panic!("Required type is generic:\n{:#?}", required_type);
+        }
         for definition in &self.module.definitions {
             match definition {
                 Definition::ModuleConstant(module_constant) if &module_constant.name == name => {
@@ -464,7 +467,18 @@ impl<'a> Generator<'a> {
                     return if is_generic_type(&declared_type) {
                         match find_global(&mangle(name, &params, &return_), &self.globals) {
                             Some(id) => id, // the function has already been monomorphized
-                            None => self.function(&monomorphize(function, &params, &return_)),
+                            None => {
+                                let function = monomorphize(function, &params, &return_);
+                                if is_generic_type(&function_type(&function))
+                                    || function
+                                        .body
+                                        .iter()
+                                        .any(|statement| is_generic_type(&statement.type_()))
+                                {
+                                    panic!("Could not monomorphize:\n{:#?}", function);
+                                }
+                                self.function(&function)
+                            }
                         }
                     } else {
                         self.function(function)
@@ -623,6 +637,11 @@ impl<'a> Generator<'a> {
                 ..
             } => {
                 let item_type = type_.list_type().unwrap();
+                if let Some(id) = get_unbound_or_generic_id(&item_type) {
+                    assert!(elements.is_empty() && tail.is_none());
+                    monomorphize_type_var(&item_type, &HashMap::from_iter([(id, type_::int())]));
+                }
+                assert!(!is_generic_type(type_));
                 let type_index = self.list_type(&item_type);
                 if let Some(rest) = tail {
                     let _ = instructions.expression(self, locals, scope.clone(), rest);
@@ -780,12 +799,11 @@ impl<'a> Generator<'a> {
             } => {
                 // FIXME: function must be evaluated first
                 let args_types = arguments.iter().map(|arg| arg.value.type_().clone());
-                let index = self.function_type(args_types, Some(type_.clone()));
                 let args = arguments.iter().map(|arg| &arg.value);
                 let _ = instructions
                     .expressions(self, locals, scope.clone(), args)
                     .expression(self, locals, scope, fun)
-                    .call_ref(index);
+                    .call_ref(self.function_type(args_types, Some(type_.clone())));
             }
             TypedExpr::Fn {
                 location,
@@ -2073,35 +2091,133 @@ fn monomorphize(
 ) -> TypedFunction {
     let new_name = mangle(&function.name.as_ref().unwrap().1, params, return_);
     let mut new_function = function.clone();
-    let mut map = vec![(&function.return_type, return_)];
-    for (old, new) in function.arguments.iter().zip(params) {
-        map.push((&old.type_, new));
-    }
     new_function.name.as_mut().unwrap().1 = new_name;
-    new_function.return_type = return_.clone();
+
+    let mut map = HashMap::new();
+    bound(&new_function.return_type, return_, &mut map);
+    for (from, to) in new_function
+        .arguments
+        .iter()
+        .map(|arg| &arg.type_)
+        .zip(params)
+    {
+        bound(from, to, &mut map)
+    }
+
+    new_function.return_type = monomorphize_type(&new_function.return_type, &map);
     for arg in &mut new_function.arguments {
         arg.type_ = monomorphize_type(&arg.type_, &map);
     }
     monomorphize_statements(&mut new_function.body, &map);
+
+    assert!(!is_generic_type(&function_type(&new_function)));
+
     new_function
 }
 
-fn monomorphize_type(old: &Arc<Type>, map: &[(&Arc<Type>, &Arc<Type>)]) -> Arc<Type> {
-    for (key, value) in map {
-        if old.same_as(key) {
-            return (*value).clone();
+fn bound(from: &Arc<Type>, to: &Arc<Type>, map: &mut HashMap<u64, Arc<Type>>) {
+    match (from.as_ref(), to.as_ref()) {
+        (Type::Var { type_ }, _) => match &*type_.borrow() {
+            TypeVar::Unbound { id } | TypeVar::Generic { id } => {
+                let _ = map.insert(*id, to.clone());
+            }
+            TypeVar::Link { type_ } => bound(type_, to, map),
+        },
+        (
+            Type::Named {
+                arguments: from, ..
+            },
+            Type::Named { arguments: to, .. },
+        ) => {
+            for (from, to) in from.iter().zip(to) {
+                bound(from, to, map);
+            }
         }
+        (Type::Tuple { elements: from }, Type::Tuple { elements: to }) => {
+            for (from, to) in from.iter().zip(to) {
+                bound(from, to, map);
+            }
+        }
+        (
+            Type::Fn {
+                arguments: from_args,
+                return_: from_return,
+            },
+            Type::Fn {
+                arguments: to_args,
+                return_: to_return,
+            },
+        ) => {
+            bound(from_return, to_return, map);
+            for (from, to) in from_args.iter().zip(to_args) {
+                bound(from, to, map);
+            }
+        }
+        (_, _) => panic!(),
     }
-    old.clone()
 }
 
-fn monomorphize_statements(statements: &mut [TypedStatement], map: &[(&Arc<Type>, &Arc<Type>)]) {
+fn get_unbound_or_generic_id(type_: &Arc<Type>) -> Option<u64> {
+    match type_.as_ref() {
+        Type::Var { type_: var } => match &*var.borrow() {
+            TypeVar::Unbound { id } | TypeVar::Generic { id } => Some(*id),
+            TypeVar::Link { type_ } => get_unbound_or_generic_id(type_),
+        },
+        _ => None,
+    }
+}
+
+fn monomorphize_type_var(old: &Arc<Type>, map: &HashMap<u64, Arc<Type>>) {
+    match &**old {
+        Type::Var { type_ } => {
+            let id = {
+                match &*type_.borrow() {
+                    TypeVar::Unbound { id } | TypeVar::Generic { id } => *id,
+                    TypeVar::Link { type_ } => return monomorphize_type_var(type_, map),
+                }
+            };
+            *type_.borrow_mut() = TypeVar::Link {
+                type_: map.get(&id).unwrap().clone(),
+            };
+        }
+        _ => panic!("Type is not var:\n{:#?}", old),
+    }
+}
+
+fn monomorphize_type(old: &Arc<Type>, map: &HashMap<u64, Arc<Type>>) -> Arc<Type> {
+    if let Some(id) = get_unbound_or_generic_id(old) {
+        map.get(&id).unwrap().clone()
+    } else if let Some(type_) = old.list_type() {
+        Type::list(monomorphize_type(&type_, map)).into()
+    } else if let Some(elements) = old.tuple_types() {
+        Type::Tuple {
+            elements: elements
+                .iter()
+                .map(|element| monomorphize_type(element, map))
+                .collect(),
+        }
+        .into()
+    } else if let Some((arguments, return_)) = old.fn_types() {
+        Type::Fn {
+            arguments: arguments
+                .iter()
+                .map(|argument| monomorphize_type(argument, map))
+                .collect(),
+            return_: monomorphize_type(&return_, map),
+        }
+        .into()
+    } else {
+        old.clone()
+    }
+}
+
+fn monomorphize_statements(statements: &mut [TypedStatement], map: &HashMap<u64, Arc<Type>>) {
     for statement in statements {
         monomorphize_statement(statement, map);
     }
 }
 
-fn monomorphize_statement(statement: &mut TypedStatement, map: &[(&Arc<Type>, &Arc<Type>)]) {
+fn monomorphize_statement(statement: &mut TypedStatement, map: &HashMap<u64, Arc<Type>>) {
     match statement {
         Statement::Expression(expression) => monomorphize_expression(expression, map),
         Statement::Assignment(assignment) => {
@@ -2127,8 +2243,14 @@ fn monomorphize_statement(statement: &mut TypedStatement, map: &[(&Arc<Type>, &A
     }
 }
 
-fn monomorphize_expression(expression: &mut TypedExpr, map: &[(&Arc<Type>, &Arc<Type>)]) {
+fn monomorphize_expression(expression: &mut TypedExpr, map: &HashMap<u64, Arc<Type>>) {
     match expression {
+        TypedExpr::Todo { message, type_, .. } | TypedExpr::Panic { message, type_, .. } => {
+            *type_ = monomorphize_type(&type_, map);
+            if let Some(message) = message {
+                monomorphize_expression(&mut *message, map);
+            }
+        }
         TypedExpr::Block { statements, .. } => {
             monomorphize_statements(statements, map);
         }
@@ -2154,23 +2276,75 @@ fn monomorphize_expression(expression: &mut TypedExpr, map: &[(&Arc<Type>, &Arc<
             ..
         } => {
             *type_ = monomorphize_type(type_, map);
-            monomorphize_expression(&mut *fun, map);
+            monomorphize_expression(fun, map);
             for arg in arguments {
                 monomorphize_expression(&mut arg.value, map);
+            }
+        }
+        TypedExpr::BinOp { right, left, .. } => {
+            monomorphize_expression(right, map);
+            monomorphize_expression(left, map);
+        }
+        TypedExpr::List {
+            type_,
+            elements,
+            tail,
+            ..
+        } => {
+            *type_ = monomorphize_type(type_, map);
+            for element in elements {
+                monomorphize_expression(element, map);
+            }
+            if let Some(tail) = tail {
+                monomorphize_expression(&mut *tail, map);
+            }
+        }
+        TypedExpr::Tuple {
+            type_, elements, ..
+        } => {
+            *type_ = monomorphize_type(type_, map);
+            for element in elements {
+                monomorphize_expression(element, map);
+            }
+        }
+        TypedExpr::TupleIndex { type_, tuple, .. } => {
+            *type_ = monomorphize_type(type_, map);
+            monomorphize_expression(tuple, map);
+        }
+        TypedExpr::Case {
+            type_,
+            subjects,
+            clauses,
+            ..
+        } => {
+            *type_ = monomorphize_type(type_, map);
+            for subject in subjects {
+                monomorphize_expression(subject, map);
+            }
+            for clause in clauses {
+                monomorphize_expression(&mut clause.then, map);
+                for pattern in clause
+                    .pattern
+                    .iter_mut()
+                    .chain(clause.alternative_patterns.iter_mut().flatten())
+                {
+                    monomorphize_pattern(pattern, map);
+                }
+                if let Some(_guard) = &mut clause.guard {
+                    panic!()
+                }
             }
         }
         TypedExpr::Int { .. }
         | TypedExpr::Float { .. }
         | TypedExpr::String { .. }
-        | TypedExpr::BinOp { .. }
         | TypedExpr::NegateBool { .. }
         | TypedExpr::NegateInt { .. } => {}
-
         _ => todo!("Expression not supported: {:#?}", expression),
     }
 }
 
-fn monomorphize_pattern(pattern: &mut TypedPattern, map: &[(&Arc<Type>, &Arc<Type>)]) {
+fn monomorphize_pattern(pattern: &mut TypedPattern, map: &HashMap<u64, Arc<Type>>) {
     match pattern {
         Pattern::Int { .. }
         | Pattern::Float { .. }
@@ -2178,33 +2352,35 @@ fn monomorphize_pattern(pattern: &mut TypedPattern, map: &[(&Arc<Type>, &Arc<Typ
         | Pattern::BitArray { .. }
         | Pattern::StringPrefix { .. }
         | Pattern::BitArraySize(_) => {}
-        Pattern::Variable { type_, .. } => {
-            *type_ = monomorphize_type(&*type_, map);
-        }
-        Pattern::List {
-            type_, elements, ..
-        } => {
-            *type_ = monomorphize_type(&*type_, map);
-            for pattern in elements {
-                monomorphize_pattern(pattern, map);
-            }
+        Pattern::Variable { type_, .. }
+        | Pattern::Invalid { type_, .. }
+        | Pattern::Discard { type_, .. } => {
+            *type_ = monomorphize_type(type_, map);
         }
         Pattern::Constructor {
             type_, arguments, ..
         } => {
-            *type_ = monomorphize_type(&*type_, map);
+            *type_ = monomorphize_type(type_, map);
             for arg in arguments {
                 monomorphize_pattern(&mut arg.value, map);
             }
         }
-        Pattern::Invalid { type_, .. } => {
-            *type_ = monomorphize_type(&*type_, map);
-        }
         Pattern::Assign { pattern, .. } => {
             monomorphize_pattern(pattern, map);
         }
-        Pattern::Discard { type_, .. } => {
-            *type_ = monomorphize_type(&*type_, map);
+        Pattern::List {
+            type_,
+            elements,
+            tail,
+            ..
+        } => {
+            *type_ = monomorphize_type(type_, map);
+            for pattern in elements {
+                monomorphize_pattern(pattern, map);
+            }
+            if let Some(tail) = tail {
+                monomorphize_pattern(&mut tail.pattern, map);
+            }
         }
         Pattern::Tuple { elements, .. } => {
             for pattern in elements {
@@ -2214,13 +2390,20 @@ fn monomorphize_pattern(pattern: &mut TypedPattern, map: &[(&Arc<Type>, &Arc<Typ
     }
 }
 
-fn type_str(type_: &Arc<Type>, to: &mut String) {
+#[allow(unused)]
+fn type_str(type_: &Arc<Type>) -> String {
+    let mut s = String::new();
+    type_str_acc(type_, &mut s);
+    s
+}
+
+fn type_str_acc(type_: &Arc<Type>, to: &mut String) {
     match &**type_ {
         Type::Named {
             name, arguments, ..
         } => {
             let _ = write!(to, "{}", name);
-            if arguments.is_empty() {
+            if !arguments.is_empty() {
                 types_str(arguments, to);
             }
         }
@@ -2228,11 +2411,11 @@ fn type_str(type_: &Arc<Type>, to: &mut String) {
             let _ = write!(to, "fn");
             types_str(arguments, to);
             let _ = write!(to, "->");
-            type_str(return_, to);
+            type_str_acc(return_, to);
         }
         Type::Var { type_ } => {
             if let TypeVar::Link { type_ } = type_.borrow().deref() {
-                type_str(type_, to);
+                type_str_acc(type_, to);
             } else {
                 panic!("Cannot mangle TypeVar that is not a Link: {:#?}", type_);
             }
@@ -2240,7 +2423,7 @@ fn type_str(type_: &Arc<Type>, to: &mut String) {
         Type::Tuple { elements, .. } => {
             let _ = write!(to, "#(");
             for element in elements {
-                type_str(element, to);
+                type_str_acc(element, to);
             }
             let _ = write!(to, ")");
         }
@@ -2250,10 +2433,10 @@ fn type_str(type_: &Arc<Type>, to: &mut String) {
 fn types_str(types: &[Arc<Type>], to: &mut String) {
     let _ = write!(to, "(");
     if let Some((first, rest)) = types.split_first() {
-        type_str(first, to);
+        type_str_acc(first, to);
         for type_ in rest {
             let _ = write!(to, ",");
-            type_str(type_, to);
+            type_str_acc(type_, to);
         }
     }
     let _ = write!(to, ")");
@@ -2275,6 +2458,6 @@ fn mangle(name: &EcoString, params: &[Arc<Type>], return_: &Arc<Type>) -> EcoStr
     let mut name = String::from(name);
     types_str(params, &mut name);
     let _ = write!(&mut name, "->");
-    type_str(return_, &mut name);
+    type_str_acc(return_, &mut name);
     name.into()
 }
