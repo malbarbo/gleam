@@ -693,8 +693,6 @@ impl<'a> Generator<'a> {
                         .else_()
                           .expression(self, locals, scope, right)
                         .end(),
-                    BinOp::Eq if left.type_().is_bool() => instructions.bool_eq(),
-                    BinOp::NotEq if left.type_().is_bool() => instructions.bool_ne(),
                     // Int
                     BinOp::AddInt => instructions.int_add(),
                     BinOp::SubInt => instructions.int_sub(),
@@ -706,8 +704,6 @@ impl<'a> Generator<'a> {
                     BinOp::LtEqInt => instructions.int_le(),
                     BinOp::GtInt => instructions.int_gt(),
                     BinOp::GtEqInt => instructions.int_ge(),
-                    BinOp::Eq if left.type_().is_int() => instructions.int_eq(),
-                    BinOp::NotEq if left.type_().is_int() => instructions.int_ne(),
                     // Float
                     BinOp::AddFloat => instructions.float_add(),
                     BinOp::SubFloat => instructions.float_sub(),
@@ -718,45 +714,20 @@ impl<'a> Generator<'a> {
                     BinOp::LtEqFloat => instructions.float_le(),
                     BinOp::GtFloat => instructions.float_gt(),
                     BinOp::GtEqFloat => instructions.float_ge(),
-                    BinOp::Eq if left.type_().is_float() => instructions.float_eq(),
-                    BinOp::NotEq if left.type_().is_float() => instructions.float_ne(),
                     // String
                     BinOp::Concatenate => {
                         let concat = self.function_string_concat();
                         instructions.call(concat)
                     }
-                    BinOp::Eq | BinOp::NotEq if left.type_().is_string() => {
-                        let eq = self.function_string_eq();
-                        let _ = instructions.call(eq);
+                    // Eq
+                    BinOp::Eq | BinOp::NotEq => {
+                        let eq = self.function_eq(&left.type_());
+                        let _ = instructions.eq(eq);
                         if let BinOp::NotEq = name {
                             let _ = instructions.bool_neg();
                         }
                         instructions
                     }
-                    // List
-                    BinOp::Eq | BinOp::NotEq if left.type_().is_list() => {
-                        // FIXME: remove unwrap when if let guard stabilize
-                        // https://github.com/rust-lang/rust/issues/51114
-                        let eq = self.function_list_eq(&left.type_().list_type().unwrap());
-                        let _ = instructions.call(eq);
-                        if let BinOp::NotEq = name {
-                            let _ = instructions.bool_neg();
-                        }
-                        instructions
-                    }
-                    // Tuple
-                    BinOp::Eq | BinOp::NotEq if left.type_().is_tuple() => {
-                        // FIXME: remove unwrap when if let guard stabilize
-                        // https://github.com/rust-lang/rust/issues/51114
-                        let eq = self.function_tuple_eq(left.type_().tuple_types().unwrap());
-                        let _ = instructions.call(eq);
-                        if let BinOp::NotEq = name {
-                            let _ = instructions.bool_neg();
-                        }
-                        instructions
-                    }
-                    // FIXME: add function eq
-                    _ => todo!("Expression not supported: {:#?}", expression),
                 };
             }
             TypedExpr::NegateInt { value, .. } => {
@@ -1246,7 +1217,7 @@ impl<'a> Generator<'a> {
         } else if let Some(types) = type_.tuple_types() {
             Eq::Call(self.function_tuple_eq(types))
         } else {
-            panic!();
+            todo!("Eq: {:#?}", type_);
         }
     }
 
