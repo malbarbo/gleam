@@ -578,7 +578,19 @@ impl<'a> Generator<'a> {
             Statement::Assignment(assignment) => {
                 scope = self.assignment(locals, scope, instructions, assignment);
             }
-            _ => todo!("Statement not supported: {:#?}", statement),
+            Statement::Assert(assert) => {
+                assert!(assert.value.type_().is_bool());
+                // FIXME: show message
+                #[rustfmt::skip]
+                let _ = instructions
+                    .expression(self, locals, scope.clone(), &assert.value)
+                    .if_(BlockType::Result(self.bool_.val_type()))
+                      .bool_const(true)
+                    .else_()
+                      .unreachable()
+                    .end();
+            }
+            Statement::Use(_) => todo!("Statement not supported: {:#?}", statement),
         }
         scope
     }
@@ -1886,7 +1898,13 @@ impl Locals {
         match statement {
             Statement::Expression(expression) => self.expression(generator, expression),
             Statement::Assignment(assignment) => self.assignment(generator, assignment),
-            _ => todo!("Statement not supported: {:#?}", statement),
+            Statement::Assert(assert) => {
+                self.expression(generator, &assert.value);
+                if let Some(message) = &assert.message {
+                    self.expression(generator, message);
+                }
+            }
+            Statement::Use(_) => todo!("Statement not supported: {:#?}", statement),
         }
     }
 
@@ -2099,7 +2117,13 @@ fn monomorphize_statement(statement: &mut TypedStatement, map: &[(&Arc<Type>, &A
             }
             monomorphize_pattern(&mut assignment.pattern, map);
         }
-        _ => todo!("Statement not supported: {:#?}", statement),
+        Statement::Assert(assert) => {
+            monomorphize_expression(&mut assert.value, map);
+            if let Some(message) = &mut assert.message {
+                monomorphize_expression(message, map);
+            }
+        }
+        Statement::Use(_) => todo!("Statement not supported: {:#?}", statement),
     }
 }
 
