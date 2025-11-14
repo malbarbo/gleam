@@ -1723,6 +1723,7 @@ impl FloatType {
 
 impl<'a> ExtendedInstructionSink<'a> {
     fn float_const(&mut self, value: &str) -> &mut Self {
+        let value = value.replace("_", "");
         let _ = self
             .instructions
             .f64_const(value.parse::<f64>().unwrap().into());
