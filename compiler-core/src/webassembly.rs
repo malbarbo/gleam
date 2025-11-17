@@ -637,11 +637,6 @@ impl<'a> Generator<'a> {
                 ..
             } => {
                 let item_type = type_.list_type().unwrap();
-                if let Some(id) = get_unbound_or_generic_id(&item_type) {
-                    assert!(elements.is_empty() && tail.is_none());
-                    monomorphize_type_var(&item_type, &HashMap::from_iter([(id, type_::int())]));
-                }
-                assert!(!is_generic_type(type_));
                 let type_index = self.list_type(&item_type);
                 if let Some(rest) = tail {
                     let _ = instructions.expression(self, locals, scope.clone(), rest);
@@ -756,12 +751,14 @@ impl<'a> Generator<'a> {
                 arguments,
                 ..
             } => {
-                // FIXME: function must be evaluated first
                 let args_types = arguments.iter().map(|arg| arg.value.type_().clone());
                 let args = arguments.iter().map(|arg| &arg.value);
+                let index = locals.get(&fun.location());
                 let _ = instructions
-                    .expressions(self, locals, scope.clone(), args)
-                    .expression(self, locals, scope, fun)
+                    .expression(self, locals, scope.clone(), fun)
+                    .local_set(index)
+                    .expressions(self, locals, scope, args)
+                    .local_get(index)
                     .call_ref(self.function_type(args_types, Some(type_.clone())));
             }
             TypedExpr::Fn {
@@ -2211,8 +2208,9 @@ impl Locals {
                 self.statements(generator, statements);
             }
             TypedExpr::Call { fun, arguments, .. } => {
-                self.expression(generator, fun);
                 self.expressions(generator, arguments.iter().map(|arg| &arg.value));
+                self.expression(generator, fun);
+                self.insert(generator, &fun.location(), &fun.type_());
             }
             TypedExpr::NegateInt { value, .. } | TypedExpr::NegateBool { value, .. } => {
                 self.expression(generator, value);
@@ -2366,6 +2364,12 @@ impl Locals {
     fn insert(&mut self, generator: &mut Generator<'_>, location: &SrcSpan, type_: &Arc<Type>) {
         let index = self.locals.len() as u32 + self.skip;
         let _ = self.locals.insert(*location, index);
+        // Some local variable can still be unbound or generic,
+        // like [], None, etc, so we choose arbitrarily to monormorphize
+        // the types to int. The locals are determined before code generation,
+        // so we choose to do the monomorphization here to avoid doing a
+        // another complete pass in the ast before the code generation.
+        set_ubound_or_generic(type_, &type_::int());
         self.val_types.push(generator.val_type(type_));
     }
 
@@ -2685,20 +2689,31 @@ fn get_unbound_or_generic_id(type_: &Arc<Type>) -> Option<u64> {
     }
 }
 
-fn monomorphize_type_var(old: &Arc<Type>, map: &HashMap<u64, Arc<Type>>) {
-    match &**old {
+fn set_ubound_or_generic(old: &Arc<Type>, new: &Arc<Type>) {
+    match old.as_ref() {
         Type::Var { type_ } => {
-            let id = {
-                match &*type_.borrow() {
-                    TypeVar::Unbound { id } | TypeVar::Generic { id } => *id,
-                    TypeVar::Link { type_ } => return monomorphize_type_var(type_, map),
-                }
-            };
-            *type_.borrow_mut() = TypeVar::Link {
-                type_: map.get(&id).unwrap().clone(),
+            if let TypeVar::Link { type_ } = &*type_.borrow() {
+                set_ubound_or_generic(&type_, new);
+            } else {
+                *type_.borrow_mut() = TypeVar::Link { type_: new.clone() };
             };
         }
-        _ => panic!("Type is not var:\n{:#?}", old),
+        Type::Named { arguments, .. } => {
+            for argument in arguments {
+                set_ubound_or_generic(argument, new);
+            }
+        }
+        Type::Fn { arguments, return_ } => {
+            for argument in arguments {
+                set_ubound_or_generic(argument, new);
+            }
+            set_ubound_or_generic(return_, new);
+        }
+        Type::Tuple { elements } => {
+            for element in elements {
+                set_ubound_or_generic(element, new);
+            }
+        }
     }
 }
 
