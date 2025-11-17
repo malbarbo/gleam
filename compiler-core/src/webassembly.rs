@@ -1,5 +1,7 @@
 #![allow(clippy::todo, clippy::unwrap_used)]
-use std::{cell::RefCell, collections::HashMap, fmt::Write, iter, ops::Deref, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell, collections::HashMap, fmt::Write, iter, ops::Deref, ptr, rc::Rc, sync::Arc,
+};
 
 use ecow::EcoString;
 use num_bigint::BigInt;
@@ -11,9 +13,10 @@ use wasm_encoder::{
 
 use crate::{
     ast::{
-        AssignmentKind, BinOp, ClauseGuard, Constant, Definition, OperatorKind, Pattern, SrcSpan,
-        Statement, TypedArg, TypedAssignment, TypedClause, TypedClauseGuard, TypedConstant,
-        TypedExpr, TypedFunction, TypedModule, TypedModuleConstant, TypedPattern, TypedStatement,
+        AssignmentKind, BinOp, ClauseGuard, Constant, Definition, OperatorKind, Pattern, Statement,
+        TypedArg, TypedAssignment, TypedClause, TypedClauseGuard, TypedConstant, TypedExpr,
+        TypedFunction, TypedModule, TypedModuleConstant, TypedPattern, TypedPipelineAssignment,
+        TypedStatement,
     },
     line_numbers::LineNumbers,
     type_::{self, Type, TypeVar},
@@ -692,8 +695,10 @@ impl<'a> Generator<'a> {
                     BinOp::AddInt => instructions.int_add(),
                     BinOp::SubInt => instructions.int_sub(),
                     BinOp::MultInt => instructions.int_mul(),
-                    BinOp::DivInt => instructions
-                        .int_div(locals.get(&left.location()), locals.get(&right.location())),
+                    BinOp::DivInt => {
+                        let (left, right) = locals.for_div(left, right);
+                        instructions.int_div(left, right)
+                    }
                     BinOp::RemainderInt => instructions.int_rem(),
                     BinOp::LtInt => instructions.int_lt(),
                     BinOp::LtEqInt => instructions.int_le(),
@@ -703,8 +708,10 @@ impl<'a> Generator<'a> {
                     BinOp::AddFloat => instructions.float_add(),
                     BinOp::SubFloat => instructions.float_sub(),
                     BinOp::MultFloat => instructions.float_mul(),
-                    BinOp::DivFloat => instructions
-                        .float_div(locals.get(&left.location()), locals.get(&right.location())),
+                    BinOp::DivFloat => {
+                        let (left, right) = locals.for_div(left, right);
+                        instructions.float_div(left, right)
+                    }
                     BinOp::LtFloat => instructions.float_lt(),
                     BinOp::LtEqFloat => instructions.float_le(),
                     BinOp::GtFloat => instructions.float_gt(),
@@ -739,6 +746,27 @@ impl<'a> Generator<'a> {
             TypedExpr::Block { statements, .. } => {
                 self.statements(instructions, scope, locals, statements);
             }
+            TypedExpr::Pipeline {
+                first_value,
+                assignments,
+                finally,
+                ..
+            } => {
+                let mut scope = scope;
+                let first_index = locals.for_pipeline_assignment(first_value);
+                let _ = instructions
+                    .expression(self, locals, scope.clone(), &first_value.value)
+                    .local_set(first_index);
+                scope = scope.insert_local(first_value.name.clone(), first_index);
+                for (assignment, _) in assignments {
+                    let assign_index = locals.for_pipeline_assignment(assignment);
+                    let _ = instructions
+                        .expression(self, locals, scope.clone(), &assignment.value)
+                        .local_set(assign_index);
+                    scope = scope.insert_local(assignment.name.clone(), assign_index);
+                }
+                let _ = instructions.expression(self, locals, scope, finally);
+            }
             TypedExpr::Var { name, .. } if is_bool_const(name, &expression.type_()) => {
                 let _ = instructions.bool_const(name == TRUE);
             }
@@ -753,7 +781,7 @@ impl<'a> Generator<'a> {
             } => {
                 let args_types = arguments.iter().map(|arg| arg.value.type_().clone());
                 let args = arguments.iter().map(|arg| &arg.value);
-                let index = locals.get(&fun.location());
+                let index = locals.for_call(fun);
                 let _ = instructions
                     .expression(self, locals, scope.clone(), fun)
                     .local_set(index)
@@ -794,14 +822,12 @@ impl<'a> Generator<'a> {
         subjects: &[TypedExpr],
         clauses: &[TypedClause],
     ) {
-        let mut subjects_locals = vec![];
-        for subject in subjects {
-            let index = locals.get(&subject.location());
-            subjects_locals.push(index);
+        let subjects_locals = locals.for_subjects(subjects);
+        for (subject, index) in subjects.iter().zip(&subjects_locals) {
             // evaluate and save each subject
             let _ = instructions
                 .expression(self, locals, scope.clone(), subject)
-                .local_set(index);
+                .local_set(*index);
         }
         // block case
         let _ = instructions.block(BlockType::Result(self.val_type(type_)));
@@ -885,7 +911,7 @@ impl<'a> Generator<'a> {
         instructions: &mut ExtendedInstructionSink<'_>,
         assignment: &TypedAssignment,
     ) -> Scope {
-        let right = locals.get(&assignment.value.location());
+        let right = locals.for_assigment(assignment);
         let _ = instructions
             .expression(self, locals, scope.clone(), &assignment.value)
             .local_tee(right);
@@ -938,12 +964,12 @@ impl<'a> Generator<'a> {
             Pattern::List {
                 elements,
                 tail,
-                location,
                 type_,
+                ..
             } => {
                 let item_type = type_.list_type().unwrap();
                 let type_index = self.list_type(&item_type);
-                let right = locals.get(location);
+                let right = locals.for_pattern(pattern);
                 let _ = instructions
                     .local_set(right)
                     .block(BlockType::Result(self.bool_.val_type()));
@@ -985,9 +1011,9 @@ impl<'a> Generator<'a> {
                 }
                 let _ = instructions.bool_const(true).end();
             }
-            Pattern::Tuple { location, elements } => {
+            Pattern::Tuple { elements, .. } => {
                 let type_index = self.tuple_type(elements.iter().map(|element| element.type_()));
-                let right = locals.get(location);
+                let right = locals.for_pattern(pattern);
                 let _ = instructions
                     .local_set(right)
                     .block(BlockType::Result(self.bool_.val_type()));
@@ -1008,8 +1034,8 @@ impl<'a> Generator<'a> {
             Pattern::Constructor { name, type_, .. } if is_bool_const(name, type_) => {
                 let _ = instructions.bool_const(name == TRUE).bool_eq();
             }
-            Pattern::Variable { name, location, .. } => {
-                let right = locals.get(location);
+            Pattern::Variable { name, .. } => {
+                let right = locals.for_pattern(pattern);
                 scope = scope.insert_local(name.clone(), right);
                 let _ = instructions.local_set(right).bool_const(true);
             }
@@ -1084,9 +1110,10 @@ impl<'a> Generator<'a> {
                     .int_rem();
             }
             ClauseGuard::DivInt { left, right, .. } => {
+                let (a, b) = locals.for_guard_div(left, right);
                 let _ = instructions
                     .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .int_div(locals.get(&left.location()), locals.get(&right.location()));
+                    .int_div(a, b);
             }
             ClauseGuard::GtInt { left, right, .. } => {
                 let _ = instructions
@@ -1135,9 +1162,10 @@ impl<'a> Generator<'a> {
                     .float_mul();
             }
             ClauseGuard::DivFloat { left, right, .. } => {
+                let (a, b) = locals.for_guard_div(left, right);
                 let _ = instructions
                     .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .float_div(locals.get(&left.location()), locals.get(&right.location()));
+                    .float_div(a, b);
             }
             ClauseGuard::GtFloat { left, right, .. } => {
                 let _ = instructions
@@ -2143,7 +2171,7 @@ impl Scope {
 #[derive(Debug)]
 struct Locals {
     skip: u32,
-    locals: HashMap<SrcSpan, u32>,
+    locals: HashMap<u64, u32>,
     val_types: Vec<ValType>,
 }
 
@@ -2156,6 +2184,80 @@ impl Locals {
         };
         locals.statements(generator, statements);
         locals
+    }
+
+    fn val_types(&self) -> Vec<(u32, ValType)> {
+        // FIXME: group locals by type
+        self.val_types.iter().map(|e| (1, *e)).collect()
+    }
+
+    fn insert_assignment(&mut self, generator: &mut Generator<'_>, assignment: &TypedAssignment) {
+        self._insert(generator, assignment, &assignment.type_());
+    }
+
+    fn for_assigment(&self, assignment: &TypedAssignment) -> u32 {
+        self._get(assignment)
+    }
+
+    fn insert_div(&mut self, generator: &mut Generator<'_>, left: &TypedExpr, right: &TypedExpr) {
+        self._insert(generator, left, &left.type_());
+        self._insert(generator, right, &right.type_());
+    }
+
+    fn for_div(&self, left: &TypedExpr, right: &TypedExpr) -> (u32, u32) {
+        (self._get(left), self._get(right))
+    }
+
+    fn insert_guard_div(
+        &mut self,
+        generator: &mut Generator<'_>,
+        left: &TypedClauseGuard,
+        right: &TypedClauseGuard,
+    ) {
+        self._insert(generator, left, &left.type_());
+        self._insert(generator, right, &right.type_());
+    }
+
+    fn for_guard_div(&self, left: &TypedClauseGuard, right: &TypedClauseGuard) -> (u32, u32) {
+        (self._get(left), self._get(right))
+    }
+
+    fn insert_call(&mut self, generator: &mut Generator<'_>, fun: &TypedExpr) {
+        self._insert(generator, fun, &fun.type_());
+    }
+
+    fn for_call(&self, fun: &TypedExpr) -> u32 {
+        self._get(fun)
+    }
+
+    fn insert_subjects(&mut self, generator: &mut Generator<'_>, subjects: &[TypedExpr]) {
+        for subject in subjects {
+            self._insert(generator, subject, &subject.type_());
+        }
+    }
+
+    fn for_subjects(&self, subjects: &[TypedExpr]) -> Vec<u32> {
+        subjects.iter().map(|subject| self._get(subject)).collect()
+    }
+
+    fn insert_pattern(&mut self, generator: &mut Generator<'_>, pattern: &TypedPattern) {
+        self._insert(generator, pattern, &pattern.type_());
+    }
+
+    fn for_pattern(&self, pattern: &TypedPattern) -> u32 {
+        self._get(pattern)
+    }
+
+    fn insert_pipeline_assignment(
+        &mut self,
+        generator: &mut Generator<'_>,
+        assignment: &TypedPipelineAssignment,
+    ) {
+        self._insert(generator, assignment, &assignment.type_());
+    }
+
+    fn for_pipeline_assignment(&self, assignment: &TypedPipelineAssignment) -> u32 {
+        self._get(assignment)
     }
 
     fn statements(&mut self, generator: &mut Generator<'_>, statements: &[TypedStatement]) {
@@ -2191,17 +2293,12 @@ impl Locals {
     fn expression(&mut self, generator: &mut Generator<'_>, expression: &TypedExpr) {
         match expression {
             TypedExpr::BinOp {
-                name,
-                left,
-                right,
-                type_,
-                ..
+                name, left, right, ..
             } => {
                 self.expression(generator, left);
                 self.expression(generator, right);
                 if matches!(name, BinOp::DivInt | BinOp::DivFloat) {
-                    self.insert(generator, &left.location(), type_);
-                    self.insert(generator, &right.location(), type_);
+                    self.insert_div(generator, left, right);
                 }
             }
             TypedExpr::Block { statements, .. } => {
@@ -2210,7 +2307,21 @@ impl Locals {
             TypedExpr::Call { fun, arguments, .. } => {
                 self.expressions(generator, arguments.iter().map(|arg| &arg.value));
                 self.expression(generator, fun);
-                self.insert(generator, &fun.location(), &fun.type_());
+                self.insert_call(generator, fun);
+            }
+            TypedExpr::Pipeline {
+                first_value,
+                assignments,
+                finally,
+                ..
+            } => {
+                self.expression(generator, &first_value.value);
+                self.insert_pipeline_assignment(generator, first_value);
+                for (assignment, _) in assignments {
+                    self.expression(generator, &assignment.value);
+                    self.insert_pipeline_assignment(generator, assignment);
+                }
+                self.expression(generator, finally);
             }
             TypedExpr::NegateInt { value, .. } | TypedExpr::NegateBool { value, .. } => {
                 self.expression(generator, value);
@@ -2235,9 +2346,7 @@ impl Locals {
             TypedExpr::Case {
                 clauses, subjects, ..
             } => {
-                for subject in subjects {
-                    self.insert(generator, &subject.location(), &subject.type_());
-                }
+                self.insert_subjects(generator, subjects);
                 self.expressions(generator, subjects);
                 for clause in clauses {
                     self.patterns(generator, &clause.pattern);
@@ -2288,8 +2397,7 @@ impl Locals {
             ClauseGuard::DivInt { left, right, .. } | ClauseGuard::DivFloat { left, right, .. } => {
                 self.guard(generator, left);
                 self.guard(generator, right);
-                self.insert(generator, &left.location(), &left.type_());
-                self.insert(generator, &right.location(), &left.type_());
+                self.insert_guard_div(generator, left, right);
             }
             ClauseGuard::Not { expression, .. } => self.guard(generator, expression),
             ClauseGuard::Var { .. } => {}
@@ -2303,11 +2411,7 @@ impl Locals {
     }
 
     fn assignment(&mut self, generator: &mut Generator<'_>, assignment: &TypedAssignment) {
-        self.insert(
-            generator,
-            &assignment.value.location(),
-            &assignment.value.type_(),
-        );
+        self.insert_assignment(generator, assignment);
         self.expression(generator, &assignment.value);
         match &assignment.kind {
             AssignmentKind::Let => {
@@ -2334,7 +2438,7 @@ impl Locals {
     }
 
     fn pattern(&mut self, generator: &mut Generator<'_>, pattern: &TypedPattern) {
-        self.insert(generator, &pattern.location(), &pattern.type_());
+        self.insert_pattern(generator, pattern);
         match pattern {
             Pattern::Int { .. }
             | Pattern::Float { .. }
@@ -2361,9 +2465,11 @@ impl Locals {
         }
     }
 
-    fn insert(&mut self, generator: &mut Generator<'_>, location: &SrcSpan, type_: &Arc<Type>) {
+    fn _insert(&mut self, generator: &mut Generator<'_>, key: impl LocalHash, type_: &Arc<Type>) {
         let index = self.locals.len() as u32 + self.skip;
-        let _ = self.locals.insert(*location, index);
+        if self.locals.insert(key.hash(), index).is_some() {
+            panic!("Locals collision.");
+        }
         // Some local variable can still be unbound or generic,
         // like [], None, etc, so we choose arbitrarily to monormorphize
         // the types to int. The locals are determined before code generation,
@@ -2373,13 +2479,24 @@ impl Locals {
         self.val_types.push(generator.val_type(type_));
     }
 
-    fn get(&self, location: &SrcSpan) -> u32 {
-        *self.locals.get(location).unwrap()
+    fn _get(&self, key: impl LocalHash) -> u32 {
+        let id = key.hash();
+        *self
+            .locals
+            .get(&id)
+            .unwrap_or_else(|| panic!("Expect local with {id}."))
     }
+}
 
-    fn val_types(&self) -> Vec<(u32, ValType)> {
-        // FIXME: group locals by type
-        self.val_types.iter().map(|e| (1, *e)).collect()
+trait LocalHash {
+    fn hash(&self) -> u64;
+}
+
+impl<T> LocalHash for &T {
+    fn hash(&self) -> u64 {
+        // We started using location as key, but we got collision on generated
+        // assigments. Let's hope we do not get collisions with this.
+        ptr::from_ref(*self) as u64
     }
 }
 
@@ -2693,7 +2810,7 @@ fn set_ubound_or_generic(old: &Arc<Type>, new: &Arc<Type>) {
     match old.as_ref() {
         Type::Var { type_ } => {
             if let TypeVar::Link { type_ } = &*type_.borrow() {
-                set_ubound_or_generic(&type_, new);
+                set_ubound_or_generic(type_, new);
             } else {
                 *type_.borrow_mut() = TypeVar::Link { type_: new.clone() };
             };
