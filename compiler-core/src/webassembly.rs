@@ -607,7 +607,9 @@ impl<'a> Generator<'a> {
                       .unreachable()
                     .end();
             }
-            Statement::Use(_) => todo!("Statement not supported: {:#?}", statement),
+            Statement::Use(use_) => {
+                let _ = instructions.expression(self, locals, scope.clone(), &use_.call);
+            }
         }
         scope
     }
@@ -926,14 +928,11 @@ impl<'a> Generator<'a> {
                       .unreachable()
                     .end();
             }
-            AssignmentKind::Let => {
+            AssignmentKind::Let | AssignmentKind::Generated => {
                 let _ = instructions
                     .pattern(self, locals, &mut scope, &assignment.pattern)
                     .drop()
                     .local_get(right);
-            }
-            AssignmentKind::Generated => {
-                todo!("Generated Assignment not implemented: {:#?}", assignment)
             }
         }
         scope
@@ -2276,7 +2275,10 @@ impl Locals {
                     self.expression(generator, message);
                 }
             }
-            Statement::Use(_) => todo!("Statement not supported: {:#?}", statement),
+            Statement::Use(use_) => {
+                self.expression(generator, &use_.call);
+                // use_.assignments is not necessary because it is desugared in use._call
+            }
         }
     }
 
@@ -2414,7 +2416,7 @@ impl Locals {
         self.insert_assignment(generator, assignment);
         self.expression(generator, &assignment.value);
         match &assignment.kind {
-            AssignmentKind::Let => {
+            AssignmentKind::Let | AssignmentKind::Generated => {
                 self.pattern(generator, &assignment.pattern);
             }
             AssignmentKind::Assert { message, .. } => {
@@ -2423,7 +2425,6 @@ impl Locals {
                     self.expression(generator, message);
                 }
             }
-            AssignmentKind::Generated => todo!("Assignment not supported: {:#?}", assignment),
         }
     }
 
@@ -2645,7 +2646,9 @@ impl Monomorphizer {
                     self.expression(message);
                 }
             }
-            Statement::Use(_) => todo!("Statement not supported: {:#?}", statement),
+            Statement::Use(use_) => {
+                self.expression(&mut use_.call);
+            }
         }
     }
 
