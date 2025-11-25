@@ -1,8 +1,6 @@
 ---
 source: compiler-core/src/javascript/tests/numbers.rs
-assertion_line: 264
 expression: "\npub fn main() {\n  09_179.1\n}\n"
-snapshot_kind: text
 ---
 ----- SOURCE CODE
 
@@ -13,5 +11,5 @@ pub fn main() {
 
 ----- COMPILED JAVASCRIPT
 export function main() {
-  return 9_179.1;
+  return 9179.1;
 }

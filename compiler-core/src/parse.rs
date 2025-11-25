@@ -80,8 +80,10 @@ use ecow::EcoString;
 use error::{LexicalError, ParseError, ParseErrorType};
 use lexer::{LexResult, Spanned};
 use num_bigint::BigInt;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 pub use token::Token;
 use vec1::{Vec1, vec1};
@@ -174,6 +176,14 @@ pub fn parse_module(
         });
     }
 
+    for detached in parser.detached_doc_comments {
+        warnings.emit(Warning::DetachedDocComment {
+            path: path.clone(),
+            src: src.clone(),
+            location: detached,
+        });
+    }
+
     Ok(parsed)
 }
 
@@ -219,6 +229,7 @@ pub struct Parser<T: Iterator<Item = LexResult>> {
     tok1: Option<Spanned>,
     extra: ModuleExtra,
     doc_comments: VecDeque<(u32, EcoString)>,
+    detached_doc_comments: Vec<SrcSpan>,
 }
 impl<T> Parser<T>
 where
@@ -233,6 +244,7 @@ where
             tok1: None,
             extra: ModuleExtra::new(),
             doc_comments: VecDeque::new(),
+            detached_doc_comments: Vec::new(),
         };
         parser.advance();
         parser.advance();
@@ -520,11 +532,12 @@ where
                 }
             }
 
-            Some((start, Token::Float { value }, end)) => {
+            Some((start, Token::Float { value, float_value }, end)) => {
                 self.advance();
                 UntypedExpr::Float {
                     location: SrcSpan { start, end },
                     value,
+                    float_value,
                 }
             }
 
@@ -1280,22 +1293,14 @@ where
                         }
                     }
                 } else {
-                    match name.as_str() {
-                        "true" | "false" => {
-                            return parse_error(
-                                ParseErrorType::LowcaseBooleanPattern,
-                                SrcSpan { start, end },
-                            );
-                        }
-                        _ => Pattern::Variable {
-                            origin: VariableOrigin {
-                                syntax: VariableSyntax::Variable(name.clone()),
-                                declaration: position.to_declaration(),
-                            },
-                            location: SrcSpan { start, end },
-                            name,
-                            type_: (),
+                    Pattern::Variable {
+                        origin: VariableOrigin {
+                            syntax: VariableSyntax::Variable(name.clone()),
+                            declaration: position.to_declaration(),
                         },
+                        location: SrcSpan { start, end },
+                        name,
+                        type_: (),
                     }
                 }
             }
@@ -1404,11 +1409,12 @@ where
                     int_value,
                 }
             }
-            Some((start, Token::Float { value }, end)) => {
+            Some((start, Token::Float { value, float_value }, end)) => {
                 self.advance();
                 Pattern::Float {
                     location: SrcSpan { start, end },
                     value,
+                    float_value,
                 }
             }
             Some((start, Token::Hash, _)) => {
@@ -1606,11 +1612,18 @@ where
         match &patterns.first() {
             Some(lead) => {
                 let mut alternative_patterns = vec![];
-                loop {
-                    if self.maybe_one(&Token::Vbar).is_none() {
-                        break;
+                while let Some((vbar_start, vbar_end)) = self.maybe_one(&Token::Vbar) {
+                    let patterns = self.parse_patterns(PatternPosition::CaseClause)?;
+                    if patterns.is_empty() {
+                        return parse_error(
+                            ParseErrorType::ExpectedPattern,
+                            SrcSpan {
+                                start: vbar_start,
+                                end: vbar_end,
+                            },
+                        );
                     }
-                    alternative_patterns.push(self.parse_patterns(PatternPosition::CaseClause)?);
+                    alternative_patterns.push(patterns);
                 }
                 let guard = self.parse_case_clause_guard()?;
                 let (arr_s, arr_e) = self
@@ -3125,11 +3138,12 @@ where
                 }))
             }
 
-            Some((start, Token::Float { value }, end)) => {
+            Some((start, Token::Float { value, float_value }, end)) => {
                 self.advance();
                 Ok(Some(Constant::Float {
                     value,
                     location: SrcSpan { start, end },
+                    float_value,
                 }))
             }
 
@@ -4073,9 +4087,12 @@ functions are declared separately from types.";
             if *start >= until {
                 break;
             }
+
             if self.extra.has_comment_between(*start, until) {
                 // We ignore doc comments that come before a regular comment.
+                let location = SrcSpan::new(*start, start + line.len() as u32);
                 _ = self.doc_comments.pop_front();
+                self.detached_doc_comments.push(location);
                 continue;
             }
 
@@ -4724,6 +4741,82 @@ impl PatternPosition {
             PatternPosition::LetAssignment => VariableDeclaration::LetPattern,
             PatternPosition::CaseClause => VariableDeclaration::ClausePattern,
             PatternPosition::UsePattern => VariableDeclaration::UsePattern,
+        }
+    }
+}
+
+/// A thin f64 wrapper that does not permit NaN.
+/// This allows us to implement `Eq`, which require reflexivity.
+///
+/// Used for gleam float literals, which cannot be NaN.
+///
+/// While there is no syntax for "infinity", float literals might be too big and
+/// overflow into infinity. This is still allowed so we can parse big literal
+/// numbers and the error will be raised during the analysis phase.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LiteralFloatValue(f64);
+
+impl LiteralFloatValue {
+    pub const ONE: Self = LiteralFloatValue(1.0);
+    pub const ZERO: Self = LiteralFloatValue(0.0);
+
+    /// Parse from a string, returning `None` if the string
+    /// is not a valid f64 or the float is `NaN``
+    pub fn parse(value: &str) -> Option<Self> {
+        value
+            .replace("_", "")
+            .parse::<f64>()
+            .ok()
+            .filter(|float| !float.is_nan())
+            .map(LiteralFloatValue)
+    }
+
+    pub fn value(&self) -> f64 {
+        self.0
+    }
+}
+
+impl Eq for LiteralFloatValue {}
+
+impl Ord for LiteralFloatValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0
+            .partial_cmp(&other.0)
+            .expect("Only NaN comparisons should fail")
+    }
+}
+
+impl PartialOrd for LiteralFloatValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Hash for LiteralFloatValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state)
+    }
+}
+
+impl Serialize for LiteralFloatValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_f64(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for LiteralFloatValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = f64::deserialize(deserializer)?;
+        if value.is_nan() {
+            Err(serde::de::Error::custom("NaN is not allowed"))
+        } else {
+            Ok(LiteralFloatValue(value))
         }
     }
 }

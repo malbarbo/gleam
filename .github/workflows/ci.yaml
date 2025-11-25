@@ -62,7 +62,7 @@ jobs:
             cargo-tool: cross
             run-integration-tests: false # Cannot run aarch64 binaries on x86_64
           # macos>=14 runs exclusively on aarch64 and will thus fail to execute properly for x64
-          - os: macos-13 # intel
+          - os: macos-15-intel # intel
             target: x86_64-apple-darwin
             binary: x86_64
             cargo-tool: cargo
@@ -104,7 +104,7 @@ jobs:
           rebar3-version: "3"
 
       - name: Setup Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: "20"
 
@@ -319,7 +319,7 @@ jobs:
           toolchain: stable
           target: wasm32-unknown-unknown
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
 
@@ -400,7 +400,7 @@ jobs:
       - run: cargo build
 
       - name: Upload artifact (Ubuntu)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: gleam
           path: target/debug/gleam
@@ -430,7 +430,7 @@ jobs:
           rebar3-version: "3"
 
       - name: Download Gleam binary from previous job
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: gleam
           path: ./test

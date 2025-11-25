@@ -22,10 +22,9 @@ use wasm_encoder::{
 
 use crate::{
     ast::{
-        AssignmentKind, BinOp, ClauseGuard, Constant, Definition, OperatorKind, Pattern, Statement,
-        TypedArg, TypedAssignment, TypedClause, TypedClauseGuard, TypedConstant, TypedExpr,
-        TypedFunction, TypedModule, TypedModuleConstant, TypedPattern, TypedPipelineAssignment,
-        TypedStatement,
+        AssignmentKind, BinOp, ClauseGuard, Constant, OperatorKind, Pattern, Statement, TypedArg,
+        TypedAssignment, TypedClause, TypedClauseGuard, TypedConstant, TypedExpr, TypedFunction,
+        TypedModule, TypedModuleConstant, TypedPattern, TypedPipelineAssignment, TypedStatement,
     },
     line_numbers::LineNumbers,
     type_::{self, Type, TypeVar},
@@ -253,13 +252,7 @@ impl<'a> Generator<'a> {
 
     fn externals_wasm(&mut self) {
         let mut externals = Externals::new(self.int, self.float);
-        externals.functions(
-            self,
-            self.module.definitions.iter().filter_map(|def| match def {
-                Definition::Function(function) => Some(function),
-                _ => None,
-            }),
-        );
+        externals.functions(self, &self.module.definitions.functions);
 
         let module = prepare_wasm_module(BUILTINS_WASM, &externals.used);
 
@@ -388,24 +381,19 @@ impl<'a> Generator<'a> {
     }
 
     fn all_pub(&mut self) {
-        for definition in &self.module.definitions {
-            match definition {
-                Definition::ModuleConstant(module_constant) => {
-                    let _ = self.module_constant(module_constant);
-                }
-                Definition::Function(function) => {
-                    if !function.publicity.is_public()
-                        || is_generic_type(&function_type(function))
-                        || function.external_webassembly.is_some()
-                    {
-                        continue;
-                    }
-                    let id = self.function(function);
-                    if is_main_funtion(function) {
-                        self.main = Some(id.index)
-                    }
-                }
-                _ => todo!("Definition not supported: {:#?}", definition),
+        for module_constant in &self.module.definitions.constants {
+            let _ = self.module_constant(module_constant);
+        }
+        for function in &self.module.definitions.functions {
+            if !function.publicity.is_public()
+                || is_generic_type(&function_type(function))
+                || function.external_webassembly.is_some()
+            {
+                continue;
+            }
+            let id = self.function(function);
+            if is_main_funtion(function) {
+                self.main = Some(id.index)
             }
         }
     }
@@ -639,43 +627,41 @@ impl<'a> Generator<'a> {
         if is_generic_type(required_type) {
             panic!("Required type is generic:\n{:#?}", required_type);
         }
-        for definition in &self.module.definitions {
-            match definition {
-                Definition::ModuleConstant(module_constant) if &module_constant.name == name => {
-                    assert!(required_type.same_as(&module_constant.type_));
-                    return self.module_constant(module_constant);
-                }
-                Definition::Function(function)
-                    if function.name.as_ref().map(|s| &s.1) == Some(name) =>
-                {
-                    let declared_type = function_type(function);
-                    return if is_generic_type(&declared_type) {
-                        match find_global(&mangle(name, required_type), &self.globals) {
-                            Some(id) => id, // the function has already been monomorphized
-                            None => {
-                                let function = Monomorphizer::new(&declared_type, required_type)
-                                    .function(function);
-                                if is_generic_type(&function_type(&function))
-                                    || function
-                                        .body
-                                        .iter()
-                                        .any(|statement| is_generic_type(&statement.type_()))
-                                {
-                                    panic!("Could not monomorphize:\n{:#?}", function);
-                                }
-                                self.function(&function)
-                            }
-                        }
-                    } else {
-                        if let Some((_, fname, _)) = &function.external_webassembly {
-                            return find_global(&fname.into(), &self.globals).unwrap();
-                        }
-                        self.function(function)
-                    };
-                }
-                _ => {}
+        for module_constant in &self.module.definitions.constants {
+            if &module_constant.name == name {
+                assert!(required_type.same_as(&module_constant.type_));
+                return self.module_constant(module_constant);
             }
         }
+        for function in &self.module.definitions.functions {
+            if function.name.as_ref().map(|s| &s.1) == Some(name) {
+                let declared_type = function_type(function);
+                return if is_generic_type(&declared_type) {
+                    match find_global(&mangle(name, required_type), &self.globals) {
+                        Some(id) => id, // the function has already been monomorphized
+                        None => {
+                            let function = Monomorphizer::new(&declared_type, required_type)
+                                .function(function);
+                            if is_generic_type(&function_type(&function))
+                                || function
+                                    .body
+                                    .iter()
+                                    .any(|statement| is_generic_type(&statement.type_()))
+                            {
+                                panic!("Could not monomorphize:\n{:#?}", function);
+                            }
+                            self.function(&function)
+                        }
+                    }
+                } else {
+                    if let Some((_, fname, _)) = &function.external_webassembly {
+                        return find_global(&fname.into(), &self.globals).unwrap();
+                    }
+                    self.function(function)
+                };
+            }
+        }
+
         todo!(
             "Name not found: {:?}. Are you using closures? They are not supporte yet.",
             name

@@ -472,7 +472,7 @@ impl Error {
 
             ResolutionError::ErrorChoosingVersion { package, source } => {
                 Self::DependencyResolutionError(format!(
-                    "An error occured while chosing the version of {package}: {source}",
+                    "An error occurred while choosing the version of {package}: {source}",
                 ))
             }
 
@@ -1558,12 +1558,12 @@ The error from the encryption library was:
             } => error
                 .iter()
                 .map(|error| match error {
-                    TypeError::ErlangFloatUnsafe { location, .. } => Diagnostic {
-                        title: "Float is outside Erlang's floating point range".into(),
+                    TypeError::LiteralFloatOutOfRange { location, .. } => Diagnostic {
+                        title: "Float outside of valid range".into(),
                         text: wrap(
                             "This float value is too large to be represented by \
-Erlang's floating point type. To avoid this error float values must be in the range \
--1.7976931348623157e308 - 1.7976931348623157e308.",
+a floating point type: float values must be in the range -1.7976931348623157e308 \
+- 1.7976931348623157e308.",
                         ),
                         hint: None,
                         level: Level::Error,
@@ -2713,8 +2713,18 @@ to variables, pass them to functions, or anything else that you would do with a 
                         expected,
                         given,
                     } => {
+                        let subject = if *expected == 1 {
+                            "subject"
+                        } else {
+                            "subjects"
+                        };
+                        let pattern = if *expected == 1 {
+                            "pattern"
+                        } else {
+                            "patterns"
+                        };
                         let text = wrap_format!(
-                            "This case expression has {expected} subjects, \
+                            "This case expression has {expected} {subject}, \
 but this pattern matches {given}.
 Each clause must have a pattern for every subject value.",
                         );
@@ -2726,7 +2736,7 @@ Each clause must have a pattern for every subject value.",
                             location: Some(Location {
                                 label: Label {
                                     text: Some(format!(
-                                        "Expected {expected} patterns, got {given}"
+                                        "Expected {expected} {pattern}, got {given}"
                                     )),
                                     span: *location,
                                 },
@@ -4020,6 +4030,22 @@ with no constructors."
                         location: Some(Location {
                             label: Label {
                                 text: None,
+                                span: *location,
+                            },
+                            path: path.clone(),
+                            src: src.clone(),
+                            extra_labels: vec![],
+                        }),
+                    },
+
+                    TypeError::LowercaseBoolPattern { location } => Diagnostic {
+                        title: "Lowercase bool pattern".to_string(),
+                        text: "See: https://tour.gleam.run/basics/bools/".into(),
+                        hint: Some("In Gleam bool literals are `True` and `False`.".into()),
+                        level: Level::Error,
+                        location: Some(Location {
+                            label: Label {
+                                text: Some("This is not a bool".into()),
                                 span: *location,
                             },
                             path: path.clone(),

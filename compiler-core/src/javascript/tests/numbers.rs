@@ -1,4 +1,4 @@
-use crate::assert_js;
+use crate::{assert_js, assert_js_module_error};
 
 #[test]
 fn int_literals() {
@@ -41,9 +41,7 @@ pub fn go() {
   0.01e-0
   -10.01e-1
   -10.01e-0
-  100.001e523
   -100.001e-523
-  100.001e123_456_789
   -100.001e-123_456_789
 }
 "#,
@@ -426,6 +424,56 @@ fn zero_after_underscore_after_binary_prefix() {
         "
 pub fn main() {
   0b_0_1_0_1
+}
+"
+    );
+}
+
+#[test]
+fn underscore_after_decimal_point() {
+    assert_js!(
+        "
+pub fn main() {
+  0._1
+}
+"
+    );
+}
+
+#[test]
+fn underscore_after_decimal_point_case_statement() {
+    assert_js!(
+        "
+pub fn main(x) {
+  case x {
+    0._1 -> \"bar\"
+    _ -> \"foo\"
+  }
+}
+"
+    );
+}
+
+#[test]
+fn inf_float_case_statement() {
+    assert_js_module_error!(
+        "
+pub fn main(x) {
+  case x {
+  100.001e123_456_789 -> \"bar\"
+    _ -> \"foo\"
+  }
+}
+"
+    );
+}
+
+#[test]
+fn division_inf_by_inf_float() {
+    assert_js_module_error!(
+        "
+pub fn main(x) {
+  -100.001e123_456_789 /. 100.001e123_456_789
 }
 "
     );

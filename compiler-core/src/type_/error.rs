@@ -6,6 +6,7 @@ use crate::{
     ast::{BinOp, BitArraySegmentTruncation, Layer, SrcSpan, TodoKind},
     build::Target,
     exhaustiveness::ImpossibleBitArraySegmentPattern,
+    parse::LiteralFloatValue,
     type_::{Type, expression::ComparisonOutcome},
 };
 
@@ -576,13 +577,16 @@ pub enum Error {
         location: SrcSpan,
     },
 
-    /// Occers when any varient of a custom type is deprecated while
+    /// Occurs when any varient of a custom type is deprecated while
     /// the custom type itself is deprecated
     DeprecatedVariantOnDeprecatedType {
         location: SrcSpan,
     },
 
-    ErlangFloatUnsafe {
+    /// Occurs when a literal floating point has a value that is outside of the
+    /// range representable by floats: -1.7976931348623157e308 to
+    /// 1.7976931348623157e308.
+    LiteralFloatOutOfRange {
         location: SrcSpan,
     },
 
@@ -669,6 +673,10 @@ pub enum Error {
     /// types, types with no constructors.
     ///
     ExternalTypeWithConstructors {
+        location: SrcSpan,
+    },
+
+    LowercaseBoolPattern {
         location: SrcSpan,
     },
 }
@@ -1301,7 +1309,7 @@ impl Error {
             | Error::AllVariantsDeprecated { location }
             | Error::EchoWithNoFollowingExpression { location }
             | Error::DeprecatedVariantOnDeprecatedType { location }
-            | Error::ErlangFloatUnsafe { location }
+            | Error::LiteralFloatOutOfRange { location }
             | Error::FloatOperatorOnInts { location, .. }
             | Error::IntOperatorOnFloats { location, .. }
             | Error::StringConcatenationWithAddInt { location }
@@ -1309,7 +1317,8 @@ impl Error {
             | Error::NonUtf8StringAssignmentInBitArray { location }
             | Error::PrivateOpaqueType { location }
             | Error::SrcImportingDevDependency { location, .. }
-            | Error::ExternalTypeWithConstructors { location, .. } => location.start,
+            | Error::ExternalTypeWithConstructors { location, .. }
+            | Error::LowercaseBoolPattern { location } => location.start,
             Error::UnknownLabels { unknown, .. } => {
                 unknown.iter().map(|(_, s)| s.start).min().unwrap_or(0)
             }
@@ -1977,20 +1986,12 @@ pub fn check_javascript_int_safety(int_value: &BigInt, location: SrcSpan, proble
 /// -1.7976931348623157e308 to 1.7976931348623157e308 which is the allowed range for
 /// Erlang's floating point numbers
 ///
-pub fn check_erlang_float_safety(
-    string_value: &EcoString,
-    location: SrcSpan,
-    problems: &mut Problems,
-) {
-    let erl_min_float = -1.7976931348623157e308f64;
-    let erl_max_float = 1.7976931348623157e308f64;
+pub fn check_float_safety(value: LiteralFloatValue, location: SrcSpan, problems: &mut Problems) {
+    let min_float = -1.7976931348623157e308f64;
+    let max_float = 1.7976931348623157e308f64;
 
-    let float_value: f64 = string_value
-        .replace("_", "")
-        .parse()
-        .expect("Unable to parse string to floating point value");
-
-    if float_value < erl_min_float || float_value > erl_max_float {
-        problems.error(Error::ErlangFloatUnsafe { location });
+    let float_value = value.value();
+    if float_value < min_float || float_value > max_float {
+        problems.error(Error::LiteralFloatOutOfRange { location });
     }
 }
