@@ -2589,7 +2589,9 @@ impl Monomorphizer {
 
         let type_ = function_type(&function);
         assert!(!is_generic_type(&type_));
-        function.name.as_mut().unwrap().1 = mangle(&function.name.as_ref().unwrap().1, &type_);
+
+        let name = mangle(&function_name(&function), &type_);
+        set_function_name(&mut function, name);
 
         function
     }
@@ -2891,14 +2893,30 @@ fn types_str(types: &[Arc<Type>], to: &mut String) {
 
 fn function_type(function: &TypedFunction) -> Arc<Type> {
     Type::Fn {
-        arguments: function
-            .arguments
-            .iter()
-            .map(|arg| arg.type_.clone())
-            .collect(),
-        return_: function.return_type.clone(),
+        arguments: function_params_types(function),
+        return_: function_return_type(function),
     }
     .into()
+}
+
+fn function_params_types(function: &TypedFunction) -> Vec<Arc<Type>> {
+    function
+        .arguments
+        .iter()
+        .map(|arg| arg.type_.clone())
+        .collect()
+}
+
+fn function_return_type(function: &TypedFunction) -> Arc<Type> {
+    function.return_type.clone()
+}
+
+fn function_name(function: &TypedFunction) -> &EcoString {
+    &function.name.as_ref().unwrap().1
+}
+
+fn set_function_name(function: &mut TypedFunction, name: EcoString) {
+    function.name.as_mut().unwrap().1 = name;
 }
 
 fn mangle(name: &EcoString, type_: &Arc<Type>) -> EcoString {
