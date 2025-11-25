@@ -131,6 +131,13 @@ impl Type {
         }
     }
 
+    pub fn is_named(&self) -> bool {
+        match self {
+            Self::Named { .. } => true,
+            _ => false,
+        }
+    }
+
     pub fn result_ok_type(&self) -> Option<Arc<Type>> {
         match self {
             Self::Named {
@@ -1401,10 +1408,13 @@ pub struct ValueConstructor {
     pub type_: Arc<Type>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub enum Deprecation {
+    #[default]
     NotDeprecated,
-    Deprecated { message: EcoString },
+    Deprecated {
+        message: EcoString,
+    },
 }
 
 impl Deprecation {
@@ -1414,12 +1424,6 @@ impl Deprecation {
     #[must_use]
     pub fn is_deprecated(&self) -> bool {
         matches!(self, Self::Deprecated { .. })
-    }
-}
-
-impl Default for Deprecation {
-    fn default() -> Self {
-        Self::NotDeprecated
     }
 }
 
@@ -1554,46 +1558,41 @@ fn assert_no_labelled_arguments<A>(arguments: &[CallArg<A>]) -> Result<(), Error
 /// could cause naively-implemented type checking to diverge.
 /// While traversing the type tree.
 ///
-fn unify_unbound_type(type_: Arc<Type>, own_id: u64) -> Result<(), UnifyError> {
-    if let Type::Var { type_ } = type_.deref() {
-        let new_value = match type_.borrow().deref() {
-            TypeVar::Link { type_, .. } => return unify_unbound_type(type_.clone(), own_id),
+fn unify_unbound_type(type_: &Type, own_id: u64) -> Result<(), UnifyError> {
+    if let Type::Var { type_ } = type_ {
+        return match type_.borrow().deref() {
+            TypeVar::Link { type_, .. } => unify_unbound_type(type_, own_id),
 
             TypeVar::Unbound { id } => {
                 if id == &own_id {
-                    return Err(UnifyError::RecursiveType);
+                    Err(UnifyError::RecursiveType)
                 } else {
-                    Some(TypeVar::Unbound { id: *id })
+                    Ok(())
                 }
             }
 
-            TypeVar::Generic { .. } => return Ok(()),
+            TypeVar::Generic { .. } => Ok(()),
         };
-
-        if let Some(t) = new_value {
-            *type_.borrow_mut() = t;
-        }
-        return Ok(());
     }
 
-    match type_.deref() {
+    match type_ {
         Type::Named { arguments, .. } => {
             for argument in arguments {
-                unify_unbound_type(argument.clone(), own_id)?
+                unify_unbound_type(argument, own_id)?
             }
             Ok(())
         }
 
         Type::Fn { arguments, return_ } => {
             for argument in arguments {
-                unify_unbound_type(argument.clone(), own_id)?;
+                unify_unbound_type(argument, own_id)?;
             }
-            unify_unbound_type(return_.clone(), own_id)
+            unify_unbound_type(return_, own_id)
         }
 
         Type::Tuple { elements, .. } => {
             for element in elements {
-                unify_unbound_type(element.clone(), own_id)?
+                unify_unbound_type(element, own_id)?
             }
             Ok(())
         }

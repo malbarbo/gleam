@@ -22,7 +22,6 @@ use std::sync::Arc;
 
 pub struct PatternTyper<'a, 'b> {
     environment: &'a mut Environment<'b>,
-    implementations: &'a Implementations,
     current_function: &'a FunctionDefinition,
     hydrator: &'a Hydrator,
     mode: PatternMode,
@@ -98,7 +97,6 @@ enum PatternMode {
 impl<'a, 'b> PatternTyper<'a, 'b> {
     pub fn new(
         environment: &'a mut Environment<'b>,
-        implementations: &'a Implementations,
         current_function: &'a FunctionDefinition,
         hydrator: &'a Hydrator,
         problems: &'a mut Problems,
@@ -106,7 +104,6 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
     ) -> Self {
         Self {
             environment,
-            implementations,
             current_function,
             hydrator,
             mode: PatternMode::Initial,
@@ -266,7 +263,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
         location: &SrcSpan,
     ) -> Vec<TypedPattern> {
         self.mode = PatternMode::Alternative(vec![]);
-        let typed_multi = self.infer_multi_pattern(multi_pattern, subjects, location);
+        let typed_multi = self.infer_multi_pattern(multi_pattern, subjects);
 
         if self.error_encountered {
             return typed_multi;
@@ -300,12 +297,18 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
         &mut self,
         multi_pattern: UntypedMultiPattern,
         subjects: &[TypedExpr],
-        location: &SrcSpan,
     ) -> Vec<TypedPattern> {
         // If there are N subjects the multi-pattern is expected to be N patterns
         if subjects.len() != multi_pattern.len() {
+            let first = multi_pattern
+                .first()
+                .expect("multi-pattern to contain at least one pattern");
+            let last = multi_pattern
+                .last()
+                .expect("multi-pattern to contain at least one pattern");
+
             self.error(Error::IncorrectNumClausePatterns {
-                location: *location,
+                location: first.location().merge(&last.location()),
                 expected: subjects.len(),
                 given: multi_pattern.len(),
             });
@@ -608,16 +611,22 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                 location,
                 origin,
                 ..
-            } => {
-                self.insert_variable(&name, type_.clone(), location, origin.clone());
-
-                Pattern::Variable {
-                    type_,
-                    name,
-                    location,
-                    origin,
+            } => match name.as_str() {
+                "true" | "false" => {
+                    self.error(Error::LowercaseBoolPattern { location });
+                    Pattern::Invalid { location, type_ }
                 }
-            }
+                _ => {
+                    self.insert_variable(&name, type_.clone(), location, origin.clone());
+
+                    Pattern::Variable {
+                        type_,
+                        name,
+                        location,
+                        origin,
+                    }
+                }
+            },
 
             Pattern::BitArraySize(size) => {
                 let location = size.location();
@@ -735,16 +744,18 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                 }
             }
 
-            Pattern::Float { location, value } => {
+            Pattern::Float {
+                location,
+                value,
+                float_value,
+            } => {
                 self.unify_types(type_, float(), location);
-
-                if self.environment.target == Target::Erlang
-                    && !self.implementations.uses_erlang_externals
-                {
-                    check_erlang_float_safety(&value, location, self.problems)
+                check_float_safety(float_value, location, self.problems);
+                Pattern::Float {
+                    location,
+                    value,
+                    float_value,
                 }
-
-                Pattern::Float { location, value }
             }
 
             Pattern::String { location, value } => {

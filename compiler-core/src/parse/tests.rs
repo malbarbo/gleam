@@ -363,18 +363,6 @@ fn pointless_spread() {
     );
 }
 
-// https://github.com/gleam-lang/gleam/issues/1358
-#[test]
-fn lowcase_bool_in_pattern() {
-    assert_error!(
-        "case 42 > 42 { true -> 1; false -> 2; }",
-        ParseError {
-            error: ParseErrorType::LowcaseBooleanPattern,
-            location: SrcSpan { start: 15, end: 19 },
-        }
-    );
-}
-
 // https://github.com/gleam-lang/gleam/issues/1613
 #[test]
 fn anonymous_function_labeled_arguments() {
@@ -1150,6 +1138,34 @@ fn case_invalid_case_pattern() {
 fn main() {
     case 1 {
         -> -> 0
+    }
+}
+"
+    );
+}
+
+#[test]
+fn case_clause_no_subject() {
+    assert_module_error!(
+        "
+fn main() {
+    case 1 {
+      -> 1
+      _ -> 2
+    }
+}
+"
+    );
+}
+
+#[test]
+fn case_alternative_clause_no_subject() {
+    assert_module_error!(
+        "
+fn main() {
+    case 1 {
+      1 | -> 1
+      _ -> 1
     }
 }
 "

@@ -4130,6 +4130,76 @@ fn int_literals_redundant_comparison_8() {
 }
 
 #[test]
+fn float_literals_redundant_comparison() {
+    assert_warning!("pub fn main() { 1.0 == 1.0 }");
+}
+
+#[test]
+fn float_literals_redundant_comparison_2() {
+    assert_warning!("pub fn main() { 1.0 == 2.0 }");
+}
+
+#[test]
+fn float_literals_redundant_comparison_3() {
+    assert_warning!("pub fn main() { 1.0 != 1.0 }");
+}
+
+#[test]
+fn float_literals_redundant_comparison_4() {
+    assert_warning!("pub fn main() { 1.0 != 2.0 }");
+}
+
+#[test]
+fn float_literals_redundant_comparison_5() {
+    assert_warning!("pub fn main() { 1.0 >. 2.0 }");
+}
+
+#[test]
+fn float_literals_redundant_comparison_6() {
+    assert_warning!("pub fn main() { 1.0 <=. 2.0 }");
+}
+
+#[test]
+fn float_literals_redundant_comparison_7() {
+    assert_warning!("pub fn main() { 1.0 <. 2.0 }");
+}
+
+#[test]
+fn float_literals_redundant_comparison_8() {
+    assert_warning!("pub fn main() { 1.0 >=. 2.0 }");
+}
+
+#[test]
+fn float_literals_redundant_comparison_different_repr() {
+    assert_warning!("pub fn main() { 1_0.0 == 10.0 }");
+}
+
+#[test]
+fn float_literals_redundant_comparison_different_repr_2() {
+    assert_warning!("pub fn main() { 10.0 == 1.0e1 }");
+}
+
+#[test]
+fn float_literals_redundant_comparison_precision_loss() {
+    assert_warning!("pub fn main() { 1.0e-500 == 1.0e-600 }");
+}
+
+#[test]
+fn float_literals_redundant_comparison_infinity() {
+    assert_warning!("pub fn main() { 1.0e500 == 1.0e600 }");
+}
+
+#[test]
+fn float_literals_redundant_comparison_signed_zero() {
+    assert_warning!("pub fn main() { 0.0 == -0.0 }");
+}
+
+#[test]
+fn float_literals_redundant_comparison_omitted_zero() {
+    assert_warning!("pub fn main() { 10. == 10.0 }");
+}
+
+#[test]
 fn bool_literals_redundant_comparison() {
     assert_warning!("pub fn main() { True == False }");
 }
@@ -4446,6 +4516,49 @@ pub fn wibble(bits) {
 }
 
 #[test]
+fn unreachable_int_pattern_with_string_of_same_value() {
+    assert_warning!(
+        r#"
+pub fn wibble(bits) {
+  case bits {
+    <<"a">> -> 1
+    <<97>> -> 2
+    _ -> 3
+  }
+}"#
+    );
+}
+
+#[test]
+fn unreachable_int_pattern_with_prefix_int() {
+    assert_warning!(
+        r#"
+pub fn wibble(bits) {
+  case bits {
+    <<0b1:1, _:1>> -> 1
+    <<0b11:2>> -> 2
+    _ -> 3
+  }
+}"#
+    );
+}
+
+#[test]
+fn reachable_pattern_after_unreachable_equal_pattern() {
+    assert_warning!(
+        r#"
+pub fn wibble(bits) {
+  case bits {
+    <<97:3>> -> 1
+    <<"a">> -> 2
+    _ -> 3
+  }
+}
+"#
+    );
+}
+
+#[test]
 fn unused_recursive_function_argument() {
     assert_warning!(
         "
@@ -4540,5 +4653,18 @@ fn external_annotation_on_custom_type_requires_v1_14() {
 @external(erlang, "wibble", "wobble")
 pub type Wobble
 "#,
+    );
+}
+
+#[test]
+fn detached_doc_comment() {
+    assert_warning!(
+        "
+/// This comment is detached
+//
+
+/// This is actual documentation
+pub const pi = 3.14
+"
     );
 }

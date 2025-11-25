@@ -27,7 +27,7 @@
 //! contain multiple pattern checks. With a psedo-Gleam syntax, this is what it
 //! would look like:
 //!
-//! ```text
+//! ```txt
 //! case {
 //!   a is Some, b is 1, c is _ -> todo
 //!   a is wibble -> todo
@@ -47,7 +47,7 @@
 //! >
 //! > In out representation that would turn into:
 //! >
-//! > ```text
+//! > ```txt
 //! > case {
 //! >   a is Some(_) -> todo
 //! >   a is None -> todo
@@ -71,6 +71,7 @@ use crate::{
         self, AssignName, BitArraySize, Endianness, IntOperator, SrcSpan, TypedBitArraySize,
         TypedClause, TypedPattern, TypedPatternBitArraySegment,
     },
+    parse::LiteralFloatValue,
     strings::{
         convert_string_escape_chars, length_utf16, length_utf32, string_to_utf16_bytes,
         string_to_utf32_bytes,
@@ -81,15 +82,16 @@ use crate::{
         is_prelude_module, string,
     },
 };
-use bitvec::{order::Msb0, slice::BitSlice, view::BitView};
+use bitvec::{order::Msb0, slice::BitSlice, vec::BitVec, view::BitView};
 use ecow::EcoString;
 use id_arena::{Arena, Id};
 use itertools::Itertools;
-use num_bigint::BigInt;
+use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 use radix_trie::{Trie, TrieCommon};
 use std::{
     cell::RefCell,
+    cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     hash::Hash,
     sync::Arc,
@@ -103,7 +105,7 @@ use std::{
 /// multiple checks (each on a different variable, which appears in the check
 /// itself!):
 ///
-/// ```text
+/// ```txt
 /// a is Some, b is 1 if condition -> todo
 /// ─┬───────  ─┬──── ─┬──────────    ─┬──
 ///  │          │      │               ╰── body: an arbitrary expression
@@ -178,7 +180,7 @@ impl Branch {
     ///
     /// In our internal representation this would become:
     ///
-    /// ```text
+    /// ```txt
     /// case {
     ///   a is Some(1) -> Some(2)
     ///   a is otherwise -> otherwise
@@ -191,7 +193,7 @@ impl Branch {
     /// by keeping track in its body of the correspondence. So it would end up
     /// looking like this:
     ///
-    /// ```text
+    /// ```txt
     /// case {
     ///   a is Some(1) -> Some(2)
     ///   ∅ -> {
@@ -442,10 +444,10 @@ impl Body {
 pub enum Pattern {
     Discard,
     Int {
-        value: EcoString,
+        int_value: BigInt,
     },
     Float {
-        value: EcoString,
+        float_value: LiteralFloatValue,
     },
     String {
         value: EcoString,
@@ -492,11 +494,11 @@ impl Pattern {
             // out of a branch's checks. So there's no corresponding runtime check
             // we can perform for them.
             Pattern::Discard | Pattern::Variable { .. } | Pattern::Assign { .. } => return None,
-            Pattern::Int { value } => RuntimeCheckKind::Int {
-                value: value.clone(),
+            Pattern::Int { int_value, .. } => RuntimeCheckKind::Int {
+                int_value: int_value.clone(),
             },
-            Pattern::Float { value } => RuntimeCheckKind::Float {
-                value: value.clone(),
+            Pattern::Float { float_value, .. } => RuntimeCheckKind::Float {
+                float_value: *float_value,
             },
             Pattern::String { value } => RuntimeCheckKind::String {
                 value: value.clone(),
@@ -562,7 +564,7 @@ impl Pattern {
 /// A single check making up a branch, checking that a variable matches with a
 /// given pattern. For example, the following branch has 2 checks:
 ///
-/// ```text
+/// ```txt
 /// a is Some, b is 1 -> todo
 /// ┬    ─┬──
 /// │     ╰── This is the pattern being checked
@@ -596,10 +598,10 @@ struct PatternCheck {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RuntimeCheck {
     Int {
-        value: EcoString,
+        int_value: BigInt,
     },
     Float {
-        value: EcoString,
+        float_value: LiteralFloatValue,
     },
     String {
         value: EcoString,
@@ -631,11 +633,11 @@ pub enum RuntimeCheck {
 impl RuntimeCheck {
     fn kind(&self) -> Option<RuntimeCheckKind> {
         let kind = match self {
-            RuntimeCheck::Int { value } => RuntimeCheckKind::Int {
-                value: value.clone(),
+            RuntimeCheck::Int { int_value, .. } => RuntimeCheckKind::Int {
+                int_value: int_value.clone(),
             },
-            RuntimeCheck::Float { value } => RuntimeCheckKind::Float {
-                value: value.clone(),
+            RuntimeCheck::Float { float_value, .. } => RuntimeCheckKind::Float {
+                float_value: *float_value,
             },
             RuntimeCheck::String { value } => RuntimeCheckKind::String {
                 value: value.clone(),
@@ -683,8 +685,8 @@ impl RuntimeCheck {
 
 #[derive(Eq, PartialEq, Clone, Hash, Debug)]
 pub enum RuntimeCheckKind {
-    Int { value: EcoString },
-    Float { value: EcoString },
+    Int { int_value: BigInt },
+    Float { float_value: LiteralFloatValue },
     String { value: EcoString },
     StringPrefix { prefix: EcoString },
     Tuple { size: usize },
@@ -745,7 +747,7 @@ impl Variable {
 
     /// Builds a `PatternCheck` that checks this variable matches the given pattern.
     /// So we can build pattern checks the same way we informally describe them:
-    /// ```text
+    /// ```txt
     /// var is pattern
     /// ```
     /// With this builder method would become:
@@ -1088,7 +1090,7 @@ impl MatchTest {
     /// with the given number of bits (in the example I'm also showing the bits
     /// that the read action matches against):
     ///
-    /// ```text
+    /// ```txt
     ///          o1         (o1+s1)
     ///         ┄├0001010110┤┄
     ///               ┄├1101000000111011┤┄
@@ -1101,7 +1103,7 @@ impl MatchTest {
     /// So the example above showcases two interfering read actions, here's an
     /// example of two read actions that are not interfering with each other:
     ///
-    /// ```text
+    /// ```txt
     ///          o1      (o1+s1)
     ///         ┄├0110101┤┄
     ///                      ┄├0101110101┤┄
@@ -1118,7 +1120,7 @@ impl MatchTest {
     ///
     /// 1. We know the first action succeeded, so the binary has the expected
     ///    bits in the matched segment
-    ///    ```text
+    ///    ```txt
     ///             o1         (o1+s1)
     ///            ┄├0110101111┤┄  ← This check succeded!
     ///                   ┄├0001110101┤┄
@@ -1131,7 +1133,7 @@ impl MatchTest {
     ///
     /// 2. We know the first action succeeded, and the second action is fully
     ///    contained inside it:
-    ///    ```text
+    ///    ```txt
     ///             o1              (o1+s1)
     ///            ┄├011010000001111┤┄  ← This check succeded!
     ///               ┄├0100000┤┄
@@ -1143,7 +1145,7 @@ impl MatchTest {
     ///
     /// 3. We know that the first action failed, and the second one is
     ///    fully enclosing it:
-    ///    ```text
+    ///    ```txt
     ///             o1  (o1+s1)
     ///            ┄├010┤┄  ← This check failed!
     ///            ┄├01000001010000001111┤┄
@@ -1212,6 +1214,9 @@ pub enum BitArrayMatchedValue {
         /// is deemed unreachable: it is the location this literal value comes
         /// from in the whole pattern.
         location: SrcSpan,
+        /// The bits representing the given literal int, with the correct
+        /// signed- and endianness as specified in the bit array segment.
+        bits: Result<BitVec<u8, Msb0>, IntToBitsError>,
     },
     LiteralString {
         value: EcoString,
@@ -1229,6 +1234,12 @@ pub enum BitArrayMatchedValue {
 }
 
 impl BitArrayMatchedValue {
+    /// This is an arbitrary limit beyond which interference _may_ no longer be done.
+    /// This is necessary because people may write very silly segments like
+    /// `<<0:9_007_199_254_740_992>>`, which would allocate around a wee petabyte of memory.
+    /// Literal strings are already in memory, and thus ignore this limit.
+    const MAX_BITS_INTERFERENCE: u32 = u16::MAX as u32;
+
     pub(crate) fn is_literal(&self) -> bool {
         match self {
             BitArrayMatchedValue::LiteralFloat(_)
@@ -1247,12 +1258,11 @@ impl BitArrayMatchedValue {
         match self {
             BitArrayMatchedValue::LiteralString { bytes, .. } => Some(bytes.view_bits::<Msb0>()),
             BitArrayMatchedValue::Assign { value, .. } => value.constant_bits(),
+            BitArrayMatchedValue::LiteralInt { bits, .. } => bits.as_deref().ok(),
 
             // TODO: We could also implement the interfering optimisation for
-            // literal ints as well, but that will be a bit trickier than
-            // strings.
-            BitArrayMatchedValue::LiteralInt { .. }
-            | BitArrayMatchedValue::LiteralFloat(_)
+            // literal floats as well, but the usefulness is questionable
+            BitArrayMatchedValue::LiteralFloat(_)
             | BitArrayMatchedValue::Variable(_)
             | BitArrayMatchedValue::Discard(_) => None,
         }
@@ -1267,19 +1277,21 @@ impl BitArrayMatchedValue {
     ) -> Option<ImpossibleBitArraySegmentPattern> {
         match self {
             BitArrayMatchedValue::Assign { value, .. } => value.is_impossible_segment(read_action),
-            BitArrayMatchedValue::LiteralInt { value, location } => {
-                let size = read_action.size.constant_bits()?.to_u32()?;
-                if representable_with_bits(value.clone(), size, read_action.signed) {
-                    None
-                } else {
+            BitArrayMatchedValue::LiteralInt {
+                value,
+                location,
+                bits,
+            } => match bits {
+                Err(IntToBitsError::Unrepresentable { size }) => {
                     Some(ImpossibleBitArraySegmentPattern::UnrepresentableInteger {
                         value: value.clone(),
-                        size,
+                        size: *size,
                         location: *location,
                         signed: read_action.signed,
                     })
                 }
-            }
+                _ => None,
+            },
 
             BitArrayMatchedValue::LiteralFloat(_)
             | BitArrayMatchedValue::LiteralString { .. }
@@ -1505,7 +1517,7 @@ impl BitArrayTest {
 /// specific number of bits (for example if we're matching the last segment
 /// of a bit array) or that it has at least some number of bits. For example:
 ///
-/// ```text
+/// ```txt
 /// <<0:size(12), 1:size(8)>>
 ///   ─┬────────  ─┬───────
 ///    │           ╰── For this segment to successfully match the bit array must
@@ -1702,6 +1714,7 @@ impl Offset {
         // we can only be certain about one being greater if there are no calculations
         if self.constant > other.constant
             && self.calculations.is_empty()
+            && other.calculations.is_empty()
             && superset(&self.variables, &other.variables)
         {
             Confidence::Certain
@@ -1718,6 +1731,7 @@ impl Offset {
         if self == other
             || (self.constant >= other.constant
                 && self.calculations.is_empty()
+                && other.calculations.is_empty()
                 && superset(&self.variables, &other.variables))
         {
             Confidence::Certain
@@ -2486,12 +2500,10 @@ impl<'a> Compiler<'a> {
         branch_mode: &BranchMode,
     ) -> RuntimeCheck {
         match (kind, branch_mode) {
-            (RuntimeCheckKind::Int { value }, _) => RuntimeCheck::Int {
-                value: value.clone(),
+            (RuntimeCheckKind::Int { int_value }, _) => RuntimeCheck::Int {
+                int_value: int_value.clone(),
             },
-            (RuntimeCheckKind::Float { value }, _) => RuntimeCheck::Float {
-                value: value.clone(),
-            },
+            (RuntimeCheckKind::Float { float_value }, _) => RuntimeCheck::Float { float_value },
             (RuntimeCheckKind::String { value }, _) => RuntimeCheck::String {
                 value: value.clone(),
             },
@@ -2609,7 +2621,7 @@ impl<'a> Compiler<'a> {
             // String prefixes are similar to strings, but a bit more involved. Let's say we're
             // checking the pattern:
             //
-            // ```text
+            // ```txt
             // "wibblest" <> rest1
             // ─┬────────
             //  ╰── We will refer to this as `prefix1`
@@ -2617,7 +2629,7 @@ impl<'a> Compiler<'a> {
             //
             // And we know that the following overlapping runtime check has already succeeded:
             //
-            // ```text
+            // ```txt
             // "wibble" <> rest0
             // ─┬──────
             //  ╰── We will refer to this as `prefix0`
@@ -3296,14 +3308,14 @@ impl CaseToCompile {
             TypedPattern::Invalid { .. } => self.insert(Pattern::Discard),
             TypedPattern::Discard { .. } => self.insert(Pattern::Discard),
 
-            TypedPattern::Int { value, .. } => {
-                let value = value.clone();
-                self.insert(Pattern::Int { value })
+            TypedPattern::Int { int_value, .. } => {
+                let int_value = int_value.clone();
+                self.insert(Pattern::Int { int_value })
             }
 
-            TypedPattern::Float { value, .. } => {
-                let value = value.clone();
-                self.insert(Pattern::Float { value })
+            TypedPattern::Float { float_value, .. } => {
+                let float_value = *float_value;
+                self.insert(Pattern::Float { float_value })
             }
 
             TypedPattern::String { value, .. } => {
@@ -3521,6 +3533,12 @@ fn segment_matched_value(
         } => BitArrayMatchedValue::LiteralInt {
             value: int_value.clone(),
             location: *location,
+            bits: int_to_bits(
+                int_value,
+                &read_action.size,
+                read_action.endianness,
+                read_action.signed,
+            ),
         },
         ast::Pattern::Float { value, .. } => BitArrayMatchedValue::LiteralFloat(value.clone()),
         ast::Pattern::String { value, .. } if segment.has_utf16_option() => {
@@ -3556,6 +3574,90 @@ fn segment_matched_value(
         },
         x => panic!("unexpected segment value pattern {x:?}"),
     }
+}
+
+fn int_to_bits(
+    value: &BigInt,
+    read_size: &ReadSize,
+    endianness: Endianness,
+    signed: bool,
+) -> Result<BitVec<u8, Msb0>, IntToBitsError> {
+    let size = read_size
+        .constant_bits()
+        .ok_or(IntToBitsError::NonConstantSize)?
+        .to_u32()
+        .ok_or(IntToBitsError::ExceedsMaximumSize)?;
+
+    if !representable_with_bits(value, size, signed) {
+        return Err(IntToBitsError::Unrepresentable { size });
+    } else if size > BitArrayMatchedValue::MAX_BITS_INTERFERENCE {
+        return Err(IntToBitsError::ExceedsMaximumSize);
+    }
+
+    // Pad negative numbers with 1s (true) and non-negative numbers with 0s (false)
+    let pad_digit = value.sign() == Sign::Minus;
+    let size = size as usize;
+    let mut bytes = int_to_bytes(value, endianness, signed);
+    let bytes_size = bytes.len() * 8;
+
+    let bits = match (endianness, bytes_size.cmp(&size)) {
+        (_, Ordering::Equal) => BitVec::from_vec(bytes),
+
+        // Even though we return an error if `value` cannot be represented in `size` bits,
+        // we may need to slice off up a couple bits if the read size is not a multiple of 8.
+        // <3:4> yields the bytes [0b0000_0011]. We slice off 4 bits and get 0011
+        (Endianness::Big, Ordering::Greater) => {
+            BitVec::from_bitslice(&bytes.view_bits()[bytes_size - size..])
+        }
+        // If the number needs fewer bits than the read size, we pad it.
+        // <3:9> yields the bytes [0b0000_0011]. We add one digit and get 0_0000_0011
+        (Endianness::Big, Ordering::Less) => {
+            let mut bits = BitVec::repeat(pad_digit, size - bytes_size);
+            bits.extend_from_raw_slice(&bytes);
+            bits
+        }
+
+        (Endianness::Little, Ordering::Greater) => {
+            // If the difference is greater than a byte, we returned an Error earlier
+            let remainder = size % 8;
+            if remainder == 0 {
+                BitVec::from_vec(bytes)
+            } else {
+                // If the size is not a multiple of 8, we need to truncate the most significant bits.
+                // As they are in the last byte, we leftshift by the appropriate amount and
+                // truncate the final bits after conversion
+                let last_byte = bytes.last_mut().expect("bytes must not be empty");
+                *last_byte <<= 8 - remainder;
+
+                let mut bits = BitVec::from_vec(bytes);
+                bits.truncate(size);
+                bits
+            }
+        }
+        (Endianness::Little, Ordering::Less) => {
+            let mut bits = BitVec::from_vec(bytes);
+            let padding: BitVec<u8, Msb0> = BitVec::repeat(pad_digit, size - bytes_size);
+            bits.extend_from_bitslice(padding.as_bitslice());
+            bits
+        }
+    };
+    Ok(bits)
+}
+
+fn int_to_bytes(value: &BigInt, endianness: Endianness, signed: bool) -> Vec<u8> {
+    match (endianness, signed) {
+        (Endianness::Big, false) => value.to_bytes_be().1,
+        (Endianness::Big, true) => value.to_signed_bytes_be(),
+        (Endianness::Little, false) => value.to_bytes_le().1,
+        (Endianness::Little, true) => value.to_signed_bytes_le(),
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+pub enum IntToBitsError {
+    Unrepresentable { size: u32 },
+    ExceedsMaximumSize,
+    NonConstantSize,
 }
 
 fn segment_size(
@@ -3675,18 +3777,42 @@ fn superset(
 }
 
 #[must_use]
-fn representable_with_bits(value: BigInt, bits: u32, signed: bool) -> bool {
+fn representable_with_bits(value: &BigInt, bits: u32, signed: bool) -> bool {
     // No number is representable in 0 bits.
     if bits == 0 {
         return false;
     };
-    if signed {
-        // Signed numbers range in [-2^(bits-1), 2^(bits-1)[
-        let power = BigInt::from(2).pow(bits - 1);
-        -&power <= value && value < power
-    } else {
-        // Unsigned numbers range in [0, 2^bits[
-        BigInt::from(0) <= value && value < BigInt::from(2).pow(bits)
+
+    let required_bits = match (value.sign(), signed) {
+        // Zero always needs one bit.
+        (Sign::NoSign, _) => 1,
+
+        // `BigInt::bits` does not consider the sign!
+        (Sign::Plus, false) => value.bits(),
+        // Therefore we need to add the sign bit here: `10` -> `010`
+        (Sign::Plus, true) => value.bits() + 1,
+
+        // A negative number must be signed
+        (Sign::Minus, false) => return false,
+        (Sign::Minus, true) => {
+            let bits_unsigned = value.bits();
+            let trailing_zeros = value
+                .trailing_zeros()
+                .expect("trailing_zeros to return a value for non-zero numbers");
+            let is_power_of_2 = trailing_zeros == bits_unsigned - 1;
+
+            // Negative powers of two don't need an extra sign bit. E.g. `-2 == 0b10`
+            if is_power_of_2 {
+                bits_unsigned
+            } else {
+                bits_unsigned + 1
+            }
+        }
+    };
+
+    match required_bits.to_u32() {
+        Some(required_bits) => bits >= required_bits,
+        None => false,
     }
 }
 
@@ -3698,32 +3824,188 @@ mod representable_with_bits_test {
     #[test]
     fn positive_number_representable_with_bits_test() {
         // 9 can be represented as a >=4 bits unsigned number.
-        assert!(representable_with_bits(9.into(), 4, false));
-        assert!(representable_with_bits(9.into(), 5, false));
+        assert!(representable_with_bits(&9.into(), 4, false));
+        assert!(representable_with_bits(&9.into(), 5, false));
         // But not in <=3 bits as an unsigned number.
-        assert!(!representable_with_bits(9.into(), 3, false));
-        assert!(!representable_with_bits(9.into(), 2, false));
+        assert!(!representable_with_bits(&9.into(), 3, false));
+        assert!(!representable_with_bits(&9.into(), 2, false));
 
         // It can be represented as a >=5 bit signed number.
-        assert!(representable_with_bits(9.into(), 5, true));
-        assert!(representable_with_bits(9.into(), 6, true));
+        assert!(representable_with_bits(&9.into(), 5, true));
+        assert!(representable_with_bits(&9.into(), 6, true));
         // But not in <= 4 bits as a signed number.
-        assert!(!representable_with_bits(9.into(), 4, true));
-        assert!(!representable_with_bits(9.into(), 3, true));
+        assert!(!representable_with_bits(&9.into(), 4, true));
+        assert!(!representable_with_bits(&9.into(), 3, true));
     }
 
     #[test]
     fn negative_number_representable_with_bits_test() {
         // A negative number will never be representable as an unsigned number,
         // no matter the number of bits!
-        assert!(!representable_with_bits(BigInt::from(-9), 1, false));
-        assert!(!representable_with_bits(BigInt::from(-9), 500, false));
+        assert!(!representable_with_bits(&BigInt::from(-9), 1, false));
+        assert!(!representable_with_bits(&BigInt::from(-9), 500, false));
 
         // -9 can be represented in >=5 bits as a signed number.
-        assert!(representable_with_bits(BigInt::from(-9), 5, true));
-        assert!(representable_with_bits(BigInt::from(-9), 6, true));
+        assert!(representable_with_bits(&BigInt::from(-9), 5, true));
+        assert!(representable_with_bits(&BigInt::from(-9), 6, true));
         // But not in <= 4 bits as a signed number.
-        assert!(!representable_with_bits(BigInt::from(-9), 4, true));
-        assert!(!representable_with_bits(BigInt::from(-9), 3, true));
+        assert!(!representable_with_bits(&BigInt::from(-9), 4, true));
+        assert!(!representable_with_bits(&BigInt::from(-9), 3, true));
+    }
+
+    #[test]
+    fn zero_representable_with_bits_test() {
+        for i in 0..12 {
+            println!("{i}: {}", BigInt::from(i).bits());
+        }
+        assert!(!representable_with_bits(&BigInt::ZERO, 0, false));
+        assert!(!representable_with_bits(&BigInt::ZERO, 0, true));
+
+        assert!(representable_with_bits(&BigInt::ZERO, 1, false));
+        assert!(representable_with_bits(&BigInt::ZERO, 1, true));
+    }
+
+    #[test]
+    fn number_representable_with_sign_test() {
+        // Sign needs one additional bit
+        assert!(representable_with_bits(&8.into(), 4, false));
+        assert!(!representable_with_bits(&8.into(), 4, true));
+        assert!(representable_with_bits(&8.into(), 5, true));
+
+        // Negative number must be signed
+        assert!(!representable_with_bits(&BigInt::from(-8), 100, false));
+
+        // Negative powers of two don't need an extra sign bit
+        assert!(!representable_with_bits(&BigInt::from(-8), 3, true));
+        assert!(representable_with_bits(&BigInt::from(-8), 4, true));
+
+        assert!(!representable_with_bits(&BigInt::from(-9), 4, true));
+        assert!(representable_with_bits(&BigInt::from(-9), 5, true));
+    }
+}
+
+#[cfg(test)]
+mod int_to_bits_test {
+    use std::assert_eq;
+
+    use crate::{
+        ast::Endianness,
+        exhaustiveness::{BitArrayMatchedValue, IntToBitsError, ReadSize, int_to_bits},
+    };
+    use bitvec::{bitvec, order::Msb0, vec::BitVec};
+    use num_bigint::BigInt;
+
+    fn read_size(size: u32) -> ReadSize {
+        ReadSize::ConstantBits(BigInt::from(size))
+    }
+
+    #[test]
+    fn int_to_bits_size_too_big() {
+        assert_eq!(
+            int_to_bits(
+                &BigInt::ZERO,
+                &read_size(BitArrayMatchedValue::MAX_BITS_INTERFERENCE + 1),
+                Endianness::Big,
+                true,
+            ),
+            Err(IntToBitsError::ExceedsMaximumSize),
+        );
+    }
+
+    #[test]
+    fn int_to_bits_zero() {
+        let expect = Ok(bitvec![u8, Msb0; 0; 3]);
+        assert_eq!(
+            int_to_bits(&BigInt::ZERO, &read_size(3), Endianness::Big, false),
+            expect
+        );
+        assert_eq!(
+            int_to_bits(&BigInt::ZERO, &read_size(3), Endianness::Little, false),
+            expect
+        );
+
+        let expect = Ok(bitvec![u8, Msb0; 0; 10]);
+        assert_eq!(
+            int_to_bits(&BigInt::ZERO, &read_size(10), Endianness::Big, false),
+            expect
+        );
+        assert_eq!(
+            int_to_bits(&BigInt::ZERO, &read_size(10), Endianness::Little, false),
+            expect
+        );
+    }
+
+    #[test]
+    fn int_to_bits_positive() {
+        // Exact match
+        assert_eq!(
+            int_to_bits(
+                &BigInt::from(0xff00),
+                &read_size(16),
+                Endianness::Big,
+                false
+            ),
+            Ok(BitVec::<u8, Msb0>::from_vec(vec![0xff, 0x00])),
+        );
+        assert_eq!(
+            int_to_bits(
+                &BigInt::from(0xff00),
+                &read_size(16),
+                Endianness::Little,
+                false
+            ),
+            Ok(BitVec::<u8, Msb0>::from_vec(vec![0x00, 0xff])),
+        );
+
+        assert_eq!(
+            int_to_bits(
+                &BigInt::from(0b11_1111_0000),
+                &read_size(10),
+                Endianness::Big,
+                false
+            ),
+            Ok(bitvec![u8, Msb0; 1, 1, 1, 1, 1, 1, 0, 0, 0, 0]),
+        );
+        assert_eq!(
+            int_to_bits(
+                &BigInt::from(0b11_1111_0000),
+                &read_size(10),
+                Endianness::Little,
+                false
+            ),
+            Ok(bitvec![u8, Msb0; 1, 1, 1, 1, 0, 0, 0, 0, 1, 1]),
+        );
+
+        // Too few bits in int
+        assert_eq!(
+            int_to_bits(&BigInt::from(0xff), &read_size(12), Endianness::Big, false),
+            Ok(bitvec![u8, Msb0; 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]),
+        );
+        assert_eq!(
+            int_to_bits(
+                &BigInt::from(0xff),
+                &read_size(12),
+                Endianness::Little,
+                false
+            ),
+            Ok(bitvec![u8, Msb0; 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0]),
+        );
+    }
+
+    #[test]
+    fn int_to_bits_signed() {
+        assert_eq!(
+            int_to_bits(&BigInt::from(-128), &read_size(12), Endianness::Big, true),
+            Ok(bitvec![u8, Msb0; 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0]),
+        );
+        assert_eq!(
+            int_to_bits(
+                &BigInt::from(-128),
+                &read_size(12),
+                Endianness::Little,
+                true
+            ),
+            Ok(bitvec![u8, Msb0; 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1]),
+        );
     }
 }

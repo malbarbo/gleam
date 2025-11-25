@@ -7,12 +7,12 @@ mod pattern;
 mod tests;
 
 use crate::build::{Target, module_erlang_name};
-use crate::erlang::pattern::PatternPrinter;
+use crate::erlang::pattern::{PatternPrinter, StringPatternAssignment};
 use crate::strings::{convert_string_escape_chars, to_snake_case};
 use crate::type_::is_prelude_module;
 use crate::{
     Result,
-    ast::{CustomType, Function, Import, ModuleConstant, TypeAlias, *},
+    ast::{Function, *},
     docvec,
     line_numbers::LineNumbers,
     pretty::*,
@@ -90,19 +90,15 @@ impl<'env> Env<'env> {
 pub fn records(module: &TypedModule) -> Vec<(&str, String)> {
     module
         .definitions
+        .custom_types
         .iter()
-        .filter_map(|definition| match definition {
-            Definition::CustomType(CustomType {
-                publicity: Publicity::Public,
-                constructors,
-                location,
-                ..
-            }) if !module.unused_definition_positions.contains(&location.start) => {
-                Some(constructors)
-            }
-            _ => None,
+        .filter(|custom_type| {
+            custom_type.publicity.is_public()
+                && !module
+                    .unused_definition_positions
+                    .contains(&custom_type.location.start)
         })
-        .flatten()
+        .flat_map(|custom_type| &custom_type.constructors)
         .filter(|constructor| !constructor.arguments.is_empty())
         .filter_map(|constructor| {
             constructor
@@ -173,16 +169,12 @@ fn module_document<'a>(
     // would result in an error as it tries to reference this private function.
     let overridden_publicity = find_private_functions_referenced_in_importable_constants(module);
 
-    for definition in &module.definitions {
-        register_imports_and_exports(
-            definition,
-            &mut exports,
-            &mut type_exports,
-            &mut type_defs,
-            &module.name,
-            &overridden_publicity,
-            &module.unused_definition_positions,
-        );
+    for function in &module.definitions.functions {
+        register_function_exports(function, &mut exports, &overridden_publicity);
+    }
+
+    for custom_type in &module.definitions.custom_types {
+        register_custom_type_exports(custom_type, &mut type_exports, &mut type_defs, &module.name);
     }
 
     let exports = match (!exports.is_empty(), !type_exports.is_empty()) {
@@ -228,10 +220,10 @@ fn module_document<'a>(
 
     let mut needs_function_docs = false;
     let mut echo_used = false;
-    let mut statements = Vec::with_capacity(module.definitions.len());
-    for definition in module.definitions.iter() {
-        if let Some((statement_document, env)) = module_statement(
-            definition,
+    let mut statements = vec![];
+    for function in &module.definitions.functions {
+        if let Some((statement_document, env)) = module_function(
+            function,
             &module.name,
             module.type_info.is_internal,
             line_numbers,
@@ -296,175 +288,141 @@ fn module_document<'a>(
     Ok(module.append(line()))
 }
 
-fn register_imports_and_exports(
-    definition: &TypedDefinition,
+fn register_function_exports(
+    function: &TypedFunction,
     exports: &mut Vec<Document<'_>>,
-    type_exports: &mut Vec<Document<'_>>,
-    type_defs: &mut Vec<Document<'_>>,
-    module_name: &str,
     overridden_publicity: &im::HashSet<EcoString>,
-    unused_definition_positions: &HashSet<u32>,
 ) {
-    // Do not generate any code for unused items
-    if unused_definition_positions.contains(&definition.location().start) {
+    let Function {
+        publicity,
+        name: Some((_, name)),
+        arguments,
+        implementations,
+        ..
+    } = function
+    else {
         return;
-    }
+    };
 
-    match definition {
-        Definition::Function(Function {
-            publicity,
-            name: Some((_, name)),
-            arguments,
-            implementations,
-            ..
-        }) if publicity.is_importable() || overridden_publicity.contains(name) => {
-            // If the function isn't for this target then don't attempt to export it
-            if implementations.supports(Target::Erlang) {
-                let function_name = escape_erlang_existing_name(name);
-                exports.push(
-                    atom_string(function_name.into())
-                        .append("/")
-                        .append(arguments.len()),
-                )
-            }
-        }
-
-        Definition::CustomType(CustomType {
-            name,
-            constructors,
-            typed_parameters,
-            opaque,
-            external_erlang,
-            ..
-        }) => {
-            // Erlang doesn't allow phantom type variables in type definitions but gleam does
-            // so we check the type declaratinon against its constroctors and generate a phantom
-            // value that uses the unused type variables.
-            let type_var_usages = collect_type_var_usages(HashMap::new(), typed_parameters);
-            let mut constructor_var_usages = HashMap::new();
-            for c in constructors {
-                constructor_var_usages = collect_type_var_usages(
-                    constructor_var_usages,
-                    c.arguments.iter().map(|a| &a.type_),
-                );
-            }
-            let phantom_vars: Vec<_> = type_var_usages
-                .keys()
-                .filter(|&id| !constructor_var_usages.contains_key(id))
-                .sorted()
-                .map(|&id| Type::Var {
-                    type_: Arc::new(std::cell::RefCell::new(TypeVar::Generic { id })),
-                })
-                .collect();
-            let phantom_vars_constructor = if !phantom_vars.is_empty() {
-                let type_printer = TypePrinter::new(module_name);
-                Some(tuple(
-                    std::iter::once("gleam_phantom".to_doc())
-                        .chain(phantom_vars.iter().map(|pv| type_printer.print(pv))),
-                ))
-            } else {
-                None
-            };
-            // Type Exports
-            type_exports.push(
-                erl_safe_type_name(to_snake_case(name))
-                    .to_doc()
-                    .append("/")
-                    .append(typed_parameters.len()),
-            );
-            // Type definitions
-            let definition = if constructors.is_empty() {
-                if let Some((module, external_type, _location)) = external_erlang {
-                    let printer = TypePrinter::new(module_name);
-                    docvec![
-                        module,
-                        ":",
-                        external_type,
-                        "(",
-                        join(
-                            typed_parameters
-                                .iter()
-                                .map(|parameter| printer.print(parameter)),
-                            ", ".to_doc()
-                        ),
-                        ")"
-                    ]
-                } else {
-                    let constructors =
-                        std::iter::once("any()".to_doc()).chain(phantom_vars_constructor);
-                    join(constructors, break_(" |", " | "))
-                }
-            } else {
-                let constructors = constructors
-                    .iter()
-                    .map(|constructor| {
-                        let name = atom_string(to_snake_case(&constructor.name));
-                        if constructor.arguments.is_empty() {
-                            name
-                        } else {
-                            let type_printer = TypePrinter::new(module_name);
-                            let arguments = constructor
-                                .arguments
-                                .iter()
-                                .map(|argument| type_printer.print(&argument.type_));
-                            tuple(std::iter::once(name).chain(arguments))
-                        }
-                    })
-                    .chain(phantom_vars_constructor);
-                join(constructors, break_(" |", " | "))
-            }
-            .nest(INDENT);
-            let type_printer = TypePrinter::new(module_name);
-            let params = join(
-                typed_parameters
-                    .iter()
-                    .map(|type_| type_printer.print(type_)),
-                ", ".to_doc(),
-            );
-            let doc = if *opaque { "-opaque " } else { "-type " }
-                .to_doc()
-                .append(erl_safe_type_name(to_snake_case(name)))
-                .append("(")
-                .append(params)
-                .append(") :: ")
-                .append(definition)
-                .group()
-                .append(".");
-            type_defs.push(doc);
-        }
-
-        Definition::Function(Function { .. })
-        | Definition::Import(Import { .. })
-        | Definition::TypeAlias(TypeAlias { .. })
-        | Definition::ModuleConstant(ModuleConstant { .. }) => (),
+    // If the function isn't for this target then don't attempt to export it
+    if implementations.supports(Target::Erlang)
+        && (publicity.is_importable() || overridden_publicity.contains(name))
+    {
+        let function_name = escape_erlang_existing_name(name);
+        exports.push(
+            atom_string(function_name.into())
+                .append("/")
+                .append(arguments.len()),
+        )
     }
 }
 
-fn module_statement<'a>(
-    statement: &'a TypedDefinition,
-    module: &'a str,
-    is_internal_module: bool,
-    line_numbers: &'a LineNumbers,
-    src_path: EcoString,
-    unused_definition_positions: &HashSet<u32>,
-) -> Option<(Document<'a>, Env<'a>)> {
-    match statement {
-        // Do not generate any code for unused items
-        Definition::Function(function)
-            if unused_definition_positions.contains(&function.location.start) =>
-        {
-            None
-        }
+fn register_custom_type_exports(
+    custom_type: &TypedCustomType,
+    type_exports: &mut Vec<Document<'_>>,
+    type_defs: &mut Vec<Document<'_>>,
+    module_name: &str,
+) {
+    let TypedCustomType {
+        name,
+        constructors,
+        opaque,
+        typed_parameters,
+        external_erlang,
+        ..
+    } = custom_type;
 
-        Definition::Function(function) => {
-            module_function(function, module, is_internal_module, line_numbers, src_path)
-        }
-
-        Definition::TypeAlias(TypeAlias { .. })
-        | Definition::CustomType(CustomType { .. })
-        | Definition::Import(Import { .. })
-        | Definition::ModuleConstant(ModuleConstant { .. }) => None,
+    // Erlang doesn't allow phantom type variables in type definitions but gleam does
+    // so we check the type declaratinon against its constroctors and generate a phantom
+    // value that uses the unused type variables.
+    let type_var_usages = collect_type_var_usages(HashMap::new(), typed_parameters);
+    let mut constructor_var_usages = HashMap::new();
+    for c in constructors {
+        constructor_var_usages =
+            collect_type_var_usages(constructor_var_usages, c.arguments.iter().map(|a| &a.type_));
     }
+    let phantom_vars: Vec<_> = type_var_usages
+        .keys()
+        .filter(|&id| !constructor_var_usages.contains_key(id))
+        .sorted()
+        .map(|&id| Type::Var {
+            type_: Arc::new(std::cell::RefCell::new(TypeVar::Generic { id })),
+        })
+        .collect();
+    let phantom_vars_constructor = if !phantom_vars.is_empty() {
+        let type_printer = TypePrinter::new(module_name);
+        Some(tuple(
+            std::iter::once("gleam_phantom".to_doc())
+                .chain(phantom_vars.iter().map(|pv| type_printer.print(pv))),
+        ))
+    } else {
+        None
+    };
+    // Type Exports
+    type_exports.push(
+        erl_safe_type_name(to_snake_case(name))
+            .to_doc()
+            .append("/")
+            .append(typed_parameters.len()),
+    );
+    // Type definitions
+    let definition = if constructors.is_empty() {
+        if let Some((module, external_type, _location)) = external_erlang {
+            let printer = TypePrinter::new(module_name);
+            docvec![
+                module,
+                ":",
+                external_type,
+                "(",
+                join(
+                    typed_parameters
+                        .iter()
+                        .map(|parameter| printer.print(parameter)),
+                    ", ".to_doc()
+                ),
+                ")"
+            ]
+        } else {
+            let constructors = std::iter::once("any()".to_doc()).chain(phantom_vars_constructor);
+            join(constructors, break_(" |", " | "))
+        }
+    } else {
+        let constructors = constructors
+            .iter()
+            .map(|constructor| {
+                let name = atom_string(to_snake_case(&constructor.name));
+                if constructor.arguments.is_empty() {
+                    name
+                } else {
+                    let type_printer = TypePrinter::new(module_name);
+                    let arguments = constructor
+                        .arguments
+                        .iter()
+                        .map(|argument| type_printer.print(&argument.type_));
+                    tuple(std::iter::once(name).chain(arguments))
+                }
+            })
+            .chain(phantom_vars_constructor);
+        join(constructors, break_(" |", " | "))
+    }
+    .nest(INDENT);
+    let type_printer = TypePrinter::new(module_name);
+    let params = join(
+        typed_parameters
+            .iter()
+            .map(|type_| type_printer.print(type_)),
+        ", ".to_doc(),
+    );
+    let doc = if *opaque { "-opaque " } else { "-type " }
+        .to_doc()
+        .append(erl_safe_type_name(to_snake_case(name)))
+        .append("(")
+        .append(params)
+        .append(") :: ")
+        .append(definition)
+        .group()
+        .append(".");
+    type_defs.push(doc);
 }
 
 fn module_function<'a>(
@@ -473,7 +431,13 @@ fn module_function<'a>(
     is_internal_module: bool,
     line_numbers: &'a LineNumbers,
     src_path: EcoString,
+    unused_definition_positions: &HashSet<u32>,
 ) -> Option<(Document<'a>, Env<'a>)> {
+    // We don't generate any code for unused functions.
+    if unused_definition_positions.contains(&function.location.start) {
+        return None;
+    }
+
     // Private external functions don't need to render anything, the underlying
     // Erlang implementation is used directly at the call site.
     if function.external_erlang.is_some() && function.publicity.is_private() {
@@ -1283,7 +1247,11 @@ fn let_assert<'a>(
         assignments,
     } = pattern_printer;
 
-    let clause_guard = optional_clause_guard(None, guards, environment);
+    let assignments_map = assignments
+        .iter()
+        .map(|assignment| (assignment.gleam_name.clone(), assignment))
+        .collect();
+    let clause_guard = optional_clause_guard(None, guards, environment, &assignments_map);
 
     let value_document = match variables.as_slice() {
         _ if is_tail => subject.clone(),
@@ -1351,7 +1319,16 @@ fn let_assert<'a>(
     let assignments = if assignments.is_empty() {
         nil()
     } else {
-        docvec![",", line(), join(assignments, ",".to_doc().append(line()))]
+        docvec![
+            ",",
+            line(),
+            join(
+                assignments
+                    .iter()
+                    .map(|assignment| assignment.to_assignment_doc()),
+                ",".to_doc().append(line())
+            )
+        ]
     };
 
     docvec![
@@ -1608,7 +1585,12 @@ fn clause<'a>(clause: &'a TypedClause, environment: &mut Env<'a>) -> Document<'a
             assignments,
         } = pattern_printer;
 
-        let guard = optional_clause_guard(guard.as_ref(), guards, environment);
+        let assignments_map = assignments
+            .iter()
+            .map(|assignment| (assignment.gleam_name.clone(), assignment))
+            .collect();
+
+        let guard = optional_clause_guard(guard.as_ref(), guards, environment, &assignments_map);
         let then = clause_consequence(then, assignments, environment).group();
         branches_docs.push(docvec![
             pattern,
@@ -1625,14 +1607,20 @@ fn clause_consequence<'a>(
     consequence: &'a TypedExpr,
     // Further assignments that the pattern might need to introduce at the start
     // of the new block.
-    assignments: Vec<Document<'a>>,
+    assignments: Vec<StringPatternAssignment<'a>>,
     env: &mut Env<'a>,
 ) -> Document<'a> {
     let assignment_doc = if assignments.is_empty() {
         nil()
     } else {
         let separator = ",".to_doc().append(line());
-        join(assignments, separator.clone()).append(separator)
+        join(
+            assignments
+                .iter()
+                .map(|assignment| assignment.to_assignment_doc()),
+            separator.clone(),
+        )
+        .append(separator)
     };
 
     let consequence = match consequence {
@@ -1646,8 +1634,9 @@ fn optional_clause_guard<'a>(
     guard: Option<&'a TypedClauseGuard>,
     additional_guards: Vec<Document<'a>>,
     env: &mut Env<'a>,
+    assignments: &HashMap<EcoString, &StringPatternAssignment<'a>>,
 ) -> Document<'a> {
-    let guard_doc = guard.map(|guard| bare_clause_guard(guard, env));
+    let guard_doc = guard.map(|guard| bare_clause_guard(guard, env, assignments));
 
     let guards_count = guard_doc.iter().len() + additional_guards.len();
     let guards_docs = additional_guards.into_iter().chain(guard_doc).map(|guard| {
@@ -1665,99 +1654,116 @@ fn optional_clause_guard<'a>(
     }
 }
 
-fn bare_clause_guard<'a>(guard: &'a TypedClauseGuard, env: &mut Env<'a>) -> Document<'a> {
+fn bare_clause_guard<'a>(
+    guard: &'a TypedClauseGuard,
+    env: &mut Env<'a>,
+    assignments: &HashMap<EcoString, &StringPatternAssignment<'a>>,
+) -> Document<'a> {
     match guard {
-        ClauseGuard::Block { value, .. } => bare_clause_guard(value, env).surround("(", ")"),
+        ClauseGuard::Block { value, .. } => {
+            bare_clause_guard(value, env, assignments).surround("(", ")")
+        }
 
-        ClauseGuard::Not { expression, .. } => docvec!["not ", bare_clause_guard(expression, env)],
+        ClauseGuard::Not { expression, .. } => {
+            docvec!["not ", bare_clause_guard(expression, env, assignments)]
+        }
 
-        ClauseGuard::Or { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::Or { left, right, .. } => clause_guard(left, env, assignments)
             .append(" orelse ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::And { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::And { left, right, .. } => clause_guard(left, env, assignments)
             .append(" andalso ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::Equals { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::Equals { left, right, .. } => clause_guard(left, env, assignments)
             .append(" =:= ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::NotEquals { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::NotEquals { left, right, .. } => clause_guard(left, env, assignments)
             .append(" =/= ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::GtInt { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::GtInt { left, right, .. } => clause_guard(left, env, assignments)
             .append(" > ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::GtEqInt { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::GtEqInt { left, right, .. } => clause_guard(left, env, assignments)
             .append(" >= ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::LtInt { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::LtInt { left, right, .. } => clause_guard(left, env, assignments)
             .append(" < ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::LtEqInt { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::LtEqInt { left, right, .. } => clause_guard(left, env, assignments)
             .append(" =< ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::GtFloat { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::GtFloat { left, right, .. } => clause_guard(left, env, assignments)
             .append(" > ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::GtEqFloat { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::GtEqFloat { left, right, .. } => clause_guard(left, env, assignments)
             .append(" >= ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::LtFloat { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::LtFloat { left, right, .. } => clause_guard(left, env, assignments)
             .append(" < ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::LtEqFloat { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::LtEqFloat { left, right, .. } => clause_guard(left, env, assignments)
             .append(" =< ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::AddInt { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::AddInt { left, right, .. } => clause_guard(left, env, assignments)
             .append(" + ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::AddFloat { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::AddFloat { left, right, .. } => clause_guard(left, env, assignments)
             .append(" + ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::SubInt { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::SubInt { left, right, .. } => clause_guard(left, env, assignments)
             .append(" - ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::SubFloat { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::SubFloat { left, right, .. } => clause_guard(left, env, assignments)
             .append(" - ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::MultInt { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::MultInt { left, right, .. } => clause_guard(left, env, assignments)
             .append(" * ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::MultFloat { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::MultFloat { left, right, .. } => clause_guard(left, env, assignments)
             .append(" * ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::DivInt { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::DivInt { left, right, .. } => clause_guard(left, env, assignments)
             .append(" div ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::DivFloat { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::DivFloat { left, right, .. } => clause_guard(left, env, assignments)
             .append(" / ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
-        ClauseGuard::RemainderInt { left, right, .. } => clause_guard(left, env)
+        ClauseGuard::RemainderInt { left, right, .. } => clause_guard(left, env, assignments)
             .append(" rem ")
-            .append(clause_guard(right, env)),
+            .append(clause_guard(right, env, assignments)),
 
         // Only local variables are supported and the typer ensures that all
         // ClauseGuard::Vars are local variables
-        ClauseGuard::Var { name, .. } => env.local_var_name(name),
+        ClauseGuard::Var { name, .. } => {
+            // If we're referencing a variable introduced by a string pattern
+            // assignment we need to replace it with its actual literal value:
+            // in the generated code the variable is only defined later, so
+            // just referencing its name would result in an error.
+            assignments
+                .get(name)
+                .map(|assignment| assignment.literal_value.clone())
+                .unwrap_or_else(|| env.local_var_name(name))
+        }
 
         ClauseGuard::TupleIndex { tuple, index, .. } => tuple_index_inline(tuple, *index, env),
 
@@ -1777,13 +1783,17 @@ fn tuple_index_inline<'a>(
     env: &mut Env<'a>,
 ) -> Document<'a> {
     let index_doc = eco_format!("{}", (index + 1)).to_doc();
-    let tuple_doc = bare_clause_guard(tuple, env);
+    let tuple_doc = bare_clause_guard(tuple, env, &HashMap::new());
     "erlang:element"
         .to_doc()
         .append(wrap_arguments([index_doc, tuple_doc]))
 }
 
-fn clause_guard<'a>(guard: &'a TypedClauseGuard, env: &mut Env<'a>) -> Document<'a> {
+fn clause_guard<'a>(
+    guard: &'a TypedClauseGuard,
+    env: &mut Env<'a>,
+    assignments: &HashMap<EcoString, &StringPatternAssignment<'a>>,
+) -> Document<'a> {
     match guard {
         // Binary operators are wrapped in parens
         ClauseGuard::Or { .. }
@@ -1808,7 +1818,7 @@ fn clause_guard<'a>(guard: &'a TypedClauseGuard, env: &mut Env<'a>) -> Document<
         | ClauseGuard::DivFloat { .. }
         | ClauseGuard::RemainderInt { .. } => "("
             .to_doc()
-            .append(bare_clause_guard(guard, env))
+            .append(bare_clause_guard(guard, env, assignments))
             .append(")"),
 
         // Other expressions are not
@@ -1818,7 +1828,7 @@ fn clause_guard<'a>(guard: &'a TypedClauseGuard, env: &mut Env<'a>) -> Document<
         | ClauseGuard::TupleIndex { .. }
         | ClauseGuard::FieldAccess { .. }
         | ClauseGuard::ModuleSelect { .. }
-        | ClauseGuard::Block { .. } => bare_clause_guard(guard, env),
+        | ClauseGuard::Block { .. } => bare_clause_guard(guard, env, assignments),
     }
 }
 
@@ -3223,10 +3233,8 @@ fn find_private_functions_referenced_in_importable_constants(
 ) -> im::HashSet<EcoString> {
     let mut overridden_publicity = im::HashSet::new();
 
-    for definition in module.definitions.iter() {
-        if let Definition::ModuleConstant(constant) = definition
-            && constant.publicity.is_importable()
-        {
+    for constant in &module.definitions.constants {
+        if constant.publicity.is_importable() {
             find_referenced_private_functions(&constant.value, &mut overridden_publicity)
         }
     }
