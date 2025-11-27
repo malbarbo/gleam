@@ -141,26 +141,26 @@ enum WasmType {
     Tuple(Vec<ValType>),
 }
 
-#[derive(Hash, PartialEq, Eq, Copy, Clone, Debug)]
+#[derive(Hash, PartialEq, Eq, Clone, Debug)]
 enum Builtins {
     Start,
-    StringEq,
     StringConcat,
+    Equal(ValType),
 }
 
 impl Builtins {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> String {
         match self {
-            Builtins::Start => "$start",
-            Builtins::StringEq => "$string_eq",
-            Builtins::StringConcat => "$string_concat",
+            Builtins::Start => "$start".into(),
+            Builtins::StringConcat => "$string_concat".into(),
+            Builtins::Equal(type_) => format!("$equal({type_:?})").into(),
         }
     }
 
     fn export(&self) -> bool {
         match self {
             Builtins::Start => true,
-            Builtins::StringEq | Builtins::StringConcat => false,
+            Builtins::StringConcat | Builtins::Equal(_) => false,
         }
     }
 }
@@ -203,7 +203,6 @@ struct Generator<'a> {
     next_function_id: u32,
     globals: Rc<RefCell<Vec<Id>>>,
     builtins: HashMap<Builtins, u32>,
-    eq: HashMap<u32, u32>,
     bool_: BoolType,
     int: IntType,
     float: FloatType,
@@ -231,7 +230,6 @@ impl<'a> Generator<'a> {
             next_function_id: 0,
             globals: Rc::default(),
             builtins: HashMap::new(),
-            eq: HashMap::new(),
             bool_: BoolType {},
             int: IntType::Int32,
             float: FloatType::Float64,
@@ -244,7 +242,7 @@ impl<'a> Generator<'a> {
         let index = generator.types.len() as u32;
         generator.string.type_index = *generator
             .types
-            .entry(WasmType::Array(StringType::store_type()))
+            .entry(StringType::wasm_type())
             .or_insert(index);
 
         generator
@@ -1484,11 +1482,12 @@ impl<'a> Generator<'a> {
     }
 
     fn function_string_eq(&mut self) -> u32 {
-        if let Some(index) = self.builtins.get(&Builtins::StringEq) {
+        let eq = Builtins::Equal(self.string.val_type());
+        if let Some(index) = self.builtins.get(&eq) {
             return *index;
         }
         let function = self.code_string_eq();
-        self.add_builtins(Builtins::StringEq, function)
+        self.add_builtins(eq, function)
     }
 
     fn code_string_eq(&mut self) -> Function {
@@ -1679,23 +1678,16 @@ impl<'a> Generator<'a> {
 
     fn function_list_eq(&mut self, item_type: &Arc<Type>) -> u32 {
         let type_index = self.list_type(item_type);
-        if let Some(index) = self.eq.get(&type_index) {
+        let eq = Builtins::Equal(self.list_val_type(type_index));
+        if let Some(index) = self.builtins.get(&eq) {
             return *index;
         }
-        let eq = self.function_eq(item_type);
-        let function = self.code_list_eq(type_index, eq);
-        let val_type = self.list_val_type(type_index);
-        let index = self.add_function(
-            None,
-            vec![val_type, val_type],
-            vec![self.bool_.val_type()],
-            function.into_raw_body(),
-        );
-        let _ = self.eq.insert(type_index, index);
-        index
+        let item_eq = self.function_eq(item_type);
+        let function = self.code_list_eq(type_index, item_eq);
+        self.add_builtins(eq, function)
     }
 
-    fn code_list_eq(&mut self, type_index: u32, eq: Eq) -> Function {
+    fn code_list_eq(&mut self, type_index: u32, item_eq: Eq) -> Function {
         let mut function = Function::new(vec![]);
         let mut instructions = function.extend_instructions(self);
         let rest_index = 0;
@@ -1748,7 +1740,7 @@ impl<'a> Generator<'a> {
                   // b.value
                   .local_get(b)
                   .struct_get(type_index, value_index)
-                  .eq(eq)
+                  .eq(item_eq)
                   // if a.value == b.value
                   .if_(BlockType::Empty)
                     // a = a.rest
@@ -1781,19 +1773,13 @@ impl<'a> Generator<'a> {
 
     fn function_tuple_eq(&mut self, types: impl IntoIterator<Item = Arc<Type>> + Clone) -> u32 {
         let type_index = self.tuple_type(types.clone());
-        if let Some(index) = self.eq.get(&type_index) {
+        let val_type = self.tuple_val_type(type_index);
+        let eq = Builtins::Equal(val_type);
+        if let Some(index) = self.builtins.get(&eq) {
             return *index;
         }
         let function = self.code_tuple_eq(type_index, types);
-        let val_type = self.tuple_val_type(type_index);
-        let index = self.add_function(
-            None,
-            vec![val_type, val_type],
-            vec![self.bool_.val_type()],
-            function.into_raw_body(),
-        );
-        let _ = self.eq.insert(type_index, index);
-        index
+        self.add_builtins(eq, function)
     }
 
     fn code_tuple_eq(
@@ -1835,21 +1821,23 @@ impl<'a> Generator<'a> {
     fn add_builtins(&mut self, builtin: Builtins, function: Function) -> u32 {
         let (params, results) = match builtin {
             Builtins::Start => (vec![], vec![]),
-            Builtins::StringEq => (
-                vec![self.string.val_type(), self.string.val_type()],
-                vec![self.bool_.val_type()],
-            ),
             Builtins::StringConcat => (
                 vec![self.string.val_type(), self.string.val_type()],
                 vec![self.string.val_type()],
             ),
+            Builtins::Equal(val_type) => (vec![val_type, val_type], vec![self.bool_.val_type()]),
         };
         let export_name = if builtin.export() {
             Some(builtin.name())
         } else {
             None
         };
-        self.add_function(export_name, params, results, function.into_raw_body())
+        self.add_function(
+            export_name.as_deref(),
+            params,
+            results,
+            function.into_raw_body(),
+        )
     }
 
     fn add_function(
@@ -2248,8 +2236,8 @@ struct StringType {
 }
 
 impl StringType {
-    fn store_type() -> StorageType {
-        StorageType::I8
+    fn wasm_type() -> WasmType {
+        WasmType::Array(StorageType::I8)
     }
 
     fn val_type(&self) -> ValType {
