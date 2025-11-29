@@ -987,6 +987,7 @@ pub struct CustomType<T> {
     pub typed_parameters: Vec<T>,
     pub external_erlang: Option<(EcoString, EcoString, SrcSpan)>,
     pub external_javascript: Option<(EcoString, EcoString, SrcSpan)>,
+    pub external_webassembly: Option<(EcoString, EcoString, SrcSpan)>,
 }
 
 impl<T> CustomType<T> {

@@ -1,6 +1,7 @@
 **/*.rs.bk
 **/*.beam
 /target/
+/builtins-wasm/target/
 /tmp
 .idea/
 .idea/*
