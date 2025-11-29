@@ -1,4 +1,5 @@
-use std::{path::Path, process::Command};
+use camino::Utf8Path;
+use std::process::Command;
 
 const BUILTINS: &str = "builtins-wasm";
 
@@ -11,9 +12,12 @@ fn main() {
         .run()
         .expect("compiling schema.capnp");
 
-    Command::new("cargo")
-        .args(["build", "--release", "--target", "wasm32-unknown-unknown"])
-        .current_dir(Path::new("..").join(BUILTINS))
-        .status()
-        .expect(&format!("Building {BUILTINS}"));
+    assert!(
+        Command::new("cargo")
+            .args(["build", "--release", "--target", "wasm32-unknown-unknown"])
+            .current_dir(Utf8Path::new("..").join(BUILTINS))
+            .status()
+            .unwrap_or_else(|_| panic!("Building {BUILTINS}"))
+            .success()
+    );
 }

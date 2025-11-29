@@ -12,7 +12,7 @@ unsafe extern "C" {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _print(fd: i32, ptr: *const u8, len: u32) -> i32 {
-    let mut written = 0u32;
+    let mut written = 0i32;
     let iovec = wasi::Ciovec {
         buf: ptr,
         buf_len: len as usize,

@@ -131,7 +131,9 @@ struct Attributes {
 
 impl Attributes {
     fn has_function_only(&self) -> bool {
-        self.external_erlang.is_some() || self.external_javascript.is_some()
+        self.external_erlang.is_some()
+            || self.external_javascript.is_some()
+            || self.external_webassembly.is_some()
     }
 
     fn has_external_for(&self, target: Target) -> bool {
@@ -2582,6 +2584,7 @@ where
             deprecation: std::mem::take(&mut attributes.deprecated),
             external_erlang: std::mem::take(&mut attributes.external_erlang),
             external_javascript: std::mem::take(&mut attributes.external_javascript),
+            external_webassembly: std::mem::take(&mut attributes.external_webassembly),
         })))
     }
 

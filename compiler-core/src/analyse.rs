@@ -959,6 +959,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             deprecation,
             external_erlang,
             external_javascript,
+            external_webassembly,
             ..
         } = t;
 
@@ -1091,6 +1092,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             deprecation,
             external_erlang,
             external_javascript,
+            external_webassembly,
         })
     }
 

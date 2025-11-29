@@ -83,6 +83,7 @@ tracing.workspace = true
 serde_derive = "1"
 # Cap'n Proto binary format codegen
 capnpc = "0"
+camino = { workspace = true, features = ["serde1"] }
 
 [dev-dependencies]
 pretty_assertions.workspace = true
