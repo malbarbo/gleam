@@ -132,6 +132,13 @@ pub fn module(module: &TypedModule, _line_numbers: &LineNumbers) -> Vec<u8> {
     // data section
     let _ = module.section(&generator.data_section);
 
+    // name section
+    let mut names = NameSection::new();
+    names.module(&generator.module.name);
+    names.functions(&generator.function_names);
+    names.globals(&generator.global_names);
+    let _ = module.section(&names);
+
     // finalize
     module.finish()
 }
@@ -205,6 +212,8 @@ struct Generator<'a> {
     import_section: ImportSection,
     export_section: ExportSection,
     data_section: DataSection,
+    function_names: NameMap,
+    global_names: NameMap,
     // Wasm types and its indexes in the type section
     wasm_types: HashMap<WasmType, u32>,
     types: HashMap<(EcoString, EcoString), CustomType>,
@@ -236,6 +245,8 @@ impl<'a> Generator<'a> {
             import_section: ImportSection::new(),
             export_section: ExportSection::new(),
             data_section: DataSection::new(),
+            function_names: NameMap::new(),
+            global_names: NameMap::new(),
             wasm_types: HashMap::new(),
             types: HashMap::new(),
             functions: vec![],
@@ -280,6 +291,7 @@ impl<'a> Generator<'a> {
     }
 
     fn add_function_to_globals(&mut self, name: EcoString, index: u32) -> Id {
+        self.function_names.append(index, &name);
         let id = Id::func(name, index);
         self.globals.borrow_mut().push(id.clone());
         id
@@ -495,20 +507,30 @@ impl<'a> Generator<'a> {
                 wasmparser::Payload::CustomSection(section) => {
                     if let wasmparser::KnownCustom::Name(section) = section.as_known() {
                         for sub in section {
-                            if let wasmparser::Name::Function(section_limited) =
-                                sub.expect("Name section")
-                            {
-                                for item in section_limited.into_iter_with_offsets() {
-                                    let (_, name) = item.expect("Name entry");
-                                    if let Some(external) = externals.available.get(name.name) {
-                                        for used_name in external.used_names() {
-                                            let _ = self.add_function_to_globals(
-                                                used_name.clone(),
-                                                name.index,
-                                            );
+                            match sub.expect("Name section") {
+                                wasmparser::Name::Function(section_limited) => {
+                                    for item in section_limited.into_iter_with_offsets() {
+                                        let (_, name) = item.expect("Name entry");
+                                        if let Some(external) = externals.available.get(name.name) {
+                                            if !external.is_used() {
+                                                self.function_names.append(name.index, name.name);
+                                            }
+                                            for used_name in external.used_names() {
+                                                let _ = self.add_function_to_globals(
+                                                    used_name.clone(),
+                                                    name.index,
+                                                );
+                                            }
                                         }
                                     }
                                 }
+                                wasmparser::Name::Global(section_limited) => {
+                                    for item in section_limited.into_iter_with_offsets() {
+                                        let (_, name) = item.expect("Name entry");
+                                        self.global_names.append(name.index, name.name);
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -1605,6 +1627,7 @@ impl<'a> Generator<'a> {
             },
             &expr,
         );
+        self.global_names.append(index, name);
         if export {
             let _ = self.export_section.export(name, ExportKind::Global, index);
         }
