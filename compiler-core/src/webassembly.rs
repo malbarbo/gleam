@@ -1,4 +1,7 @@
 #![allow(clippy::todo, clippy::unwrap_used)]
+use ecow::EcoString;
+use itertools::Itertools;
+use num_bigint::BigInt;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -9,14 +12,10 @@ use std::{
     rc::Rc,
     sync::Arc,
 };
-
-use ecow::EcoString;
-use itertools::Itertools;
-use num_bigint::BigInt;
 use wasm_encoder::{
     AbstractHeapType, BlockType, CodeSection, ConstExpr, DataCountSection, DataSection,
     ElementSection, Elements, EntityType, ExportKind, ExportSection, FieldType, Function,
-    FunctionSection, GlobalSection, GlobalType, HeapType, ImportSection, InstructionSink,
+    FunctionSection, GlobalSection, GlobalType, HeapType, ImportSection, InstructionSink, MemArg,
     MemorySection, MemoryType, Module, NameMap, NameSection, RefType, StartSection, StorageType,
     TypeSection, ValType,
 };
@@ -26,6 +25,7 @@ use crate::{
         AssignmentKind, BinOp, ClauseGuard, Constant, OperatorKind, Pattern, Statement, TypedArg,
         TypedAssignment, TypedClause, TypedClauseGuard, TypedConstant, TypedExpr, TypedFunction,
         TypedModule, TypedModuleConstant, TypedPattern, TypedPipelineAssignment, TypedStatement,
+        visit::Visit,
     },
     line_numbers::LineNumbers,
     type_::{self, Type, TypeVar},
@@ -42,8 +42,13 @@ const I32_TO_STR: &str = "_i32_to_str";
 const I64_TO_STR: &str = "_i64_to_str";
 const F64_TO_STR: &str = "_f64_to_str";
 
-pub fn module(module: &TypedModule, _line_numbers: &LineNumbers) -> Vec<u8> {
-    let mut generator = Generator::new(module);
+const HEAP_BASE: &str = "_heap_base";
+const PRINT: &str = "_print";
+
+const STDERR: i32 = 2;
+
+pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
+    let mut generator = Generator::new(module, line_numbers);
     let start = generator.generate();
 
     let mut module = Module::default();
@@ -155,23 +160,48 @@ enum WasmType {
 #[derive(Hash, PartialEq, Eq, Clone, Debug)]
 enum BuiltinFunction {
     StringConcat,
-    Equal(ValType),
-    IntToString,
-    FloatToString,
+    Equal(ValType, String),
+    ListRepr(ValType, String),
+    TupleRepr(ValType, String),
+    FunctionRepr(ValType, String),
+    // Can be used in external
     I32ToInt,
     IntToI32,
+    IntRepr,
+    FloatRepr,
+    StringRepr,
+    StringToMemory,
+    MemoryToString,
 }
 
 impl BuiltinFunction {
     fn name(&self) -> EcoString {
         match self {
-            BuiltinFunction::StringConcat => "$string_concat".into(),
-            BuiltinFunction::Equal(type_) => format!("$equal({type_:?})").into(),
-            BuiltinFunction::IntToString => "$int_to_string".into(),
-            BuiltinFunction::FloatToString => "$float_to_string".into(),
-            BuiltinFunction::I32ToInt => "$i32_to_int".into(),
-            BuiltinFunction::IntToI32 => "$int_to_i32".into(),
+            BuiltinFunction::StringConcat => "_string_concat".into(),
+            BuiltinFunction::Equal(_, name) => format!("_equal({name})").into(),
+            BuiltinFunction::ListRepr(_, name) => format!("_list_repr({name})").into(),
+            BuiltinFunction::TupleRepr(_, name) => format!("_tuple_repr({name})").into(),
+            BuiltinFunction::FunctionRepr(_, name) => format!("_function_repr({name})").into(),
+            BuiltinFunction::I32ToInt => "_i32_to_int".into(),
+            BuiltinFunction::IntToI32 => "_int_to_i32".into(),
+            BuiltinFunction::IntRepr => "_int_repr".into(),
+            BuiltinFunction::FloatRepr => "_float_repr".into(),
+            BuiltinFunction::StringRepr => "_string_repr".into(),
+            BuiltinFunction::StringToMemory => "_string_to_memory".into(),
+            BuiltinFunction::MemoryToString => "_memory_to_string".into(),
         }
+    }
+
+    fn externals() -> &'static [BuiltinFunction] {
+        &[
+            BuiltinFunction::I32ToInt,
+            BuiltinFunction::IntToI32,
+            BuiltinFunction::IntRepr,
+            BuiltinFunction::FloatRepr,
+            BuiltinFunction::StringRepr,
+            BuiltinFunction::StringToMemory,
+            BuiltinFunction::MemoryToString,
+        ]
     }
 }
 
@@ -232,6 +262,7 @@ struct Generator<'a> {
     float: FloatType,
     string: StringType,
     module: &'a TypedModule,
+    line_numbers: &'a LineNumbers,
 }
 
 fn find_global(name: &EcoString, globals: &RefCell<Vec<Id>>) -> Option<Id> {
@@ -239,7 +270,7 @@ fn find_global(name: &EcoString, globals: &RefCell<Vec<Id>>) -> Option<Id> {
 }
 
 impl<'a> Generator<'a> {
-    fn new(module: &'a TypedModule) -> Self {
+    fn new(module: &'a TypedModule, line_numbers: &'a LineNumbers) -> Self {
         Generator {
             function_section: FunctionSection::new(),
             global_section: GlobalSection::new(),
@@ -262,6 +293,7 @@ impl<'a> Generator<'a> {
             float: FloatType::Float64,
             string: StringType { type_index: 0 },
             module,
+            line_numbers,
         }
     }
 
@@ -277,14 +309,6 @@ impl<'a> Generator<'a> {
 
         // externals must come first because of the indexes in the builtin wasm file
         self.externals();
-
-        // String type
-        // FIXME: add only if its necessary
-        let index = self.wasm_types.len() as u32;
-        self.string.type_index = *self
-            .wasm_types
-            .entry(StringType::wasm_type())
-            .or_insert(index);
 
         self.constants();
         self.functions();
@@ -303,20 +327,27 @@ impl<'a> Generator<'a> {
     }
 
     fn find_global_expect(&self, name: &EcoString) -> Id {
-        self.find_global(name).expect("Global \"{name}\".")
+        self.find_global(name)
+            .unwrap_or_else(|| panic!("Global \"{name}\"."))
     }
 
     fn builtin_wasm_dependencies(&self, function: &BuiltinFunction) -> &'static [&'static str] {
         match function {
             BuiltinFunction::StringConcat
-            | BuiltinFunction::Equal(_)
+            | BuiltinFunction::Equal(_, _)
+            | BuiltinFunction::ListRepr(_, _)
+            | BuiltinFunction::TupleRepr(_, _)
+            | BuiltinFunction::FunctionRepr(_, _)
             | BuiltinFunction::I32ToInt
-            | BuiltinFunction::IntToI32 => &[],
-            BuiltinFunction::IntToString => match self.int {
+            | BuiltinFunction::IntToI32
+            | BuiltinFunction::StringRepr
+            | BuiltinFunction::StringToMemory
+            | BuiltinFunction::MemoryToString => &[],
+            BuiltinFunction::IntRepr => match self.int {
                 IntType::Int32 => &[I32_TO_STR],
                 IntType::Int64 => &[I64_TO_STR],
             },
-            BuiltinFunction::FloatToString => match self.float {
+            BuiltinFunction::FloatRepr => match self.float {
                 FloatType::Float64 => &[F64_TO_STR],
             },
         }
@@ -328,38 +359,73 @@ impl<'a> Generator<'a> {
                 vec![self.string.val_type(), self.string.val_type()],
                 vec![self.string.val_type()],
             ),
-            BuiltinFunction::IntToString => {
-                (vec![self.int.val_type(), ValType::I32], vec![ValType::I32])
-            }
-            BuiltinFunction::FloatToString => (
-                vec![self.float.val_type(), ValType::I32],
-                vec![ValType::I32],
-            ),
-            BuiltinFunction::Equal(val_type) => {
+            BuiltinFunction::Equal(val_type, _) => {
                 (vec![*val_type, *val_type], vec![self.bool_.val_type()])
+            }
+            BuiltinFunction::ListRepr(val_type, _) => {
+                (vec![*val_type, ValType::I32], vec![ValType::I32])
+            }
+            BuiltinFunction::TupleRepr(val_type, _) => {
+                (vec![*val_type, ValType::I32], vec![ValType::I32])
+            }
+            BuiltinFunction::FunctionRepr(val_type, _) => {
+                (vec![*val_type, ValType::I32], vec![ValType::I32])
             }
             BuiltinFunction::I32ToInt => (vec![ValType::I32], vec![self.int.val_type()]),
             BuiltinFunction::IntToI32 => (vec![self.int.val_type()], vec![ValType::I32]),
+            BuiltinFunction::IntRepr => {
+                (vec![self.int.val_type(), ValType::I32], vec![ValType::I32])
+            }
+            BuiltinFunction::FloatRepr => (
+                vec![self.float.val_type(), ValType::I32],
+                vec![ValType::I32],
+            ),
+            BuiltinFunction::StringRepr => (
+                vec![self.string.val_type(), ValType::I32],
+                vec![ValType::I32],
+            ),
+            BuiltinFunction::StringToMemory => (
+                vec![self.string.val_type(), ValType::I32],
+                vec![ValType::I32],
+            ),
+            BuiltinFunction::MemoryToString => (
+                vec![ValType::I32, ValType::I32],
+                vec![self.string.val_type()],
+            ),
         }
     }
 
     fn builtin_check_type(&mut self, builtin: &BuiltinFunction, function: &TypedFunction) {
         let valid = match builtin {
-            BuiltinFunction::StringConcat => todo!(),
-            BuiltinFunction::Equal(_) => todo!(),
-            BuiltinFunction::IntToString => match &function.arguments[..] {
-                [first, _] => first.type_.is_int(),
-                _ => false,
-            },
-            BuiltinFunction::FloatToString => match &function.arguments[..] {
-                [first, _] => first.type_.is_float(),
-                _ => false,
-            },
+            BuiltinFunction::StringConcat
+            | BuiltinFunction::Equal(_, _)
+            | BuiltinFunction::ListRepr(_, _)
+            | BuiltinFunction::TupleRepr(_, _)
+            | BuiltinFunction::FunctionRepr(_, _) => {
+                panic!("Function {} shouldn't be used as external", builtin.name())
+            }
             BuiltinFunction::I32ToInt => function.return_type.is_int(),
             BuiltinFunction::IntToI32 => match &function.arguments[..] {
                 [first] => first.type_.is_int(),
                 _ => false,
             },
+            BuiltinFunction::IntRepr => match &function.arguments[..] {
+                [first, _] => first.type_.is_int(),
+                _ => false,
+            },
+            BuiltinFunction::FloatRepr => match &function.arguments[..] {
+                [first, _] => first.type_.is_float(),
+                _ => false,
+            },
+            BuiltinFunction::StringRepr => match &function.arguments[..] {
+                [first, _] => first.type_.is_string(),
+                _ => false,
+            },
+            BuiltinFunction::StringToMemory => match &function.arguments[..] {
+                [first, _] => first.type_.is_string(),
+                _ => false,
+            },
+            BuiltinFunction::MemoryToString => function.return_type.is_string(),
         };
 
         let (params, results) = self.builtin_type(builtin);
@@ -540,6 +606,14 @@ impl<'a> Generator<'a> {
             }
         }
 
+        // String type
+        // FIXME: add only if its necessary
+        let index = self.wasm_types.len() as u32;
+        self.string.type_index = *self
+            .wasm_types
+            .entry(StringType::wasm_type())
+            .or_insert(index);
+
         for external in externals.available.into_values() {
             if external.is_used()
                 && let ExternalFunction::Builtin {
@@ -548,19 +622,32 @@ impl<'a> Generator<'a> {
                 } = external
             {
                 let index = match function {
-                    BuiltinFunction::IntToString => {
-                        self.add_function_builtin(function, self.code_int_to_str())
-                    }
-                    BuiltinFunction::FloatToString => {
-                        self.add_function_builtin(function, self.code_float_to_str())
-                    }
                     BuiltinFunction::I32ToInt => {
                         self.add_function_builtin(function, self.code_i32_to_int())
                     }
                     BuiltinFunction::IntToI32 => {
                         self.add_function_builtin(function, self.code_int_to_i32())
                     }
-                    _ => {
+                    BuiltinFunction::IntRepr => {
+                        self.add_function_builtin(function, self.code_int_repr())
+                    }
+                    BuiltinFunction::FloatRepr => {
+                        self.add_function_builtin(function, self.code_float_repr())
+                    }
+                    BuiltinFunction::StringRepr => {
+                        self.add_function_builtin(function, self.code_string_repr())
+                    }
+                    BuiltinFunction::StringToMemory => {
+                        self.add_function_builtin(function, self.code_string_to_memory())
+                    }
+                    BuiltinFunction::MemoryToString => {
+                        self.add_function_builtin(function, self.code_memory_to_string())
+                    }
+                    BuiltinFunction::StringConcat
+                    | BuiltinFunction::Equal(_, _)
+                    | BuiltinFunction::ListRepr(_, _)
+                    | BuiltinFunction::TupleRepr(_, _)
+                    | BuiltinFunction::FunctionRepr(_, _) => {
                         // FIXME: add message
                         panic!();
                     }
@@ -1207,6 +1294,13 @@ impl<'a> Generator<'a> {
             } => {
                 self.expression_case(locals, scope, instructions, type_, subjects, clauses);
             }
+            echo @ TypedExpr::Echo {
+                expression,
+                message,
+                ..
+            } => {
+                self.expression_echo(locals, &scope, instructions, echo, expression, message);
+            }
             _ => todo!("Expression not supported: {:#?}", expression),
         };
     }
@@ -1300,6 +1394,82 @@ impl<'a> Generator<'a> {
             IdKind::Global => instructions.global_get(id.index),
             IdKind::Local => instructions.local_get(id.index),
         };
+    }
+
+    fn expression_echo(
+        &mut self,
+        locals: &Locals,
+        scope: &Scope,
+        instructions: &mut ExtendedInstructionSink<'_>,
+        echo: &TypedExpr,
+        expression: &Option<Box<TypedExpr>>,
+        message: &Option<Box<TypedExpr>>,
+    ) {
+        if let Some(expression) = expression {
+            let print = self.find_global_expect(&PRINT.into());
+            let heap_base = self.find_global_expect(&HEAP_BASE.into());
+            let string_to_memory = self.find_global_expect(&BuiltinFunction::StringToMemory.name());
+            let string_index = self.string_index(
+                &format!(
+                    "src/{}.gleam:{}{}",
+                    self.module.name,
+                    self.line_numbers.line_number(echo.location().start),
+                    if message.is_some() { ' ' } else { '\n' }
+                )
+                .into(),
+            );
+
+            let (dest, expr) = locals.for_echo(echo, expression);
+
+            let _ = instructions
+                .expression(self, locals, scope.clone(), expression)
+                .local_set(expr)
+                // write the module name and line number
+                .global_as_non_null(string_index)
+                .call(heap_base.index)
+                .local_tee(dest)
+                .call(string_to_memory.index)
+                // update end
+                .local_get(dest)
+                .i32_add()
+                .local_set(dest);
+
+            if let Some(message) = message {
+                let _ = instructions
+                    .expression(self, locals, scope.clone(), message)
+                    .local_get(dest)
+                    .call(self.function_repr(&message.type_()))
+                    // update end
+                    .local_get(dest)
+                    .i32_add()
+                    .local_tee(dest)
+                    // add new line
+                    .byte_store(b'\n')
+                    .i32_inc(dest);
+            }
+
+            let _ = instructions
+                .local_get(expr)
+                .local_get(dest)
+                .call(self.function_repr(&expression.type_()))
+                // update end
+                .local_get(dest)
+                .i32_add()
+                .local_tee(dest)
+                // add new line
+                .byte_store(b'\n')
+                .i32_inc(dest)
+                // call print
+                .i32_const(STDERR)
+                .call(heap_base.index)
+                .local_get(dest)
+                .call(heap_base.index)
+                .i32_sub()
+                .call(print.index)
+                .drop()
+                // recover expression value
+                .local_get(expr);
+        }
     }
 
     fn assignment(
@@ -1694,6 +1864,7 @@ impl<'a> Generator<'a> {
     }
 
     fn string_index(&mut self, string: &EcoString) -> u32 {
+        let string = unescape(string);
         let index = self.global_section.len();
         *self.strings.entry(string.into()).or_insert_with(|| {
             let _ = self.global_section.global(
@@ -1709,7 +1880,8 @@ impl<'a> Generator<'a> {
     }
 
     fn function_string_eq(&mut self) -> u32 {
-        let eq = BuiltinFunction::Equal(self.string.val_type());
+        let name = type_str(&type_::string());
+        let eq = BuiltinFunction::Equal(self.string.val_type(), name);
         if let Some(index) = self.builtins.get(&eq) {
             return *index;
         }
@@ -1720,10 +1892,13 @@ impl<'a> Generator<'a> {
     fn code_string_eq(&self) -> Function {
         let mut function = Function::new(vec![(2, ValType::I32)]);
         let mut instructions = function.extend_instructions(self);
-        let a = 0;
-        let b = 1;
-        let i = 2;
-        let len = 3;
+        // params
+        let a = 0; // String
+        let b = 1; // String
+        // locals
+        let i = 2; // I32
+        let len = 3; // I32
+        // return Bool
         #[rustfmt::skip]
         let _ = instructions
             .local_get(a)
@@ -1774,11 +1949,7 @@ impl<'a> Generator<'a> {
                 .bool_const(false)
                 .return_()
               .end()
-              // i = i + 1
-              .local_get(i)
-              .i32_const(1)
-              .i32_add()
-              .local_set(i)
+              .i32_inc(i)
               // loop
               .br(0)
             // end loop
@@ -1800,12 +1971,15 @@ impl<'a> Generator<'a> {
     fn code_string_concat(&self) -> Function {
         let mut function = Function::new(vec![(3, ValType::I32), (1, self.string.val_type())]);
         let mut instructions = function.extend_instructions(self);
-        let a = 0;
-        let b = 1;
-        let len_a = 2;
-        let len_b = 3;
-        let i = 4;
-        let r = 5;
+        // params
+        let a = 0; // String
+        let b = 1; // String
+        // locals
+        let len_a = 2; // I32
+        let len_b = 3; // I32
+        let i = 4; // I32
+        // return
+        let r = 5; // String
         #[rustfmt::skip]
         let _ = instructions
             // len_a = a.len; push len_a
@@ -1902,8 +2076,9 @@ impl<'a> Generator<'a> {
     }
 
     fn function_list_eq(&mut self, item_type: &Arc<Type>) -> u32 {
+        let item_name = type_str(item_type);
         let type_index = self.list_type(item_type);
-        let eq = BuiltinFunction::Equal(self.list_val_type(type_index));
+        let eq = BuiltinFunction::Equal(self.list_val_type(type_index), item_name);
         if let Some(index) = self.builtins.get(&eq) {
             return *index;
         }
@@ -1915,8 +2090,10 @@ impl<'a> Generator<'a> {
     fn code_list_eq(&self, type_index: u32, item_eq: Eq) -> Function {
         let mut function = Function::new(vec![]);
         let mut instructions = function.extend_instructions(self);
-        let a = 0;
-        let b = 1;
+        // params
+        let a = 0; // List(a)
+        let b = 1; // List(a)
+        // return Bool
         #[rustfmt::skip]
         let _ = instructions
             .loop_(BlockType::Empty)
@@ -1995,9 +2172,13 @@ impl<'a> Generator<'a> {
     }
 
     fn function_tuple_eq(&mut self, types: impl IntoIterator<Item = Arc<Type>> + Clone) -> u32 {
+        let type_ = Type::Tuple {
+            elements: types.clone().into_iter().collect(),
+        };
+        let name = type_str(&Arc::new(type_));
         let type_index = self.tuple_type(types.clone());
         let val_type = self.tuple_val_type(type_index);
-        let eq = BuiltinFunction::Equal(val_type);
+        let eq = BuiltinFunction::Equal(val_type, name);
         if let Some(index) = self.builtins.get(&eq) {
             return *index;
         }
@@ -2012,8 +2193,10 @@ impl<'a> Generator<'a> {
     ) -> Function {
         let mut function = Function::new(vec![]);
         let mut instructions = function.extend_instructions(self);
-        let a = 0;
-        let b = 1;
+        // params
+        let a = 0; // Tuple
+        let b = 1; // Tuple
+        // return Bool
         #[rustfmt::skip]
         let _ = instructions
             .local_get(a)
@@ -2041,7 +2224,68 @@ impl<'a> Generator<'a> {
         function
     }
 
-    fn code_int_to_str(&self) -> Function {
+    fn code_i32_to_int(&self) -> Function {
+        let mut function = Function::new(vec![]);
+        let _ = function
+            .extend_instructions(self)
+            .local_get(0)
+            .i32_to_int()
+            .end();
+        function
+    }
+
+    fn code_int_to_i32(&self) -> Function {
+        let mut function = Function::new(vec![]);
+        let _ = function
+            .extend_instructions(self)
+            .local_get(0)
+            .int_to_i32()
+            .end();
+        function
+    }
+
+    fn function_repr(&mut self, type_: &Arc<Type>) -> u32 {
+        // TODO: add CustomType
+        let repr = if type_.is_int() {
+            BuiltinFunction::IntRepr
+        } else if type_.is_float() {
+            BuiltinFunction::FloatRepr
+        } else if type_.is_string() {
+            BuiltinFunction::StringRepr
+        } else if let Some(item_type) = type_.list_type() {
+            BuiltinFunction::ListRepr(self.val_type(type_), type_str(&item_type))
+        } else if type_.tuple_types().is_some() {
+            BuiltinFunction::TupleRepr(self.val_type(type_), type_str(type_))
+        } else if type_.fn_types().is_some() {
+            BuiltinFunction::FunctionRepr(self.val_type(type_), type_str(type_))
+        } else {
+            todo!("echo: {:#?}", type_)
+        };
+
+        if let Some(id) = self.builtins.get(&repr) {
+            return *id;
+        }
+
+        let function = if type_.is_int() {
+            self.code_int_repr()
+        } else if type_.is_float() {
+            self.code_float_repr()
+        } else if type_.is_string() {
+            self.code_string_repr()
+        } else if let Some(item_type) = type_.list_type() {
+            self.code_list_repr(&item_type)
+        } else if let Some(types) = type_.tuple_types() {
+            self.code_tuple_repr(&types)
+        } else if type_.fn_types().is_some() {
+            self.code_function_repr(type_)
+        } else {
+            todo!("echo: {:#?}", type_)
+        };
+
+        self.add_function_builtin(repr, function)
+    }
+
+    fn code_int_repr(&self) -> Function {
         let mut function = Function::new(vec![]);
         let id = match self.int {
             IntType::Int32 => self.find_global_expect(&I32_TO_STR.into()),
@@ -2056,7 +2300,7 @@ impl<'a> Generator<'a> {
         function
     }
 
-    fn code_float_to_str(&self) -> Function {
+    fn code_float_repr(&self) -> Function {
         let mut function = Function::new(vec![]);
         let id = match self.float {
             FloatType::Float64 => self.find_global_expect(&F64_TO_STR.into()),
@@ -2070,25 +2314,312 @@ impl<'a> Generator<'a> {
         function
     }
 
-    fn code_i32_to_int(&self) -> Function {
-        let mut function = Function::new(vec![]);
-        let mut instructions = function.instructions();
-        let _ = match self.int {
-            IntType::Int32 => instructions.local_get(0),
-            IntType::Int64 => instructions.local_get(0).i64_extend_i32_s(),
-        }
-        .end();
+    fn code_string_repr(&self) -> Function {
+        let mut function = Function::new(vec![(4, ValType::I32)]);
+        // params
+        let s = 0; // String
+        let ptr = 1; // I32
+        // locals
+        let len = 2; // I32
+        let i = 3; // I32
+        let s_i = 4; // I32
+        let dest = 5; // I32
+        // return I32 - number of written bytes
+        let mut instructions = function.extend_instructions(self);
+        #[rustfmt::skip]
+        let _ = instructions
+            .local_get(ptr)
+            .local_tee(dest)
+            .byte_store(b'"')
+            .i32_inc(dest)
+            .local_get(s)
+            .string_len()
+            .local_set(len)
+            .i32_const(0)
+            .local_set(i)
+            // while i <= len
+            .loop_(BlockType::Empty)
+              .local_get(i)
+              .local_get(len)
+              .i32_lt_u()
+              .if_(BlockType::Empty)
+                // value = s[i]
+                .local_get(s)
+                .local_get(i)
+                .string_get()
+                .local_set(s_i)
+                .block(BlockType::Empty)
+                  .local_get(s_i)
+                  .try_escape(dest, b'"', b'"')
+                  .br_if(0)
+                  .local_get(s_i)
+                  .try_escape(dest, b'\\', b'\\')
+                  .br_if(0)
+                  .local_get(s_i)
+                  .try_escape(dest, b'\x0C', b'f')
+                  .br_if(0)
+                  .local_get(s_i)
+                  .try_escape(dest, b'\n', b'n')
+                  .br_if(0)
+                  .local_get(s_i)
+                  .try_escape(dest, b'\r', b'r')
+                  .br_if(0)
+                  .local_get(s_i)
+                  .try_escape(dest, b'\t', b't')
+                  .br_if(0)
+                  // default, do not escape
+                  .local_get(dest)
+                  .local_get(s_i)
+                  .i32_store8(MemArg {
+                      offset: 0,
+                      align: 0,
+                      memory_index: 0,
+                  })
+                // block
+                .end()
+                .i32_inc(dest)
+                .i32_inc(i)
+                .br(1)
+              // if
+              .end()
+            // loop
+            .end()
+            .local_get(dest)
+            .byte_store(b'"')
+            .i32_inc(dest)
+            .local_get(dest)
+            .local_get(ptr)
+            .i32_sub()
+            .end();
         function
     }
 
-    fn code_int_to_i32(&self) -> Function {
-        let mut function = Function::new(vec![]);
-        let mut instructions = function.instructions();
-        let _ = match self.int {
-            IntType::Int32 => instructions.local_get(0),
-            IntType::Int64 => instructions.local_get(0).i32_wrap_i64(),
+    fn code_list_repr(&mut self, item_type: &Arc<Type>) -> Function {
+        let struct_index = self.list_type(item_type);
+        let mut function = Function::new(vec![(1, ValType::I32)]);
+        // params
+        let lst = 0; // List(a)
+        let ptr = 1; // I32
+        let dest = 2; // I32
+        // return I32 - number of written bytes
+        let mut instructions = function.extend_instructions(self);
+        #[rustfmt::skip]
+        let _ = instructions
+            .local_get(ptr)
+            .local_tee(dest)
+            .byte_store(b'[')
+            .i32_inc(dest)
+            .local_get(lst)
+            .ref_is_null()
+            .if_(BlockType::Empty)
+              .local_get(dest)
+              .byte_store(b']')
+              .i32_const(2)
+              .return_()
+            .else_()
+              .local_get(lst)
+              .struct_get(struct_index, 1)
+              .local_get(dest)
+              .call(self.function_repr(item_type))
+              .local_get(dest)
+              .i32_add()
+              .local_set(dest)
+            // if
+            .end()
+            .loop_(BlockType::Empty)
+              .local_get(lst)
+              .struct_get(struct_index, 0)
+              .local_tee(lst)
+              .ref_is_null()
+              .if_(BlockType::Empty)
+                .local_get(dest)
+                .byte_store(b']')
+                .i32_inc(dest)
+              .else_()
+                .local_get(dest)
+                .byte_store(b',')
+                .i32_inc(dest)
+                .local_get(dest)
+                .byte_store(b' ')
+                .i32_inc(dest)
+                .local_get(lst)
+                .struct_get(struct_index, 1)
+                .local_get(dest)
+                .call(self.function_repr(item_type))
+                .local_get(dest)
+                .i32_add()
+                .local_set(dest)
+                .br(1)
+              .end()
+            // loop
+            .end()
+            .local_get(dest)
+            .local_get(ptr)
+            .i32_sub()
+            // function
+            .end();
+        function
+    }
+
+    fn code_tuple_repr(&mut self, types: &[Arc<Type>]) -> Function {
+        let struct_index = self.tuple_type(types.iter().cloned());
+        let mut function = Function::new(vec![(1, ValType::I32)]);
+        // params
+        let t = 0; // Tuple
+        let ptr = 1; // I32
+        let dest = 2; // I32
+        // return I32 - number of written bytes
+        let mut instructions = function.extend_instructions(self);
+
+        let _ = instructions
+            .local_get(ptr)
+            .local_tee(dest)
+            .byte_store(b'#')
+            .i32_inc(dest)
+            .local_get(dest)
+            .byte_store(b'(')
+            .i32_inc(dest);
+
+        if let Some((first, rest)) = types.split_first() {
+            let _ = instructions
+                .local_get(t)
+                .struct_get(struct_index, 0)
+                .local_get(dest)
+                .call(self.function_repr(first))
+                .local_get(dest)
+                .i32_add()
+                .local_set(dest);
+            for (type_, field_index) in rest.iter().zip(1..) {
+                let _ = instructions
+                    .local_get(dest)
+                    .byte_store(b',')
+                    .i32_inc(dest)
+                    .local_get(dest)
+                    .byte_store(b' ')
+                    .i32_inc(dest)
+                    .local_get(t)
+                    .struct_get(struct_index, field_index)
+                    .local_get(dest)
+                    .call(self.function_repr(type_))
+                    .local_get(dest)
+                    .i32_add()
+                    .local_set(dest);
+            }
         }
-        .end();
+
+        let _ = instructions
+            .local_get(dest)
+            .byte_store(b')')
+            .i32_inc(dest)
+            .local_get(dest)
+            .local_get(ptr)
+            .i32_sub()
+            .end();
+
+        function
+    }
+
+    fn code_function_repr(&mut self, type_: &Arc<Type>) -> Function {
+        let mut function = Function::new(vec![]);
+        // params
+        let _func = 0; // Function
+        let ptr = 1; // I32
+        // return I32 - number of written bytes
+        let repr = format!("//{} {{ ... }}", type_str(type_));
+        let string_index = self.string_index(&repr.into());
+        let _ = function
+            .extend_instructions(self)
+            .global_as_non_null(string_index)
+            .local_get(ptr)
+            .call(
+                self.find_global_expect(&BuiltinFunction::StringToMemory.name())
+                    .index,
+            )
+            .end();
+        function
+    }
+
+    fn code_string_to_memory(&self) -> Function {
+        let mut function = Function::new(vec![(2, ValType::I32)]);
+        // params
+        let s = 0; // String
+        let dest = 1; // I32
+        // locals
+        let len = 2; // I32
+        let i = 3; // I32
+        let mut instructions = function.extend_instructions(self);
+        #[rustfmt::skip]
+        let _ = instructions
+            .local_get(s)
+            .array_len()
+            .local_set(len)
+            .i32_const(0)
+            .local_set(i)
+            // while i <= len
+            .loop_(BlockType::Empty)
+              .local_get(i)
+              .local_get(len)
+              .i32_lt_u()
+              .if_(BlockType::Empty)
+                .local_get(dest)
+                // value
+                .local_get(s)
+                .local_get(i)
+                .string_get()
+                // store
+                .i32_store8(MemArg {
+                    offset: 0,
+                    align: 0,
+                    memory_index: 0,
+                })
+                .i32_inc(dest)
+                .i32_inc(i)
+                .br(1)
+              // if
+              .end()
+            // loop
+            .end()
+            .local_get(len)
+            .end();
+        function
+    }
+
+    fn code_memory_to_string(&self) -> Function {
+        let mut function = Function::new(vec![(1, ValType::I32), (1, self.string.val_type())]);
+        // params
+        let src = 0; // I32
+        let len = 1; // I32
+        // locals
+        let i = 2; // I32
+        // return String
+        let s = 3;
+        let mut instructions = function.extend_instructions(self);
+        #[rustfmt::skip]
+        let _ = instructions
+            .local_get(len)
+            .string_new()
+            .local_set(s)
+            .i32_const(0)
+            .local_set(i)
+            .loop_(BlockType::Empty)
+              .local_get(i)
+              .local_get(len)
+              .i32_lt_u()
+              .if_(BlockType::Empty)
+                .local_get(s)
+                .local_get(i)
+                .local_get(src)
+                .i32_load8_u(MemArg { offset: 0, align: 0, memory_index: 0 })
+                .array_set(self.string.type_index)
+                .i32_inc(src)
+                .i32_inc(i)
+                .br(1)
+              // if
+              .end()
+            // loop
+            .end()
+            .local_get(s)
+            .end();
         function
     }
 
@@ -2111,6 +2642,7 @@ impl<'a> Generator<'a> {
         let index = self.next_function_id();
         self.functions.push((function, index));
         if let Some(name) = export_name {
+            self.function_names.append(index, name);
             let _ = self.export_section.export(name, ExportKind::Func, index);
         }
         index
@@ -2218,6 +2750,14 @@ impl<'a> ExtendedInstructionSink<'a> {
         self.array_len()
     }
 
+    fn byte_store(&mut self, byte: u8) -> &mut Self {
+        self.i32_const(byte as i32).i32_store8(MemArg {
+            offset: 0,
+            align: 0,
+            memory_index: 0,
+        })
+    }
+
     fn global_as_non_null(&mut self, index: u32) -> &mut Self {
         self.global_get(index).ref_as_non_null()
     }
@@ -2317,6 +2857,7 @@ impl<'a> ExtendedInstructionSink<'a> {
         loop_(bt: BlockType),
         block(bt: BlockType),
         br(l: u32),
+        br_if(l: u32),
         unreachable(),
         drop(),
         local_set(index: u32),
@@ -2340,10 +2881,14 @@ impl<'a> ExtendedInstructionSink<'a> {
         array_set(type_index: u32),
         return_(),
         i32_const(x: i32),
+        i32_eq(),
         i32_ne(),
         i32_ge_u(),
         i32_lt_u(),
         i32_add(),
+        i32_sub(),
+        i32_store8(m: MemArg),
+        i32_load8_u(m: MemArg),
     }
 }
 
@@ -2454,6 +2999,20 @@ impl<'a> ExtendedInstructionSink<'a> {
                   .i64_const(0)
                 .end(),
         };
+        self
+    }
+
+    fn i32_to_int(&mut self) -> &mut Self {
+        if let IntType::Int64 = self.int {
+            let _ = self.instructions.i64_extend_i32_s();
+        }
+        self
+    }
+
+    fn int_to_i32(&mut self) -> &mut Self {
+        if let IntType::Int64 = self.int {
+            let _ = self.instructions.i32_wrap_i64();
+        }
         self
     }
 
@@ -2723,6 +3282,21 @@ impl Locals {
         self._get(assignment)
     }
 
+    fn insert_echo(
+        &mut self,
+        generator: &mut Generator<'_>,
+        echo: &TypedExpr,
+        expression: &TypedExpr,
+    ) {
+        // the number of written bytes
+        self._insert_with_val_type(echo, ValType::I32);
+        self._insert(generator, expression, &expression.type_());
+    }
+
+    fn for_echo(&self, echo: &TypedExpr, expression: &TypedExpr) -> (u32, u32) {
+        (self._get(echo), self._get(expression))
+    }
+
     fn statements(&mut self, generator: &mut Generator<'_>, statements: &[TypedStatement]) {
         for statement in statements {
             self.statement(generator, statement);
@@ -2823,6 +3397,20 @@ impl Locals {
                         self.guard(generator, guard);
                     }
                     self.expression(generator, &clause.then);
+                }
+            }
+            echo @ TypedExpr::Echo {
+                expression,
+                message,
+                ..
+            } => {
+                self.insert_echo(
+                    generator,
+                    echo,
+                    expression.as_ref().expect("echo expression"),
+                );
+                if let Some(message) = message {
+                    self.expression(generator, message);
                 }
             }
             TypedExpr::Int { .. }
@@ -2942,6 +3530,14 @@ impl Locals {
         // another complete pass in the ast before the code generation.
         set_ubound_or_generic(type_, &type_::int());
         self.val_types.push(generator.val_type(type_));
+    }
+
+    fn _insert_with_val_type(&mut self, key: impl LocalHash, val_type: ValType) {
+        let index = self.locals.len() as u32 + self.skip;
+        if self.locals.insert(key.hash(), index).is_some() {
+            panic!("Locals collision.");
+        }
+        self.val_types.push(val_type);
     }
 
     fn _get(&self, key: impl LocalHash) -> u32 {
@@ -3426,6 +4022,9 @@ impl ExternalFunction {
 
 struct Externals {
     available: HashMap<EcoString, ExternalFunction>,
+    echo_any: bool,
+    echo_int: bool,
+    echo_float: bool,
     echo: usize,
 }
 
@@ -3433,6 +4032,9 @@ impl Externals {
     fn new(generator: &mut Generator<'_>) -> Externals {
         let mut externals = Externals {
             available: HashMap::new(),
+            echo_any: false,
+            echo_int: false,
+            echo_float: false,
             echo: 0,
         };
 
@@ -3462,22 +4064,31 @@ impl Externals {
         }
 
         // add builtin functions to available
-        for function in [
-            BuiltinFunction::IntToString,
-            BuiltinFunction::FloatToString,
-            BuiltinFunction::I32ToInt,
-            BuiltinFunction::IntToI32,
-        ] {
+        for function in BuiltinFunction::externals() {
             externals.insert_available(
                 function.name(),
                 ExternalFunction::Builtin {
                     used_names: HashSet::new(),
-                    function,
+                    function: function.clone(),
                 },
             );
         }
 
         externals.functions(generator, &generator.module.definitions.functions);
+
+        if externals.echo_any {
+            externals.insert_used_name(&BuiltinFunction::StringToMemory.name(), None);
+            externals.insert_used_name(&HEAP_BASE.into(), None);
+            externals.insert_used_name(&PRINT.into(), None);
+        }
+
+        if externals.echo_int {
+            externals.insert_used_name(&BuiltinFunction::IntRepr.name(), None);
+        }
+
+        if externals.echo_float {
+            externals.insert_used_name(&BuiltinFunction::FloatRepr.name(), None);
+        }
 
         let mut used = HashSet::new();
         for external in externals.available.values() {
@@ -3495,7 +4106,7 @@ impl Externals {
 
         for name in used {
             let name: EcoString = name.into();
-            externals.insert_used_name(&name, name.clone());
+            externals.insert_used_name(&name, Some(name.clone()));
         }
 
         externals
@@ -3505,8 +4116,9 @@ impl Externals {
         let _ = self.available.insert(name, function);
     }
 
-    fn insert_used_name(&mut self, builtin_name: &EcoString, used_name: EcoString) {
-        let external = self.available.get_mut(builtin_name).unwrap();
+    fn insert_used_name(&mut self, builtin_name: &EcoString, used_name: Option<EcoString>) {
+        let external = self.available.get_mut(builtin_name).expect(builtin_name);
+        let used_name = used_name.unwrap_or_else(|| builtin_name.into());
         let _ = match external {
             ExternalFunction::Builtin { used_names, .. }
             | ExternalFunction::Wasm { used_names, .. } => used_names.insert(used_name),
@@ -3514,10 +4126,14 @@ impl Externals {
     }
 
     fn use_data_section(&self) -> bool {
-        self.available
-            .get(&BuiltinFunction::FloatToString.name())
-            .map(|ex| ex.is_used())
-            .unwrap_or(false)
+        true
+        // FIXME: echo needs __heap_base, which is in data section,
+        //        but we cannot easily get it without the other data,
+        //        so we include all data section.
+        // self.available
+        //     .get(&BuiltinFunction::FloatToString.name())
+        //     .map(|ex| ex.is_used())
+        //     .unwrap_or(false)
     }
 
     fn functions<'a>(
@@ -3572,127 +4188,45 @@ impl Externals {
                     }
                 };
             }
-            self.function(function);
+            self.visit_typed_function(function);
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for Externals {
+    fn visit_typed_expr_echo(
+        &mut self,
+        _location: &'ast crate::ast::SrcSpan,
+        _type_: &'ast Arc<Type>,
+        expr: &'ast Option<Box<TypedExpr>>,
+        message: &'ast Option<Box<TypedExpr>>,
+    ) {
+        self.echo_any = true;
+        self.echo += 1;
+        let _ = expr.as_ref().inspect(|expr| self.visit_typed_expr(expr));
+        let _ = message.as_ref().inspect(|expr| self.visit_typed_expr(expr));
+        self.echo -= 1;
+    }
+
+    fn visit_typed_expr_int(
+        &mut self,
+        _location: &'ast crate::ast::SrcSpan,
+        _type_: &'ast Arc<Type>,
+        _value: &'ast EcoString,
+    ) {
+        if self.echo > 0 {
+            self.echo_int = true;
         }
     }
 
-    fn function(&mut self, function: &TypedFunction) {
-        self.statements(&function.body);
-    }
-
-    fn statements(&mut self, statements: &[TypedStatement]) {
-        for statement in statements {
-            self.statement(statement);
-        }
-    }
-
-    fn statement(&mut self, statement: &TypedStatement) {
-        match statement {
-            Statement::Expression(expression) => self.expression(expression),
-            Statement::Assignment(assignment) => {
-                self.expression(&assignment.value);
-            }
-            Statement::Use(use_) => self.expression(&use_.call),
-            Statement::Assert(assert) => {
-                self.expression(&assert.value);
-                if let Some(message) = &assert.message {
-                    self.expression(message);
-                }
-            }
-        }
-    }
-
-    fn expressions(&mut self, expressions: &[TypedExpr]) {
-        for expression in expressions {
-            self.expression(expression);
-        }
-    }
-
-    fn expression(&mut self, expression: &TypedExpr) {
-        match expression {
-            TypedExpr::Int { .. } => {
-                if self.echo > 0 {
-                    let name = BuiltinFunction::IntToString.name();
-                    self.insert_used_name(&name, name.clone());
-                }
-            }
-            TypedExpr::Float { .. } => {
-                if self.echo > 0 {
-                    let name = BuiltinFunction::FloatToString.name();
-                    self.insert_used_name(&name, name.clone());
-                }
-            }
-            TypedExpr::String { .. } => {}
-            TypedExpr::Block { statements, .. } => self.statements(statements),
-            TypedExpr::Pipeline {
-                first_value,
-                assignments,
-                finally,
-                ..
-            } => {
-                self.expression(&first_value.value);
-                for (assignment, _) in assignments {
-                    self.expression(&assignment.value);
-                }
-                self.expression(finally);
-            }
-            TypedExpr::Var { .. } => {}
-            TypedExpr::Fn { body, .. } => {
-                self.statements(body);
-            }
-            TypedExpr::List { elements, tail, .. } => {
-                self.expressions(elements);
-                if let Some(tail) = tail {
-                    self.expression(tail)
-                }
-            }
-            TypedExpr::Call { fun, arguments, .. } => {
-                self.expression(fun);
-                for arg in arguments {
-                    self.expression(&arg.value);
-                }
-            }
-            TypedExpr::BinOp { left, right, .. } => {
-                self.expression(left);
-                self.expression(right);
-            }
-            TypedExpr::Case {
-                subjects, clauses, ..
-            } => {
-                self.expressions(subjects);
-                for clause in clauses {
-                    self.expression(&clause.then);
-                }
-            }
-            TypedExpr::Tuple { elements, .. } => {
-                self.expressions(elements);
-            }
-            TypedExpr::TupleIndex { tuple, .. } => {
-                self.expression(tuple.as_ref());
-            }
-            TypedExpr::Todo { message, .. } | TypedExpr::Panic { message, .. } => {
-                if let Some(message) = message {
-                    self.expression(message);
-                }
-            }
-            TypedExpr::Echo {
-                expression,
-                message,
-                ..
-            } => {
-                self.echo += 1;
-                if let Some(expression) = expression {
-                    self.expression(expression);
-                }
-                if let Some(message) = message {
-                    self.expression(message);
-                }
-                self.echo -= 1;
-            }
-            TypedExpr::NegateBool { value, .. } | TypedExpr::NegateInt { value, .. } => {
-                self.expression(value)
-            }
-            _ => todo!("Expression: {:#?}", expression),
+    fn visit_typed_expr_float(
+        &mut self,
+        _location: &'ast crate::ast::SrcSpan,
+        _type_: &'ast Arc<Type>,
+        _value: &'ast EcoString,
+    ) {
+        if self.echo > 0 {
+            self.echo_float = true;
         }
     }
 }
@@ -3872,4 +4406,44 @@ fn const_expr_i32_const(const_: &wasmparser::ConstExpr<'_>) -> ConstExpr {
         }
     }
     ConstExpr::i32_const(i32_value)
+}
+
+pub fn unescape(s: &str) -> String {
+    let mut r = String::new();
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            r.push(ch);
+            continue;
+        }
+        // see https://tour.gleam.run/basics/strings/
+        let ch = match chars.next() {
+            Some('"') => '"',
+            Some('\\') => '\\',
+            Some('f') => '\x0C',
+            Some('n') => '\n',
+            Some('r') => '\r',
+            Some('t') => '\t',
+            Some('u') => unescape_unicode(&mut chars),
+            _ => panic!(),
+        };
+        r.push(ch);
+    }
+    r
+}
+
+fn unescape_unicode(chars: &mut Chars<'_>) -> char {
+    let s = chars.as_str();
+    assert_eq!(chars.next(), Some('{'));
+    let num = 1 + chars.take_while(|c| *c != '}').count();
+    *chars = s[num + 1..].chars();
+    char::from_u32(u32::from_str_radix(&s[1..num], 16).unwrap()).unwrap()
+}
+
+#[test]
+fn string_unescape() {
+    assert_eq!(
+        unescape(r#"sure \\ \n \"its\" \t works! \u{263A}, \r or \f not..."#),
+        "sure \\ \n \"its\" \t works! ☺, \r or \x0C not..."
+    );
 }
