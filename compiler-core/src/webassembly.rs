@@ -22,10 +22,15 @@ use wasm_encoder::{
 
 use crate::{
     ast::{
-        AssignmentKind, BinOp, ClauseGuard, Constant, OperatorKind, Pattern, Statement, TypedArg,
-        TypedAssignment, TypedClause, TypedClauseGuard, TypedConstant, TypedExpr, TypedFunction,
-        TypedModule, TypedModuleConstant, TypedPattern, TypedPipelineAssignment, TypedStatement,
-        visit::Visit,
+        AssignmentKind, BinOp, ClauseGuard, Constant, OperatorKind, Pattern, SrcSpan, Statement,
+        TypedArg, TypedAssignment, TypedClause, TypedClauseGuard, TypedConstant, TypedExpr,
+        TypedFunction, TypedModule, TypedModuleConstant, TypedPattern, TypedPipelineAssignment,
+        TypedStatement,
+        visit::{
+            Visit, visit_typed_assignment, visit_typed_clause_guard, visit_typed_expr,
+            visit_typed_expr_bin_op, visit_typed_expr_call, visit_typed_expr_case,
+            visit_typed_expr_echo, visit_typed_pattern, visit_typed_pipeline_assignment,
+        },
     },
     line_numbers::LineNumbers,
     type_::{self, Type, TypeVar},
@@ -3204,7 +3209,16 @@ impl Locals {
             locals: HashMap::new(),
             val_types: vec![],
         };
-        locals.statements(generator, statements);
+
+        let mut visit = LocalsVisit {
+            locals: &mut locals,
+            generator,
+        };
+
+        for statement in statements {
+            visit.visit_typed_statement(statement);
+        }
+
         locals
     }
 
@@ -3297,227 +3311,6 @@ impl Locals {
         (self._get(echo), self._get(expression))
     }
 
-    fn statements(&mut self, generator: &mut Generator<'_>, statements: &[TypedStatement]) {
-        for statement in statements {
-            self.statement(generator, statement);
-        }
-    }
-
-    fn statement(&mut self, generator: &mut Generator<'_>, statement: &TypedStatement) {
-        match statement {
-            Statement::Expression(expression) => self.expression(generator, expression),
-            Statement::Assignment(assignment) => self.assignment(generator, assignment),
-            Statement::Assert(assert) => {
-                self.expression(generator, &assert.value);
-                if let Some(message) = &assert.message {
-                    self.expression(generator, message);
-                }
-            }
-            Statement::Use(use_) => {
-                self.expression(generator, &use_.call);
-                // use_.assignments is not necessary because it is desugared in use._call
-            }
-        }
-    }
-
-    fn expressions<'a>(
-        &mut self,
-        generator: &mut Generator<'_>,
-        expressions: impl IntoIterator<Item = &'a TypedExpr>,
-    ) {
-        for expression in expressions {
-            self.expression(generator, expression);
-        }
-    }
-
-    fn expression(&mut self, generator: &mut Generator<'_>, expression: &TypedExpr) {
-        match expression {
-            TypedExpr::BinOp {
-                name, left, right, ..
-            } => {
-                self.expression(generator, left);
-                self.expression(generator, right);
-                if matches!(name, BinOp::DivInt | BinOp::DivFloat) {
-                    self.insert_div(generator, left, right);
-                }
-            }
-            TypedExpr::Block { statements, .. } => {
-                self.statements(generator, statements);
-            }
-            TypedExpr::Call { fun, arguments, .. } => {
-                self.expressions(generator, arguments.iter().map(|arg| &arg.value));
-                self.expression(generator, fun);
-                self.insert_call(generator, fun);
-            }
-            TypedExpr::Pipeline {
-                first_value,
-                assignments,
-                finally,
-                ..
-            } => {
-                self.expression(generator, &first_value.value);
-                self.insert_pipeline_assignment(generator, first_value);
-                for (assignment, _) in assignments {
-                    self.expression(generator, &assignment.value);
-                    self.insert_pipeline_assignment(generator, assignment);
-                }
-                self.expression(generator, finally);
-            }
-            TypedExpr::NegateInt { value, .. } | TypedExpr::NegateBool { value, .. } => {
-                self.expression(generator, value);
-            }
-            TypedExpr::Todo { message, .. } | TypedExpr::Panic { message, .. } => {
-                if let Some(value) = message {
-                    self.expression(generator, value);
-                }
-            }
-            TypedExpr::List { elements, tail, .. } => {
-                self.expressions(generator, elements);
-                if let Some(tail) = tail {
-                    self.expression(generator, tail);
-                }
-            }
-            TypedExpr::Tuple { elements, .. } => {
-                self.expressions(generator, elements);
-            }
-            TypedExpr::TupleIndex { tuple, .. } => {
-                self.expression(generator, tuple);
-            }
-            TypedExpr::Case {
-                clauses, subjects, ..
-            } => {
-                self.insert_subjects(generator, subjects);
-                self.expressions(generator, subjects);
-                for clause in clauses {
-                    self.patterns(generator, &clause.pattern);
-                    for pattern in &clause.alternative_patterns {
-                        self.patterns(generator, pattern);
-                    }
-                    if let Some(guard) = &clause.guard {
-                        self.guard(generator, guard);
-                    }
-                    self.expression(generator, &clause.then);
-                }
-            }
-            echo @ TypedExpr::Echo {
-                expression,
-                message,
-                ..
-            } => {
-                self.insert_echo(
-                    generator,
-                    echo,
-                    expression.as_ref().expect("echo expression"),
-                );
-                if let Some(message) = message {
-                    self.expression(generator, message);
-                }
-            }
-            TypedExpr::Int { .. }
-            | TypedExpr::Float { .. }
-            | TypedExpr::String { .. }
-            | TypedExpr::Var { .. }
-            | TypedExpr::Fn { .. } => {}
-            _ => todo!("Expression not supported: {:#?}", expression),
-        }
-    }
-
-    fn guard(&mut self, generator: &mut Generator<'_>, guard: &TypedClauseGuard) {
-        match guard {
-            ClauseGuard::Block { value, .. } => self.guard(generator, value),
-            ClauseGuard::Constant(constant) => self.constant(generator, constant),
-            ClauseGuard::Equals { left, right, .. }
-            | ClauseGuard::NotEquals { left, right, .. }
-            | ClauseGuard::GtInt { left, right, .. }
-            | ClauseGuard::GtEqInt { left, right, .. }
-            | ClauseGuard::LtInt { left, right, .. }
-            | ClauseGuard::LtEqInt { left, right, .. }
-            | ClauseGuard::GtFloat { left, right, .. }
-            | ClauseGuard::GtEqFloat { left, right, .. }
-            | ClauseGuard::LtFloat { left, right, .. }
-            | ClauseGuard::LtEqFloat { left, right, .. }
-            | ClauseGuard::AddInt { left, right, .. }
-            | ClauseGuard::AddFloat { left, right, .. }
-            | ClauseGuard::SubInt { left, right, .. }
-            | ClauseGuard::SubFloat { left, right, .. }
-            | ClauseGuard::MultInt { left, right, .. }
-            | ClauseGuard::MultFloat { left, right, .. }
-            | ClauseGuard::RemainderInt { left, right, .. }
-            | ClauseGuard::Or { left, right, .. }
-            | ClauseGuard::And { left, right, .. } => {
-                self.guard(generator, left);
-                self.guard(generator, right);
-            }
-            ClauseGuard::DivInt { left, right, .. } | ClauseGuard::DivFloat { left, right, .. } => {
-                self.guard(generator, left);
-                self.guard(generator, right);
-                self.insert_guard_div(generator, left, right);
-            }
-            ClauseGuard::Not { expression, .. } => self.guard(generator, expression),
-            ClauseGuard::Var { .. } => {}
-            ClauseGuard::TupleIndex { tuple, .. } => self.guard(generator, tuple),
-            _ => todo!("Guard: {:#?}", guard),
-        }
-    }
-
-    fn constant(&mut self, _generator: &mut Generator<'_>, _constant: &TypedConstant) {
-        // We don't need any local for constants, do we?
-    }
-
-    fn assignment(&mut self, generator: &mut Generator<'_>, assignment: &TypedAssignment) {
-        self.insert_assignment(generator, assignment);
-        self.expression(generator, &assignment.value);
-        match &assignment.kind {
-            AssignmentKind::Let | AssignmentKind::Generated => {
-                self.pattern(generator, &assignment.pattern);
-            }
-            AssignmentKind::Assert { message, .. } => {
-                self.pattern(generator, &assignment.pattern);
-                if let Some(message) = message {
-                    self.expression(generator, message);
-                }
-            }
-        }
-    }
-
-    fn patterns<'a>(
-        &mut self,
-        generator: &mut Generator<'_>,
-        patterns: impl IntoIterator<Item = &'a TypedPattern>,
-    ) {
-        for pattern in patterns {
-            self.pattern(generator, pattern);
-        }
-    }
-
-    fn pattern(&mut self, generator: &mut Generator<'_>, pattern: &TypedPattern) {
-        self.insert_pattern(generator, pattern);
-        match pattern {
-            Pattern::Int { .. }
-            | Pattern::Float { .. }
-            | Pattern::String { .. }
-            | Pattern::Discard { .. } => {}
-            Pattern::Constructor { name, type_, .. } if is_bool_const(name, type_) => {}
-            Pattern::List { elements, tail, .. } => {
-                for element in elements {
-                    self.pattern(generator, element);
-                }
-                if let Some(tail) = tail {
-                    self.pattern(generator, &tail.pattern)
-                }
-            }
-            Pattern::Tuple { elements, .. } => {
-                self.patterns(generator, elements);
-            }
-            Pattern::Variable { name, type_, .. } => {
-                if is_generic_type(type_) {
-                    panic!("Local function \"{name}\" cannot be generic.");
-                }
-            }
-            _ => todo!("Pattern not supported: {:#?}", pattern),
-        }
-    }
-
     fn _insert(&mut self, generator: &mut Generator<'_>, key: impl LocalHash, type_: &Arc<Type>) {
         let index = self.locals.len() as u32 + self.skip;
         if self.locals.insert(key.hash(), index).is_some() {
@@ -3546,6 +3339,85 @@ impl Locals {
             .locals
             .get(&id)
             .unwrap_or_else(|| panic!("Expect local with {id}."))
+    }
+}
+
+struct LocalsVisit<'a, 'b, 'c> {
+    locals: &'a mut Locals,
+    generator: &'b mut Generator<'c>,
+}
+
+impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
+    fn visit_typed_assignment(&mut self, assignment: &'ast TypedAssignment) {
+        self.locals.insert_assignment(self.generator, assignment);
+        visit_typed_assignment(self, assignment);
+    }
+
+    fn visit_typed_expr_bin_op(
+        &mut self,
+        location: &'ast SrcSpan,
+        type_: &'ast Arc<Type>,
+        name: &'ast BinOp,
+        name_location: &'ast SrcSpan,
+        left: &'ast TypedExpr,
+        right: &'ast TypedExpr,
+    ) {
+        if matches!(name, BinOp::DivInt | BinOp::DivFloat) {
+            self.locals.insert_div(self.generator, left, right);
+        }
+        visit_typed_expr_bin_op(self, location, type_, name, name_location, left, right);
+    }
+
+    fn visit_typed_expr_call(
+        &mut self,
+        location: &'ast SrcSpan,
+        type_: &'ast Arc<Type>,
+        fun: &'ast TypedExpr,
+        arguments: &'ast [type_::TypedCallArg],
+    ) {
+        self.locals.insert_call(self.generator, fun);
+        visit_typed_expr_call(self, location, type_, fun, arguments);
+    }
+
+    fn visit_typed_expr_case(
+        &mut self,
+        location: &'ast SrcSpan,
+        type_: &'ast Arc<Type>,
+        subjects: &'ast [TypedExpr],
+        clauses: &'ast [TypedClause],
+        compiled_case: &'ast crate::exhaustiveness::CompiledCase,
+    ) {
+        self.locals.insert_subjects(self.generator, subjects);
+        visit_typed_expr_case(self, location, type_, subjects, clauses, compiled_case);
+    }
+
+    fn visit_typed_clause_guard(&mut self, guard: &'ast TypedClauseGuard) {
+        match guard {
+            ClauseGuard::DivInt { left, right, .. } | ClauseGuard::DivFloat { left, right, .. } => {
+                self.locals.insert_guard_div(self.generator, left, right);
+            }
+            _ => {}
+        }
+        visit_typed_clause_guard(self, guard);
+    }
+
+    fn visit_typed_pattern(&mut self, pattern: &'ast TypedPattern) {
+        self.locals.insert_pattern(self.generator, pattern);
+        visit_typed_pattern(self, pattern);
+    }
+
+    fn visit_typed_pipeline_assignment(&mut self, assignment: &'ast TypedPipelineAssignment) {
+        self.locals
+            .insert_pipeline_assignment(self.generator, assignment);
+        visit_typed_pipeline_assignment(self, assignment);
+    }
+
+    fn visit_typed_expr(&mut self, expr: &'ast TypedExpr) {
+        if let echo @ TypedExpr::Echo { expression, .. } = expr {
+            self.locals
+                .insert_echo(self.generator, echo, expression.as_ref().unwrap());
+        }
+        visit_typed_expr(self, expr);
     }
 }
 
@@ -4196,21 +4068,20 @@ impl Externals {
 impl<'ast> Visit<'ast> for Externals {
     fn visit_typed_expr_echo(
         &mut self,
-        _location: &'ast crate::ast::SrcSpan,
-        _type_: &'ast Arc<Type>,
-        expr: &'ast Option<Box<TypedExpr>>,
+        location: &'ast SrcSpan,
+        type_: &'ast Arc<Type>,
+        expression: &'ast Option<Box<TypedExpr>>,
         message: &'ast Option<Box<TypedExpr>>,
     ) {
         self.echo_any = true;
         self.echo += 1;
-        let _ = expr.as_ref().inspect(|expr| self.visit_typed_expr(expr));
-        let _ = message.as_ref().inspect(|expr| self.visit_typed_expr(expr));
+        visit_typed_expr_echo(self, location, type_, expression, message);
         self.echo -= 1;
     }
 
     fn visit_typed_expr_int(
         &mut self,
-        _location: &'ast crate::ast::SrcSpan,
+        _location: &'ast SrcSpan,
         _type_: &'ast Arc<Type>,
         _value: &'ast EcoString,
     ) {
@@ -4221,7 +4092,7 @@ impl<'ast> Visit<'ast> for Externals {
 
     fn visit_typed_expr_float(
         &mut self,
-        _location: &'ast crate::ast::SrcSpan,
+        _location: &'ast SrcSpan,
         _type_: &'ast Arc<Type>,
         _value: &'ast EcoString,
     ) {
