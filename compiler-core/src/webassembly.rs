@@ -17,7 +17,8 @@ use wasm_encoder::{
     AbstractHeapType, BlockType, CodeSection, ConstExpr, DataCountSection, DataSection,
     ElementSection, Elements, EntityType, ExportKind, ExportSection, FieldType, Function,
     FunctionSection, GlobalSection, GlobalType, HeapType, ImportSection, InstructionSink,
-    MemorySection, MemoryType, Module, RefType, StartSection, StorageType, TypeSection, ValType,
+    MemorySection, MemoryType, Module, NameMap, NameSection, RefType, StartSection, StorageType,
+    TypeSection, ValType,
 };
 
 use crate::{
@@ -828,7 +829,7 @@ impl<'a> Generator<'a> {
                 let type_index = self.list_type(&item_type);
                 let _ = instructions.list_null(type_index);
                 for element in elements.iter().rev() {
-                    let _ = instructions.constant(self, element).struct_new(type_index);
+                    let _ = instructions.constant(self, element).list_new(type_index);
                 }
             }
             Constant::Tuple { elements, .. } => {
@@ -1046,7 +1047,7 @@ impl<'a> Generator<'a> {
                 for element in elements.iter().rev() {
                     let _ = instructions
                         .expression(self, locals, scope.clone(), element)
-                        .struct_new(type_index);
+                        .list_new(type_index);
                 }
             }
             TypedExpr::Tuple { elements, .. } => {
@@ -1371,7 +1372,7 @@ impl<'a> Generator<'a> {
                     #[rustfmt::skip]
                     let _ = instructions
                         .local_get(right)
-                        .struct_get(type_index, 1)
+                        .list_first(type_index)
                         .pattern(self, locals, &mut scope, element)
                         .bool_not()
                         .if_(BlockType::Empty)
@@ -1379,7 +1380,7 @@ impl<'a> Generator<'a> {
                           .br(1)
                         .end()
                         .local_get(right)
-                        .struct_get(type_index, 0)
+                        .list_rest(type_index)
                         .local_set(right);
                 }
                 if let Some(tail) = tail {
@@ -1668,7 +1669,7 @@ impl<'a> Generator<'a> {
                 } => {
                     let _ = instructions.global_get(global_index);
                     for element in elements.iter().rev() {
-                        let _ = instructions.constant(self, element).struct_new(type_index);
+                        let _ = instructions.constant(self, element).list_new(type_index);
                     }
                     let _ = instructions.global_set(global_index);
                 }
@@ -1735,11 +1736,11 @@ impl<'a> Generator<'a> {
             .end()
             // len = a.len; push len
             .local_get(a)
-            .array_len()
+            .string_len()
             .local_tee(len)
             // b.len
             .local_get(b)
-            .array_len()
+            .string_len()
             .i32_ne()
             // if a.len != b.len
             .if_(BlockType::Empty)
@@ -1762,11 +1763,11 @@ impl<'a> Generator<'a> {
               // a[i]
               .local_get(a)
               .local_get(i)
-              .array_get_u(self.string.type_index)
+              .string_get()
               // b[i]
               .local_get(b)
               .local_get(i)
-              .array_get_u(self.string.type_index)
+              .string_get()
               .i32_ne()
               // if a[i] != b[i]
               .if_(BlockType::Empty)
@@ -1809,15 +1810,15 @@ impl<'a> Generator<'a> {
         let _ = instructions
             // len_a = a.len; push len_a
             .local_get(a)
-            .array_len()
+            .string_len()
             .local_tee(len_a)
             // len_b = b.len; push len_b
             .local_get(b)
-            .array_len()
+            .string_len()
             .local_tee(len_b)
             // r = array.new_default(len_a + len_b)
             .i32_add()
-            .array_new_default(self.string.type_index)
+            .string_new()
             .local_set(r)
             // i = 0
             .i32_const(0)
@@ -1834,13 +1835,9 @@ impl<'a> Generator<'a> {
                 .local_get(i)
                 .local_get(a)
                 .local_get(i)
-                .array_get_u(self.string.type_index)
-                .array_set(self.string.type_index)
-                // i = i + 1
-                .local_get(i)
-                .i32_const(1)
-                .i32_add()
-                .local_set(i)
+                .string_get()
+                .string_set()
+                .i32_inc(i)
                 // loop
                 .br(1)
               // end if i <= len_a
@@ -1864,13 +1861,9 @@ impl<'a> Generator<'a> {
                 .i32_add()
                 .local_get(b)
                 .local_get(i)
-                .array_get_u(self.string.type_index)
-                .array_set(self.string.type_index)
-                // i = i + 1
-                .local_get(i)
-                .i32_const(1)
-                .i32_add()
-                .local_set(i)
+                .string_get()
+                .string_set()
+                .i32_inc(i)
                 // loop
                 .br(1)
               // end if i <= len_b
@@ -1922,8 +1915,6 @@ impl<'a> Generator<'a> {
     fn code_list_eq(&self, type_index: u32, item_eq: Eq) -> Function {
         let mut function = Function::new(vec![]);
         let mut instructions = function.extend_instructions(self);
-        let rest_index = 0;
-        let value_index = 1;
         let a = 0;
         let b = 1;
         #[rustfmt::skip]
@@ -1968,20 +1959,20 @@ impl<'a> Generator<'a> {
                   // a != null and b != null
                   // a.value
                   .local_get(a)
-                  .struct_get(type_index, value_index)
+                  .list_first(type_index)
                   // b.value
                   .local_get(b)
-                  .struct_get(type_index, value_index)
+                  .list_first(type_index)
                   .eq(item_eq)
                   // if a.value == b.value
                   .if_(BlockType::Empty)
                     // a = a.rest
                     .local_get(a)
-                    .struct_get(type_index, rest_index)
+                    .list_rest(type_index)
                     .local_set(a)
                     // b = b.rest
                     .local_get(b)
-                    .struct_get(type_index, rest_index)
+                    .list_rest(type_index)
                     .local_set(b)
                   .else_()
                     // a.value != b.value
@@ -2140,6 +2131,7 @@ struct ExtendedInstructionSink<'a> {
     bool_: BoolType,
     int: IntType,
     float: FloatType,
+    string: StringType,
     instructions: InstructionSink<'a>,
 }
 
@@ -2168,6 +2160,7 @@ impl NewExtendedInstructionSink for Function {
             bool_: generator.bool_,
             int: generator.int,
             float: generator.float,
+            string: generator.string,
             instructions: self.instructions(),
         }
     }
@@ -2186,12 +2179,47 @@ macro_rules! delegate {
 
 // We do not implement Deref and DerefMut so we do not call "native" int and float instructions directly.
 impl<'a> ExtendedInstructionSink<'a> {
-    fn global_as_non_null(&mut self, index: u32) -> &mut Self {
-        self.global_get(index).ref_as_non_null()
+    fn i32_inc(&mut self, local: u32) -> &mut Self {
+        self.local_get(local)
+            .i32_const(1)
+            .i32_add()
+            .local_set(local)
     }
 
     fn list_null(&mut self, type_index: u32) -> &mut Self {
         self.ref_null(HeapType::Concrete(type_index))
+    }
+
+    fn list_new(&mut self, type_index: u32) -> &mut Self {
+        self.struct_new(type_index)
+    }
+
+    fn list_first(&mut self, type_index: u32) -> &mut Self {
+        self.struct_get(type_index, 1)
+    }
+
+    fn list_rest(&mut self, type_index: u32) -> &mut Self {
+        self.struct_get(type_index, 0)
+    }
+
+    fn string_new(&mut self) -> &mut Self {
+        self.array_new_default(self.string.type_index)
+    }
+
+    fn string_get(&mut self) -> &mut Self {
+        self.array_get_u(self.string.type_index)
+    }
+
+    fn string_set(&mut self) -> &mut Self {
+        self.array_set(self.string.type_index)
+    }
+
+    fn string_len(&mut self) -> &mut Self {
+        self.array_len()
+    }
+
+    fn global_as_non_null(&mut self, index: u32) -> &mut Self {
+        self.global_get(index).ref_as_non_null()
     }
 
     fn eq(&mut self, eq: Eq) -> &mut Self {
@@ -2504,6 +2532,7 @@ impl<'a> ExtendedInstructionSink<'a> {
     float_op!(float_ge, f64_ge);
 }
 
+#[derive(Clone, Copy)]
 struct StringType {
     type_index: u32,
 }
