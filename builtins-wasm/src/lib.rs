@@ -11,6 +11,16 @@ unsafe extern "C" {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn _heap_base() -> u32 {
+    unsafe { __heap_base }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _exit(code: i32) -> ! {
+    unsafe { wasip1::proc_exit(code) }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn _print(fd: i32, ptr: *const u8, len: u32) -> i32 {
     let mut written = 0i32;
     let iovec = wasi::Ciovec {
@@ -25,11 +35,6 @@ pub extern "C" fn _print(fd: i32, ptr: *const u8, len: u32) -> i32 {
             &mut written as *mut _ as i32,
         )
     }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn _heap_base() -> u32 {
-    unsafe { __heap_base }
 }
 
 #[unsafe(no_mangle)]

@@ -9,6 +9,7 @@ use std::{
     ops::Deref,
     ptr,
     rc::Rc,
+    str::Chars,
     sync::Arc,
 };
 use wasm_encoder::{
@@ -22,13 +23,14 @@ use wasm_encoder::{
 use crate::{
     ast::{
         AssignmentKind, BinOp, ClauseGuard, Constant, OperatorKind, Pattern, SrcSpan, Statement,
-        TypedArg, TypedAssignment, TypedClause, TypedClauseGuard, TypedConstant, TypedExpr,
-        TypedFunction, TypedModule, TypedModuleConstant, TypedPattern, TypedPipelineAssignment,
-        TypedStatement,
+        TodoKind, TypedArg, TypedAssert, TypedAssignment, TypedClause, TypedClauseGuard,
+        TypedConstant, TypedExpr, TypedFunction, TypedModule, TypedModuleConstant, TypedPattern,
+        TypedPipelineAssignment, TypedStatement,
         visit::{
-            Visit, visit_typed_assignment, visit_typed_clause_guard, visit_typed_expr,
-            visit_typed_expr_bin_op, visit_typed_expr_call, visit_typed_expr_case,
-            visit_typed_expr_echo, visit_typed_pattern, visit_typed_pipeline_assignment,
+            Visit, visit_typed_assert, visit_typed_assignment, visit_typed_clause_guard,
+            visit_typed_expr, visit_typed_expr_bin_op, visit_typed_expr_call,
+            visit_typed_expr_case, visit_typed_expr_echo, visit_typed_expr_panic,
+            visit_typed_expr_todo, visit_typed_pattern, visit_typed_pipeline_assignment,
         },
     },
     line_numbers::LineNumbers,
@@ -47,6 +49,7 @@ const I64_TO_STR: &str = "_i64_to_str";
 const F64_TO_STR: &str = "_f64_to_str";
 
 const HEAP_BASE: &str = "_heap_base";
+const EXIT: &str = "_exit";
 const PRINT: &str = "_print";
 
 const STDERR: i32 = 2;
@@ -472,7 +475,7 @@ impl<'a> Generator<'a> {
                 params
                     .iter()
                     .map(|type_| self.type_pretty_name(type_))
-                    .join(", "),
+                    .join(","),
                 self.type_pretty_name(&return_)
             )
             .into()
@@ -719,6 +722,8 @@ impl<'a> Generator<'a> {
                 if is_main_funtion(function) {
                     self.main = Some(id.index)
                 }
+            } else {
+                // FIXME: show message explaning why somo function was not compiled
             }
         }
     }
@@ -1107,22 +1112,44 @@ impl<'a> Generator<'a> {
                 scope = self.assignment(locals, scope, instructions, assignment);
             }
             Statement::Assert(assert) => {
-                assert!(assert.value.type_().is_bool());
-                // FIXME: show message
-                #[rustfmt::skip]
-                let _ = instructions
-                    .expression(self, locals, scope.clone(), &assert.value)
-                    .if_(BlockType::Result(self.bool_.val_type()))
-                      .bool_const(true)
-                    .else_()
-                      .unreachable()
-                    .end();
+                self.assert(instructions, &scope, locals, assert);
             }
             Statement::Use(use_) => {
                 let _ = instructions.expression(self, locals, scope.clone(), &use_.call);
             }
         }
         scope
+    }
+
+    fn assert(
+        &mut self,
+        instructions: &mut ExtendedInstructionSink<'_>,
+        scope: &Scope,
+        locals: &Locals,
+        assert: &crate::ast::Assert<TypedExpr>,
+    ) {
+        assert!(assert.value.type_().is_bool());
+        let msg: EcoString = format!(
+            "Assertion failed at src/{}.gleam:{}.\n",
+            self.module.name,
+            self.line_numbers.line_number(assert.location.start)
+        )
+        .into();
+        let string_index = self.string_index(&msg);
+        let string_to_memory = self.find_global_expect(&BuiltinFunction::StringToMemory.name());
+        let heap_base = self.find_global_expect(&HEAP_BASE.into());
+        let print = self.find_global_expect(&PRINT.into());
+        let exit = self.find_global_expect(&EXIT.into());
+        #[rustfmt::skip]
+        let _ = instructions
+            .expression(self, locals, scope.clone(), &assert.value)
+            .if_(BlockType::Result(self.bool_.val_type()))
+              .bool_const(true)
+            .else_()
+              .show_error_message(string_index, string_to_memory, heap_base, print)
+              .call(exit.index)
+              .unreachable()
+            .end();
     }
 
     fn _expression(
@@ -1133,8 +1160,8 @@ impl<'a> Generator<'a> {
         expression: &TypedExpr,
     ) {
         match expression {
-            TypedExpr::Todo { .. } | TypedExpr::Panic { .. } => {
-                let _ = instructions.unreachable();
+            TypedExpr::Todo { message, .. } | TypedExpr::Panic { message, .. } => {
+                self.expression_todo_panic(locals, scope, instructions, expression, message);
             }
             TypedExpr::Int { int_value, .. } => {
                 let _ = instructions.int_const(int_value);
@@ -1268,6 +1295,60 @@ impl<'a> Generator<'a> {
             }
             _ => todo!("Expression not supported: {:#?}", expression),
         };
+    }
+
+    fn expression_todo_panic(
+        &mut self,
+        locals: &Locals,
+        scope: Scope,
+        instructions: &mut ExtendedInstructionSink<'_>,
+        expression: &TypedExpr,
+        message: &Option<Box<TypedExpr>>,
+    ) {
+        let msg: EcoString = format!(
+            "{} at src/{}.gleam:{}{}",
+            if expression.is_panic() {
+                "panic"
+            } else {
+                "todo"
+            },
+            self.module.name,
+            self.line_numbers.line_number(expression.location().start),
+            if message.is_none() { ".\n" } else { "\n  " },
+        )
+        .into();
+
+        let string_index = self.string_index(&msg);
+        let string_to_memory = self.find_global_expect(&BuiltinFunction::StringToMemory.name());
+        let heap_base = self.find_global_expect(&HEAP_BASE.into());
+        let print = self.find_global_expect(&PRINT.into());
+        let exit = self.find_global_expect(&EXIT.into());
+
+        let _ = instructions.show_error_message(
+            string_index,
+            string_to_memory.clone(),
+            heap_base.clone(),
+            print.clone(),
+        );
+
+        if let Some(message) = message {
+            assert!(message.type_().is_string());
+            let _ = instructions
+                .i32_const(STDERR)
+                .call(heap_base.index)
+                .expression(self, locals, scope, message)
+                .call(heap_base.index)
+                .call(string_to_memory.index)
+                .call(print.index)
+                .call(heap_base.index)
+                .byte_store(b'\n')
+                .i32_const(STDERR)
+                .call(heap_base.index)
+                .i32_const(1)
+                .call(print.index);
+        }
+
+        let _ = instructions.call(exit.index).unreachable();
     }
 
     fn expression_bin_op(
@@ -1525,12 +1606,26 @@ impl<'a> Generator<'a> {
             .local_tee(right);
         match assignment.kind {
             AssignmentKind::Assert { .. } => {
+                let msg: EcoString = format!(
+                    "Pattern match failed, no pattern matched the value at src/{}.gleam:{}.\n",
+                    self.module.name,
+                    self.line_numbers.line_number(assignment.location.start)
+                )
+                .into();
+                let string_index = self.string_index(&msg);
+                let string_to_memory =
+                    self.find_global_expect(&BuiltinFunction::StringToMemory.name());
+                let heap_base = self.find_global_expect(&HEAP_BASE.into());
+                let print = self.find_global_expect(&PRINT.into());
+                let exit = self.find_global_expect(&EXIT.into());
                 #[rustfmt::skip]
                 let _ = instructions
                     .pattern(self, locals, &mut scope, &assignment.pattern)
                     .if_(BlockType::Result(self.val_type(&assignment.value.type_())))
                       .local_get(right)
                     .else_()
+                      .show_error_message(string_index, string_to_memory, heap_base, print)
+                      .call(exit.index)
                       .unreachable()
                     .end();
             }
@@ -2431,6 +2526,30 @@ impl<'a> Generator<'a> {
             .local_get(ptr)
             .i32_sub()
             .end();
+
+        trait Escape {
+            fn try_escape(&mut self, dest: u32, byte: u8, escape: u8) -> &mut Self;
+        }
+
+        impl<'a> Escape for ExtendedInstructionSink<'a> {
+            #[rustfmt::skip]
+            fn try_escape(&mut self, dest: u32, byte: u8, escape: u8) -> &mut Self {
+                self.i32_const(byte as i32)
+                    .i32_eq()
+                    .if_(BlockType::Result(ValType::I32))
+                      .local_get(dest)
+                      .byte_store(b'\\')
+                      .i32_inc(dest)
+                      .local_get(dest)
+                      .byte_store(escape)
+                      .i32_inc(dest)
+                      .i32_const(1)
+                    .else_()
+                      .i32_const(0)
+                    .end()
+            }
+        }
+
         function
     }
 
@@ -2888,6 +3007,21 @@ impl<'a> ExtendedInstructionSink<'a> {
             generator._clause_guard(locals, scope, self, guard);
         }
         self
+    }
+
+    fn show_error_message(
+        &mut self,
+        string_index: u32,
+        string_to_memory: Id,
+        heap_base: Id,
+        print: Id,
+    ) -> &mut Self {
+        self.i32_const(STDERR)
+            .call(heap_base.index)
+            .global_as_non_null(string_index)
+            .call(heap_base.index)
+            .call(string_to_memory.index)
+            .call(print.index)
     }
 
     delegate! {
@@ -3860,6 +3994,8 @@ impl ExternalFunction {
 
 struct Externals {
     available: HashMap<EcoString, ExternalFunction>,
+    todo_panic: bool,
+    assert: bool,
     echo_any: bool,
     echo_int: bool,
     echo_float: bool,
@@ -3870,6 +4006,8 @@ impl Externals {
     fn new(generator: &mut Generator<'_>) -> Externals {
         let mut externals = Externals {
             available: HashMap::new(),
+            todo_panic: false,
+            assert: false,
             echo_any: false,
             echo_int: false,
             echo_float: false,
@@ -3884,12 +4022,6 @@ impl Externals {
             {
                 let type_ = module.types.get(local_function.ty());
                 let results = type_.results();
-                if !name.starts_with("__") && results.len() != 1 {
-                    panic!(
-                        "Wasm function \"{name}\" must have one return value, but was {:?}",
-                        results
-                    );
-                };
                 externals.insert_available(
                     name.into(),
                     ExternalFunction::Wasm {
@@ -3914,10 +4046,14 @@ impl Externals {
 
         externals.functions(generator, &generator.module.definitions.functions);
 
-        if externals.echo_any {
+        if externals.echo_any || externals.assert || externals.todo_panic {
             externals.insert_used_name(&BuiltinFunction::StringToMemory.name(), None);
             externals.insert_used_name(&HEAP_BASE.into(), None);
             externals.insert_used_name(&PRINT.into(), None);
+        }
+
+        if externals.assert || externals.todo_panic {
+            externals.insert_used_name(&EXIT.into(), None);
         }
 
         if externals.echo_int {
@@ -4065,6 +4201,39 @@ impl<'ast> Visit<'ast> for Externals {
         if self.echo > 0 {
             self.echo_float = true;
         }
+    }
+
+    fn visit_typed_assert(&mut self, assert: &'ast TypedAssert) {
+        self.assert = true;
+        visit_typed_assert(self, assert);
+    }
+
+    fn visit_typed_assignment(&mut self, assignment: &'ast TypedAssignment) {
+        if assignment.kind.is_assert() {
+            self.assert = true;
+        }
+        visit_typed_assignment(self, assignment);
+    }
+
+    fn visit_typed_expr_panic(
+        &mut self,
+        location: &'ast SrcSpan,
+        message: &'ast Option<Box<TypedExpr>>,
+        type_: &'ast Arc<Type>,
+    ) {
+        self.todo_panic = true;
+        visit_typed_expr_panic(self, location, message, type_);
+    }
+
+    fn visit_typed_expr_todo(
+        &mut self,
+        location: &'ast SrcSpan,
+        message: &'ast Option<Box<TypedExpr>>,
+        kind: &'ast TodoKind,
+        type_: &'ast Arc<Type>,
+    ) {
+        self.todo_panic = true;
+        visit_typed_expr_todo(self, location, message, kind, type_);
     }
 }
 
