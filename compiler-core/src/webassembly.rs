@@ -5,7 +5,6 @@ use num_bigint::BigInt;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
-    fmt::Write,
     iter,
     ops::Deref,
     ptr,
@@ -33,7 +32,7 @@ use crate::{
         },
     },
     line_numbers::LineNumbers,
-    type_::{self, Type, TypeVar},
+    type_::{self, Type, TypeVar, printer::Printer},
 };
 
 const BUILTINS_WASM: &[u8] =
@@ -255,7 +254,7 @@ struct Generator<'a> {
     types: HashMap<(EcoString, EcoString), CustomType>,
     // Function code and its index in the code section
     functions: Vec<(Vec<u8>, u32)>,
-    next_function_id: u32,
+    function_next_id: u32,
     builtins: HashMap<BuiltinFunction, u32>,
     main: Option<u32>,
     // String literals and its index in the global section
@@ -287,15 +286,15 @@ impl<'a> Generator<'a> {
             wasm_types: HashMap::new(),
             types: HashMap::new(),
             functions: vec![],
-            next_function_id: 0,
+            function_next_id: 0,
             builtins: HashMap::new(),
             main: None,
             strings: HashMap::new(),
             consts: vec![],
             globals: Rc::default(),
             bool_: BoolType {},
-            int: IntType::Int32,
-            float: FloatType::Float64,
+            int: IntType::I32,
+            float: FloatType::F64,
             string: StringType { type_index: 0 },
             module,
             line_numbers,
@@ -349,11 +348,11 @@ impl<'a> Generator<'a> {
             | BuiltinFunction::StringToMemory
             | BuiltinFunction::MemoryToString => &[],
             BuiltinFunction::IntRepr => match self.int {
-                IntType::Int32 => &[I32_TO_STR],
-                IntType::Int64 => &[I64_TO_STR],
+                IntType::I32 => &[I32_TO_STR],
+                IntType::I64 => &[I64_TO_STR],
             },
             BuiltinFunction::FloatRepr => match self.float {
-                FloatType::Float64 => &[F64_TO_STR],
+                FloatType::F64 => &[F64_TO_STR],
             },
         }
     }
@@ -461,6 +460,27 @@ impl<'a> Generator<'a> {
         }
     }
 
+    fn type_pretty_name(&self, type_: &Arc<Type>) -> String {
+        Printer::new(&self.module.names).print_type(type_).into()
+    }
+
+    fn mangle(&self, name: &EcoString, type_: &Arc<Type>) -> EcoString {
+        if let Some((params, return_)) = type_.fn_types() {
+            format!(
+                "{}({})->{}",
+                name,
+                params
+                    .iter()
+                    .map(|type_| self.type_pretty_name(type_))
+                    .join(", "),
+                self.type_pretty_name(&return_)
+            )
+            .into()
+        } else {
+            format!("{}::{}", name, self.type_pretty_name(type_)).into()
+        }
+    }
+
     fn externals(&mut self) {
         let externals = Externals::new(self);
 
@@ -508,7 +528,7 @@ impl<'a> Generator<'a> {
                             import.name,
                             EntityType::Function(type_index),
                         );
-                        self.next_function_id += 1;
+                        self.function_next_id += 1;
                     }
                 }
                 wasmparser::Payload::GlobalSection(section) => {
@@ -951,11 +971,14 @@ impl<'a> Generator<'a> {
             if function_name(function) == name {
                 let declared_type = function_type(function);
                 return if is_generic_type(&declared_type) {
-                    match self.find_global(&mangle(name, required_type)) {
+                    match self.find_global(&self.mangle(name, required_type)) {
                         Some(id) => id, // the function has already been monomorphized
                         None => {
-                            let function = Monomorphizer::new(&declared_type, required_type)
+                            let mut function = Monomorphizer::new(&declared_type, required_type)
                                 .function(function);
+                            let name = self.mangle(function_name(&function), required_type);
+                            set_function_name(&mut function, name);
+
                             if is_generic_type(&function_type(&function))
                                 || function
                                     .body
@@ -982,9 +1005,9 @@ impl<'a> Generator<'a> {
         );
     }
 
-    fn next_function_id(&mut self) -> u32 {
-        let id = self.next_function_id;
-        self.next_function_id += 1;
+    fn function_next_id(&mut self) -> u32 {
+        let id = self.function_next_id;
+        self.function_next_id += 1;
         id
     }
 
@@ -994,7 +1017,7 @@ impl<'a> Generator<'a> {
             return id;
         }
 
-        let index = self.next_function_id();
+        let index = self.function_next_id();
         let _ = self.export_section.export(name, ExportKind::Func, index);
         let id = self.add_function_to_globals(name.clone(), index);
 
@@ -1020,7 +1043,7 @@ impl<'a> Generator<'a> {
         id
     }
 
-    fn local_function(
+    fn function_local(
         &mut self,
         name: EcoString,
         type_: &Arc<Type>,
@@ -1031,7 +1054,7 @@ impl<'a> Generator<'a> {
             return id;
         }
 
-        let index = self.next_function_id();
+        let index = self.function_next_id();
         let id = self.add_function_to_globals(name.clone(), index);
 
         let (params, return_) = type_.fn_types().unwrap();
@@ -1157,70 +1180,7 @@ impl<'a> Generator<'a> {
             TypedExpr::BinOp {
                 name, left, right, ..
             } => {
-                if name.operator_kind() != OperatorKind::BooleanLogic {
-                    let _ = instructions
-                        .expression(self, locals, scope.clone(), left)
-                        .expression(self, locals, scope.clone(), right);
-                }
-
-                let _ = match name {
-                    // Bool
-                    #[rustfmt::skip]
-                    BinOp::And => instructions
-                        .expression(self, locals, scope.clone(), left)
-                        .if_(BlockType::Result(self.bool_.val_type()))
-                          .expression(self, locals, scope, right)
-                        .else_()
-                          .bool_const(false)
-                        .end(),
-                    #[rustfmt::skip]
-                    BinOp::Or => instructions
-                        .expression(self, locals, scope.clone(), left)
-                        .if_(BlockType::Result(self.bool_.val_type()))
-                          .bool_const(true)
-                        .else_()
-                          .expression(self, locals, scope, right)
-                        .end(),
-                    // Int
-                    BinOp::AddInt => instructions.int_add(),
-                    BinOp::SubInt => instructions.int_sub(),
-                    BinOp::MultInt => instructions.int_mul(),
-                    BinOp::DivInt => {
-                        let (left, right) = locals.for_div(left, right);
-                        instructions.int_div(left, right)
-                    }
-                    BinOp::RemainderInt => instructions.int_rem(),
-                    BinOp::LtInt => instructions.int_lt(),
-                    BinOp::LtEqInt => instructions.int_le(),
-                    BinOp::GtInt => instructions.int_gt(),
-                    BinOp::GtEqInt => instructions.int_ge(),
-                    // Float
-                    BinOp::AddFloat => instructions.float_add(),
-                    BinOp::SubFloat => instructions.float_sub(),
-                    BinOp::MultFloat => instructions.float_mul(),
-                    BinOp::DivFloat => {
-                        let (left, right) = locals.for_div(left, right);
-                        instructions.float_div(left, right)
-                    }
-                    BinOp::LtFloat => instructions.float_lt(),
-                    BinOp::LtEqFloat => instructions.float_le(),
-                    BinOp::GtFloat => instructions.float_gt(),
-                    BinOp::GtEqFloat => instructions.float_ge(),
-                    // String
-                    BinOp::Concatenate => {
-                        let concat = self.function_string_concat();
-                        instructions.call(concat)
-                    }
-                    // Eq
-                    BinOp::Eq | BinOp::NotEq => {
-                        let eq = self.function_eq(&left.type_());
-                        let _ = instructions.eq(eq);
-                        if let BinOp::NotEq = name {
-                            let _ = instructions.bool_not();
-                        }
-                        instructions
-                    }
-                };
+                self.expression_bin_op(locals, scope, instructions, name, left, right);
             }
             TypedExpr::NegateInt { value, .. } => {
                 let _ = instructions
@@ -1288,7 +1248,7 @@ impl<'a> Generator<'a> {
             } => {
                 let name: EcoString =
                     format!("anonymous@{}-{}", location.start, location.end).into();
-                let id = self.local_function(name, type_, arguments, body);
+                let id = self.function_local(name, type_, arguments, body);
                 let _ = instructions.ref_func(id.index);
             }
             TypedExpr::Case {
@@ -1307,6 +1267,81 @@ impl<'a> Generator<'a> {
                 self.expression_echo(locals, &scope, instructions, echo, expression, message);
             }
             _ => todo!("Expression not supported: {:#?}", expression),
+        };
+    }
+
+    fn expression_bin_op(
+        &mut self,
+        locals: &Locals,
+        scope: Scope,
+        instructions: &mut ExtendedInstructionSink<'_>,
+        name: &BinOp,
+        left: &TypedExpr,
+        right: &TypedExpr,
+    ) {
+        if name.operator_kind() != OperatorKind::BooleanLogic {
+            let _ = instructions
+                .expression(self, locals, scope.clone(), left)
+                .expression(self, locals, scope.clone(), right);
+        }
+
+        let _ = match name {
+            // Bool
+            #[rustfmt::skip]
+            BinOp::And => instructions
+                .expression(self, locals, scope.clone(), left)
+                .if_(BlockType::Result(self.bool_.val_type()))
+                  .expression(self, locals, scope, right)
+                .else_()
+                  .bool_const(false)
+                .end(),
+            #[rustfmt::skip]
+            BinOp::Or => instructions
+                .expression(self, locals, scope.clone(), left)
+                .if_(BlockType::Result(self.bool_.val_type()))
+                  .bool_const(true)
+                .else_()
+                  .expression(self, locals, scope, right)
+                .end(),
+            // Int
+            BinOp::AddInt => instructions.int_add(),
+            BinOp::SubInt => instructions.int_sub(),
+            BinOp::MultInt => instructions.int_mul(),
+            BinOp::DivInt => {
+                let (left, right) = locals.for_div(left, right);
+                instructions.int_div(left, right)
+            }
+            BinOp::RemainderInt => instructions.int_rem(),
+            BinOp::LtInt => instructions.int_lt(),
+            BinOp::LtEqInt => instructions.int_le(),
+            BinOp::GtInt => instructions.int_gt(),
+            BinOp::GtEqInt => instructions.int_ge(),
+            // Float
+            BinOp::AddFloat => instructions.float_add(),
+            BinOp::SubFloat => instructions.float_sub(),
+            BinOp::MultFloat => instructions.float_mul(),
+            BinOp::DivFloat => {
+                let (left, right) = locals.for_div(left, right);
+                instructions.float_div(left, right)
+            }
+            BinOp::LtFloat => instructions.float_lt(),
+            BinOp::LtEqFloat => instructions.float_le(),
+            BinOp::GtFloat => instructions.float_gt(),
+            BinOp::GtEqFloat => instructions.float_ge(),
+            // String
+            BinOp::Concatenate => {
+                let concat = self.function_string_concat();
+                instructions.call(concat)
+            }
+            // Eq
+            BinOp::Eq | BinOp::NotEq => {
+                let eq = self.function_eq(&left.type_());
+                let _ = instructions.eq(eq);
+                if let BinOp::NotEq = name {
+                    let _ = instructions.bool_not();
+                }
+                instructions
+            }
         };
     }
 
@@ -1885,7 +1920,7 @@ impl<'a> Generator<'a> {
     }
 
     fn function_string_eq(&mut self) -> u32 {
-        let name = type_str(&type_::string());
+        let name = self.type_pretty_name(&type_::string());
         let eq = BuiltinFunction::Equal(self.string.val_type(), name);
         if let Some(index) = self.builtins.get(&eq) {
             return *index;
@@ -2081,7 +2116,7 @@ impl<'a> Generator<'a> {
     }
 
     fn function_list_eq(&mut self, item_type: &Arc<Type>) -> u32 {
-        let item_name = type_str(item_type);
+        let item_name = self.type_pretty_name(item_type);
         let type_index = self.list_type(item_type);
         let eq = BuiltinFunction::Equal(self.list_val_type(type_index), item_name);
         if let Some(index) = self.builtins.get(&eq) {
@@ -2180,7 +2215,7 @@ impl<'a> Generator<'a> {
         let type_ = Type::Tuple {
             elements: types.clone().into_iter().collect(),
         };
-        let name = type_str(&Arc::new(type_));
+        let name = self.type_pretty_name(&Arc::new(type_));
         let type_index = self.tuple_type(types.clone());
         let val_type = self.tuple_val_type(type_index);
         let eq = BuiltinFunction::Equal(val_type, name);
@@ -2258,11 +2293,11 @@ impl<'a> Generator<'a> {
         } else if type_.is_string() {
             BuiltinFunction::StringRepr
         } else if let Some(item_type) = type_.list_type() {
-            BuiltinFunction::ListRepr(self.val_type(type_), type_str(&item_type))
+            BuiltinFunction::ListRepr(self.val_type(type_), self.type_pretty_name(&item_type))
         } else if type_.tuple_types().is_some() {
-            BuiltinFunction::TupleRepr(self.val_type(type_), type_str(type_))
+            BuiltinFunction::TupleRepr(self.val_type(type_), self.type_pretty_name(type_))
         } else if type_.fn_types().is_some() {
-            BuiltinFunction::FunctionRepr(self.val_type(type_), type_str(type_))
+            BuiltinFunction::FunctionRepr(self.val_type(type_), self.type_pretty_name(type_))
         } else {
             todo!("echo: {:#?}", type_)
         };
@@ -2293,8 +2328,8 @@ impl<'a> Generator<'a> {
     fn code_int_repr(&self) -> Function {
         let mut function = Function::new(vec![]);
         let id = match self.int {
-            IntType::Int32 => self.find_global_expect(&I32_TO_STR.into()),
-            IntType::Int64 => self.find_global_expect(&I64_TO_STR.into()),
+            IntType::I32 => self.find_global_expect(&I32_TO_STR.into()),
+            IntType::I64 => self.find_global_expect(&I64_TO_STR.into()),
         };
         let _ = function
             .instructions()
@@ -2308,7 +2343,7 @@ impl<'a> Generator<'a> {
     fn code_float_repr(&self) -> Function {
         let mut function = Function::new(vec![]);
         let id = match self.float {
-            FloatType::Float64 => self.find_global_expect(&F64_TO_STR.into()),
+            FloatType::F64 => self.find_global_expect(&F64_TO_STR.into()),
         };
         let _ = function
             .instructions()
@@ -2530,7 +2565,7 @@ impl<'a> Generator<'a> {
         let _func = 0; // Function
         let ptr = 1; // I32
         // return I32 - number of written bytes
-        let repr = format!("//{} {{ ... }}", type_str(type_));
+        let repr = format!("//{} {{ ... }}", self.type_pretty_name(type_));
         let string_index = self.string_index(&repr.into());
         let _ = function
             .extend_instructions(self)
@@ -2644,7 +2679,7 @@ impl<'a> Generator<'a> {
     ) -> u32 {
         let type_index = self.function_type_with_val_types(params, results);
         let _ = self.function_section.function(type_index);
-        let index = self.next_function_id();
+        let index = self.function_next_id();
         self.functions.push((function, index));
         if let Some(name) = export_name {
             self.function_names.append(index, name);
@@ -2935,22 +2970,22 @@ impl<'a> ExtendedInstructionSink<'a> {
 #[allow(unused)]
 #[derive(Debug, Copy, Clone)]
 enum IntType {
-    Int32,
-    Int64,
+    I32,
+    I64,
 }
 
 impl IntType {
     fn val_type(&self) -> ValType {
         match self {
-            IntType::Int32 => ValType::I32,
-            IntType::Int64 => ValType::I64,
+            IntType::I32 => ValType::I32,
+            IntType::I64 => ValType::I64,
         }
     }
 
     fn int_const(&self, value: &BigInt) -> ConstExpr {
         match self {
-            IntType::Int32 => ConstExpr::i32_const(value.try_into().unwrap()),
-            IntType::Int64 => ConstExpr::i64_const(value.try_into().unwrap()),
+            IntType::I32 => ConstExpr::i32_const(value.try_into().unwrap()),
+            IntType::I64 => ConstExpr::i64_const(value.try_into().unwrap()),
         }
     }
 }
@@ -2959,8 +2994,8 @@ macro_rules! int_op {
     ($name:ident, $i32:ident, $i64:ident) => {
         fn $name(&mut self) -> &mut Self {
             let _ = match self.int {
-                IntType::Int32 => self.instructions.$i32(),
-                IntType::Int64 => self.instructions.$i64(),
+                IntType::I32 => self.instructions.$i32(),
+                IntType::I64 => self.instructions.$i64(),
             };
             self
         }
@@ -2970,8 +3005,8 @@ macro_rules! int_op {
 impl<'a> ExtendedInstructionSink<'a> {
     fn int_const(&mut self, value: &BigInt) -> &mut Self {
         let _ = match self.int {
-            IntType::Int32 => self.instructions.i32_const(value.try_into().unwrap()),
-            IntType::Int64 => self.instructions.i64_const(value.try_into().unwrap()),
+            IntType::I32 => self.instructions.i32_const(value.try_into().unwrap()),
+            IntType::I64 => self.instructions.i64_const(value.try_into().unwrap()),
         };
         self
     }
@@ -2979,7 +3014,7 @@ impl<'a> ExtendedInstructionSink<'a> {
     fn int_div(&mut self, dividend: u32, divisor: u32) -> &mut Self {
         #[rustfmt::skip]
         let _ = match self.int {
-            IntType::Int32 => self
+            IntType::I32 => self
                 .instructions
                 .local_set(divisor)
                 .local_set(dividend)
@@ -2991,7 +3026,7 @@ impl<'a> ExtendedInstructionSink<'a> {
                 .else_()
                   .i32_const(0)
                 .end(),
-            IntType::Int64 => self
+            IntType::I64 => self
                 .instructions
                 .local_set(divisor)
                 .local_set(dividend)
@@ -3008,14 +3043,14 @@ impl<'a> ExtendedInstructionSink<'a> {
     }
 
     fn i32_to_int(&mut self) -> &mut Self {
-        if let IntType::Int64 = self.int {
+        if let IntType::I64 = self.int {
             let _ = self.instructions.i64_extend_i32_s();
         }
         self
     }
 
     fn int_to_i32(&mut self) -> &mut Self {
-        if let IntType::Int64 = self.int {
+        if let IntType::I64 = self.int {
             let _ = self.instructions.i32_wrap_i64();
         }
         self
@@ -3035,7 +3070,7 @@ impl<'a> ExtendedInstructionSink<'a> {
 
 #[derive(Debug, Copy, Clone)]
 enum FloatType {
-    Float64,
+    F64,
 }
 
 macro_rules! float_op {
@@ -3513,17 +3548,12 @@ impl Monomorphizer {
         let mut function = function.clone();
 
         function.return_type = self.type_(&function.return_type);
+
         for arg in &mut function.arguments {
             arg.type_ = self.type_(&arg.type_);
         }
 
         self.statements(&mut function.body);
-
-        let type_ = function_type(&function);
-        assert!(!is_generic_type(&type_));
-
-        let name = mangle(function_name(&function), &type_);
-        set_function_name(&mut function, name);
 
         function
     }
@@ -3771,58 +3801,6 @@ fn set_ubound_or_generic(old: &Arc<Type>, new: &Arc<Type>) {
     }
 }
 
-#[allow(unused)]
-fn type_str(type_: &Arc<Type>) -> String {
-    let mut s = String::new();
-    type_str_acc(type_, &mut s);
-    s
-}
-
-fn type_str_acc(type_: &Arc<Type>, to: &mut String) {
-    match &**type_ {
-        Type::Named {
-            name, arguments, ..
-        } => {
-            let _ = write!(to, "{}", name);
-            if !arguments.is_empty() {
-                types_str(arguments, to);
-            }
-        }
-        Type::Fn { arguments, return_ } => {
-            let _ = write!(to, "fn");
-            types_str(arguments, to);
-            let _ = write!(to, "->");
-            type_str_acc(return_, to);
-        }
-        Type::Var { type_ } => {
-            if let TypeVar::Link { type_ } = type_.borrow().deref() {
-                type_str_acc(type_, to);
-            } else {
-                panic!("Cannot mangle TypeVar that is not a Link: {:#?}", type_);
-            }
-        }
-        Type::Tuple { elements, .. } => {
-            let _ = write!(to, "#(");
-            for element in elements {
-                type_str_acc(element, to);
-            }
-            let _ = write!(to, ")");
-        }
-    }
-}
-
-fn types_str(types: &[Arc<Type>], to: &mut String) {
-    let _ = write!(to, "(");
-    if let Some((first, rest)) = types.split_first() {
-        type_str_acc(first, to);
-        for type_ in rest {
-            let _ = write!(to, ",");
-            type_str_acc(type_, to);
-        }
-    }
-    let _ = write!(to, ")");
-}
-
 fn function_type(function: &TypedFunction) -> Arc<Type> {
     Type::Fn {
         arguments: function_params_types(function),
@@ -3849,18 +3827,6 @@ fn function_name(function: &TypedFunction) -> &EcoString {
 
 fn set_function_name(function: &mut TypedFunction, name: EcoString) {
     function.name.as_mut().unwrap().1 = name;
-}
-
-fn mangle(name: &EcoString, type_: &Arc<Type>) -> EcoString {
-    let mut name = String::from(name);
-    if let Some((params, return_)) = type_.fn_types() {
-        types_str(&params, &mut name);
-        let _ = write!(&mut name, "->");
-        type_str_acc(&return_, &mut name);
-    } else {
-        type_str_acc(type_, &mut name);
-    }
-    name.into()
 }
 
 #[derive(Clone)]
@@ -4052,7 +4018,7 @@ impl Externals {
                         {
                             panic!(
                                 "Wrong type for {module}/{name}. Expected {:?}, but got ({:?}) -> ({:?}).",
-                                type_str(&function_type(function)),
+                                generator.type_pretty_name(&function_type(function)),
                                 params,
                                 results
                             );
@@ -4136,7 +4102,7 @@ fn prepare_wasm_module<'a>(
     let mut used_functions = HashSet::new();
     let mut used_types = HashSet::new();
     let mut used_globals = HashSet::new();
-    let mut queue: Vec<_> = roots.into_iter().collect();
+    let mut queue = roots.into_iter().collect_vec();
     while let Some(id) = queue.pop() {
         let func = module.funcs.get(id);
         let _ = used_types.insert(func.ty());
@@ -4155,12 +4121,12 @@ fn prepare_wasm_module<'a>(
     }
 
     // Remove unused functions
-    let unused: Vec<_> = module
+    let unused = module
         .funcs
         .iter()
         .map(|f| f.id())
         .filter(|id| !used_functions.contains(id))
-        .collect();
+        .collect_vec();
     for id in unused {
         module.funcs.delete(id);
         if let Some(export) = module.exports.get_exported_func(id) {
@@ -4172,23 +4138,23 @@ fn prepare_wasm_module<'a>(
     }
 
     // Remove unused types
-    let unused: Vec<_> = module
+    let unused = module
         .types
         .iter()
         .map(|t| t.id())
         .filter(|id| !used_types.contains(id))
-        .collect();
+        .collect_vec();
     for id in unused {
         module.types.delete(id);
     }
 
     // Remove unused globals
-    let unused: Vec<_> = module
+    let unused = module
         .globals
         .iter()
         .map(|g| g.id())
         .filter(|id| !used_globals.contains(id))
-        .collect();
+        .collect_vec();
     for id in unused {
         module.globals.delete(id);
         if let Some(export) = module.exports.get_exported_global(id) {
