@@ -45,8 +45,6 @@ const BUILTINS_WASM: &[u8] =
     include_bytes!("../../builtins-wasm/target/wasm32-unknown-unknown/release/builtins_wasm.wasm");
 
 const MAIN: &str = "main";
-const TRUE: &str = "True";
-const FALSE: &str = "False";
 
 const I32_TO_STR: &str = "_i32_to_str";
 const I64_TO_STR: &str = "_i64_to_str";
@@ -57,6 +55,8 @@ const EXIT: &str = "_exit";
 const PRINT: &str = "_print";
 
 const STDERR: i32 = 2;
+
+const BOOL_VALTYPE: ValType = ValType::I32;
 
 pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
     let mut generator = Generator::new(module, line_numbers);
@@ -330,7 +330,6 @@ struct Generator<'a> {
     strings: HashMap<EcoString, u32>,
     consts: Vec<Const>,
     globals: Rc<RefCell<Vec<Id>>>,
-    bool_: BoolType,
     int: IntType,
     float: FloatType,
     string: StringType,
@@ -362,7 +361,6 @@ impl<'a> Generator<'a> {
             strings: HashMap::new(),
             consts: vec![],
             globals: Rc::default(),
-            bool_: BoolType {},
             int: IntType::I32,
             float: FloatType::F64,
             string: StringType { type_index: 0 },
@@ -435,9 +433,7 @@ impl<'a> Generator<'a> {
                 vec![self.string.val_type(), self.string.val_type()],
                 vec![self.string.val_type()],
             ),
-            BuiltinFunction::Equal(val_type, _) => {
-                (vec![*val_type, *val_type], vec![self.bool_.val_type()])
-            }
+            BuiltinFunction::Equal(val_type, _) => (vec![*val_type, *val_type], vec![BOOL_VALTYPE]),
             BuiltinFunction::ListRepr(val_type, _) => {
                 (vec![*val_type, ValType::I32], vec![ValType::I32])
             }
@@ -795,7 +791,6 @@ impl<'a> Generator<'a> {
         for (custom_type, module_name) in Self::prelude_custom_types()
             .iter()
             .map(|t| (t, PRELUDE_MODULE_NAME))
-            .into_iter()
             .chain(
                 self.module
                     .definitions
@@ -925,6 +920,16 @@ impl<'a> Generator<'a> {
             vec![],
         );
 
+        let bool_ = custom_type(
+            "Bool",
+            vec![
+                record_constructor("False", vec![]),
+                record_constructor("True", vec![]),
+            ],
+            vec![],
+            vec![],
+        );
+
         let type_ok = type_var_generic(u64::MAX - 1);
         let type_err = type_var_generic(u64::MAX);
         let result = custom_type(
@@ -946,7 +951,7 @@ impl<'a> Generator<'a> {
             vec![type_ok, type_err],
         );
 
-        vec![nil, result]
+        vec![nil, bool_, result]
     }
 
     fn custom_type(&self, type_: &Arc<Type>) -> Option<(CustomType, Vec<Arc<Type>>)> {
@@ -984,8 +989,6 @@ impl<'a> Generator<'a> {
     fn val_type(&mut self, type_: &Arc<Type>) -> ValType {
         if type_.is_int() {
             self.int.val_type()
-        } else if type_.is_bool() {
-            self.bool_.val_type()
         } else if type_.is_float() {
             self.float.val_type()
         } else if type_.is_string() {
@@ -1267,12 +1270,6 @@ impl<'a> Generator<'a> {
                 });
                 id
             }
-            Constant::Record { name, type_, .. } if is_bool_const(name, type_) => self.add_const(
-                const_name,
-                self.bool_.val_type(),
-                self.bool_.bool_const(name == TRUE),
-                export,
-            ),
             Constant::Record {
                 type_,
                 arguments,
@@ -1344,8 +1341,6 @@ impl<'a> Generator<'a> {
                     (self.int.int_const(&0.into()), self.int.val_type())
                 } else if type_.is_float() {
                     (self.float.float_const(&"0".into()), self.float.val_type())
-                } else if type_.is_bool() {
-                    (self.bool_.bool_const(false), self.bool_.val_type())
                 } else if let Some((custom_type, args)) = self.custom_type(type_) {
                     match custom_type {
                         CustomType::ExternalI32 | CustomType::Enum { .. } => {
@@ -1436,8 +1431,8 @@ impl<'a> Generator<'a> {
                     .constants(self, elements)
                     .struct_new(type_index);
             }
-            Constant::Record { name, .. } if const_.type_().is_bool() => {
-                let _ = instructions.bool_const(name == TRUE);
+            Constant::Record { name, type_, .. } if type_.is_bool() => {
+                let _ = instructions.bool_const(name == "True");
             }
             _ => todo!("Constant not supported: {:#?}", const_),
         }
@@ -1630,7 +1625,7 @@ impl<'a> Generator<'a> {
         #[rustfmt::skip]
         let _ = instructions
             .expression(self, locals, scope.clone(), &assert.value)
-            .if_(BlockType::Result(self.bool_.val_type()))
+            .if_(BlockType::Result(BOOL_VALTYPE))
               .bool_const(true)
             .else_()
               .show_error_message(string_index, string_to_memory, heap_base, print)
@@ -1732,9 +1727,6 @@ impl<'a> Generator<'a> {
                     scope = scope.insert_local(assignment.name.clone(), assign_index);
                 }
                 let _ = instructions.expression(self, locals, scope, finally);
-            }
-            TypedExpr::Var { name, .. } if is_bool_const(name, &expression.type_()) => {
-                let _ = instructions.bool_const(name == TRUE);
             }
             TypedExpr::Var { name, .. } => {
                 self.expression_var(&scope, instructions, name, &expression.type_());
@@ -1931,7 +1923,7 @@ impl<'a> Generator<'a> {
             #[rustfmt::skip]
             BinOp::And => instructions
                 .expression(self, locals, scope.clone(), left)
-                .if_(BlockType::Result(self.bool_.val_type()))
+                .if_(BlockType::Result(BOOL_VALTYPE))
                   .expression(self, locals, scope, right)
                 .else_()
                   .bool_const(false)
@@ -1939,7 +1931,7 @@ impl<'a> Generator<'a> {
             #[rustfmt::skip]
             BinOp::Or => instructions
                 .expression(self, locals, scope.clone(), left)
-                .if_(BlockType::Result(self.bool_.val_type()))
+                .if_(BlockType::Result(BOOL_VALTYPE))
                   .bool_const(true)
                 .else_()
                   .expression(self, locals, scope, right)
@@ -2006,11 +1998,11 @@ impl<'a> Generator<'a> {
         let _ = instructions.block(BlockType::Result(self.val_type(type_)));
         for clause in clauses {
             // block clause
-            let _ = instructions.block(BlockType::Result(self.bool_.val_type()));
+            let _ = instructions.block(BlockType::Result(BOOL_VALTYPE));
             let mut scope = scope.clone();
             for patterns in iter::once(&clause.pattern).chain(&clause.alternative_patterns) {
                 // block patterns
-                let _ = instructions.block(BlockType::Result(self.bool_.val_type()));
+                let _ = instructions.block(BlockType::Result(BOOL_VALTYPE));
                 for (pattern, subject_local) in patterns.iter().zip(&subjects_locals) {
                     #[rustfmt::skip]
                     let _ = instructions
@@ -2310,7 +2302,7 @@ impl<'a> Generator<'a> {
                 let right = locals.for_pattern(pattern);
                 let _ = instructions
                     .local_set(right)
-                    .block(BlockType::Result(self.bool_.val_type()));
+                    .block(BlockType::Result(BOOL_VALTYPE));
                 for element in elements {
                     #[rustfmt::skip]
                     let _ = instructions
@@ -2360,9 +2352,6 @@ impl<'a> Generator<'a> {
                     pattern,
                     elements.iter(),
                 );
-            }
-            Pattern::Constructor { name, type_, .. } if is_bool_const(name, type_) => {
-                let _ = instructions.bool_const(name == TRUE).bool_eq();
             }
             Pattern::Constructor {
                 name,
@@ -2416,7 +2405,7 @@ impl<'a> Generator<'a> {
                             .struct_get(supertype_index, 0)
                             .i32_const(tag as i32)
                             .i32_eq()
-                            .if_(BlockType::Result(self.bool_.val_type()))
+                            .if_(BlockType::Result(BOOL_VALTYPE))
                             .local_get(right);
                         self.patterns(
                             locals,
@@ -2455,7 +2444,7 @@ impl<'a> Generator<'a> {
         let right = locals.for_pattern(pattern);
         let _ = instructions
             .local_set(right)
-            .block(BlockType::Result(self.bool_.val_type()));
+            .block(BlockType::Result(BOOL_VALTYPE));
         for (field_index, element) in elements.into_iter().enumerate() {
             let _ = instructions.local_get(right);
             if let Some(subtype_index) = subtype_index {
@@ -2491,7 +2480,7 @@ impl<'a> Generator<'a> {
                 #[rustfmt::skip]
                 let _ = instructions
                     .clause_guard(self, locals, scope, left)
-                    .if_(BlockType::Result(self.bool_.val_type()))
+                    .if_(BlockType::Result(BOOL_VALTYPE))
                       .bool_const(true)
                     .else_()
                       .clause_guard(self, locals, scope, right)
@@ -2501,7 +2490,7 @@ impl<'a> Generator<'a> {
                 #[rustfmt::skip]
                 let _ = instructions
                     .clause_guard(self, locals, scope, left)
-                    .if_(BlockType::Result(self.bool_.val_type()))
+                    .if_(BlockType::Result(BOOL_VALTYPE))
                       .clause_guard(self, locals, scope, right)
                     .else_()
                       .bool_const(false)
@@ -3824,7 +3813,6 @@ fn custom_type_inferred_constructor<'a>(
 
 #[allow(unused)]
 struct ExtendedInstructionSink<'a> {
-    bool_: BoolType,
     int: IntType,
     float: FloatType,
     string: StringType,
@@ -3853,7 +3841,6 @@ impl NewExtendedInstructionSink for Function {
         generator: &Generator<'_>,
     ) -> ExtendedInstructionSink<'a> {
         ExtendedInstructionSink {
-            bool_: generator.bool_,
             int: generator.int,
             float: generator.float,
             string: generator.string,
@@ -4069,19 +4056,6 @@ impl<'a> ExtendedInstructionSink<'a> {
         i32_sub(),
         i32_store8(m: MemArg),
         i32_load8_u(m: MemArg),
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-struct BoolType {}
-
-impl BoolType {
-    fn val_type(&self) -> ValType {
-        ValType::I32
-    }
-
-    fn bool_const(&self, bool_: bool) -> ConstExpr {
-        ConstExpr::i32_const(bool_.into())
     }
 }
 
@@ -4599,10 +4573,6 @@ impl<T> LocalHash for &T {
         // assigments. Let's hope we do not get collisions with this.
         ptr::from_ref(*self) as u64
     }
-}
-
-fn is_bool_const(name: &str, type_: &Arc<Type>) -> bool {
-    (name == TRUE || name == FALSE) && type_.is_bool()
 }
 
 fn is_generic_type(type_: &Arc<Type>) -> bool {
