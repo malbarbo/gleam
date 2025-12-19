@@ -22,10 +22,11 @@ use wasm_encoder::{
 
 use crate::{
     ast::{
-        AssignmentKind, BinOp, ClauseGuard, Constant, OperatorKind, Pattern, SrcSpan, Statement,
-        TodoKind, TypedArg, TypedAssert, TypedAssignment, TypedClause, TypedClauseGuard,
-        TypedConstant, TypedCustomType, TypedExpr, TypedFunction, TypedModule, TypedModuleConstant,
-        TypedPattern, TypedPipelineAssignment, TypedRecordConstructor, TypedStatement,
+        AssignmentKind, BinOp, ClauseGuard, Constant, OperatorKind, Pattern, Publicity, SrcSpan,
+        Statement, TodoKind, TypeAst, TypeAstVar, TypedArg, TypedAssert, TypedAssignment,
+        TypedClause, TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr, TypedFunction,
+        TypedModule, TypedModuleConstant, TypedPattern, TypedPipelineAssignment,
+        TypedRecordConstructor, TypedRecordConstructorArg, TypedStatement,
         visit::{
             Visit, visit_typed_assert, visit_typed_assignment, visit_typed_clause_guard,
             visit_typed_expr, visit_typed_expr_bin_op, visit_typed_expr_call,
@@ -35,7 +36,7 @@ use crate::{
     },
     line_numbers::LineNumbers,
     type_::{
-        self, Type, TypeVar,
+        self, PRELUDE_MODULE_NAME, Type, TypeVar,
         printer::{Names, Printer},
     },
 };
@@ -790,12 +791,19 @@ impl<'a> Generator<'a> {
         fn is_not_external(custom_type: &TypedCustomType) -> bool {
             custom_type.external_webassembly.is_none() && !custom_type.constructors.is_empty()
         }
-        for custom_type in self
-            .module
-            .definitions
-            .custom_types
+
+        for (custom_type, module_name) in Self::prelude_custom_types()
             .iter()
-            .filter(|t| is_not_external(t))
+            .map(|t| (t, PRELUDE_MODULE_NAME))
+            .into_iter()
+            .chain(
+                self.module
+                    .definitions
+                    .custom_types
+                    .iter()
+                    .filter(|t| is_not_external(t))
+                    .map(|c| (c, self.module.name.as_str())),
+            )
         {
             let mut is_union = false;
             let type_ = if custom_type
@@ -843,8 +851,102 @@ impl<'a> Generator<'a> {
 
             let _ = self
                 .types
-                .insert((self.module.name.clone(), custom_type.name.clone()), type_);
+                .insert((module_name.into(), custom_type.name.clone()), type_);
         }
+    }
+
+    fn prelude_custom_types() -> Vec<TypedCustomType> {
+        fn type_var_generic(id: u64) -> Arc<Type> {
+            Type::Var {
+                type_: RefCell::new(TypeVar::Generic { id }).into(),
+            }
+            .into()
+        }
+
+        fn record_constructor_arg(ast: TypeAst, type_: Arc<Type>) -> TypedRecordConstructorArg {
+            TypedRecordConstructorArg {
+                label: Default::default(),
+                ast,
+                location: Default::default(),
+                type_,
+                doc: Default::default(),
+            }
+        }
+
+        fn record_constructor(
+            name: &str,
+            arguments: Vec<TypedRecordConstructorArg>,
+        ) -> TypedRecordConstructor {
+            TypedRecordConstructor {
+                location: Default::default(),
+                name_location: Default::default(),
+                name: name.into(),
+                arguments,
+                documentation: Default::default(),
+                deprecation: Default::default(),
+            }
+        }
+
+        fn ast_var(name: &str) -> TypeAst {
+            TypeAst::Var(TypeAstVar {
+                location: Default::default(),
+                name: name.into(),
+            })
+        }
+
+        fn custom_type(
+            name: &str,
+            constructors: Vec<TypedRecordConstructor>,
+            parameters: Vec<(SrcSpan, EcoString)>,
+            typed_parameters: Vec<Arc<Type>>,
+        ) -> TypedCustomType {
+            TypedCustomType {
+                location: Default::default(),
+                end_position: Default::default(),
+                name: name.into(),
+                name_location: Default::default(),
+                publicity: Publicity::Public,
+                constructors,
+                documentation: Default::default(),
+                deprecation: Default::default(),
+                opaque: Default::default(),
+                parameters,
+                typed_parameters,
+                external_erlang: Default::default(),
+                external_javascript: Default::default(),
+                external_webassembly: Default::default(),
+            }
+        }
+
+        let nil = custom_type(
+            "Nil",
+            vec![record_constructor("Nil", vec![])],
+            vec![],
+            vec![],
+        );
+
+        let type_ok = type_var_generic(u64::MAX - 1);
+        let type_err = type_var_generic(u64::MAX);
+        let result = custom_type(
+            "Result",
+            vec![
+                record_constructor(
+                    "Ok",
+                    vec![record_constructor_arg(ast_var("ok"), type_ok.clone())],
+                ),
+                record_constructor(
+                    "Error",
+                    vec![record_constructor_arg(ast_var("err"), type_err.clone())],
+                ),
+            ],
+            vec![
+                (Default::default(), "ok".into()),
+                (Default::default(), "err".into()),
+            ],
+            vec![type_ok, type_err],
+        );
+
+        vec![nil, result]
     }
 
     fn custom_type(&self, type_: &Arc<Type>) -> Option<(CustomType, Vec<Arc<Type>>)> {
