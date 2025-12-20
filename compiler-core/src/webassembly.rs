@@ -2364,6 +2364,16 @@ impl<'a> Generator<'a> {
                 let _ = instructions
                     .local_set(right)
                     .block(BlockType::Result(BOOL_VALTYPE));
+                if !elements.is_empty() {
+                    #[rustfmt::skip]
+                    let _ = instructions
+                        .local_get(right)
+                        .ref_is_null()
+                        .if_(BlockType::Empty)
+                          .bool_const(false)
+                          .br(1)
+                        .end();
+                }
                 for element in elements {
                     #[rustfmt::skip]
                     let _ = instructions
