@@ -204,16 +204,7 @@ enum BuiltinFunction {
     FunctionRepr(ValType, EcoString),
     CustomTypeRepr(ValType, EcoString, Option<EcoString>),
     VariantConstructor(Vec<ValType>, ValType, EcoString),
-    // Can be used in external
-    I32ToInt,
-    IntToI32,
-    IntRepr,
-    FloatRepr,
-    StringRepr,
-    StringToMemory,
-    MemoryToString,
 }
-
 impl BuiltinFunction {
     fn name(&self) -> EcoString {
         match self {
@@ -230,25 +221,43 @@ impl BuiltinFunction {
                 }
             }
             BuiltinFunction::VariantConstructor(_, _, name) => format!("_create({name})").into(),
-            BuiltinFunction::I32ToInt => "_i32_to_int".into(),
-            BuiltinFunction::IntToI32 => "_int_to_i32".into(),
-            BuiltinFunction::IntRepr => "_repr_int".into(),
-            BuiltinFunction::FloatRepr => "_repr_float".into(),
-            BuiltinFunction::StringRepr => "_repr_string".into(),
-            BuiltinFunction::StringToMemory => "_string_to_memory".into(),
-            BuiltinFunction::MemoryToString => "_memory_to_string".into(),
+        }
+    }
+}
+
+#[derive(Hash, PartialEq, Eq, Clone, Debug)]
+enum BuiltinFunctionExternal {
+    I32ToInt,
+    IntToI32,
+    IntRepr,
+    FloatRepr,
+    StringRepr,
+    StringToMemory,
+    MemoryToString,
+}
+
+impl BuiltinFunctionExternal {
+    fn name(&self) -> EcoString {
+        match self {
+            BuiltinFunctionExternal::I32ToInt => "_i32_to_int".into(),
+            BuiltinFunctionExternal::IntToI32 => "_int_to_i32".into(),
+            BuiltinFunctionExternal::IntRepr => "_repr_int".into(),
+            BuiltinFunctionExternal::FloatRepr => "_repr_float".into(),
+            BuiltinFunctionExternal::StringRepr => "_repr_string".into(),
+            BuiltinFunctionExternal::StringToMemory => "_string_to_memory".into(),
+            BuiltinFunctionExternal::MemoryToString => "_memory_to_string".into(),
         }
     }
 
-    fn externals() -> &'static [BuiltinFunction] {
+    fn all() -> &'static [BuiltinFunctionExternal] {
         &[
-            BuiltinFunction::I32ToInt,
-            BuiltinFunction::IntToI32,
-            BuiltinFunction::IntRepr,
-            BuiltinFunction::FloatRepr,
-            BuiltinFunction::StringRepr,
-            BuiltinFunction::StringToMemory,
-            BuiltinFunction::MemoryToString,
+            BuiltinFunctionExternal::I32ToInt,
+            BuiltinFunctionExternal::IntToI32,
+            BuiltinFunctionExternal::IntRepr,
+            BuiltinFunctionExternal::FloatRepr,
+            BuiltinFunctionExternal::StringRepr,
+            BuiltinFunctionExternal::StringToMemory,
+            BuiltinFunctionExternal::MemoryToString,
         ]
     }
 }
@@ -325,6 +334,7 @@ struct Generator<'a> {
     functions: Vec<(Vec<u8>, u32)>,
     function_next_id: u32,
     builtins: HashMap<BuiltinFunction, u32>,
+    builtins_external: HashMap<BuiltinFunctionExternal, u32>,
     main: Option<u32>,
     // String literals and its index in the global section
     strings: HashMap<EcoString, u32>,
@@ -357,6 +367,7 @@ impl<'a> Generator<'a> {
             functions: vec![],
             function_next_id: 0,
             builtins: HashMap::new(),
+            builtins_external: HashMap::new(),
             main: None,
             strings: HashMap::new(),
             consts: vec![],
@@ -403,30 +414,6 @@ impl<'a> Generator<'a> {
             .unwrap_or_else(|| panic!("Global \"{name}\"."))
     }
 
-    fn builtin_wasm_dependencies(&self, function: &BuiltinFunction) -> &'static [&'static str] {
-        match function {
-            BuiltinFunction::StringConcat
-            | BuiltinFunction::Equal(_, _)
-            | BuiltinFunction::ListRepr(_, _)
-            | BuiltinFunction::TupleRepr(_, _)
-            | BuiltinFunction::FunctionRepr(_, _)
-            | BuiltinFunction::CustomTypeRepr(_, _, _)
-            | BuiltinFunction::VariantConstructor(_, _, _)
-            | BuiltinFunction::I32ToInt
-            | BuiltinFunction::IntToI32
-            | BuiltinFunction::StringRepr
-            | BuiltinFunction::StringToMemory
-            | BuiltinFunction::MemoryToString => &[],
-            BuiltinFunction::IntRepr => match self.int {
-                IntType::I32 => &[I32_TO_STR],
-                IntType::I64 => &[I64_TO_STR],
-            },
-            BuiltinFunction::FloatRepr => match self.float {
-                FloatType::F64 => &[F64_TO_STR],
-            },
-        }
-    }
-
     fn builtin_type(&self, function: &BuiltinFunction) -> (Vec<ValType>, Vec<ValType>) {
         match function {
             BuiltinFunction::StringConcat => (
@@ -449,66 +436,89 @@ impl<'a> Generator<'a> {
             BuiltinFunction::VariantConstructor(params, return_, _) => {
                 (params.clone(), vec![*return_])
             }
-            BuiltinFunction::I32ToInt => (vec![ValType::I32], vec![self.int.val_type()]),
-            BuiltinFunction::IntToI32 => (vec![self.int.val_type()], vec![ValType::I32]),
-            BuiltinFunction::IntRepr => {
+        }
+    }
+
+    fn builtin_external_wasm_dependencies(
+        &self,
+        function: &BuiltinFunctionExternal,
+    ) -> &'static [&'static str] {
+        match function {
+            BuiltinFunctionExternal::I32ToInt
+            | BuiltinFunctionExternal::IntToI32
+            | BuiltinFunctionExternal::StringRepr
+            | BuiltinFunctionExternal::StringToMemory
+            | BuiltinFunctionExternal::MemoryToString => &[],
+            BuiltinFunctionExternal::IntRepr => match self.int {
+                IntType::I32 => &[I32_TO_STR],
+                IntType::I64 => &[I64_TO_STR],
+            },
+            BuiltinFunctionExternal::FloatRepr => match self.float {
+                FloatType::F64 => &[F64_TO_STR],
+            },
+        }
+    }
+
+    fn builtin_external_type(
+        &self,
+        function: &BuiltinFunctionExternal,
+    ) -> (Vec<ValType>, Vec<ValType>) {
+        match function {
+            BuiltinFunctionExternal::I32ToInt => (vec![ValType::I32], vec![self.int.val_type()]),
+            BuiltinFunctionExternal::IntToI32 => (vec![self.int.val_type()], vec![ValType::I32]),
+            BuiltinFunctionExternal::IntRepr => {
                 (vec![self.int.val_type(), ValType::I32], vec![ValType::I32])
             }
-            BuiltinFunction::FloatRepr => (
+            BuiltinFunctionExternal::FloatRepr => (
                 vec![self.float.val_type(), ValType::I32],
                 vec![ValType::I32],
             ),
-            BuiltinFunction::StringRepr => (
+            BuiltinFunctionExternal::StringRepr => (
                 vec![self.string.val_type(), ValType::I32],
                 vec![ValType::I32],
             ),
-            BuiltinFunction::StringToMemory => (
+            BuiltinFunctionExternal::StringToMemory => (
                 vec![self.string.val_type(), ValType::I32],
                 vec![ValType::I32],
             ),
-            BuiltinFunction::MemoryToString => (
+            BuiltinFunctionExternal::MemoryToString => (
                 vec![ValType::I32, ValType::I32],
                 vec![self.string.val_type()],
             ),
         }
     }
 
-    fn builtin_check_type(&mut self, builtin: &BuiltinFunction, function: &TypedFunction) {
+    fn builtin_external_check_type(
+        &mut self,
+        builtin: &BuiltinFunctionExternal,
+        function: &TypedFunction,
+    ) {
         let valid = match builtin {
-            BuiltinFunction::StringConcat
-            | BuiltinFunction::Equal(_, _)
-            | BuiltinFunction::ListRepr(_, _)
-            | BuiltinFunction::TupleRepr(_, _)
-            | BuiltinFunction::FunctionRepr(_, _)
-            | BuiltinFunction::CustomTypeRepr(_, _, _)
-            | BuiltinFunction::VariantConstructor(_, _, _) => {
-                panic!("Function {} shouldn't be used as external", builtin.name())
-            }
-            BuiltinFunction::I32ToInt => function.return_type.is_int(),
-            BuiltinFunction::IntToI32 => match &function.arguments[..] {
+            BuiltinFunctionExternal::I32ToInt => function.return_type.is_int(),
+            BuiltinFunctionExternal::IntToI32 => match &function.arguments[..] {
                 [first] => first.type_.is_int(),
                 _ => false,
             },
-            BuiltinFunction::IntRepr => match &function.arguments[..] {
+            BuiltinFunctionExternal::IntRepr => match &function.arguments[..] {
                 [first, _] => first.type_.is_int(),
                 _ => false,
             },
-            BuiltinFunction::FloatRepr => match &function.arguments[..] {
+            BuiltinFunctionExternal::FloatRepr => match &function.arguments[..] {
                 [first, _] => first.type_.is_float(),
                 _ => false,
             },
-            BuiltinFunction::StringRepr => match &function.arguments[..] {
+            BuiltinFunctionExternal::StringRepr => match &function.arguments[..] {
                 [first, _] => first.type_.is_string(),
                 _ => false,
             },
-            BuiltinFunction::StringToMemory => match &function.arguments[..] {
+            BuiltinFunctionExternal::StringToMemory => match &function.arguments[..] {
                 [first, _] => first.type_.is_string(),
                 _ => false,
             },
-            BuiltinFunction::MemoryToString => function.return_type.is_string(),
+            BuiltinFunctionExternal::MemoryToString => function.return_type.is_string(),
         };
 
-        let (params, results) = self.builtin_type(builtin);
+        let (params, results) = self.builtin_external_type(builtin);
 
         if !valid
             || params != self.val_types(function_params_types(function))
@@ -742,39 +752,28 @@ impl<'a> Generator<'a> {
                     function,
                 } = external
             {
-                let index = match function {
-                    BuiltinFunction::I32ToInt => {
-                        self.add_function_builtin(function, self.code_i32_to_int())
-                    }
-                    BuiltinFunction::IntToI32 => {
-                        self.add_function_builtin(function, self.code_int_to_i32())
-                    }
-                    BuiltinFunction::IntRepr => {
-                        self.add_function_builtin(function, self.code_int_repr())
-                    }
-                    BuiltinFunction::FloatRepr => {
-                        self.add_function_builtin(function, self.code_float_repr())
-                    }
-                    BuiltinFunction::StringRepr => {
-                        self.add_function_builtin(function, self.code_string_repr())
-                    }
-                    BuiltinFunction::StringToMemory => {
-                        self.add_function_builtin(function, self.code_string_to_memory())
-                    }
-                    BuiltinFunction::MemoryToString => {
-                        self.add_function_builtin(function, self.code_memory_to_string())
-                    }
-                    BuiltinFunction::StringConcat
-                    | BuiltinFunction::Equal(_, _)
-                    | BuiltinFunction::ListRepr(_, _)
-                    | BuiltinFunction::TupleRepr(_, _)
-                    | BuiltinFunction::FunctionRepr(_, _)
-                    | BuiltinFunction::CustomTypeRepr(_, _, _)
-                    | BuiltinFunction::VariantConstructor(_, _, _) => {
-                        // FIXME: add message
-                        panic!();
-                    }
-                };
+                let index =
+                    match function {
+                        BuiltinFunctionExternal::I32ToInt => {
+                            self.add_function_builtin_external(function, self.code_i32_to_int())
+                        }
+                        BuiltinFunctionExternal::IntToI32 => {
+                            self.add_function_builtin_external(function, self.code_int_to_i32())
+                        }
+                        BuiltinFunctionExternal::IntRepr => {
+                            self.add_function_builtin_external(function, self.code_int_repr())
+                        }
+                        BuiltinFunctionExternal::FloatRepr => {
+                            self.add_function_builtin_external(function, self.code_float_repr())
+                        }
+                        BuiltinFunctionExternal::StringRepr => {
+                            self.add_function_builtin_external(function, self.code_string_repr())
+                        }
+                        BuiltinFunctionExternal::StringToMemory => self
+                            .add_function_builtin_external(function, self.code_string_to_memory()),
+                        BuiltinFunctionExternal::MemoryToString => self
+                            .add_function_builtin_external(function, self.code_memory_to_string()),
+                    };
 
                 for name in used_names {
                     let _ = self.add_function_to_globals(name, index);
@@ -812,6 +811,7 @@ impl<'a> Generator<'a> {
                         ValType::I32,
                         ConstExpr::i32_const(value as i32),
                         custom_type.publicity.is_public(),
+                        false,
                     );
                 }
                 CustomType::Enum {
@@ -1217,12 +1217,14 @@ impl<'a> Generator<'a> {
                 self.int.val_type(),
                 self.int.int_const(int_value),
                 export,
+                false,
             ),
             Constant::Float { value, .. } => self.add_const(
                 const_name,
                 self.float.val_type(),
                 self.float.float_const(value),
                 export,
+                false,
             ),
             Constant::String { value, .. } => {
                 let id = self.add_const(
@@ -1230,6 +1232,7 @@ impl<'a> Generator<'a> {
                     self.string.val_type_nullable(),
                     const_expr_ref_null(self.string.type_index),
                     export,
+                    true,
                 );
                 let from = self.string_index(value);
                 self.consts.push(Const::String { from, to: id.index });
@@ -1243,6 +1246,7 @@ impl<'a> Generator<'a> {
                     val_type,
                     const_expr_ref_null(type_index),
                     export,
+                    true,
                 );
                 self.consts.push(Const::Struct {
                     global_index: id.index,
@@ -1262,6 +1266,7 @@ impl<'a> Generator<'a> {
                     val_type,
                     const_expr_ref_null(type_index),
                     export,
+                    true,
                 );
                 self.consts.push(Const::List {
                     global_index: id.index,
@@ -1286,6 +1291,7 @@ impl<'a> Generator<'a> {
                             self.int.val_type(),
                             self.int.int_const(&value.into()),
                             export,
+                            false,
                         )
                     }
                     CustomType::Struct {
@@ -1300,6 +1306,7 @@ impl<'a> Generator<'a> {
                             val_type,
                             const_expr_ref_null(type_index),
                             export,
+                            true,
                         );
                         self.consts.push(Const::Struct {
                             global_index: id.index,
@@ -1319,6 +1326,7 @@ impl<'a> Generator<'a> {
                             val_type,
                             const_expr_ref_null(type_index),
                             export,
+                            true,
                         );
                         self.consts.push(Const::Struct {
                             global_index: id.index,
@@ -1366,7 +1374,7 @@ impl<'a> Generator<'a> {
                 } else {
                     todo!()
                 };
-                let id = self.add_const(const_name, val_type, expr, export);
+                let id = self.add_const(const_name, val_type, expr, export, true);
                 self.consts.push(Const::Var {
                     global_index: id.index,
                     name: name.clone(),
@@ -1618,7 +1626,8 @@ impl<'a> Generator<'a> {
         )
         .into();
         let string_index = self.string_index(&msg);
-        let string_to_memory = self.find_global_expect(&BuiltinFunction::StringToMemory.name());
+        let string_to_memory =
+            self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
         let heap_base = self.find_global_expect(&HEAP_BASE.into());
         let print = self.find_global_expect(&PRINT.into());
         let exit = self.find_global_expect(&EXIT.into());
@@ -1867,7 +1876,8 @@ impl<'a> Generator<'a> {
         .into();
 
         let string_index = self.string_index(&msg);
-        let string_to_memory = self.find_global_expect(&BuiltinFunction::StringToMemory.name());
+        let string_to_memory =
+            self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
         let heap_base = self.find_global_expect(&HEAP_BASE.into());
         let print = self.find_global_expect(&PRINT.into());
         let exit = self.find_global_expect(&EXIT.into());
@@ -2157,7 +2167,8 @@ impl<'a> Generator<'a> {
         if let Some(expression) = expression {
             let print = self.find_global_expect(&PRINT.into());
             let heap_base = self.find_global_expect(&HEAP_BASE.into());
-            let string_to_memory = self.find_global_expect(&BuiltinFunction::StringToMemory.name());
+            let string_to_memory =
+                self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
             let string_index = self.string_index(
                 &format!(
                     "src/{}.gleam:{}{}",
@@ -2242,7 +2253,7 @@ impl<'a> Generator<'a> {
                 .into();
                 let string_index = self.string_index(&msg);
                 let string_to_memory =
-                    self.find_global_expect(&BuiltinFunction::StringToMemory.name());
+                    self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
                 let heap_base = self.find_global_expect(&HEAP_BASE.into());
                 let print = self.find_global_expect(&PRINT.into());
                 let exit = self.find_global_expect(&EXIT.into());
@@ -2658,12 +2669,13 @@ impl<'a> Generator<'a> {
         val_type: ValType,
         expr: ConstExpr,
         export: bool,
+        mutable: bool,
     ) -> Id {
         let index = self.global_section.len();
         let _ = self.global_section.global(
             GlobalType {
                 val_type,
-                mutable: true,
+                mutable,
                 shared: false,
             },
             &expr,
@@ -3211,13 +3223,23 @@ impl<'a> Generator<'a> {
     }
 
     fn function_repr(&mut self, type_: &Arc<Type>) -> u32 {
-        let repr = if type_.is_int() {
-            BuiltinFunction::IntRepr
-        } else if type_.is_float() {
-            BuiltinFunction::FloatRepr
-        } else if type_.is_string() {
-            BuiltinFunction::StringRepr
-        } else if type_.is_list() {
+        if type_.is_int() | type_.is_float() | type_.is_string() {
+            let (repr, code) = if type_.is_int() {
+                (BuiltinFunctionExternal::IntRepr, self.code_int_repr())
+            } else if type_.is_float() {
+                (BuiltinFunctionExternal::FloatRepr, self.code_float_repr())
+            } else {
+                (BuiltinFunctionExternal::StringRepr, self.code_string_repr())
+            };
+
+            return if let Some(id) = self.builtins_external.get(&repr) {
+                *id
+            } else {
+                self.add_function_builtin_external(repr, code)
+            };
+        }
+
+        let repr = if type_.is_list() {
             BuiltinFunction::ListRepr(self.val_type(type_), self.type_pretty_name(type_))
         } else if type_.is_tuple() {
             BuiltinFunction::TupleRepr(
@@ -3233,7 +3255,7 @@ impl<'a> Generator<'a> {
                 None,
             )
         } else {
-            todo!("echo: {:#?}", type_)
+            todo!("function_repr\n{type_:#?}");
         };
 
         if let Some(id) = self.builtins.get(&repr) {
@@ -3244,13 +3266,7 @@ impl<'a> Generator<'a> {
         // so we avoid problems with recursive types.
         let index = self.add_function_builtin(repr, Function::new(vec![]));
 
-        let function = if type_.is_int() {
-            self.code_int_repr()
-        } else if type_.is_float() {
-            self.code_float_repr()
-        } else if type_.is_string() {
-            self.code_string_repr()
-        } else if let Some(item_type) = type_.list_type() {
+        let function = if let Some(item_type) = type_.list_type() {
             self.code_list_repr(&item_type)
         } else if let Some(types) = type_.tuple_types() {
             self.code_tuple_repr(&types)
@@ -3259,7 +3275,7 @@ impl<'a> Generator<'a> {
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             self.code_custom_type_repr(type_, &custom_type, &args)
         } else {
-            todo!("echo: {:#?}", type_)
+            todo!("function_repr\n{type_:#?}");
         };
 
         // Now we update the function
@@ -3488,7 +3504,8 @@ impl<'a> Generator<'a> {
         // local
         let dest = 2; // I32
         // return I32 - number of written bytes
-        let string_to_memory = self.find_global_expect(&BuiltinFunction::StringToMemory.name());
+        let string_to_memory =
+            self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
         let string_index = self.string_index(name);
         let mut instructions = function.extend_instructions(self);
         let _ = instructions
@@ -3555,7 +3572,7 @@ impl<'a> Generator<'a> {
             .global_as_non_null(string_index)
             .local_get(ptr)
             .call(
-                self.find_global_expect(&BuiltinFunction::StringToMemory.name())
+                self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name())
                     .index,
             )
             .end();
@@ -3573,7 +3590,8 @@ impl<'a> Generator<'a> {
         let value = 0; // value
         let ptr = 1; // I32
         // return I32 - number of written bytes
-        let string_to_memory = self.find_global_expect(&BuiltinFunction::StringToMemory.name());
+        let string_to_memory =
+            self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
         let mut instructions = function.extend_instructions(self);
         match custom_type {
             CustomType::ExternalI32 => {
@@ -3760,6 +3778,23 @@ impl<'a> Generator<'a> {
             function.into_raw_body(),
         );
         let _ = self.builtins.insert(builtin, index);
+        index
+    }
+
+    fn add_function_builtin_external(
+        &mut self,
+        builtin: BuiltinFunctionExternal,
+        function: Function,
+    ) -> u32 {
+        let (params, results) = self.builtin_external_type(&builtin);
+        let index = self.add_function(
+            Some(&builtin.name()),
+            false,
+            params,
+            results,
+            function.into_raw_body(),
+        );
+        let _ = self.builtins_external.insert(builtin, index);
         index
     }
 
@@ -5049,7 +5084,7 @@ fn set_function_name(function: &mut TypedFunction, name: EcoString) {
 enum ExternalFunction {
     Builtin {
         used_names: HashSet<EcoString>,
-        function: BuiltinFunction,
+        function: BuiltinFunctionExternal,
     },
     Wasm {
         used_names: HashSet<EcoString>,
@@ -5121,7 +5156,7 @@ impl Externals {
         }
 
         // add builtin functions to available
-        for function in BuiltinFunction::externals() {
+        for function in BuiltinFunctionExternal::all() {
             externals.insert_available(
                 function.name(),
                 ExternalFunction::Builtin {
@@ -5134,7 +5169,7 @@ impl Externals {
         externals.functions(generator, &generator.module.definitions.functions);
 
         if externals.echo_any || externals.assert || externals.todo_panic {
-            externals.insert_used_name(&BuiltinFunction::StringToMemory.name(), None);
+            externals.insert_used_name(&BuiltinFunctionExternal::StringToMemory.name(), None);
             externals.insert_used_name(&HEAP_BASE.into(), None);
             externals.insert_used_name(&PRINT.into(), None);
         }
@@ -5144,11 +5179,11 @@ impl Externals {
         }
 
         if externals.echo_int {
-            externals.insert_used_name(&BuiltinFunction::IntRepr.name(), None);
+            externals.insert_used_name(&BuiltinFunctionExternal::IntRepr.name(), None);
         }
 
         if externals.echo_float {
-            externals.insert_used_name(&BuiltinFunction::FloatRepr.name(), None);
+            externals.insert_used_name(&BuiltinFunctionExternal::FloatRepr.name(), None);
         }
 
         let mut used = HashSet::new();
@@ -5158,7 +5193,7 @@ impl Externals {
             {
                 used.extend(
                     generator
-                        .builtin_wasm_dependencies(function)
+                        .builtin_external_wasm_dependencies(function)
                         .iter()
                         .cloned(),
                 );
@@ -5223,7 +5258,7 @@ impl Externals {
                         used_names,
                         function: builtin_function,
                     } => {
-                        generator.builtin_check_type(builtin_function, function);
+                        generator.builtin_external_check_type(builtin_function, function);
                         let _ = used_names.insert(name.clone());
                     }
                     ExternalFunction::Wasm {
