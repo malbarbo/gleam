@@ -4,7 +4,8 @@ use itertools::Itertools;
 use num_bigint::BigInt;
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    cmp::Ordering,
+    collections::{BTreeSet, HashMap, HashSet},
     iter,
     ops::Deref,
     ptr,
@@ -120,7 +121,11 @@ pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
     let _ = module.section(&generator.import_section);
 
     // function section
-    let _ = module.section(&generator.function_section);
+    let mut function_section = FunctionSection::new();
+    for function in &generator.functions {
+        let _ = function_section.function(function.type_index);
+    }
+    let _ = module.section(&function_section);
 
     // memory section
     // FIXME: create only if it is necessary
@@ -138,6 +143,11 @@ pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
     let _ = module.section(&generator.global_section);
 
     // export section
+    for function in generator.functions.iter().filter(|f| f.export) {
+        let _ = generator
+            .export_section
+            .export(&function.name, ExportKind::Func, function.index);
+    }
     let _ = module.section(&generator.export_section);
 
     // start section
@@ -148,7 +158,7 @@ pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
     // element section
     let mut element_section = ElementSection::new();
     let _ = element_section.declared(Elements::Functions(
-        generator.functions.iter().map(|f| f.1).sorted().collect(),
+        generator.functions.iter().map(|f| f.index).collect(),
     ));
     let _ = module.section(&element_section);
 
@@ -158,10 +168,9 @@ pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
     });
 
     // code section
-    generator.functions.sort_by_key(|t| t.1);
     let mut codes_section = CodeSection::new();
-    for (body, _) in generator.functions {
-        let _ = codes_section.raw(&body);
+    for function in &generator.functions {
+        let _ = codes_section.raw(&function.code);
     }
     let _ = module.section(&codes_section);
 
@@ -175,9 +184,14 @@ pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
             type_names.append(*type_index, name);
         }
     }
+
+    let mut function_names = NameMap::new();
+    for function in &generator.functions {
+        function_names.append(function.index, &function.name);
+    }
     let mut names = NameSection::new();
     names.module(&generator.module.name);
-    names.functions(&generator.function_names);
+    names.functions(&function_names);
     names.types(&type_names);
     names.globals(&generator.global_names);
     let _ = module.section(&names);
@@ -195,6 +209,59 @@ enum WasmType {
     Union(Vec<ValType>, EcoString, Option<u32>),
 }
 
+#[derive(Clone)]
+enum WasmConst {
+    // The index in the global section for the const string name and
+    // the index in the global section for the string literal
+    String {
+        from: u32,
+        to: u32,
+    },
+    List {
+        global_index: u32,
+        type_index: u32,
+        elements: Vec<TypedConstant>,
+    },
+    Struct {
+        global_index: u32,
+        type_index: u32,
+        elements: Vec<TypedConstant>,
+    },
+    Var {
+        global_index: u32,
+        name: EcoString,
+    },
+}
+
+#[derive(Clone)]
+struct WasmFunction {
+    name: EcoString,
+    export: bool,
+    index: u32,
+    type_index: u32,
+    code: Rc<Vec<u8>>,
+}
+
+impl std::cmp::Eq for WasmFunction {}
+
+impl PartialEq for WasmFunction {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index
+    }
+}
+
+impl PartialOrd for WasmFunction {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for WasmFunction {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.index.cmp(&other.index)
+    }
+}
+
 #[derive(Hash, PartialEq, Eq, Clone, Debug)]
 enum BuiltinFunction {
     StringConcat,
@@ -205,6 +272,7 @@ enum BuiltinFunction {
     CustomTypeRepr(ValType, EcoString, Option<EcoString>),
     VariantConstructor(Vec<ValType>, ValType, EcoString),
 }
+
 impl BuiltinFunction {
     fn name(&self) -> EcoString {
         match self {
@@ -262,30 +330,6 @@ impl BuiltinFunctionExternal {
     }
 }
 
-#[derive(Clone)]
-enum Const {
-    // The index in the global section for the const string name and
-    // the index in the global section for the string literal
-    String {
-        from: u32,
-        to: u32,
-    },
-    List {
-        global_index: u32,
-        type_index: u32,
-        elements: Vec<TypedConstant>,
-    },
-    Struct {
-        global_index: u32,
-        type_index: u32,
-        elements: Vec<TypedConstant>,
-    },
-    Var {
-        global_index: u32,
-        name: EcoString,
-    },
-}
-
 #[derive(Debug, Clone)]
 enum CustomType {
     ExternalI32,
@@ -319,26 +363,23 @@ struct Variant {
 }
 
 struct Generator<'a> {
-    function_section: FunctionSection,
     global_section: GlobalSection,
     import_section: ImportSection,
     export_section: ExportSection,
     data_section: DataSection,
-    function_names: NameMap,
     global_names: NameMap,
     // Wasm types and its indexes in the type section
     wasm_types: HashMap<WasmType, (u32, Option<EcoString>)>,
     types: HashMap<(EcoString, EcoString), CustomType>,
     variants: HashMap<EcoString, Variant>,
-    // Function code and its index in the code section
-    functions: Vec<(Vec<u8>, u32)>,
+    functions: BTreeSet<WasmFunction>,
     function_next_id: u32,
     builtins: HashMap<BuiltinFunction, u32>,
     builtins_external: HashMap<BuiltinFunctionExternal, u32>,
     main: Option<u32>,
     // String literals and its index in the global section
     strings: HashMap<EcoString, u32>,
-    consts: Vec<Const>,
+    consts: Vec<WasmConst>,
     globals: Rc<RefCell<Vec<Id>>>,
     int: IntType,
     float: FloatType,
@@ -354,17 +395,15 @@ fn find_global(name: &EcoString, globals: &RefCell<Vec<Id>>) -> Option<Id> {
 impl<'a> Generator<'a> {
     fn new(module: &'a TypedModule, line_numbers: &'a LineNumbers) -> Self {
         Generator {
-            function_section: FunctionSection::new(),
             global_section: GlobalSection::new(),
             import_section: ImportSection::new(),
             export_section: ExportSection::new(),
             data_section: DataSection::new(),
-            function_names: NameMap::new(),
             global_names: NameMap::new(),
             wasm_types: HashMap::new(),
             types: HashMap::new(),
             variants: HashMap::new(),
-            functions: vec![],
+            functions: BTreeSet::new(),
             function_next_id: 0,
             builtins: HashMap::new(),
             builtins_external: HashMap::new(),
@@ -600,7 +639,7 @@ impl<'a> Generator<'a> {
 
         let mut types = vec![];
         let mut functions_types = vec![];
-        let mut code_index = 0;
+        let mut functions = vec![];
 
         for payload in wasmparser::Parser::new(0).parse_all(&module) {
             match payload.expect("Payload") {
@@ -635,6 +674,12 @@ impl<'a> Generator<'a> {
                         self.function_next_id += 1;
                     }
                 }
+                wasmparser::Payload::FunctionSection(section) => {
+                    for function in section.into_iter_with_offsets() {
+                        let (_, type_index) = function.expect("Function entry");
+                        functions_types.push(types.get(type_index as usize).expect("Type").clone());
+                    }
+                }
                 wasmparser::Payload::GlobalSection(section) => {
                     for entry in section.into_iter_with_offsets() {
                         let (_, global) = entry.expect("Global entry");
@@ -648,12 +693,6 @@ impl<'a> Generator<'a> {
                             },
                             &const_expr_i32_const(&global.init_expr),
                         );
-                    }
-                }
-                wasmparser::Payload::FunctionSection(section) => {
-                    for function in section.into_iter_with_offsets() {
-                        let (_, type_index) = function.expect("Function entry");
-                        functions_types.push(types.get(type_index as usize).expect("Type").clone());
                     }
                 }
                 wasmparser::Payload::ExportSection(section) => {
@@ -671,13 +710,10 @@ impl<'a> Generator<'a> {
                 }
                 wasmparser::Payload::CodeSectionEntry(section) => {
                     let (params, results) = functions_types
-                        .get(code_index)
+                        .get(functions.len())
                         .expect("Function type")
                         .clone();
-
-                    let _ =
-                        self.add_function(None, false, params, results, section.as_bytes().into());
-                    code_index += 1;
+                    functions.push((params, results, section.as_bytes().to_vec()));
                 }
                 wasmparser::Payload::DataSection(section) => {
                     if !externals.use_data_section() {
@@ -710,7 +746,17 @@ impl<'a> Generator<'a> {
                                     for item in section_limited.into_iter_with_offsets() {
                                         let (_, name) = item.expect("Name entry");
                                         if let Some(external) = externals.available.get(name.name) {
-                                            self.function_names.append(name.index, name.name);
+                                            let index =
+                                                (name.index - self.import_section.len()) as usize;
+                                            let (params, results, code) =
+                                                functions.get(index).unwrap();
+                                            let _ = self.add_function(
+                                                name.name.into(),
+                                                false,
+                                                params.clone(),
+                                                results.clone(),
+                                                code.clone(),
+                                            );
                                             for used_name in external.used_names() {
                                                 let _ = self.add_function_to_globals(
                                                     used_name.clone(),
@@ -749,34 +795,34 @@ impl<'a> Generator<'a> {
             if external.is_used()
                 && let ExternalFunction::Builtin {
                     used_names,
-                    function,
+                    function: builtin,
                 } = external
             {
-                let index =
-                    match function {
+                let function =
+                    match builtin {
                         BuiltinFunctionExternal::I32ToInt => {
-                            self.add_function_builtin_external(function, self.code_i32_to_int())
+                            self.add_function_builtin_external(builtin, self.code_i32_to_int())
                         }
                         BuiltinFunctionExternal::IntToI32 => {
-                            self.add_function_builtin_external(function, self.code_int_to_i32())
+                            self.add_function_builtin_external(builtin, self.code_int_to_i32())
                         }
                         BuiltinFunctionExternal::IntRepr => {
-                            self.add_function_builtin_external(function, self.code_int_repr())
+                            self.add_function_builtin_external(builtin, self.code_int_repr())
                         }
                         BuiltinFunctionExternal::FloatRepr => {
-                            self.add_function_builtin_external(function, self.code_float_repr())
+                            self.add_function_builtin_external(builtin, self.code_float_repr())
                         }
                         BuiltinFunctionExternal::StringRepr => {
-                            self.add_function_builtin_external(function, self.code_string_repr())
+                            self.add_function_builtin_external(builtin, self.code_string_repr())
                         }
                         BuiltinFunctionExternal::StringToMemory => self
-                            .add_function_builtin_external(function, self.code_string_to_memory()),
+                            .add_function_builtin_external(builtin, self.code_string_to_memory()),
                         BuiltinFunctionExternal::MemoryToString => self
-                            .add_function_builtin_external(function, self.code_memory_to_string()),
+                            .add_function_builtin_external(builtin, self.code_memory_to_string()),
                     };
 
                 for name in used_names {
-                    let _ = self.add_function_to_globals(name, index);
+                    let _ = self.add_function_to_globals(name, function.index);
                 }
             }
         }
@@ -976,7 +1022,7 @@ impl<'a> Generator<'a> {
                 && !is_generic_type(&function_type(function))
                 && function.external_webassembly.is_none()
             {
-                let id = self.function(function);
+                let id = self.function(function, true);
                 if is_main_funtion(function) {
                     self.main = Some(id.index)
                 }
@@ -1235,7 +1281,7 @@ impl<'a> Generator<'a> {
                     true,
                 );
                 let from = self.string_index(value);
-                self.consts.push(Const::String { from, to: id.index });
+                self.consts.push(WasmConst::String { from, to: id.index });
                 id
             }
             Constant::Tuple { elements, .. } => {
@@ -1248,7 +1294,7 @@ impl<'a> Generator<'a> {
                     export,
                     true,
                 );
-                self.consts.push(Const::Struct {
+                self.consts.push(WasmConst::Struct {
                     global_index: id.index,
                     type_index,
                     elements: elements.clone(),
@@ -1268,7 +1314,7 @@ impl<'a> Generator<'a> {
                     export,
                     true,
                 );
-                self.consts.push(Const::List {
+                self.consts.push(WasmConst::List {
                     global_index: id.index,
                     type_index,
                     elements: elements.clone(),
@@ -1308,7 +1354,7 @@ impl<'a> Generator<'a> {
                             export,
                             true,
                         );
-                        self.consts.push(Const::Struct {
+                        self.consts.push(WasmConst::Struct {
                             global_index: id.index,
                             type_index,
                             elements: arguments.iter().map(|e| &e.value).cloned().collect(),
@@ -1328,7 +1374,7 @@ impl<'a> Generator<'a> {
                             export,
                             true,
                         );
-                        self.consts.push(Const::Struct {
+                        self.consts.push(WasmConst::Struct {
                             global_index: id.index,
                             type_index,
                             elements: iter::once(TypedConstant::Int {
@@ -1375,7 +1421,7 @@ impl<'a> Generator<'a> {
                     todo!()
                 };
                 let id = self.add_const(const_name, val_type, expr, export, true);
-                self.consts.push(Const::Var {
+                self.consts.push(WasmConst::Var {
                     global_index: id.index,
                     name: name.clone(),
                 });
@@ -1480,14 +1526,14 @@ impl<'a> Generator<'a> {
                                     "Could not monomorphize:\n{required_type:#?}\n{function:#?}"
                                 );
                             }
-                            self.function(&function)
+                            self.function(&function, function.publicity.is_public())
                         }
                     }
                 } else {
                     if let Some((_, fname, _)) = &function.external_webassembly {
                         return self.find_global_expect(&fname.into());
                     }
-                    self.function(function)
+                    self.function(function, function.publicity.is_public())
                 };
             }
         }
@@ -1504,23 +1550,15 @@ impl<'a> Generator<'a> {
         id
     }
 
-    fn function(&mut self, function: &TypedFunction) -> Id {
+    fn function(&mut self, function: &TypedFunction, export: bool) -> Id {
         let name = function_name(function);
+
         if let Some(id) = self.find_global(name) {
             return id;
         }
 
         let index = self.function_next_id();
-        let _ = self.export_section.export(name, ExportKind::Func, index);
         let id = self.add_function_to_globals(name.clone(), index);
-        self.function_names.append(index, name);
-
-        let type_index = self.function_type_index(
-            function_params_types(function),
-            Some(function.return_type.clone()),
-        );
-        let _ = self.function_section.function(type_index);
-
         let locals = Locals::new(self, function.arguments.len() as u32, &function.body);
         let mut code = Function::new(locals.val_types());
         let mut instructions = code.extend_instructions(self);
@@ -1532,7 +1570,17 @@ impl<'a> Generator<'a> {
         );
         let _ = instructions.end();
 
-        self.functions.push((code.into_raw_body(), index));
+        let type_index = self.function_type_index(
+            function_params_types(function),
+            Some(function.return_type.clone()),
+        );
+        let _ = self.functions.insert(WasmFunction {
+            name: name.clone(),
+            index,
+            type_index,
+            code: code.into_raw_body().into(),
+            export,
+        });
 
         id
     }
@@ -1550,12 +1598,6 @@ impl<'a> Generator<'a> {
 
         let index = self.function_next_id();
         let id = self.add_function_to_globals(name.clone(), index);
-        self.function_names.append(index, &name);
-
-        let (params, return_) = type_.fn_types().unwrap();
-        let type_index = self.function_type_index(params, Some(return_));
-        let _ = self.function_section.function(type_index);
-
         let locals = Locals::new(self, arguments.len() as u32, body);
         let mut code = Function::new(locals.val_types());
         let mut instructions = code.extend_instructions(self);
@@ -1567,7 +1609,15 @@ impl<'a> Generator<'a> {
         );
         let _ = instructions.end();
 
-        self.functions.push((code.into_raw_body(), index));
+        let (params, return_) = type_.fn_types().unwrap();
+        let type_index = self.function_type_index(params, Some(return_));
+        let _ = self.functions.insert(WasmFunction {
+            name,
+            index,
+            type_index,
+            code: code.into_raw_body().into(),
+            export: false,
+        });
 
         id
     }
@@ -2118,7 +2168,7 @@ impl<'a> Generator<'a> {
                     }
                 };
                 let function = self.code_variant_constructor(type_index, num_fields, tag);
-                self.add_function_builtin(builtin, function)
+                self.add_function_builtin(builtin, function).index
             };
 
             if params.is_empty() {
@@ -2692,12 +2742,13 @@ impl<'a> Generator<'a> {
     fn function_start(&mut self) -> u32 {
         let function = self.code_start();
         self.add_function(
-            Some("$start"),
+            "$start".into(),
             true,
             vec![],
             vec![],
             function.into_raw_body(),
         )
+        .index
     }
 
     fn code_start(&mut self) -> Function {
@@ -2717,10 +2768,10 @@ impl<'a> Generator<'a> {
         // constants
         for const_ in self.consts.clone() {
             match const_ {
-                Const::String { from, to } => {
+                WasmConst::String { from, to } => {
                     let _ = instructions.global_get(from).global_set(to);
                 }
-                Const::List {
+                WasmConst::List {
                     global_index,
                     type_index,
                     elements,
@@ -2731,7 +2782,7 @@ impl<'a> Generator<'a> {
                     }
                     let _ = instructions.global_set(global_index);
                 }
-                Const::Struct {
+                WasmConst::Struct {
                     global_index,
                     type_index,
                     elements,
@@ -2741,7 +2792,7 @@ impl<'a> Generator<'a> {
                         .struct_new(type_index)
                         .global_set(global_index);
                 }
-                Const::Var { global_index, name } => {
+                WasmConst::Var { global_index, name } => {
                     let _ = instructions
                         .global_get(self.find_global_expect(&name).index)
                         .global_set(global_index);
@@ -2778,6 +2829,7 @@ impl<'a> Generator<'a> {
         }
         let function = self.code_string_concat();
         self.add_function_builtin(BuiltinFunction::StringConcat, function)
+            .index
     }
 
     fn code_string_concat(&self) -> Function {
@@ -2876,9 +2928,7 @@ impl<'a> Generator<'a> {
             return Eq::I32;
         }
 
-        let name = self.type_pretty_name(type_);
-        let val_type = self.val_type(type_);
-        let eq = BuiltinFunction::Equal(val_type, name);
+        let eq = BuiltinFunction::Equal(self.val_type(type_), self.type_pretty_name(type_));
 
         if let Some(index) = self.builtins.get(&eq) {
             return Eq::Call(*index);
@@ -2886,9 +2936,9 @@ impl<'a> Generator<'a> {
 
         // We register an empty function to get the builtin index,
         // so we avoid problems with recursive types.
-        let index = self.add_function_builtin(eq, Function::new(vec![]));
+        let mut function = self.add_function_builtin(eq.clone(), Function::new(vec![]));
 
-        let function = if type_.is_string() {
+        let code = if type_.is_string() {
             self.code_string_eq()
         } else if let Some(item_type) = type_.list_type() {
             let type_index = self.list_type_index(&item_type);
@@ -2918,10 +2968,10 @@ impl<'a> Generator<'a> {
         };
 
         // Now we update the function
-        self.functions.retain(|(_, i)| *i != index);
-        self.functions.push((function.into_raw_body(), index));
-
-        Eq::Call(index)
+        function.code = code.into_raw_body().into();
+        let eq = Eq::Call(function.index);
+        assert!(self.functions.replace(function).is_some());
+        eq
     }
 
     fn code_string_eq(&self) -> Function {
@@ -3163,7 +3213,7 @@ impl<'a> Generator<'a> {
             } else {
                 let code =
                     self.code_composite_eq(type_index, iter::once(type_::int()).chain(types));
-                self.add_function_builtin(builtin, code)
+                self.add_function_builtin(builtin, code).index
             };
 
             #[rustfmt::skip]
@@ -3235,7 +3285,7 @@ impl<'a> Generator<'a> {
             return if let Some(id) = self.builtins_external.get(&repr) {
                 *id
             } else {
-                self.add_function_builtin_external(repr, code)
+                self.add_function_builtin_external(repr, code).index
             };
         }
 
@@ -3264,9 +3314,9 @@ impl<'a> Generator<'a> {
 
         // We register an empty function to get the builtin index,
         // so we avoid problems with recursive types.
-        let index = self.add_function_builtin(repr, Function::new(vec![]));
+        let mut function = self.add_function_builtin(repr.clone(), Function::new(vec![]));
 
-        let function = if let Some(item_type) = type_.list_type() {
+        let code = if let Some(item_type) = type_.list_type() {
             self.code_list_repr(&item_type)
         } else if let Some(types) = type_.tuple_types() {
             self.code_tuple_repr(&types)
@@ -3279,9 +3329,9 @@ impl<'a> Generator<'a> {
         };
 
         // Now we update the function
-        self.functions.retain(|(_, i)| *i != index);
-        self.functions.push((function.into_raw_body(), index));
-
+        function.code = code.into_raw_body().into();
+        let index = function.index;
+        assert!(self.functions.replace(function.clone()).is_some());
         index
     }
 
@@ -3658,7 +3708,7 @@ impl<'a> Generator<'a> {
                             type_index,
                             &iter::once(type_::int()).chain(types).collect_vec(),
                         );
-                        self.add_function_builtin(builtin, code)
+                        self.add_function_builtin(builtin, code).index
                     };
                     #[rustfmt::skip]
                     let _ = instructions
@@ -3768,55 +3818,59 @@ impl<'a> Generator<'a> {
         function
     }
 
-    fn add_function_builtin(&mut self, builtin: BuiltinFunction, function: Function) -> u32 {
+    fn add_function_builtin(
+        &mut self,
+        builtin: BuiltinFunction,
+        function: Function,
+    ) -> WasmFunction {
         let (params, results) = self.builtin_type(&builtin);
-        let index = self.add_function(
-            Some(&builtin.name()),
+        let function = self.add_function(
+            builtin.name(),
             false,
             params,
             results,
             function.into_raw_body(),
         );
-        let _ = self.builtins.insert(builtin, index);
-        index
+        let _ = self.builtins.insert(builtin, function.index);
+        function
     }
 
     fn add_function_builtin_external(
         &mut self,
         builtin: BuiltinFunctionExternal,
         function: Function,
-    ) -> u32 {
+    ) -> WasmFunction {
         let (params, results) = self.builtin_external_type(&builtin);
-        let index = self.add_function(
-            Some(&builtin.name()),
+        let function = self.add_function(
+            builtin.name(),
             false,
             params,
             results,
             function.into_raw_body(),
         );
-        let _ = self.builtins_external.insert(builtin, index);
-        index
+        let _ = self.builtins_external.insert(builtin, function.index);
+        function
     }
 
     fn add_function(
         &mut self,
-        name: Option<&str>,
+        name: EcoString,
         export: bool,
         params: Vec<ValType>,
         results: Vec<ValType>,
-        function: Vec<u8>,
-    ) -> u32 {
+        code: Vec<u8>,
+    ) -> WasmFunction {
         let type_index = self.function_type_index_with_val_types(params, results);
-        let _ = self.function_section.function(type_index);
         let index = self.function_next_id();
-        self.functions.push((function, index));
-        if let Some(name) = name {
-            self.function_names.append(index, name);
-            if export {
-                let _ = self.export_section.export(name, ExportKind::Func, index);
-            }
-        }
-        index
+        let function = WasmFunction {
+            name: name.clone(),
+            index,
+            type_index,
+            code: code.into(),
+            export,
+        };
+        let _ = self.functions.insert(function.clone());
+        function
     }
 }
 
