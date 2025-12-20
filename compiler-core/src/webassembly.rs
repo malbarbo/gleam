@@ -17,8 +17,8 @@ use wasm_encoder::{
     AbstractHeapType, BlockType, CodeSection, CompositeInnerType, CompositeType, ConstExpr,
     DataCountSection, DataSection, ElementSection, Elements, EntityType, ExportKind, ExportSection,
     FieldType, Function, FunctionSection, GlobalSection, GlobalType, HeapType, ImportSection,
-    InstructionSink, MemArg, MemorySection, MemoryType, Module, NameMap, NameSection, RefType,
-    StartSection, StorageType, StructType, SubType, TypeSection, ValType,
+    IndirectNameMap, InstructionSink, MemArg, MemorySection, MemoryType, Module, NameMap,
+    NameSection, RefType, StartSection, StorageType, StructType, SubType, TypeSection, ValType,
 };
 
 use crate::{
@@ -178,22 +178,39 @@ pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
     let _ = module.section(&generator.data_section);
 
     // name section
+    let mut names = NameSection::new();
+    names.module(&generator.module.name);
+
+    // name section / function names
+    let mut function_names = NameMap::new();
+    for function in &generator.functions {
+        function_names.append(function.index, &function.name);
+    }
+    names.functions(&function_names);
+
+    // name section / type names
     let mut type_names = NameMap::new();
     for (type_index, name) in generator.wasm_types.values() {
         if let Some(name) = name {
             type_names.append(*type_index, name);
         }
     }
-
-    let mut function_names = NameMap::new();
-    for function in &generator.functions {
-        function_names.append(function.index, &function.name);
-    }
-    let mut names = NameSection::new();
-    names.module(&generator.module.name);
-    names.functions(&function_names);
     names.types(&type_names);
+
+    // name section / global names
     names.globals(&generator.global_names);
+
+    // name section / local names
+    let mut locals = IndirectNameMap::new();
+    for function in &generator.functions {
+        let mut name_map = NameMap::new();
+        for (index, name) in &function.locals {
+            name_map.append(*index, name);
+        }
+        locals.append(function.index, &name_map);
+    }
+    names.locals(&locals);
+
     let _ = module.section(&names);
 
     // finalize
@@ -240,6 +257,7 @@ struct WasmFunction {
     index: u32,
     type_index: u32,
     code: Rc<Vec<u8>>,
+    locals: Vec<(u32, EcoString)>,
 }
 
 impl std::cmp::Eq for WasmFunction {}
@@ -1559,7 +1577,7 @@ impl<'a> Generator<'a> {
 
         let index = self.function_next_id();
         let id = self.add_function_to_globals(name.clone(), index);
-        let locals = Locals::new(self, function.arguments.len() as u32, &function.body);
+        let locals = Locals::new(self, &function.arguments, &function.body);
         let mut code = Function::new(locals.val_types());
         let mut instructions = code.extend_instructions(self);
         self.statements(
@@ -1580,6 +1598,7 @@ impl<'a> Generator<'a> {
             type_index,
             code: code.into_raw_body().into(),
             export,
+            locals: locals.names(),
         });
 
         id
@@ -1598,7 +1617,7 @@ impl<'a> Generator<'a> {
 
         let index = self.function_next_id();
         let id = self.add_function_to_globals(name.clone(), index);
-        let locals = Locals::new(self, arguments.len() as u32, body);
+        let locals = Locals::new(self, arguments, body);
         let mut code = Function::new(locals.val_types());
         let mut instructions = code.extend_instructions(self);
         self.statements(
@@ -1617,6 +1636,7 @@ impl<'a> Generator<'a> {
             type_index,
             code: code.into_raw_body().into(),
             export: false,
+            locals: locals.names(),
         });
 
         id
@@ -1798,13 +1818,21 @@ impl<'a> Generator<'a> {
             } => {
                 let args_types = arguments.iter().map(|arg| arg.value.type_().clone());
                 let args = arguments.iter().map(|arg| &arg.value);
-                let index = locals.for_call(fun);
-                let _ = instructions
-                    .expression(self, locals, scope.clone(), fun)
-                    .local_set(index)
-                    .expressions(self, locals, scope, args)
-                    .local_get(index)
-                    .call_ref(self.function_type_index(args_types, Some(type_.clone())));
+                if fun.is_var() {
+                    // the function can be evaluated after the parameters
+                    let _ = instructions
+                        .expressions(self, locals, scope.clone(), args)
+                        .expression(self, locals, scope, fun)
+                        .call_ref(self.function_type_index(args_types, Some(type_.clone())));
+                } else {
+                    let index = locals.for_call(fun);
+                    let _ = instructions
+                        .expression(self, locals, scope.clone(), fun)
+                        .local_set(index)
+                        .expressions(self, locals, scope, args)
+                        .local_get(index)
+                        .call_ref(self.function_type_index(args_types, Some(type_.clone())));
+                }
             }
             TypedExpr::Fn {
                 location,
@@ -2414,12 +2442,11 @@ impl<'a> Generator<'a> {
             }
             Pattern::Tuple { elements, .. } => {
                 let type_index = self.tuple_type_index(elements.iter().map(|e| e.type_()));
-                self.patterns(
+                let _ = instructions.patterns(
+                    self,
                     locals,
                     &mut scope,
-                    instructions,
-                    type_index,
-                    None,
+                    (type_index, None),
                     pattern,
                     elements.iter(),
                 );
@@ -2430,37 +2457,31 @@ impl<'a> Generator<'a> {
                 arguments,
                 ..
             } => {
-                match type_
-                    .named_type_information()
-                    .and_then(|k| self.types.get(&(k.0, k.1)).map(|c| (c, k.2)))
-                {
-                    Some((CustomType::Enum { values }, _)) => {
+                let (custom_type, args) = self.custom_type(type_).unwrap();
+                match custom_type {
+                    CustomType::Enum { values } => {
                         let value = values.iter().position(|n| n == name).unwrap();
                         let _ = instructions.i32_const(value as i32).i32_eq();
                     }
-                    Some((
-                        CustomType::Struct {
-                            custom_type,
-                            constructor,
-                        },
-                        args,
-                    )) => {
+                    CustomType::Struct {
+                        custom_type,
+                        constructor,
+                    } => {
                         let custom_type = custom_type.clone();
                         let constructor = constructor.clone();
                         let (type_index, _) =
                             self.mono_struct_type_index(type_, &custom_type, &constructor, &args);
                         assert_eq!(constructor.arguments.len(), arguments.len());
-                        self.patterns(
+                        let _ = instructions.patterns(
+                            self,
                             locals,
                             &mut scope,
-                            instructions,
-                            type_index,
-                            None,
+                            (type_index, None),
                             pattern,
                             arguments.iter().map(|arg| &arg.value),
                         );
                     }
-                    Some((CustomType::Union { custom_type }, args)) => {
+                    CustomType::Union { custom_type } => {
                         let custom_type = custom_type.clone();
                         let (tag, constructor) = custom_type
                             .constructors
@@ -2471,25 +2492,27 @@ impl<'a> Generator<'a> {
                         let (supertype_index, type_index, _) =
                             self.mono_union_subtype_index(type_, &custom_type, constructor, &args);
                         let right = locals.for_pattern(pattern);
+                        #[rustfmt::skip]
                         let _ = instructions
                             .local_tee(right)
                             .struct_get(supertype_index, 0)
                             .i32_const(tag as i32)
                             .i32_eq()
                             .if_(BlockType::Result(BOOL_VALTYPE))
-                            .local_get(right);
-                        self.patterns(
-                            locals,
-                            &mut scope,
-                            instructions,
-                            supertype_index,
-                            Some(type_index),
-                            pattern,
-                            arguments.iter().map(|arg| &arg.value),
-                        );
-                        let _ = instructions.else_().bool_const(false).end();
+                              .local_get(right)
+                              .patterns(
+                                self,
+                                locals,
+                                &mut scope,
+                                (supertype_index, Some(type_index)),
+                                pattern,
+                                arguments.iter().map(|arg| &arg.value),
+                              )
+                            .else_()
+                              .bool_const(false)
+                            .end();
                     }
-                    _ => panic!(),
+                    CustomType::ExternalI32 => panic!(),
                 };
             }
             Pattern::Variable { name, .. } => {
@@ -2502,13 +2525,12 @@ impl<'a> Generator<'a> {
         scope
     }
 
-    fn patterns<'b>(
+    fn _patterns<'b>(
         &mut self,
         locals: &Locals,
         scope: &mut Scope,
         instructions: &mut ExtendedInstructionSink<'_>,
-        type_index: u32,
-        subtype_index: Option<u32>,
+        (type_index, subtype_index): (u32, Option<u32>),
         pattern: &Pattern<Arc<Type>>,
         elements: impl IntoIterator<Item = &'b Pattern<Arc<Type>>> + Clone,
     ) {
@@ -3878,6 +3900,7 @@ impl<'a> Generator<'a> {
             type_index,
             code: code.into(),
             export,
+            locals: vec![],
         };
         let _ = self.functions.insert(function.clone());
         function
@@ -4073,6 +4096,26 @@ impl<'a> ExtendedInstructionSink<'a> {
         pattern: &TypedPattern,
     ) -> &mut Self {
         *scope = generator._pattern(locals, scope.clone(), self, pattern);
+        self
+    }
+
+    fn patterns<'b>(
+        &mut self,
+        generator: &mut Generator<'_>,
+        locals: &Locals,
+        scope: &mut Scope,
+        (type_index, subtype_index): (u32, Option<u32>),
+        pattern: &Pattern<Arc<Type>>,
+        elements: impl IntoIterator<Item = &'b Pattern<Arc<Type>>> + Clone,
+    ) -> &mut Self {
+        generator._patterns(
+            locals,
+            scope,
+            self,
+            (type_index, subtype_index),
+            pattern,
+            elements,
+        );
         self
     }
 
@@ -4438,16 +4481,32 @@ impl Scope {
 
 #[derive(Debug)]
 struct Locals {
-    skip: u32,
-    locals: HashMap<u64, u32>,
+    params: Vec<(u32, Option<EcoString>)>,
+    locals: HashMap<u64, (u32, Option<EcoString>)>,
+    names: HashMap<EcoString, usize>,
     val_types: Vec<ValType>,
 }
 
 impl Locals {
-    fn new(generator: &mut Generator<'_>, num_params: u32, statements: &[TypedStatement]) -> Self {
+    fn new(
+        generator: &mut Generator<'_>,
+        arguments: &[TypedArg],
+        statements: &[TypedStatement],
+    ) -> Self {
         let mut locals = Locals {
-            skip: num_params,
+            params: (0..)
+                .zip(
+                    arguments
+                        .iter()
+                        .map(|arg| arg.names.get_variable_name().cloned()),
+                )
+                .collect(),
             locals: HashMap::new(),
+            names: HashMap::from_iter(
+                arguments
+                    .iter()
+                    .flat_map(|arg| arg.names.get_variable_name().map(|name| (name.clone(), 1))),
+            ),
             val_types: vec![],
         };
 
@@ -4463,17 +4522,33 @@ impl Locals {
         locals
     }
 
+    fn names(&self) -> Vec<(u32, EcoString)> {
+        self.params
+            .iter()
+            .chain(self.locals.values())
+            .filter_map(|(index, name)| name.as_ref().map(|n| (*index, n.clone())))
+            .collect()
+    }
+
     fn val_types(&self) -> Vec<(u32, ValType)> {
         // FIXME: group locals by type
         self.val_types.iter().map(|e| (1, *e)).collect()
     }
 
     fn insert_assignment(&mut self, generator: &mut Generator<'_>, assignment: &TypedAssignment) {
-        self._insert(generator, assignment, &assignment.type_());
+        if matches!(assignment.kind, AssignmentKind::Let) && assignment.pattern.is_variable() {
+            //we use the local variable
+        } else {
+            self._insert(generator, assignment, &assignment.type_());
+        }
     }
 
     fn for_assigment(&self, assignment: &TypedAssignment) -> u32 {
-        self._get(assignment)
+        if matches!(assignment.kind, AssignmentKind::Let) && assignment.pattern.is_variable() {
+            self._get(&assignment.pattern)
+        } else {
+            self._get(assignment)
+        }
     }
 
     fn insert_div(&mut self, generator: &mut Generator<'_>, left: &TypedExpr, right: &TypedExpr) {
@@ -4500,16 +4575,26 @@ impl Locals {
     }
 
     fn insert_call(&mut self, generator: &mut Generator<'_>, fun: &TypedExpr) {
-        self._insert(generator, fun, &fun.type_());
+        if !fun.is_var() {
+            self._insert(generator, fun, &fun.type_())
+        } else {
+            set_ubound_or_generic(&fun.type_(), &type_::nil());
+        }
     }
 
     fn for_call(&self, fun: &TypedExpr) -> u32 {
+        assert!(!fun.is_var());
         self._get(fun)
     }
 
     fn insert_subjects(&mut self, generator: &mut Generator<'_>, subjects: &[TypedExpr]) {
         for subject in subjects {
-            self._insert(generator, subject, &subject.type_());
+            // FIXME: do not create a local if the subject is var
+            let name = format!(
+                "subject@{}",
+                generator.line_numbers.line_number(subject.location().start)
+            );
+            self._insert_named(generator, subject, &subject.type_(), Some(name.into()));
         }
     }
 
@@ -4518,7 +4603,18 @@ impl Locals {
     }
 
     fn insert_pattern(&mut self, generator: &mut Generator<'_>, pattern: &TypedPattern) {
-        self._insert(generator, pattern, &pattern.type_());
+        match pattern {
+            TypedPattern::Variable { name, .. } => {
+                self._insert_named(generator, pattern, &pattern.type_(), Some(name.clone()));
+            }
+            _ => {
+                let name = format!(
+                    "pattern@{}",
+                    generator.line_numbers.line_number(pattern.location().start)
+                );
+                self._insert_named(generator, pattern, &pattern.type_(), Some(name.into()));
+            }
+        }
     }
 
     fn for_pattern(&self, pattern: &TypedPattern) -> u32 {
@@ -4553,22 +4649,41 @@ impl Locals {
     }
 
     fn _insert(&mut self, generator: &mut Generator<'_>, key: impl LocalHash, type_: &Arc<Type>) {
-        let index = self.locals.len() as u32 + self.skip;
-        if self.locals.insert(key.hash(), index).is_some() {
+        self._insert_named(generator, key, type_, None);
+    }
+
+    fn _insert_named(
+        &mut self,
+        generator: &mut Generator<'_>,
+        key: impl LocalHash,
+        type_: &Arc<Type>,
+        name: Option<EcoString>,
+    ) {
+        let index = self.locals.len() as u32 + self.params.len() as u32;
+        let name = name.map(|name| {
+            let count = self.names.entry(name.clone()).or_insert(0);
+            *count += 1;
+            if *count == 1 {
+                name
+            } else {
+                name + "'".repeat(*count - 1).as_str()
+            }
+        });
+        if self.locals.insert(key.hash(), (index, name)).is_some() {
             panic!("Locals collision.");
         }
         // Some local variable can still be unbound or generic,
         // like [], None, etc, so we choose arbitrarily to monormorphize
-        // the types to int. The locals are determined before code generation,
+        // the types to nil. The locals are determined before code generation,
         // so we choose to do the monomorphization here to avoid doing a
         // another complete pass in the ast before the code generation.
-        set_ubound_or_generic(type_, &type_::int());
+        set_ubound_or_generic(type_, &type_::nil());
         self.val_types.push(generator.val_type(type_));
     }
 
     fn _insert_with_val_type(&mut self, key: impl LocalHash, val_type: ValType) {
-        let index = self.locals.len() as u32 + self.skip;
-        if self.locals.insert(key.hash(), index).is_some() {
+        let index = self.locals.len() as u32 + self.params.len() as u32;
+        if self.locals.insert(key.hash(), (index, None)).is_some() {
             panic!("Locals collision.");
         }
         self.val_types.push(val_type);
@@ -4576,10 +4691,10 @@ impl Locals {
 
     fn _get(&self, key: impl LocalHash) -> u32 {
         let id = key.hash();
-        *self
-            .locals
+        self.locals
             .get(&id)
-            .unwrap_or_else(|| panic!("Expect local with {id}."))
+            .unwrap_or_else(|| panic!("Local with id {id} not found."))
+            .0
     }
 }
 
