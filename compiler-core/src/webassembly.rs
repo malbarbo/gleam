@@ -67,14 +67,14 @@ pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
 
     // type section
     let mut type_section = TypeSection::new();
-    for (type_, (type_index, _)) in generator.wasm_types.iter().sorted_by_key(|t| t.1) {
-        match type_ {
-            WasmType::Array(storage_type) => type_section.ty().array(storage_type, true),
-            WasmType::Function(params, results) => {
+    for (type_, index) in generator.wasm_types.iter().sorted_by(|a, b| a.1.cmp(b.1)) {
+        match &type_.kind {
+            WasmTypeKind::Array(storage_type) => type_section.ty().array(storage_type, true),
+            WasmTypeKind::Function(params, results) => {
                 type_section.ty().function(params.clone(), results.clone())
             }
-            WasmType::List(val_type) => {
-                let list_val_type = generator.list_val_type(*type_index);
+            WasmTypeKind::List(val_type) => {
+                let list_val_type = generator.list_val_type(*index);
                 type_section.ty().struct_(vec![
                     FieldType {
                         element_type: StorageType::Val(list_val_type),
@@ -86,24 +86,24 @@ pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
                     },
                 ]);
             }
-            WasmType::Struct(val_types, _) => {
+            WasmTypeKind::Struct(val_types) => {
                 type_section
                     .ty()
                     .struct_(val_types.iter().map(|val_type| FieldType {
-                        element_type: StorageType::Val(*val_type),
+                        element_type: StorageType::Val(val_type.1),
                         mutable: false,
                     }));
             }
-            WasmType::Union(val_types, _, supertype_idx) => {
+            WasmTypeKind::Union(val_types, supertype_idx) => {
                 type_section.ty().subtype(&SubType {
                     is_final: false,
                     supertype_idx: *supertype_idx,
                     composite_type: CompositeType {
                         inner: CompositeInnerType::Struct(StructType {
-                            fields: iter::once(&ValType::I32)
+                            fields: iter::once(&("tag".into(), ValType::I32))
                                 .chain(val_types)
                                 .map(|val_type| FieldType {
-                                    element_type: StorageType::Val(*val_type),
+                                    element_type: StorageType::Val(val_type.1),
                                     mutable: false,
                                 })
                                 .collect_vec()
@@ -190,9 +190,9 @@ pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
 
     // name section / type names
     let mut type_names = NameMap::new();
-    for (type_index, name) in generator.wasm_types.values() {
-        if let Some(name) = name {
-            type_names.append(*type_index, name);
+    for (wasm_type, index) in &generator.wasm_types {
+        if let Some(name) = &wasm_type.name {
+            type_names.append(*index, name);
         }
     }
     names.types(&type_names);
@@ -211,19 +211,93 @@ pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
     }
     names.locals(&locals);
 
+    // name section / local names
+    let mut fields = IndirectNameMap::new();
+    for (type_, index) in &generator.wasm_types {
+        let mut name_map = NameMap::new();
+        match &type_.kind {
+            WasmTypeKind::List(_) => {
+                name_map.append(0, "rest");
+                name_map.append(1, "first");
+            }
+            WasmTypeKind::Struct(items) => {
+                for (index, (name, _)) in items.iter().enumerate() {
+                    name_map.append(index as u32, name);
+                }
+            }
+            WasmTypeKind::Union(items, _) => {
+                name_map.append(0, "tag");
+                for (index, (name, _)) in items.iter().enumerate() {
+                    name_map.append(index as u32 + 1, name);
+                }
+            }
+            _ => {}
+        }
+        fields.append(*index, &name_map);
+    }
+    names.fields(&fields);
+
     let _ = module.section(&names);
 
     // finalize
     module.finish()
 }
 
-#[derive(Hash, Eq, PartialEq)]
-enum WasmType {
+#[derive(Hash, PartialEq, Eq)]
+struct WasmType {
+    name: Option<EcoString>,
+    kind: WasmTypeKind,
+}
+
+impl WasmType {
+    fn array(store_type: StorageType) -> WasmType {
+        WasmType {
+            name: None,
+            kind: WasmTypeKind::Array(store_type),
+        }
+    }
+
+    fn function(params: Vec<ValType>, results: Vec<ValType>) -> WasmType {
+        WasmType {
+            name: None,
+            kind: WasmTypeKind::Function(params, results),
+        }
+    }
+
+    // FIXME: use list val type
+    fn list(name: EcoString, item_val_type: ValType) -> WasmType {
+        WasmType {
+            name: Some(name),
+            kind: WasmTypeKind::List(item_val_type),
+        }
+    }
+
+    fn struct_(name: EcoString, fields: Vec<(EcoString, ValType)>) -> WasmType {
+        WasmType {
+            name: Some(name),
+            kind: WasmTypeKind::Struct(fields),
+        }
+    }
+
+    fn union(
+        name: EcoString,
+        fields: Vec<(EcoString, ValType)>,
+        supertype: Option<u32>,
+    ) -> WasmType {
+        WasmType {
+            name: Some(name),
+            kind: WasmTypeKind::Union(fields, supertype),
+        }
+    }
+}
+
+#[derive(Hash, PartialEq, Eq)]
+enum WasmTypeKind {
     Array(StorageType),
     Function(Vec<ValType>, Vec<ValType>),
     List(ValType),
-    Struct(Vec<ValType>, EcoString),
-    Union(Vec<ValType>, EcoString, Option<u32>),
+    Struct(Vec<(EcoString, ValType)>),
+    Union(Vec<(EcoString, ValType)>, Option<u32>),
 }
 
 #[derive(Clone)]
@@ -386,8 +460,7 @@ struct Generator<'a> {
     export_section: ExportSection,
     data_section: DataSection,
     global_names: NameMap,
-    // Wasm types and its indexes in the type section
-    wasm_types: HashMap<WasmType, (u32, Option<EcoString>)>,
+    wasm_types: HashMap<WasmType, u32>,
     types: HashMap<(EcoString, EcoString), CustomType>,
     variants: HashMap<EcoString, Variant>,
     functions: BTreeSet<WasmFunction>,
@@ -802,12 +875,10 @@ impl<'a> Generator<'a> {
         // String type
         // FIXME: add only if its necessary
         let index = self.wasm_types.len() as u32;
-        let string = self.type_pretty_name(&type_::string());
-        self.string.type_index = self
+        self.string.type_index = *self
             .wasm_types
             .entry(StringType::wasm_type())
-            .or_insert((index, Some(string)))
-            .0;
+            .or_insert(index);
 
         for external in externals.available.into_values() {
             if external.is_used()
@@ -1117,10 +1188,10 @@ impl<'a> Generator<'a> {
         result: Vec<ValType>,
     ) -> u32 {
         let index = self.wasm_types.len() as u32;
-        self.wasm_types
-            .entry(WasmType::Function(params, result))
-            .or_insert((index, None))
-            .0
+        *self
+            .wasm_types
+            .entry(WasmType::function(params, result))
+            .or_insert(index)
     }
 
     fn function_val_type(&self, type_index: u32) -> ValType {
@@ -1130,18 +1201,13 @@ impl<'a> Generator<'a> {
     fn list_type_index(&mut self, item_type: &Arc<Type>) -> u32 {
         let item_val_type = self.val_type(item_type);
         let index = self.wasm_types.len() as u32;
-        self.wasm_types
-            .entry(WasmType::List(item_val_type))
-            .or_insert_with(|| {
-                (
-                    index,
-                    Some(type_pretty_name(
-                        &self.module.names,
-                        &type_::list(item_type.clone()),
-                    )),
-                )
-            })
-            .0
+        *self
+            .wasm_types
+            .entry(WasmType::list(
+                type_pretty_name(&self.module.names, &type_::list(item_type.clone())),
+                item_val_type,
+            ))
+            .or_insert(index)
     }
 
     fn list_val_type(&self, type_index: u32) -> ValType {
@@ -1155,23 +1221,45 @@ impl<'a> Generator<'a> {
         let name = self
             .type_pretty_name(&type_::tuple(types))
             .replace("#", "Tuple");
-        self.wasm_types
-            .entry(WasmType::Struct(val_types, name.clone()))
-            .or_insert_with(|| (index, Some(name)))
-            .0
+        *self
+            .wasm_types
+            .entry(WasmType::struct_(
+                name,
+                val_types
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, v)| (index.to_string().into(), v))
+                    .collect(),
+            ))
+            .or_insert(index)
     }
 
-    fn struct_type_index(
-        &mut self,
-        name: EcoString,
-        types: impl IntoIterator<Item = Arc<Type>>,
-    ) -> u32 {
-        let val_types = self.val_types(types);
+    fn struct_type_index(&mut self, name: EcoString, fields: Vec<(EcoString, ValType)>) -> u32 {
         let index = self.wasm_types.len() as u32;
-        self.wasm_types
-            .entry(WasmType::Struct(val_types, name.clone()))
-            .or_insert_with(|| (index, Some(name)))
-            .0
+        *self
+            .wasm_types
+            .entry(WasmType::struct_(name, fields))
+            .or_insert(index)
+    }
+
+    fn fields(
+        &mut self,
+        constructor: &TypedRecordConstructor,
+        types: &[Arc<Type>],
+    ) -> Vec<(EcoString, ValType)> {
+        constructor
+            .arguments
+            .iter()
+            .enumerate()
+            .map(|(index, c)| {
+                if let Some((_, label)) = &c.label {
+                    label.clone()
+                } else {
+                    index.to_string().into()
+                }
+            })
+            .zip(self.val_types(types.iter().cloned()))
+            .collect()
     }
 
     fn mono_struct_type_index(
@@ -1182,8 +1270,9 @@ impl<'a> Generator<'a> {
         args: &[Arc<Type>],
     ) -> (u32, Vec<Arc<Type>>) {
         let types = Monomorphizer::variant_constructor(custom_type, constructor, args);
+        let fields = self.fields(constructor, &types);
         let name = self.type_pretty_name(type_);
-        (self.struct_type_index(name, types.iter().cloned()), types)
+        (self.struct_type_index(name, fields), types)
     }
 
     fn mono_union_supertype_index(
@@ -1223,19 +1312,20 @@ impl<'a> Generator<'a> {
     ) -> (u32, Vec<Arc<Type>>) {
         let index = self.wasm_types.len() as u32;
         let mut name = self.type_pretty_name(type_);
-        let types = if let Some(constructor) = constructor {
+        let (fields, types) = if let Some(constructor) = constructor {
             name += ".";
             name += constructor.name.clone();
-            Monomorphizer::variant_constructor(custom_type, constructor, args)
+            let types = Monomorphizer::variant_constructor(custom_type, constructor, args);
+            (self.fields(constructor, &types), types)
         } else {
-            vec![]
+            (vec![], vec![])
         };
-        let val_types = self.val_types(types.iter().cloned());
+
         (
-            self.wasm_types
-                .entry(WasmType::Union(val_types, name.clone(), supertype_index))
-                .or_insert_with(|| (index, Some(name)))
-                .0,
+            *self
+                .wasm_types
+                .entry(WasmType::union(name, fields, supertype_index))
+                .or_insert(index),
             types,
         )
     }
@@ -4387,7 +4477,7 @@ struct StringType {
 
 impl StringType {
     fn wasm_type() -> WasmType {
-        WasmType::Array(StorageType::I8)
+        WasmType::array(StorageType::I8)
     }
 
     fn val_type(&self) -> ValType {
