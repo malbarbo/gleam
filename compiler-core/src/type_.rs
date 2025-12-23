@@ -574,7 +574,10 @@ impl Type {
                     && package == other_package
                     && module == other_module
                     && name == other_name
-                    && arguments == other_arguments
+                    && arguments
+                        .iter()
+                        .zip(other_arguments)
+                        .all(|(a, b)| a.same_as(b))
             }
 
             (Type::Fn { .. }, Type::Named { .. } | Type::Tuple { .. }) => false,
