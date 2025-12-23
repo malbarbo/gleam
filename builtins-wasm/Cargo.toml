@@ -7,8 +7,15 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
+fast-float2 = { version="0.2.3",  default-features=false }
 itoa = { version="1.0.15", features = ["no-panic"] }
+lexical-core = { version="1.0.6", default-features=false, features = ["parse-integers"] }
+no-panic = "0.1"
 ryu = { version = "1.0.20", features = ["no-panic", "small"] }
 wasi = "0.11"
+
+[profile.release]
+lto = true
+codegen-units = 1
 
 [workspace]

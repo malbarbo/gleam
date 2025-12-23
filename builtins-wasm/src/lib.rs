@@ -1,10 +1,14 @@
 #![no_std]
 #![no_main]
-use core;
+use core::{self, slice};
 use itoa;
+use no_panic::no_panic;
 use ryu;
 use wasi;
 use wasi::wasi_snapshot_preview1 as wasip1;
+
+//////////////
+// system
 
 unsafe extern "C" {
     static __heap_base: u32;
@@ -36,6 +40,9 @@ pub extern "C" fn _print(fd: i32, ptr: *const u8, len: u32) -> i32 {
         )
     }
 }
+
+//////////////
+// to string
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _i32_to_str(n: i32, ptr: *mut u8) -> u32 {
@@ -75,4 +82,65 @@ pub extern "C" fn _f64_to_str(f: f64, ptr: *mut u8) -> u32 {
         core::ptr::copy_nonoverlapping(s.as_ptr(), ptr, s.len());
         s.len() as u32
     }
+}
+
+//////////////
+// parsing
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _parse_i32(parsed: *mut bool, ptr: *const u8, len: u32) -> i32 {
+    unsafe {
+        if let Ok(r) = lexical_core::parse(bytes_from_ptr_len(ptr, len as usize)) {
+            *parsed = true;
+            r
+        } else {
+            *parsed = false;
+            Default::default()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _parse_i64(parsed: *mut bool, ptr: *const u8, len: u32) -> i64 {
+    unsafe {
+        if let Ok(r) = lexical_core::parse(bytes_from_ptr_len(ptr, len as usize)) {
+            *parsed = true;
+            r
+        } else {
+            *parsed = false;
+            Default::default()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+#[no_panic]
+pub extern "C" fn _parse_f32(parsed: *mut bool, ptr: *const u8, len: u32) -> f32 {
+    unsafe {
+        if let Ok(r) = fast_float2::parse(bytes_from_ptr_len(ptr, len as usize)) {
+            *parsed = true;
+            r
+        } else {
+            *parsed = false;
+            Default::default()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+#[no_panic]
+pub extern "C" fn _parse_f64(parsed: *mut bool, ptr: *const u8, len: u32) -> f64 {
+    unsafe {
+        if let Ok(r) = fast_float2::parse(bytes_from_ptr_len(ptr, len as usize)) {
+            *parsed = true;
+            r
+        } else {
+            *parsed = false;
+            Default::default()
+        }
+    }
+}
+
+unsafe fn bytes_from_ptr_len<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
+    unsafe { slice::from_raw_parts(ptr, len) }
 }
