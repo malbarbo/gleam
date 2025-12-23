@@ -51,6 +51,10 @@ const I32_TO_STR: &str = "_i32_to_str";
 const I64_TO_STR: &str = "_i64_to_str";
 const F64_TO_STR: &str = "_f64_to_str";
 
+const PARSE_I32: &str = "_parse_i32";
+const PARSE_I64: &str = "_parse_i64";
+const PARSE_F64: &str = "_parse_f64";
+
 const HEAP_BASE: &str = "_heap_base";
 const EXIT: &str = "_exit";
 const PRINT: &str = "_print";
@@ -385,8 +389,9 @@ impl BuiltinFunction {
     }
 }
 
-#[derive(Hash, PartialEq, Eq, Clone, Debug)]
+#[derive(Hash, PartialEq, Eq, Ord, PartialOrd, Clone, Debug)]
 enum BuiltinFunctionExternal {
+    // In topological order of dependencies
     I32ToInt,
     IntToI32,
     IntRepr,
@@ -394,21 +399,11 @@ enum BuiltinFunctionExternal {
     StringRepr,
     StringToMemory,
     MemoryToString,
+    ParseInt,
+    ParseFloat,
 }
 
 impl BuiltinFunctionExternal {
-    fn name(&self) -> EcoString {
-        match self {
-            BuiltinFunctionExternal::I32ToInt => "_i32_to_int".into(),
-            BuiltinFunctionExternal::IntToI32 => "_int_to_i32".into(),
-            BuiltinFunctionExternal::IntRepr => "_repr_int".into(),
-            BuiltinFunctionExternal::FloatRepr => "_repr_float".into(),
-            BuiltinFunctionExternal::StringRepr => "_repr_string".into(),
-            BuiltinFunctionExternal::StringToMemory => "_string_to_memory".into(),
-            BuiltinFunctionExternal::MemoryToString => "_memory_to_string".into(),
-        }
-    }
-
     fn all() -> &'static [BuiltinFunctionExternal] {
         &[
             BuiltinFunctionExternal::I32ToInt,
@@ -418,7 +413,80 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::StringRepr,
             BuiltinFunctionExternal::StringToMemory,
             BuiltinFunctionExternal::MemoryToString,
+            BuiltinFunctionExternal::ParseInt,
+            BuiltinFunctionExternal::ParseFloat,
         ]
+    }
+
+    fn by_name(name: &str) -> Option<BuiltinFunctionExternal> {
+        Self::all().iter().find(|f| f.name() == name).cloned()
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            BuiltinFunctionExternal::I32ToInt => "_i32_to_int",
+            BuiltinFunctionExternal::IntToI32 => "_int_to_i32",
+            BuiltinFunctionExternal::IntRepr => "_repr_int",
+            BuiltinFunctionExternal::FloatRepr => "_repr_float",
+            BuiltinFunctionExternal::StringRepr => "_repr_string",
+            BuiltinFunctionExternal::StringToMemory => "_string_to_memory",
+            BuiltinFunctionExternal::MemoryToString => "_memory_to_string",
+            BuiltinFunctionExternal::ParseInt => "_parse_int",
+            BuiltinFunctionExternal::ParseFloat => "_parse_float",
+        }
+    }
+
+    fn type_(&self, i32: Arc<Type>) -> (Vec<Arc<Type>>, Arc<Type>) {
+        let int = type_::int();
+        match self {
+            BuiltinFunctionExternal::I32ToInt => (vec![i32], int),
+            BuiltinFunctionExternal::IntToI32 => (vec![int], i32),
+            BuiltinFunctionExternal::IntRepr => (vec![int, i32.clone()], i32),
+            BuiltinFunctionExternal::FloatRepr => (vec![type_::float(), i32.clone()], i32),
+            BuiltinFunctionExternal::StringRepr => (vec![type_::string(), i32.clone()], int),
+            BuiltinFunctionExternal::StringToMemory => (vec![type_::string(), i32.clone()], int),
+            BuiltinFunctionExternal::MemoryToString => (vec![i32.clone(), i32], type_::string()),
+            BuiltinFunctionExternal::ParseInt => {
+                (vec![type_::string()], type_::result(int, type_::nil()))
+            }
+            BuiltinFunctionExternal::ParseFloat => (
+                vec![type_::string()],
+                type_::result(type_::float(), type_::nil()),
+            ),
+        }
+    }
+
+    fn dependencies(&self) -> &'static [BuiltinFunctionExternal] {
+        match self {
+            BuiltinFunctionExternal::ParseInt | BuiltinFunctionExternal::ParseFloat => {
+                &[BuiltinFunctionExternal::StringToMemory]
+            }
+            _ => &[],
+        }
+    }
+
+    fn externals_dependencies(&self, int: IntType, float: FloatType) -> &'static [&'static str] {
+        match self {
+            BuiltinFunctionExternal::I32ToInt
+            | BuiltinFunctionExternal::IntToI32
+            | BuiltinFunctionExternal::StringRepr
+            | BuiltinFunctionExternal::StringToMemory
+            | BuiltinFunctionExternal::MemoryToString => &[],
+            BuiltinFunctionExternal::IntRepr => match int {
+                IntType::I32 => &[I32_TO_STR],
+                IntType::I64 => &[I64_TO_STR],
+            },
+            BuiltinFunctionExternal::FloatRepr => match float {
+                FloatType::F64 => &[F64_TO_STR],
+            },
+            BuiltinFunctionExternal::ParseInt => match int {
+                IntType::I32 => &[PARSE_I32],
+                IntType::I64 => &[PARSE_I64],
+            },
+            BuiltinFunctionExternal::ParseFloat => match float {
+                FloatType::F64 => &[PARSE_F64],
+            },
+        }
     }
 }
 
@@ -455,6 +523,7 @@ struct Variant {
 }
 
 struct Generator<'a> {
+    // FIXME: generate all sections and names in function module?
     global_section: GlobalSection,
     import_section: ImportSection,
     export_section: ExportSection,
@@ -479,7 +548,7 @@ struct Generator<'a> {
     line_numbers: &'a LineNumbers,
 }
 
-fn find_global(name: &EcoString, globals: &RefCell<Vec<Id>>) -> Option<Id> {
+fn find_global(name: &str, globals: &RefCell<Vec<Id>>) -> Option<Id> {
     globals.borrow().iter().find(|id| &id.name == name).cloned()
 }
 
@@ -515,18 +584,50 @@ impl<'a> Generator<'a> {
             todo!("Imports\n{:#?}", self.module.definitions.imports);
         }
 
-        // if !self.module.definitions.type_aliases.is_empty() {
-        //     todo!("Type aliases\n{:#?}", self.module.definitions.type_aliases)
-        // }
-
         // External types, like I32, must come first because of the external function type checking.
         // Externals functions come first because of the indexes in the builtin wasm file.
         self.types_external();
-        self.functions_external();
+        let builtins = self.functions_external();
+        self.types_prelude();
+        self.functions_builtins(builtins);
         self.types();
         self.constants();
         self.functions();
         self.function_start()
+    }
+
+    fn functions_builtins(
+        &mut self,
+        builtins: Vec<(BuiltinFunctionExternal, Vec<(EcoString, Arc<Type>)>)>,
+    ) {
+        let i32 = type_::named("wasm", &self.module.name, "I32", Publicity::Private, vec![]);
+        let builtins = builtins
+            .into_iter()
+            .map(|(builtin, used_as)| {
+                let mut names = vec![];
+                let (arguments, result) = builtin.type_(i32.clone());
+                let expected = type_::fn_(arguments, result);
+                for (name, type_) in used_as {
+                    if !expected.same_as(&type_) {
+                        panic!(
+                            "{expected:#?}\n{type_:#?}\n{} != {}",
+                            self.type_pretty_name(&expected),
+                            self.type_pretty_name(&type_)
+                        );
+                    }
+                    names.push(name);
+                }
+                (builtin, names)
+            })
+            .collect_vec();
+
+        for (builtin, names) in builtins {
+            let name = builtin.name();
+            let index = self.get_function_builtin_external(builtin);
+            for name in iter::once(name.into()).chain(names) {
+                let _ = self.add_function_to_globals(name, index);
+            }
+        }
     }
 
     fn add_function_to_globals(&mut self, name: EcoString, index: u32) -> Id {
@@ -535,13 +636,17 @@ impl<'a> Generator<'a> {
         id
     }
 
-    fn find_global(&self, name: &EcoString) -> Option<Id> {
+    fn find_global(&self, name: &str) -> Option<Id> {
         find_global(name, &self.globals)
     }
 
-    fn find_global_expect(&self, name: &EcoString) -> Id {
-        self.find_global(name)
-            .unwrap_or_else(|| panic!("Global \"{name}\"."))
+    fn find_global_expect(&self, name: &str) -> Id {
+        self.find_global(name).unwrap_or_else(|| {
+            panic!(
+                "Global \"{name}\".\n{}",
+                std::backtrace::Backtrace::capture()
+            )
+        })
     }
 
     fn builtin_type(&self, function: &BuiltinFunction) -> (Vec<ValType>, Vec<ValType>) {
@@ -566,102 +671,6 @@ impl<'a> Generator<'a> {
             BuiltinFunction::VariantConstructor(params, return_, _) => {
                 (params.clone(), vec![*return_])
             }
-        }
-    }
-
-    fn builtin_external_wasm_dependencies(
-        &self,
-        function: &BuiltinFunctionExternal,
-    ) -> &'static [&'static str] {
-        match function {
-            BuiltinFunctionExternal::I32ToInt
-            | BuiltinFunctionExternal::IntToI32
-            | BuiltinFunctionExternal::StringRepr
-            | BuiltinFunctionExternal::StringToMemory
-            | BuiltinFunctionExternal::MemoryToString => &[],
-            BuiltinFunctionExternal::IntRepr => match self.int {
-                IntType::I32 => &[I32_TO_STR],
-                IntType::I64 => &[I64_TO_STR],
-            },
-            BuiltinFunctionExternal::FloatRepr => match self.float {
-                FloatType::F64 => &[F64_TO_STR],
-            },
-        }
-    }
-
-    fn builtin_external_type(
-        &self,
-        function: &BuiltinFunctionExternal,
-    ) -> (Vec<ValType>, Vec<ValType>) {
-        match function {
-            BuiltinFunctionExternal::I32ToInt => (vec![ValType::I32], vec![self.int.val_type()]),
-            BuiltinFunctionExternal::IntToI32 => (vec![self.int.val_type()], vec![ValType::I32]),
-            BuiltinFunctionExternal::IntRepr => {
-                (vec![self.int.val_type(), ValType::I32], vec![ValType::I32])
-            }
-            BuiltinFunctionExternal::FloatRepr => (
-                vec![self.float.val_type(), ValType::I32],
-                vec![ValType::I32],
-            ),
-            BuiltinFunctionExternal::StringRepr => (
-                vec![self.string.val_type(), ValType::I32],
-                vec![ValType::I32],
-            ),
-            BuiltinFunctionExternal::StringToMemory => (
-                vec![self.string.val_type(), ValType::I32],
-                vec![ValType::I32],
-            ),
-            BuiltinFunctionExternal::MemoryToString => (
-                vec![ValType::I32, ValType::I32],
-                vec![self.string.val_type()],
-            ),
-        }
-    }
-
-    fn builtin_external_check_type(
-        &mut self,
-        builtin: &BuiltinFunctionExternal,
-        function: &TypedFunction,
-    ) {
-        let valid = match builtin {
-            BuiltinFunctionExternal::I32ToInt => function.return_type.is_int(),
-            BuiltinFunctionExternal::IntToI32 => match &function.arguments[..] {
-                [first] => first.type_.is_int(),
-                _ => false,
-            },
-            BuiltinFunctionExternal::IntRepr => match &function.arguments[..] {
-                [first, _] => first.type_.is_int(),
-                _ => false,
-            },
-            BuiltinFunctionExternal::FloatRepr => match &function.arguments[..] {
-                [first, _] => first.type_.is_float(),
-                _ => false,
-            },
-            BuiltinFunctionExternal::StringRepr => match &function.arguments[..] {
-                [first, _] => first.type_.is_string(),
-                _ => false,
-            },
-            BuiltinFunctionExternal::StringToMemory => match &function.arguments[..] {
-                [first, _] => first.type_.is_string(),
-                _ => false,
-            },
-            BuiltinFunctionExternal::MemoryToString => function.return_type.is_string(),
-        };
-
-        let (params, results) = self.builtin_external_type(builtin);
-
-        if !valid
-            || params != self.val_types(function_params_types(function))
-            || results != self.val_types(vec![function_return_type(function)])
-        {
-            panic!(
-                "Expected type for {}: {:?}->{:?}, but found {:?}->{:?}",
-                builtin.name(),
-                params,
-                results,
-                function_params_types(function),
-                function_return_type(function)
-            )
         }
     }
 
@@ -712,15 +721,16 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn functions_external(&mut self) {
+    fn functions_external(
+        &mut self,
+    ) -> Vec<(BuiltinFunctionExternal, Vec<(EcoString, Arc<Type>)>)> {
+        // FIXME: move this code to Externals
         let externals = Externals::new(self);
 
         let module = prepare_wasm_module(
             BUILTINS_WASM,
-            externals.available.iter().flat_map(|(name, external)| {
-                if let ExternalFunction::Wasm { .. } = external
-                    && external.is_used()
-                {
+            externals.externals.iter().flat_map(|(name, external)| {
+                if !external.used_names.is_empty() {
                     Some(name)
                 } else {
                     None
@@ -836,7 +846,7 @@ impl<'a> Generator<'a> {
                                 wasmparser::Name::Function(section_limited) => {
                                     for item in section_limited.into_iter_with_offsets() {
                                         let (_, name) = item.expect("Name entry");
-                                        if let Some(external) = externals.available.get(name.name) {
+                                        if let Some(external) = externals.externals.get(name.name) {
                                             let index =
                                                 (name.index - self.import_section.len()) as usize;
                                             let (params, results, code) =
@@ -848,7 +858,7 @@ impl<'a> Generator<'a> {
                                                 results.clone(),
                                                 code.clone(),
                                             );
-                                            for used_name in external.used_names() {
+                                            for used_name in &external.used_names {
                                                 let _ = self.add_function_to_globals(
                                                     used_name.clone(),
                                                     name.index,
@@ -872,49 +882,21 @@ impl<'a> Generator<'a> {
             }
         }
 
-        // String type
-        // FIXME: add only if its necessary
-        let index = self.wasm_types.len() as u32;
-        self.string.type_index = *self
-            .wasm_types
-            .entry(StringType::wasm_type())
-            .or_insert(index);
-
-        for external in externals.available.into_values() {
-            if external.is_used()
-                && let ExternalFunction::Builtin {
-                    used_names,
-                    function: builtin,
-                } = external
-            {
-                let function =
-                    match builtin {
-                        BuiltinFunctionExternal::I32ToInt => {
-                            self.add_function_builtin_external(builtin, self.code_i32_to_int())
-                        }
-                        BuiltinFunctionExternal::IntToI32 => {
-                            self.add_function_builtin_external(builtin, self.code_int_to_i32())
-                        }
-                        BuiltinFunctionExternal::IntRepr => {
-                            self.add_function_builtin_external(builtin, self.code_int_repr())
-                        }
-                        BuiltinFunctionExternal::FloatRepr => {
-                            self.add_function_builtin_external(builtin, self.code_float_repr())
-                        }
-                        BuiltinFunctionExternal::StringRepr => {
-                            self.add_function_builtin_external(builtin, self.code_string_repr())
-                        }
-                        BuiltinFunctionExternal::StringToMemory => self
-                            .add_function_builtin_external(builtin, self.code_string_to_memory()),
-                        BuiltinFunctionExternal::MemoryToString => self
-                            .add_function_builtin_external(builtin, self.code_memory_to_string()),
-                    };
-
-                for name in used_names {
-                    let _ = self.add_function_to_globals(name, function.index);
+        let mut builtins: Vec<(BuiltinFunctionExternal, Vec<(EcoString, Arc<Type>)>)> = vec![];
+        for (builtin, use_) in externals.builtins {
+            if let Some(use_) = use_ {
+                if let Some((_, entry)) = builtins.iter_mut().find(|(b, _)| *b == builtin) {
+                    entry.push(use_);
+                } else {
+                    builtins.push((builtin, vec![use_]));
                 }
+            } else {
+                builtins.push((builtin, vec![]));
             }
         }
+
+        builtins.sort_by_key(|(builtin, _)| builtin.clone());
+        builtins
     }
 
     fn types(&mut self) {
@@ -922,18 +904,39 @@ impl<'a> Generator<'a> {
             custom_type.external_webassembly.is_none() && !custom_type.constructors.is_empty()
         }
 
-        for (custom_type, module_name) in Self::prelude_custom_types()
-            .iter()
-            .map(|t| (t, PRELUDE_MODULE_NAME))
-            .chain(
-                self.module
-                    .definitions
-                    .custom_types
-                    .iter()
-                    .filter(|t| is_not_external(t))
-                    .map(|c| (c, self.module.name.as_str())),
-            )
-        {
+        self.add_custom_types(
+            self.module
+                .definitions
+                .custom_types
+                .iter()
+                .filter(|t| is_not_external(t))
+                .map(|c| (c, self.module.name.as_str())),
+        )
+    }
+
+    fn types_prelude(&mut self) {
+        // Add Nil, Bool and Result
+        self.add_custom_types(
+            Self::prelude_custom_types()
+                .iter()
+                .map(|c| (c, PRELUDE_MODULE_NAME)),
+        );
+
+        // Add String
+        let index = self.wasm_types.len() as u32;
+        self.string.type_index = *self
+            .wasm_types
+            .entry(StringType::wasm_type())
+            .or_insert(index);
+
+        // TODO: Add List to avois special handling
+    }
+
+    fn add_custom_types<'b>(
+        &mut self,
+        types: impl IntoIterator<Item = (&'b TypedCustomType, &'b str)>,
+    ) {
+        for (custom_type, module_name) in types {
             let mut is_union = false;
             let type_ = if custom_type
                 .constructors
@@ -1116,7 +1119,7 @@ impl<'a> Generator<'a> {
                     self.main = Some(id.index)
                 }
             } else {
-                // FIXME: show message explaning why somo function was not compiled
+                // FIXME: show message explaning why somo function was not compiled?
             }
         }
     }
@@ -1139,8 +1142,16 @@ impl<'a> Generator<'a> {
             self.function_val_type(type_index)
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             self.custom_type_val_type(type_, &custom_type, args)
+        } else if let Some((_, name)) = type_.named_type_name()
+            && name == "I32"
+        {
+            ValType::I32
         } else {
-            todo!("Type not supported: {:#?}", type_);
+            todo!(
+                "Type not supported: {:#?}\n{}",
+                type_,
+                std::backtrace::Backtrace::capture()
+            );
         }
     }
 
@@ -1639,7 +1650,7 @@ impl<'a> Generator<'a> {
                     }
                 } else {
                     if let Some((_, fname, _)) = &function.external_webassembly {
-                        return self.find_global_expect(&fname.into());
+                        return self.find_global_expect(fname);
                     }
                     self.function(function, function.publicity.is_public())
                 };
@@ -1787,10 +1798,10 @@ impl<'a> Generator<'a> {
         .into();
         let string_index = self.string_index(&msg);
         let string_to_memory =
-            self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
-        let heap_base = self.find_global_expect(&HEAP_BASE.into());
-        let print = self.find_global_expect(&PRINT.into());
-        let exit = self.find_global_expect(&EXIT.into());
+            self.find_global_expect(BuiltinFunctionExternal::StringToMemory.name());
+        let heap_base = self.find_global_expect(HEAP_BASE);
+        let print = self.find_global_expect(PRINT);
+        let exit = self.find_global_expect(EXIT);
         #[rustfmt::skip]
         let _ = instructions
             .expression(self, locals, scope.clone(), &assert.value)
@@ -2046,9 +2057,9 @@ impl<'a> Generator<'a> {
         let string_index = self.string_index(&msg);
         let string_to_memory =
             self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
-        let heap_base = self.find_global_expect(&HEAP_BASE.into());
-        let print = self.find_global_expect(&PRINT.into());
-        let exit = self.find_global_expect(&EXIT.into());
+        let heap_base = self.find_global_expect(HEAP_BASE);
+        let print = self.find_global_expect(PRINT);
+        let exit = self.find_global_expect(EXIT);
 
         let _ = instructions.show_error_message(
             string_index,
@@ -2333,8 +2344,8 @@ impl<'a> Generator<'a> {
         message: &Option<Box<TypedExpr>>,
     ) {
         if let Some(expression) = expression {
-            let print = self.find_global_expect(&PRINT.into());
-            let heap_base = self.find_global_expect(&HEAP_BASE.into());
+            let print = self.find_global_expect(PRINT);
+            let heap_base = self.find_global_expect(HEAP_BASE);
             let string_to_memory =
                 self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
             let string_index = self.string_index(
@@ -2422,9 +2433,9 @@ impl<'a> Generator<'a> {
                 let string_index = self.string_index(&msg);
                 let string_to_memory =
                     self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
-                let heap_base = self.find_global_expect(&HEAP_BASE.into());
-                let print = self.find_global_expect(&PRINT.into());
-                let exit = self.find_global_expect(&EXIT.into());
+                let heap_base = self.find_global_expect(HEAP_BASE);
+                let print = self.find_global_expect(PRINT);
+                let exit = self.find_global_expect(EXIT);
                 #[rustfmt::skip]
                 let _ = instructions
                     .pattern(self, locals, &mut scope, &assignment.pattern)
@@ -3395,20 +3406,14 @@ impl<'a> Generator<'a> {
     }
 
     fn function_repr(&mut self, type_: &Arc<Type>) -> u32 {
-        if type_.is_int() | type_.is_float() | type_.is_string() {
-            let (repr, code) = if type_.is_int() {
-                (BuiltinFunctionExternal::IntRepr, self.code_int_repr())
-            } else if type_.is_float() {
-                (BuiltinFunctionExternal::FloatRepr, self.code_float_repr())
-            } else {
-                (BuiltinFunctionExternal::StringRepr, self.code_string_repr())
-            };
-
-            return if let Some(id) = self.builtins_external.get(&repr) {
-                *id
-            } else {
-                self.add_function_builtin_external(repr, code).index
-            };
+        if type_.is_int() {
+            return self.get_function_builtin_external(BuiltinFunctionExternal::IntRepr);
+        }
+        if type_.is_float() {
+            return self.get_function_builtin_external(BuiltinFunctionExternal::FloatRepr);
+        }
+        if type_.is_string() {
+            return self.get_function_builtin_external(BuiltinFunctionExternal::StringRepr);
         }
 
         let repr = if type_.is_list() {
@@ -3460,8 +3465,8 @@ impl<'a> Generator<'a> {
     fn code_int_repr(&self) -> Function {
         let mut function = Function::new(vec![]);
         let id = match self.int {
-            IntType::I32 => self.find_global_expect(&I32_TO_STR.into()),
-            IntType::I64 => self.find_global_expect(&I64_TO_STR.into()),
+            IntType::I32 => self.find_global_expect(I32_TO_STR),
+            IntType::I64 => self.find_global_expect(I64_TO_STR),
         };
         let _ = function
             .instructions()
@@ -3475,7 +3480,7 @@ impl<'a> Generator<'a> {
     fn code_float_repr(&self) -> Function {
         let mut function = Function::new(vec![]);
         let id = match self.float {
-            FloatType::F64 => self.find_global_expect(&F64_TO_STR.into()),
+            FloatType::F64 => self.find_global_expect(F64_TO_STR),
         };
         let _ = function
             .instructions()
@@ -3767,7 +3772,7 @@ impl<'a> Generator<'a> {
         let mut instructions = function.extend_instructions(self);
         match custom_type {
             CustomType::ExternalI32 => {
-                let i32_to_str = self.find_global_expect(&I32_TO_STR.into());
+                let i32_to_str = self.find_global_expect(I32_TO_STR);
                 let _ = instructions
                     .local_get(value)
                     .local_get(ptr)
@@ -3864,6 +3869,7 @@ impl<'a> Generator<'a> {
         // locals
         let len = 2; // I32
         let i = 3; // I32
+        // result len - I32
         let mut instructions = function.extend_instructions(self);
         #[rustfmt::skip]
         let _ = instructions
@@ -3940,6 +3946,74 @@ impl<'a> Generator<'a> {
         function
     }
 
+    fn code_parse_int(&mut self) -> Function {
+        let parse = match self.int {
+            IntType::I32 => self.find_global_expect(PARSE_I32),
+            IntType::I64 => self.find_global_expect(PARSE_I64),
+        };
+        self.code_parse(type_::int(), parse.index)
+    }
+
+    fn code_parse_float(&mut self) -> Function {
+        let parse = match self.float {
+            FloatType::F64 => self.find_global_expect(PARSE_F64),
+        };
+        self.code_parse(type_::float(), parse.index)
+    }
+
+    fn code_parse(&mut self, type_: Arc<Type>, parse: u32) -> Function {
+        let mut function = Function::new(vec![(3, ValType::I32), (1, self.val_type(&type_))]);
+        // params
+        let s = 0; // String
+        // locals
+        let prt = 1; // I32
+        let dest = 2; // I32
+        let len = 3; // I32
+        let r = 4; // type_
+        // return Result(type, Nil)
+        // FIX: create on demand
+        let string_to_memory =
+            self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
+        let heap_base = self.find_global_expect(HEAP_BASE);
+        let result = type_::result(type_.clone(), type_::nil());
+        let params = vec![type_];
+        let ok_type = type_::fn_(params.clone(), result.clone());
+        let ok_index = self.function_type_index(params, Some(result.clone()));
+        let params = vec![type_::nil()];
+        let err_type = type_::fn_(params.clone(), result.clone());
+        let err_index = self.function_type_index(params, Some(result.clone()));
+        let scope = Scope::with_params(self.globals.clone(), &[]);
+        let mut instructions = function.extend_instructions(self);
+        let _ = instructions
+            .local_get(s)
+            .call(heap_base.index)
+            .local_tee(prt)
+            .local_set(dest)
+            .i32_inc(dest)
+            .local_get(dest)
+            .call(string_to_memory.index)
+            .local_set(len)
+            .local_get(prt) // result
+            .local_get(dest) // ptr
+            .local_get(len)
+            .call(parse)
+            .local_set(r)
+            .local_get(prt)
+            .i32_load8_u(MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            })
+            .if_(BlockType::Result(self.val_type(&result)))
+            .local_get(r);
+        // FIXME: call variant_constructor instead of expression_var
+        let _ = self.expression_var(&scope, &mut instructions, &"Ok".into(), &ok_type);
+        let _ = instructions.call_ref(ok_index).else_().i32_const(0); // FIXME: get nil value
+        let _ = self.expression_var(&scope, &mut instructions, &"Error".into(), &err_type);
+        let _ = instructions.call_ref(err_index).end().end();
+        function
+    }
+
     fn add_function_builtin(
         &mut self,
         builtin: BuiltinFunction,
@@ -3957,21 +4031,36 @@ impl<'a> Generator<'a> {
         function
     }
 
-    fn add_function_builtin_external(
-        &mut self,
-        builtin: BuiltinFunctionExternal,
-        function: Function,
-    ) -> WasmFunction {
-        let (params, results) = self.builtin_external_type(&builtin);
+    fn get_function_builtin_external(&mut self, builtin: BuiltinFunctionExternal) -> u32 {
+        if let Some(id) = self.builtins_external.get(&builtin) {
+            return *id;
+        }
+
+        let function = match builtin {
+            BuiltinFunctionExternal::I32ToInt => self.code_i32_to_int(),
+            BuiltinFunctionExternal::IntToI32 => self.code_int_to_i32(),
+            BuiltinFunctionExternal::IntRepr => self.code_int_repr(),
+            BuiltinFunctionExternal::FloatRepr => self.code_float_repr(),
+            BuiltinFunctionExternal::StringRepr => self.code_string_repr(),
+            BuiltinFunctionExternal::StringToMemory => self.code_string_to_memory(),
+            BuiltinFunctionExternal::MemoryToString => self.code_memory_to_string(),
+            BuiltinFunctionExternal::ParseInt => self.code_parse_int(),
+            BuiltinFunctionExternal::ParseFloat => self.code_parse_float(),
+        };
+        // FIXME: create an appropriated type
+        let i32 = type_::named("", &self.module.name, "I32", Publicity::Private, vec![]);
+        let (params, result) = builtin.type_(i32);
+        let params = self.val_types(params);
+        let result = self.val_type(&result);
         let function = self.add_function(
-            builtin.name(),
+            builtin.name().into(),
             false,
             params,
-            results,
+            vec![result],
             function.into_raw_body(),
         );
         let _ = self.builtins_external.insert(builtin, function.index);
-        function
+        function.index
     }
 
     fn add_function(
@@ -4621,7 +4710,6 @@ impl Locals {
     }
 
     fn val_types(&self) -> Vec<(u32, ValType)> {
-        // FIXME: group locals by type
         self.val_types.iter().map(|e| (1, *e)).collect()
     }
 
@@ -4731,7 +4819,7 @@ impl Locals {
     ) {
         // the number of written bytes
         self._insert_with_val_type(echo, ValType::I32);
-        self._insert(generator, expression, &expression.type_());
+        self._insert(generator, expression, &echo.type_());
     }
 
     fn for_echo(&self, echo: &TypedExpr, expression: &TypedExpr) -> (u32, u32) {
@@ -5350,36 +5438,15 @@ fn set_function_name(function: &mut TypedFunction, name: EcoString) {
 }
 
 #[derive(Clone)]
-enum ExternalFunction {
-    Builtin {
-        used_names: HashSet<EcoString>,
-        function: BuiltinFunctionExternal,
-    },
-    Wasm {
-        used_names: HashSet<EcoString>,
-        params: Vec<ValType>,
-        results: Vec<ValType>,
-    },
-}
-
-impl ExternalFunction {
-    fn used_names(&self) -> impl Iterator<Item = &EcoString> {
-        match self {
-            ExternalFunction::Builtin { used_names, .. }
-            | ExternalFunction::Wasm { used_names, .. } => used_names.iter(),
-        }
-    }
-
-    fn is_used(&self) -> bool {
-        match self {
-            ExternalFunction::Builtin { used_names, .. }
-            | ExternalFunction::Wasm { used_names, .. } => !used_names.is_empty(),
-        }
-    }
+struct ExternalFunction {
+    used_names: HashSet<EcoString>,
+    params: Vec<ValType>,
+    results: Vec<ValType>,
 }
 
 struct Externals {
-    available: HashMap<EcoString, ExternalFunction>,
+    externals: HashMap<EcoString, ExternalFunction>,
+    builtins: HashMap<BuiltinFunctionExternal, Option<(EcoString, Arc<Type>)>>,
     // FIXME: use a reference
     custom_types: Vec<TypedCustomType>,
     visited_types: Vec<Arc<Type>>,
@@ -5394,7 +5461,8 @@ struct Externals {
 impl Externals {
     fn new(generator: &mut Generator<'_>) -> Externals {
         let mut externals = Externals {
-            available: HashMap::new(),
+            externals: HashMap::new(),
+            builtins: HashMap::new(),
             custom_types: generator.module.definitions.custom_types.clone(),
             visited_types: vec![],
             todo_panic: false,
@@ -5415,7 +5483,7 @@ impl Externals {
                 let results = type_.results();
                 externals.insert_available(
                     name.into(),
-                    ExternalFunction::Wasm {
+                    ExternalFunction {
                         used_names: HashSet::new(),
                         params: walrus_types_to_wasmencoder_types(type_.params()),
                         results: walrus_types_to_wasmencoder_types(results),
@@ -5424,70 +5492,57 @@ impl Externals {
             }
         }
 
-        // add builtin functions to available
-        for function in BuiltinFunctionExternal::all() {
-            externals.insert_available(
-                function.name(),
-                ExternalFunction::Builtin {
-                    used_names: HashSet::new(),
-                    function: function.clone(),
-                },
-            );
-        }
-
         externals.functions(generator, &generator.module.definitions.functions);
 
         if externals.echo_any || externals.assert || externals.todo_panic {
-            externals.insert_used_name(&BuiltinFunctionExternal::StringToMemory.name(), None);
-            externals.insert_used_name(&HEAP_BASE.into(), None);
-            externals.insert_used_name(&PRINT.into(), None);
+            externals.insert_builtin(BuiltinFunctionExternal::StringToMemory, None);
+            externals.insert_external(HEAP_BASE);
+            externals.insert_external(PRINT);
         }
 
         if externals.assert || externals.todo_panic {
-            externals.insert_used_name(&EXIT.into(), None);
+            externals.insert_external(EXIT);
         }
 
         if externals.echo_int {
-            externals.insert_used_name(&BuiltinFunctionExternal::IntRepr.name(), None);
+            externals.insert_builtin(BuiltinFunctionExternal::IntRepr, None);
         }
 
         if externals.echo_float {
-            externals.insert_used_name(&BuiltinFunctionExternal::FloatRepr.name(), None);
+            externals.insert_builtin(BuiltinFunctionExternal::FloatRepr, None);
         }
 
-        let mut used = HashSet::new();
-        for external in externals.available.values() {
-            if let ExternalFunction::Builtin { function, .. } = external
-                && external.is_used()
-            {
-                used.extend(
-                    generator
-                        .builtin_external_wasm_dependencies(function)
-                        .iter()
-                        .cloned(),
-                );
+        for builtin in externals.builtins.keys().cloned().collect_vec() {
+            for dep in builtin.dependencies() {
+                externals.insert_builtin(dep.clone(), None);
             }
-        }
-
-        for name in used {
-            let name: EcoString = name.into();
-            externals.insert_used_name(&name, Some(name.clone()));
+            for dep in builtin.externals_dependencies(generator.int, generator.float) {
+                externals.insert_external(dep);
+            }
         }
 
         externals
     }
 
     fn insert_available(&mut self, name: EcoString, function: ExternalFunction) {
-        let _ = self.available.insert(name, function);
+        let _ = self.externals.insert(name, function);
     }
 
-    fn insert_used_name(&mut self, builtin_name: &EcoString, used_name: Option<EcoString>) {
-        let external = self.available.get_mut(builtin_name).expect(builtin_name);
-        let used_name = used_name.unwrap_or_else(|| builtin_name.into());
-        let _ = match external {
-            ExternalFunction::Builtin { used_names, .. }
-            | ExternalFunction::Wasm { used_names, .. } => used_names.insert(used_name),
-        };
+    fn insert_external(&mut self, name: &str) {
+        let _ = self
+            .externals
+            .get_mut(name)
+            .unwrap()
+            .used_names
+            .insert(name.into());
+    }
+
+    fn insert_builtin(
+        &mut self,
+        builtin: BuiltinFunctionExternal,
+        use_: Option<(EcoString, Arc<Type>)>,
+    ) {
+        let _ = self.builtins.insert(builtin, use_);
     }
 
     fn use_data_section(&self) -> bool {
@@ -5495,10 +5550,6 @@ impl Externals {
         // FIXME: echo needs __heap_base, which is in data section,
         //        but we cannot easily get it without the other data,
         //        so we include all data section.
-        // self.available
-        //     .get(&BuiltinFunction::FloatToString.name())
-        //     .map(|ex| ex.is_used())
-        //     .unwrap_or(false)
     }
 
     fn functions<'a>(
@@ -5508,50 +5559,40 @@ impl Externals {
     ) {
         for function in functions {
             if let Some((module, name, _)) = &function.external_webassembly {
-                // FIXME: return an error, add line number
+                // FIXME: handle error
                 assert_eq!(module, "builtins");
-
-                let wasm_params =
-                    generator.val_types(function.arguments.iter().map(|arg| arg.type_.clone()));
-                let wasm_results = generator.val_types(iter::once(function.return_type.clone()));
-
-                let external = match self.available.get_mut(name) {
-                    Some(external) => external,
-                    None => {
-                        panic!("There is no function {name} in {module} module.");
+                if let Some(ExternalFunction {
+                    params,
+                    results,
+                    used_names,
+                }) = self.externals.get_mut(name)
+                {
+                    let _ = used_names.insert(name.clone());
+                    let wasm_params =
+                        generator.val_types(function.arguments.iter().map(|arg| arg.type_.clone()));
+                    let wasm_results =
+                        generator.val_types(iter::once(function.return_type.clone()));
+                    if !function
+                        .arguments
+                        .iter()
+                        .all(|arg| generator.is_external_type(&arg.type_))
+                        || !generator.is_external_type(&function.return_type)
+                        || (&wasm_params, &wasm_results) != (params, results)
+                    {
+                        // FIXME: improve error
+                        panic!(
+                            "Wrong type for {module}/{name}. Expected {:?}, but got ({:?}) -> ({:?}).",
+                            generator.type_pretty_name(&function_type(function)),
+                            params,
+                            results
+                        );
                     }
-                };
-
-                match external {
-                    ExternalFunction::Builtin {
-                        used_names,
-                        function: builtin_function,
-                    } => {
-                        generator.builtin_external_check_type(builtin_function, function);
-                        let _ = used_names.insert(name.clone());
-                    }
-                    ExternalFunction::Wasm {
-                        params,
-                        results,
-                        used_names,
-                    } => {
-                        let _ = used_names.insert(name.clone());
-                        if !function
-                            .arguments
-                            .iter()
-                            .all(|arg| generator.is_external_type(&arg.type_))
-                            || !generator.is_external_type(&function.return_type)
-                            || (&wasm_params, &wasm_results) != (params, results)
-                        {
-                            panic!(
-                                "Wrong type for {module}/{name}. Expected {:?}, but got ({:?}) -> ({:?}).",
-                                generator.type_pretty_name(&function_type(function)),
-                                params,
-                                results
-                            );
-                        }
-                    }
-                };
+                } else if let Some(builtin) = BuiltinFunctionExternal::by_name(name) {
+                    let _ =
+                        self.insert_builtin(builtin, Some((name.into(), function_type(function))));
+                } else {
+                    panic!("There is no function {name} in {module} module.");
+                }
             }
             self.visit_typed_function(function);
         }
@@ -5575,7 +5616,7 @@ impl Externals {
                 for argument in arguments {
                     self.visit_type(argument);
                 }
-                // FIXME: types in other modules
+                // FIXME: types in other modules?
                 if let Some(custom_type) = self
                     .custom_types
                     .iter()
