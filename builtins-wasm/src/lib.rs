@@ -1,9 +1,9 @@
 #![no_std]
 #![no_main]
 use core::{self, slice};
+use dtoa;
 use itoa;
 use no_panic::no_panic;
-use ryu;
 use wasi;
 use wasi::wasi_snapshot_preview1 as wasip1;
 
@@ -67,7 +67,7 @@ pub extern "C" fn _i64_to_str(n: i64, ptr: *mut u8) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn _f32_to_str(f: f32, ptr: *mut u8) -> u32 {
     unsafe {
-        let mut buffer = ryu::Buffer::new();
+        let mut buffer = dtoa::Buffer::new();
         let s = buffer.format(f);
         core::ptr::copy_nonoverlapping(s.as_ptr(), ptr, s.len());
         s.len() as u32
@@ -77,7 +77,7 @@ pub extern "C" fn _f32_to_str(f: f32, ptr: *mut u8) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn _f64_to_str(f: f64, ptr: *mut u8) -> u32 {
     unsafe {
-        let mut buffer = ryu::Buffer::new();
+        let mut buffer = dtoa::Buffer::new();
         let s = buffer.format(f);
         core::ptr::copy_nonoverlapping(s.as_ptr(), ptr, s.len());
         s.len() as u32
@@ -88,7 +88,7 @@ pub extern "C" fn _f64_to_str(f: f64, ptr: *mut u8) -> u32 {
 // parsing
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _parse_i32(parsed: *mut bool, ptr: *const u8, len: u32) -> i32 {
+pub extern "C" fn _i32_parse(parsed: *mut bool, ptr: *const u8, len: u32) -> i32 {
     unsafe {
         if let Ok(r) = lexical_core::parse(bytes_from_ptr_len(ptr, len as usize)) {
             *parsed = true;
@@ -101,7 +101,7 @@ pub extern "C" fn _parse_i32(parsed: *mut bool, ptr: *const u8, len: u32) -> i32
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _parse_i64(parsed: *mut bool, ptr: *const u8, len: u32) -> i64 {
+pub extern "C" fn _i64_parse(parsed: *mut bool, ptr: *const u8, len: u32) -> i64 {
     unsafe {
         if let Ok(r) = lexical_core::parse(bytes_from_ptr_len(ptr, len as usize)) {
             *parsed = true;
@@ -115,7 +115,7 @@ pub extern "C" fn _parse_i64(parsed: *mut bool, ptr: *const u8, len: u32) -> i64
 
 #[unsafe(no_mangle)]
 #[no_panic]
-pub extern "C" fn _parse_f32(parsed: *mut bool, ptr: *const u8, len: u32) -> f32 {
+pub extern "C" fn _f32_parse(parsed: *mut bool, ptr: *const u8, len: u32) -> f32 {
     unsafe {
         if let Ok(r) = fast_float2::parse(bytes_from_ptr_len(ptr, len as usize)) {
             *parsed = true;
@@ -129,7 +129,7 @@ pub extern "C" fn _parse_f32(parsed: *mut bool, ptr: *const u8, len: u32) -> f32
 
 #[unsafe(no_mangle)]
 #[no_panic]
-pub extern "C" fn _parse_f64(parsed: *mut bool, ptr: *const u8, len: u32) -> f64 {
+pub extern "C" fn _f64_parse(parsed: *mut bool, ptr: *const u8, len: u32) -> f64 {
     unsafe {
         if let Ok(r) = fast_float2::parse(bytes_from_ptr_len(ptr, len as usize)) {
             *parsed = true;
@@ -143,4 +143,10 @@ pub extern "C" fn _parse_f64(parsed: *mut bool, ptr: *const u8, len: u32) -> f64
 
 unsafe fn bytes_from_ptr_len<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     unsafe { slice::from_raw_parts(ptr, len) }
+}
+
+// Strings
+#[unsafe(no_mangle)]
+pub extern "C" fn _i32_is_codepoint(ch: u32) -> bool {
+    char::from_u32(ch).is_some()
 }

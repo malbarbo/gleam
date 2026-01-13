@@ -47,17 +47,30 @@ const BUILTINS_WASM: &[u8] =
 
 const MAIN: &str = "main";
 
-const I32_TO_STR: &str = "_i32_to_str";
-const I64_TO_STR: &str = "_i64_to_str";
-const F64_TO_STR: &str = "_f64_to_str";
-
-const PARSE_I32: &str = "_parse_i32";
-const PARSE_I64: &str = "_parse_i64";
-const PARSE_F64: &str = "_parse_f64";
-
 const HEAP_BASE: &str = "_heap_base";
 const EXIT: &str = "_exit";
 const PRINT: &str = "_print";
+
+const I32_TO_STR: &str = "_i32_to_str";
+const I32_PARSE: &str = "_i32_parse";
+const I32_IS_CODEPOINT: &str = "_i32_is_codepoint";
+
+const I64_TO_STR: &str = "_i64_to_str";
+const I64_PARSE: &str = "_i64_parse";
+
+const F64_TO_STR: &str = "_f64_to_str";
+const F64_PARSE: &str = "_f64_parse";
+
+const WASM_NATIVE: &[&str] = &[
+    HEAP_BASE,
+    I32_TO_STR,
+    I32_PARSE,
+    I32_IS_CODEPOINT,
+    I64_PARSE,
+    I64_TO_STR,
+    F64_TO_STR,
+    F64_PARSE,
+];
 
 const STDERR: i32 = 2;
 
@@ -360,7 +373,6 @@ impl Ord for WasmFunction {
 
 #[derive(Hash, PartialEq, Eq, Clone, Debug)]
 enum BuiltinFunction {
-    StringConcat,
     Equal(ValType, EcoString),
     ListRepr(ValType, EcoString),
     TupleRepr(ValType, EcoString),
@@ -372,7 +384,6 @@ enum BuiltinFunction {
 impl BuiltinFunction {
     fn name(&self) -> EcoString {
         match self {
-            BuiltinFunction::StringConcat => "_string_concat".into(),
             BuiltinFunction::Equal(_, name) => format!("_equal({name})").into(),
             BuiltinFunction::ListRepr(_, name) => format!("_repr({name})").into(),
             BuiltinFunction::TupleRepr(_, name) => format!("_repr({name})").into(),
@@ -391,11 +402,15 @@ impl BuiltinFunction {
 
 #[derive(Hash, PartialEq, Eq, Ord, PartialOrd, Clone, Debug)]
 enum BuiltinFunctionExternal {
-    // In topological order of dependencies
+    StringConcat,
+    StringNumBytes,
+    StringGetByte,
     I32ToInt,
     IntToI32,
+    IntToUtfCodepoint,
     IntRepr,
     FloatRepr,
+    UtfCodepointRepr,
     StringRepr,
     StringToMemory,
     MemoryToString,
@@ -406,10 +421,15 @@ enum BuiltinFunctionExternal {
 impl BuiltinFunctionExternal {
     fn all() -> &'static [BuiltinFunctionExternal] {
         &[
+            BuiltinFunctionExternal::StringConcat,
+            BuiltinFunctionExternal::StringNumBytes,
+            BuiltinFunctionExternal::StringGetByte,
             BuiltinFunctionExternal::I32ToInt,
             BuiltinFunctionExternal::IntToI32,
+            BuiltinFunctionExternal::IntToUtfCodepoint,
             BuiltinFunctionExternal::IntRepr,
             BuiltinFunctionExternal::FloatRepr,
+            BuiltinFunctionExternal::UtfCodepointRepr,
             BuiltinFunctionExternal::StringRepr,
             BuiltinFunctionExternal::StringToMemory,
             BuiltinFunctionExternal::MemoryToString,
@@ -424,10 +444,15 @@ impl BuiltinFunctionExternal {
 
     fn name(&self) -> &'static str {
         match self {
+            BuiltinFunctionExternal::StringConcat => "_string_concat",
+            BuiltinFunctionExternal::StringNumBytes => "_string_num_bytes",
+            BuiltinFunctionExternal::StringGetByte => "_string_get_byte",
             BuiltinFunctionExternal::I32ToInt => "_i32_to_int",
             BuiltinFunctionExternal::IntToI32 => "_int_to_i32",
+            BuiltinFunctionExternal::IntToUtfCodepoint => "_int_to_utf_codepoint",
             BuiltinFunctionExternal::IntRepr => "_repr_int",
             BuiltinFunctionExternal::FloatRepr => "_repr_float",
+            BuiltinFunctionExternal::UtfCodepointRepr => "_repr_utf_code_point",
             BuiltinFunctionExternal::StringRepr => "_repr_string",
             BuiltinFunctionExternal::StringToMemory => "_string_to_memory",
             BuiltinFunctionExternal::MemoryToString => "_memory_to_string",
@@ -437,41 +462,39 @@ impl BuiltinFunctionExternal {
     }
 
     fn type_(&self, i32: Arc<Type>) -> (Vec<Arc<Type>>, Arc<Type>) {
-        let int = type_::int();
+        use type_::{float, int, nil, result, string, utf_codepoint};
         match self {
-            BuiltinFunctionExternal::I32ToInt => (vec![i32], int),
-            BuiltinFunctionExternal::IntToI32 => (vec![int], i32),
-            BuiltinFunctionExternal::IntRepr => (vec![int, i32.clone()], i32),
-            BuiltinFunctionExternal::FloatRepr => (vec![type_::float(), i32.clone()], i32),
-            BuiltinFunctionExternal::StringRepr => (vec![type_::string(), i32.clone()], int),
-            BuiltinFunctionExternal::StringToMemory => (vec![type_::string(), i32.clone()], int),
-            BuiltinFunctionExternal::MemoryToString => (vec![i32.clone(), i32], type_::string()),
-            BuiltinFunctionExternal::ParseInt => {
-                (vec![type_::string()], type_::result(int, type_::nil()))
+            BuiltinFunctionExternal::StringConcat => (vec![string(), string()], string()),
+            BuiltinFunctionExternal::StringNumBytes => (vec![string()], int()),
+            BuiltinFunctionExternal::StringGetByte => (vec![string(), int()], result(int(), nil())),
+            BuiltinFunctionExternal::I32ToInt => (vec![i32], int()),
+            BuiltinFunctionExternal::IntToI32 => (vec![int()], i32),
+            BuiltinFunctionExternal::IntToUtfCodepoint => {
+                (vec![int()], result(utf_codepoint(), nil()))
             }
-            BuiltinFunctionExternal::ParseFloat => (
-                vec![type_::string()],
-                type_::result(type_::float(), type_::nil()),
-            ),
-        }
-    }
-
-    fn dependencies(&self) -> &'static [BuiltinFunctionExternal] {
-        match self {
-            BuiltinFunctionExternal::ParseInt | BuiltinFunctionExternal::ParseFloat => {
-                &[BuiltinFunctionExternal::StringToMemory]
-            }
-            _ => &[],
+            BuiltinFunctionExternal::IntRepr => (vec![int(), i32.clone()], i32),
+            BuiltinFunctionExternal::FloatRepr => (vec![float(), i32.clone()], i32),
+            BuiltinFunctionExternal::UtfCodepointRepr => (vec![utf_codepoint(), i32.clone()], i32),
+            BuiltinFunctionExternal::StringRepr => (vec![string(), i32.clone()], int()),
+            BuiltinFunctionExternal::StringToMemory => (vec![string(), i32.clone()], i32),
+            BuiltinFunctionExternal::MemoryToString => (vec![i32.clone(), i32], string()),
+            BuiltinFunctionExternal::ParseInt => (vec![string()], result(int(), nil())),
+            BuiltinFunctionExternal::ParseFloat => (vec![string()], result(float(), nil())),
         }
     }
 
     fn externals_dependencies(&self, int: IntType, float: FloatType) -> &'static [&'static str] {
         match self {
-            BuiltinFunctionExternal::I32ToInt
+            BuiltinFunctionExternal::StringConcat
+            | BuiltinFunctionExternal::StringNumBytes
+            | BuiltinFunctionExternal::StringGetByte
+            | BuiltinFunctionExternal::I32ToInt
             | BuiltinFunctionExternal::IntToI32
+            | BuiltinFunctionExternal::UtfCodepointRepr
             | BuiltinFunctionExternal::StringRepr
             | BuiltinFunctionExternal::StringToMemory
             | BuiltinFunctionExternal::MemoryToString => &[],
+            BuiltinFunctionExternal::IntToUtfCodepoint => &[I32_IS_CODEPOINT],
             BuiltinFunctionExternal::IntRepr => match int {
                 IntType::I32 => &[I32_TO_STR],
                 IntType::I64 => &[I64_TO_STR],
@@ -480,11 +503,11 @@ impl BuiltinFunctionExternal {
                 FloatType::F64 => &[F64_TO_STR],
             },
             BuiltinFunctionExternal::ParseInt => match int {
-                IntType::I32 => &[PARSE_I32],
-                IntType::I64 => &[PARSE_I64],
+                IntType::I32 => &[I32_PARSE, HEAP_BASE],
+                IntType::I64 => &[I64_PARSE, HEAP_BASE],
             },
             BuiltinFunctionExternal::ParseFloat => match float {
-                FloatType::F64 => &[PARSE_F64],
+                FloatType::F64 => &[F64_PARSE, HEAP_BASE],
             },
         }
     }
@@ -549,7 +572,7 @@ struct Generator<'a> {
 }
 
 fn find_global(name: &str, globals: &RefCell<Vec<Id>>) -> Option<Id> {
-    globals.borrow().iter().find(|id| &id.name == name).cloned()
+    globals.borrow().iter().find(|id| id.name == name).cloned()
 }
 
 impl<'a> Generator<'a> {
@@ -598,35 +621,21 @@ impl<'a> Generator<'a> {
 
     fn functions_builtins(
         &mut self,
-        builtins: Vec<(BuiltinFunctionExternal, Vec<(EcoString, Arc<Type>)>)>,
+        builtins: Vec<(BuiltinFunctionExternal, EcoString, Arc<Type>)>,
     ) {
         let i32 = type_::named("wasm", &self.module.name, "I32", Publicity::Private, vec![]);
-        let builtins = builtins
-            .into_iter()
-            .map(|(builtin, used_as)| {
-                let mut names = vec![];
-                let (arguments, result) = builtin.type_(i32.clone());
-                let expected = type_::fn_(arguments, result);
-                for (name, type_) in used_as {
-                    if !expected.same_as(&type_) {
-                        panic!(
-                            "{expected:#?}\n{type_:#?}\n{} != {}",
-                            self.type_pretty_name(&expected),
-                            self.type_pretty_name(&type_)
-                        );
-                    }
-                    names.push(name);
-                }
-                (builtin, names)
-            })
-            .collect_vec();
-
-        for (builtin, names) in builtins {
-            let name = builtin.name();
-            let index = self.get_function_builtin_external(builtin);
-            for name in iter::once(name.into()).chain(names) {
-                let _ = self.add_function_to_globals(name, index);
+        for (builtin, name, type_) in builtins {
+            let (arguments, result) = builtin.type_(i32.clone());
+            let expected = type_::fn_(arguments, result);
+            if !expected.same_as(&type_) {
+                panic!(
+                    "{expected:#?}\n{type_:#?}\n{} != {}",
+                    self.type_pretty_name(&expected),
+                    self.type_pretty_name(&type_)
+                );
             }
+            let index = self.get_function_builtin_external(builtin);
+            let _ = self.add_function_to_globals(name, index);
         }
     }
 
@@ -651,10 +660,6 @@ impl<'a> Generator<'a> {
 
     fn builtin_type(&self, function: &BuiltinFunction) -> (Vec<ValType>, Vec<ValType>) {
         match function {
-            BuiltinFunction::StringConcat => (
-                vec![self.string.val_type(), self.string.val_type()],
-                vec![self.string.val_type()],
-            ),
             BuiltinFunction::Equal(val_type, _) => (vec![*val_type, *val_type], vec![BOOL_VALTYPE]),
             BuiltinFunction::ListRepr(val_type, _) => {
                 (vec![*val_type, ValType::I32], vec![ValType::I32])
@@ -675,6 +680,7 @@ impl<'a> Generator<'a> {
     }
 
     fn is_external_type(&self, type_: &Arc<Type>) -> bool {
+        // FIXME: this function is not right
         if let Some((module, name, args)) = type_.named_type_information()
             && args.is_empty()
             && self.types.contains_key(&(module, name))
@@ -721,9 +727,7 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn functions_external(
-        &mut self,
-    ) -> Vec<(BuiltinFunctionExternal, Vec<(EcoString, Arc<Type>)>)> {
+    fn functions_external(&mut self) -> Vec<(BuiltinFunctionExternal, EcoString, Arc<Type>)> {
         // FIXME: move this code to Externals
         let externals = Externals::new(self);
 
@@ -882,20 +886,10 @@ impl<'a> Generator<'a> {
             }
         }
 
-        let mut builtins: Vec<(BuiltinFunctionExternal, Vec<(EcoString, Arc<Type>)>)> = vec![];
-        for (builtin, use_) in externals.builtins {
-            if let Some(use_) = use_ {
-                if let Some((_, entry)) = builtins.iter_mut().find(|(b, _)| *b == builtin) {
-                    entry.push(use_);
-                } else {
-                    builtins.push((builtin, vec![use_]));
-                }
-            } else {
-                builtins.push((builtin, vec![]));
-            }
+        let mut builtins: Vec<(BuiltinFunctionExternal, EcoString, Arc<Type>)> = vec![];
+        for (builtin, (name, type_)) in externals.builtins {
+            builtins.push((builtin, name, type_));
         }
-
-        builtins.sort_by_key(|(builtin, _)| builtin.clone());
         builtins
     }
 
@@ -929,7 +923,7 @@ impl<'a> Generator<'a> {
             .entry(StringType::wasm_type())
             .or_insert(index);
 
-        // TODO: Add List to avois special handling
+        // TODO: Add List to avoid special handling
     }
 
     fn add_custom_types<'b>(
@@ -989,13 +983,6 @@ impl<'a> Generator<'a> {
     }
 
     fn prelude_custom_types() -> Vec<TypedCustomType> {
-        fn type_var_generic(id: u64) -> Arc<Type> {
-            Type::Var {
-                type_: RefCell::new(TypeVar::Generic { id }).into(),
-            }
-            .into()
-        }
-
         fn record_constructor_arg(ast: TypeAst, type_: Arc<Type>) -> TypedRecordConstructorArg {
             TypedRecordConstructorArg {
                 label: Default::default(),
@@ -1068,8 +1055,8 @@ impl<'a> Generator<'a> {
             vec![],
         );
 
-        let type_ok = type_var_generic(u64::MAX - 1);
-        let type_err = type_var_generic(u64::MAX);
+        let type_ok = type_::generic_var(u64::MAX - 1);
+        let type_err = type_::generic_var(u64::MAX);
         let result = custom_type(
             "Result",
             vec![
@@ -1125,7 +1112,9 @@ impl<'a> Generator<'a> {
     }
 
     fn val_type(&mut self, type_: &Arc<Type>) -> ValType {
-        if type_.is_int() {
+        if type_.is_utf_codepoint() {
+            ValType::I32
+        } else if type_.is_int() {
             self.int.val_type()
         } else if type_.is_float() {
             self.float.val_type()
@@ -1798,7 +1787,7 @@ impl<'a> Generator<'a> {
         .into();
         let string_index = self.string_index(&msg);
         let string_to_memory =
-            self.find_global_expect(BuiltinFunctionExternal::StringToMemory.name());
+            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
         let heap_base = self.find_global_expect(HEAP_BASE);
         let print = self.find_global_expect(PRINT);
         let exit = self.find_global_expect(EXIT);
@@ -1808,7 +1797,7 @@ impl<'a> Generator<'a> {
             .if_(BlockType::Result(BOOL_VALTYPE))
               .bool_const(true)
             .else_()
-              .show_error_message(string_index, string_to_memory, heap_base, print)
+              .show_error_message(string_index, string_to_memory, heap_base.index, print.index)
               .drop()
               .i32_const(1)
               .call(exit.index)
@@ -2056,16 +2045,16 @@ impl<'a> Generator<'a> {
 
         let string_index = self.string_index(&msg);
         let string_to_memory =
-            self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
+            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
         let heap_base = self.find_global_expect(HEAP_BASE);
         let print = self.find_global_expect(PRINT);
         let exit = self.find_global_expect(EXIT);
 
         let _ = instructions.show_error_message(
             string_index,
-            string_to_memory.clone(),
-            heap_base.clone(),
-            print.clone(),
+            string_to_memory,
+            heap_base.index,
+            print.index,
         );
 
         if let Some(message) = message {
@@ -2075,7 +2064,7 @@ impl<'a> Generator<'a> {
                 .call(heap_base.index)
                 .expression(self, locals, scope, message)
                 .call(heap_base.index)
-                .call(string_to_memory.index)
+                .call(string_to_memory)
                 .call(print.index)
                 .call(heap_base.index)
                 .byte_store(b'\n')
@@ -2152,7 +2141,8 @@ impl<'a> Generator<'a> {
             BinOp::GtEqFloat => instructions.float_ge(),
             // String
             BinOp::Concatenate => {
-                let concat = self.function_string_concat();
+                let concat =
+                    self.get_function_builtin_external(BuiltinFunctionExternal::StringConcat);
                 instructions.call(concat)
             }
             // Eq
@@ -2250,57 +2240,9 @@ impl<'a> Generator<'a> {
         let id = if let Some(id) = scope.find(name) {
             id
         } else if let Some(variant) = self.variants.get(name).cloned() {
-            // Variant constructor
-            let (params, return_) = if let Some((params, return_)) = type_.fn_types() {
-                (params, return_)
-            } else {
-                (vec![], type_.clone())
-            };
+            let index = self.variant_constructor(type_, variant);
 
-            let (_, _, args) = return_.named_type_information().unwrap();
-
-            let mut name = self.type_pretty_name(&return_);
-            if let CustomType::Union { .. } = &variant.custom_type {
-                name += ".";
-                name += variant.constructor.name.clone();
-            }
-
-            let builtin = BuiltinFunction::VariantConstructor(
-                self.val_types(params.iter().cloned()),
-                self.val_type(&return_),
-                name.clone(),
-            );
-
-            let index = if let Some(index) = self.builtins.get(&builtin) {
-                *index
-            } else {
-                let num_fields = params.len() as u32;
-                let (type_index, tag) = match variant.custom_type {
-                    CustomType::ExternalI32 | CustomType::Enum { .. } => panic!(),
-                    CustomType::Struct {
-                        custom_type,
-                        constructor,
-                        ..
-                    } => (
-                        self.mono_struct_type_index(&return_, &custom_type, &constructor, &args)
-                            .0,
-                        None,
-                    ),
-                    CustomType::Union { custom_type } => {
-                        let (_, type_index, _) = self.mono_union_subtype_index(
-                            &return_,
-                            &custom_type,
-                            &variant.constructor,
-                            &args,
-                        );
-                        (type_index, variant.tag)
-                    }
-                };
-                let function = self.code_variant_constructor(type_index, num_fields, tag);
-                self.add_function_builtin(builtin, function).index
-            };
-
-            if params.is_empty() {
+            if type_.fn_types().is_none() {
                 // a variant with no args
                 let _ = instructions.call(index);
                 return;
@@ -2347,7 +2289,7 @@ impl<'a> Generator<'a> {
             let print = self.find_global_expect(PRINT);
             let heap_base = self.find_global_expect(HEAP_BASE);
             let string_to_memory =
-                self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
+                self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
             let string_index = self.string_index(
                 &format!(
                     "src/{}.gleam:{}{}",
@@ -2367,7 +2309,7 @@ impl<'a> Generator<'a> {
                 .global_as_non_null(string_index)
                 .call(heap_base.index)
                 .local_tee(dest)
-                .call(string_to_memory.index)
+                .call(string_to_memory)
                 // update end
                 .local_get(dest)
                 .i32_add()
@@ -2432,7 +2374,7 @@ impl<'a> Generator<'a> {
                 .into();
                 let string_index = self.string_index(&msg);
                 let string_to_memory =
-                    self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
+                    self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
                 let heap_base = self.find_global_expect(HEAP_BASE);
                 let print = self.find_global_expect(PRINT);
                 let exit = self.find_global_expect(EXIT);
@@ -2442,7 +2384,7 @@ impl<'a> Generator<'a> {
                     .if_(BlockType::Result(self.val_type(&assignment.value.type_())))
                       .local_get(right)
                     .else_()
-                      .show_error_message(string_index, string_to_memory, heap_base, print)
+                      .show_error_message(string_index, string_to_memory, heap_base.index, print.index)
                       .drop()
                       .i32_const(1)
                       .call(exit.index)
@@ -2940,6 +2882,67 @@ impl<'a> Generator<'a> {
         function
     }
 
+    fn variant_constructor(&mut self, type_: &Arc<Type>, variant: Variant) -> u32 {
+        let (params, return_) = if let Some((params, return_)) = type_.fn_types() {
+            (params, return_)
+        } else {
+            (vec![], type_.clone())
+        };
+
+        let mut constructor_name = self.type_pretty_name(&return_);
+        if let CustomType::Union { .. } = &variant.custom_type {
+            constructor_name += ".";
+            constructor_name += variant.constructor.name.clone();
+        }
+
+        let builtin = BuiltinFunction::VariantConstructor(
+            self.val_types(params.iter().cloned()),
+            self.val_type(&return_),
+            constructor_name.clone(),
+        );
+
+        if let Some(index) = self.builtins.get(&builtin) {
+            *index
+        } else {
+            let num_fields = params.len() as u32;
+            let (_, _, args) = return_.named_type_information().unwrap();
+            let (type_index, tag) = match variant.custom_type {
+                CustomType::ExternalI32 | CustomType::Enum { .. } => panic!(),
+                CustomType::Struct {
+                    custom_type,
+                    constructor,
+                    ..
+                } => (
+                    self.mono_struct_type_index(&return_, &custom_type, &constructor, &args)
+                        .0,
+                    None,
+                ),
+                CustomType::Union { custom_type } => {
+                    let (_, type_index, _) = self.mono_union_subtype_index(
+                        &return_,
+                        &custom_type,
+                        &variant.constructor,
+                        &args,
+                    );
+                    (type_index, variant.tag)
+                }
+            };
+            let function = self.code_variant_constructor(type_index, num_fields, tag);
+            let id = self.add_function_builtin(builtin, function);
+            id.index
+        }
+    }
+
+    fn ok_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> u32 {
+        let ok_type = type_::fn_(vec![ok.clone()], type_::result(ok, error));
+        self.variant_constructor(&ok_type, self.variants.get("Ok").unwrap().clone())
+    }
+
+    fn error_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> u32 {
+        let error_type = type_::fn_(vec![error.clone()], type_::result(ok, error));
+        self.variant_constructor(&error_type, self.variants.get("Error").unwrap().clone())
+    }
+
     fn string_index(&mut self, string: &EcoString) -> u32 {
         let string = unescape(string);
         let index = self.global_section.len();
@@ -2954,15 +2957,6 @@ impl<'a> Generator<'a> {
             );
             index
         })
-    }
-
-    fn function_string_concat(&mut self) -> u32 {
-        if let Some(index) = self.builtins.get(&BuiltinFunction::StringConcat) {
-            return *index;
-        }
-        let function = self.code_string_concat();
-        self.add_function_builtin(BuiltinFunction::StringConcat, function)
-            .index
     }
 
     fn code_string_concat(&self) -> Function {
@@ -3048,13 +3042,59 @@ impl<'a> Generator<'a> {
         function
     }
 
+    fn code_string_num_bytes(&self) -> Function {
+        let mut function = Function::new(vec![]);
+        let mut instructions = function.extend_instructions(self);
+        // params
+        let s = 0; // String
+        // return Int
+        let _ = instructions.local_get(s).string_len().i32_to_int().end();
+        function
+    }
+
+    fn code_string_get_byte(&mut self) -> Function {
+        let mut function = Function::new(vec![]);
+        let mut instructions = function.extend_instructions(self);
+        // params
+        let s = 0; // String
+        let i = 1; // Index
+        // return Int
+        let result = type_::result(type_::int(), type_::nil());
+        let ok_index = self.ok_variant_constructor(type_::int(), type_::nil());
+        let error_index = self.error_variant_constructor(type_::int(), type_::nil());
+        #[rustfmt::skip]
+        let _ = instructions
+            .local_get(i)
+            .local_get(s)
+            .string_len()
+            .i32_to_int()
+            .int_lt()
+            .local_get(i)
+            .int_const(&0.into())
+            .int_ge()
+            .i32_and()
+            .if_(BlockType::Result(self.val_type(&result)))
+              .local_get(s)
+              .local_get(i)
+              .int_to_i32()
+              .string_get()
+              .i32_to_int()
+              .call(ok_index)
+            .else_()
+              .i32_const(0)
+              .call(error_index)
+            .end()
+            .end();
+        function
+    }
+
     fn function_eq(&mut self, type_: &Arc<Type>) -> Eq {
         if type_.is_int() {
             return Eq::Int;
         } else if type_.is_float() {
             return Eq::Float;
-        } else if type_.is_bool() {
-            return Eq::Bool;
+        } else if type_.is_utf_codepoint() {
+            return Eq::I32;
         } else if let Some((CustomType::ExternalI32 | CustomType::Enum { .. }, _)) =
             self.custom_type(type_)
         {
@@ -3405,6 +3445,33 @@ impl<'a> Generator<'a> {
         function
     }
 
+    fn code_int_to_utf_codepoint(&mut self) -> Function {
+        let mut function = Function::new(vec![]);
+        // params
+        let i = 0; // Int
+        // return Result(UtfCodepoint, Nil)
+        let is_codepoint = self.find_global_expect(I32_IS_CODEPOINT);
+        let ok_index = self.ok_variant_constructor(type_::utf_codepoint(), type_::nil());
+        let error_index = self.error_variant_constructor(type_::utf_codepoint(), type_::nil());
+        // FIXME: check int to i32 conversion
+        #[rustfmt::skip]
+        let _ = function
+            .extend_instructions(self)
+            .local_get(i)
+            .int_to_i32()
+            .call(is_codepoint.index)
+            .if_(BlockType::Result(self.val_type(&type_::result(type_::utf_codepoint(), type_::nil()))))
+              .local_get(i)
+              .int_to_i32()
+              .call(ok_index)
+            .else_()
+              .i32_const(0)
+              .call(error_index)
+            .end()
+            .end();
+        function
+    }
+
     fn function_repr(&mut self, type_: &Arc<Type>) -> u32 {
         if type_.is_int() {
             return self.get_function_builtin_external(BuiltinFunctionExternal::IntRepr);
@@ -3414,6 +3481,9 @@ impl<'a> Generator<'a> {
         }
         if type_.is_string() {
             return self.get_function_builtin_external(BuiltinFunctionExternal::StringRepr);
+        }
+        if type_.is_utf_codepoint() {
+            return self.get_function_builtin_external(BuiltinFunctionExternal::UtfCodepointRepr);
         }
 
         let repr = if type_.is_list() {
@@ -3682,14 +3752,14 @@ impl<'a> Generator<'a> {
         let dest = 2; // I32
         // return I32 - number of written bytes
         let string_to_memory =
-            self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
+            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
         let string_index = self.string_index(name);
         let mut instructions = function.extend_instructions(self);
         let _ = instructions
             .global_as_non_null(string_index)
             .local_get(ptr)
             .local_tee(dest)
-            .call(string_to_memory.index)
+            .call(string_to_memory)
             .local_get(dest)
             .i32_add()
             .local_set(dest);
@@ -3748,10 +3818,24 @@ impl<'a> Generator<'a> {
             .extend_instructions(self)
             .global_as_non_null(string_index)
             .local_get(ptr)
-            .call(
-                self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name())
-                    .index,
-            )
+            .call(self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory))
+            .end();
+        function
+    }
+
+    fn code_utf_codepoint_repr(&mut self) -> Function {
+        let mut function = Function::new(vec![]);
+        // params
+        let _func = 0; // Function
+        let ptr = 1; // I32
+        // return I32 - number of written bytes
+        let repr = "//utfcodepoint()";
+        let string_index = self.string_index(&repr.into());
+        let _ = function
+            .extend_instructions(self)
+            .global_as_non_null(string_index)
+            .local_get(ptr)
+            .call(self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory))
             .end();
         function
     }
@@ -3768,7 +3852,7 @@ impl<'a> Generator<'a> {
         let ptr = 1; // I32
         // return I32 - number of written bytes
         let string_to_memory =
-            self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
+            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
         let mut instructions = function.extend_instructions(self);
         match custom_type {
             CustomType::ExternalI32 => {
@@ -3798,7 +3882,7 @@ impl<'a> Generator<'a> {
                     .unreachable()
                     .end()
                     .local_get(ptr)
-                    .call(string_to_memory.index)
+                    .call(string_to_memory)
                     .end();
             }
             CustomType::Struct {
@@ -3948,15 +4032,15 @@ impl<'a> Generator<'a> {
 
     fn code_parse_int(&mut self) -> Function {
         let parse = match self.int {
-            IntType::I32 => self.find_global_expect(PARSE_I32),
-            IntType::I64 => self.find_global_expect(PARSE_I64),
+            IntType::I32 => self.find_global_expect(I32_PARSE),
+            IntType::I64 => self.find_global_expect(I64_PARSE),
         };
         self.code_parse(type_::int(), parse.index)
     }
 
     fn code_parse_float(&mut self) -> Function {
         let parse = match self.float {
-            FloatType::F64 => self.find_global_expect(PARSE_F64),
+            FloatType::F64 => self.find_global_expect(F64_PARSE),
         };
         self.code_parse(type_::float(), parse.index)
     }
@@ -3966,51 +4050,55 @@ impl<'a> Generator<'a> {
         // params
         let s = 0; // String
         // locals
-        let prt = 1; // I32
+        let ptr = 1; // I32
         let dest = 2; // I32
         let len = 3; // I32
         let r = 4; // type_
         // return Result(type, Nil)
-        // FIX: create on demand
         let string_to_memory =
-            self.find_global_expect(&BuiltinFunctionExternal::StringToMemory.name());
+            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
         let heap_base = self.find_global_expect(HEAP_BASE);
         let result = type_::result(type_.clone(), type_::nil());
-        let params = vec![type_];
-        let ok_type = type_::fn_(params.clone(), result.clone());
-        let ok_index = self.function_type_index(params, Some(result.clone()));
-        let params = vec![type_::nil()];
-        let err_type = type_::fn_(params.clone(), result.clone());
-        let err_index = self.function_type_index(params, Some(result.clone()));
-        let scope = Scope::with_params(self.globals.clone(), &[]);
-        let mut instructions = function.extend_instructions(self);
-        let _ = instructions
-            .local_get(s)
+        let ok_index = self.ok_variant_constructor(type_.clone(), type_::nil());
+        let error_index = self.error_variant_constructor(type_.clone(), type_::nil());
+        #[rustfmt::skip]
+        let _ = function
+            .extend_instructions(self)
             .call(heap_base.index)
-            .local_tee(prt)
+            .local_tee(ptr)
+            .i32_const(0)
+            .i32_store(MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            })
+            .local_get(ptr)
+            .i32_const(4)
+            .i32_add()
             .local_set(dest)
-            .i32_inc(dest)
+            .local_get(s)
             .local_get(dest)
-            .call(string_to_memory.index)
+            .call(string_to_memory)
             .local_set(len)
-            .local_get(prt) // result
+            .local_get(ptr) // result
             .local_get(dest) // ptr
             .local_get(len)
             .call(parse)
             .local_set(r)
-            .local_get(prt)
-            .i32_load8_u(MemArg {
+            .local_get(ptr)
+            .i32_load(MemArg {
                 offset: 0,
-                align: 0,
+                align: 2,
                 memory_index: 0,
             })
             .if_(BlockType::Result(self.val_type(&result)))
-            .local_get(r);
-        // FIXME: call variant_constructor instead of expression_var
-        let _ = self.expression_var(&scope, &mut instructions, &"Ok".into(), &ok_type);
-        let _ = instructions.call_ref(ok_index).else_().i32_const(0); // FIXME: get nil value
-        let _ = self.expression_var(&scope, &mut instructions, &"Error".into(), &err_type);
-        let _ = instructions.call_ref(err_index).end().end();
+              .local_get(r)
+              .call(ok_index)
+            .else_()
+              .i32_const(0) // get nil
+              .call(error_index)
+            .end()
+            .end();
         function
     }
 
@@ -4037,10 +4125,15 @@ impl<'a> Generator<'a> {
         }
 
         let function = match builtin {
+            BuiltinFunctionExternal::StringConcat => self.code_string_concat(),
+            BuiltinFunctionExternal::StringNumBytes => self.code_string_num_bytes(),
+            BuiltinFunctionExternal::StringGetByte => self.code_string_get_byte(),
             BuiltinFunctionExternal::I32ToInt => self.code_i32_to_int(),
             BuiltinFunctionExternal::IntToI32 => self.code_int_to_i32(),
+            BuiltinFunctionExternal::IntToUtfCodepoint => self.code_int_to_utf_codepoint(),
             BuiltinFunctionExternal::IntRepr => self.code_int_repr(),
             BuiltinFunctionExternal::FloatRepr => self.code_float_repr(),
+            BuiltinFunctionExternal::UtfCodepointRepr => self.code_utf_codepoint_repr(),
             BuiltinFunctionExternal::StringRepr => self.code_string_repr(),
             BuiltinFunctionExternal::StringToMemory => self.code_string_to_memory(),
             BuiltinFunctionExternal::MemoryToString => self.code_memory_to_string(),
@@ -4123,7 +4216,6 @@ struct ExtendedInstructionSink<'a> {
 #[derive(Clone, Copy)]
 enum Eq {
     I32,
-    Bool,
     Int,
     Float,
     Call(u32),
@@ -4220,7 +4312,6 @@ impl<'a> ExtendedInstructionSink<'a> {
                 let _ = self.instructions.i32_eq();
                 self
             }
-            Eq::Bool => self.bool_eq(),
             Eq::Int => self.int_eq(),
             Eq::Float => self.float_eq(),
             Eq::Call(index) => self.call(index),
@@ -4325,16 +4416,16 @@ impl<'a> ExtendedInstructionSink<'a> {
     fn show_error_message(
         &mut self,
         string_index: u32,
-        string_to_memory: Id,
-        heap_base: Id,
-        print: Id,
+        string_to_memory: u32,
+        heap_base: u32,
+        print: u32,
     ) -> &mut Self {
         self.i32_const(STDERR)
-            .call(heap_base.index)
+            .call(heap_base)
             .global_as_non_null(string_index)
-            .call(heap_base.index)
-            .call(string_to_memory.index)
-            .call(print.index)
+            .call(heap_base)
+            .call(string_to_memory)
+            .call(print)
     }
 
     delegate! {
@@ -4374,9 +4465,12 @@ impl<'a> ExtendedInstructionSink<'a> {
         i32_ge_u(),
         i32_lt_u(),
         i32_add(),
+        i32_and(),
         i32_sub(),
         i32_store8(m: MemArg),
+        i32_store(m: MemArg),
         i32_load8_u(m: MemArg),
+        i32_load(m: MemArg),
     }
 }
 
@@ -4388,11 +4482,6 @@ impl<'a> ExtendedInstructionSink<'a> {
 
     fn bool_not(&mut self) -> &mut Self {
         let _ = self.instructions.i32_eqz();
-        self
-    }
-
-    fn bool_eq(&mut self) -> &mut Self {
-        let _ = self.instructions.i32_eq();
         self
     }
 }
@@ -5446,7 +5535,7 @@ struct ExternalFunction {
 
 struct Externals {
     externals: HashMap<EcoString, ExternalFunction>,
-    builtins: HashMap<BuiltinFunctionExternal, Option<(EcoString, Arc<Type>)>>,
+    builtins: HashMap<BuiltinFunctionExternal, (EcoString, Arc<Type>)>,
     // FIXME: use a reference
     custom_types: Vec<TypedCustomType>,
     visited_types: Vec<Arc<Type>>,
@@ -5495,7 +5584,6 @@ impl Externals {
         externals.functions(generator, &generator.module.definitions.functions);
 
         if externals.echo_any || externals.assert || externals.todo_panic {
-            externals.insert_builtin(BuiltinFunctionExternal::StringToMemory, None);
             externals.insert_external(HEAP_BASE);
             externals.insert_external(PRINT);
         }
@@ -5505,17 +5593,22 @@ impl Externals {
         }
 
         if externals.echo_int {
-            externals.insert_builtin(BuiltinFunctionExternal::IntRepr, None);
+            for dep in BuiltinFunctionExternal::IntRepr
+                .externals_dependencies(generator.int, generator.float)
+            {
+                externals.insert_external(dep);
+            }
         }
 
         if externals.echo_float {
-            externals.insert_builtin(BuiltinFunctionExternal::FloatRepr, None);
+            for dep in BuiltinFunctionExternal::FloatRepr
+                .externals_dependencies(generator.int, generator.float)
+            {
+                externals.insert_external(dep);
+            }
         }
 
         for builtin in externals.builtins.keys().cloned().collect_vec() {
-            for dep in builtin.dependencies() {
-                externals.insert_builtin(dep.clone(), None);
-            }
             for dep in builtin.externals_dependencies(generator.int, generator.float) {
                 externals.insert_external(dep);
             }
@@ -5540,16 +5633,20 @@ impl Externals {
     fn insert_builtin(
         &mut self,
         builtin: BuiltinFunctionExternal,
-        use_: Option<(EcoString, Arc<Type>)>,
+        name: EcoString,
+        type_: Arc<Type>,
     ) {
-        let _ = self.builtins.insert(builtin, use_);
+        let _ = self.builtins.insert(builtin, (name, type_));
     }
 
     fn use_data_section(&self) -> bool {
-        self.echo_any
-        // FIXME: echo needs __heap_base, which is in data section,
-        //        but we cannot easily get it without the other data,
-        //        so we include all data section.
+        WASM_NATIVE.iter().any(|name| {
+            self.externals
+                .get(*name)
+                .map(|e| !e.used_names.is_empty())
+                .unwrap_or(false)
+        })
+        // FIXME: split data section?
     }
 
     fn functions<'a>(
@@ -5588,8 +5685,7 @@ impl Externals {
                         );
                     }
                 } else if let Some(builtin) = BuiltinFunctionExternal::by_name(name) {
-                    let _ =
-                        self.insert_builtin(builtin, Some((name.into(), function_type(function))));
+                    self.insert_builtin(builtin, name.into(), function_type(function));
                 } else {
                     panic!("There is no function {name} in {module} module.");
                 }
