@@ -287,7 +287,7 @@ impl Type {
             {
                 true
             }
-            Self::Var { type_ } => type_.borrow().is_nil(),
+            Self::Var { type_ } => type_.borrow().is_utf_codepoint(),
             _ => false,
         }
     }
@@ -1324,6 +1324,13 @@ impl TypeVar {
     pub fn is_nil(&self) -> bool {
         match self {
             Self::Link { type_ } => type_.is_nil(),
+            Self::Unbound { .. } | Self::Generic { .. } => false,
+        }
+    }
+
+    pub fn is_utf_codepoint(&self) -> bool {
+        match self {
+            Self::Link { type_ } => type_.is_utf_codepoint(),
             Self::Unbound { .. } | Self::Generic { .. } => false,
         }
     }
