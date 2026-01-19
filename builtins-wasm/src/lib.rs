@@ -147,6 +147,11 @@ unsafe fn bytes_from_ptr_len<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
 
 // Strings
 #[unsafe(no_mangle)]
-pub extern "C" fn _i32_is_codepoint(ch: u32) -> bool {
-    char::from_u32(ch).is_some()
+pub extern "C" fn _i32_is_codepoint(ch: i32) -> bool {
+    ch.try_into().ok().and_then(char::from_u32).is_some()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _i64_is_codepoint(ch: i64) -> bool {
+    ch.try_into().ok().and_then(char::from_u32).is_some()
 }

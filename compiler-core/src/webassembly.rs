@@ -57,6 +57,10 @@ const I32_IS_CODEPOINT: &str = "_i32_is_codepoint";
 
 const I64_TO_STR: &str = "_i64_to_str";
 const I64_PARSE: &str = "_i64_parse";
+const I64_IS_CODEPOINT: &str = "_i64_is_codepoint";
+
+const F32_TO_STR: &str = "_f32_to_str";
+const F32_PARSE: &str = "_f32_parse";
 
 const F64_TO_STR: &str = "_f64_to_str";
 const F64_PARSE: &str = "_f64_parse";
@@ -333,6 +337,7 @@ enum WasmConst {
     Struct {
         global_index: u32,
         type_index: u32,
+        tag: Option<i32>,
         elements: Vec<TypedConstant>,
     },
     Var {
@@ -475,7 +480,7 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::IntRepr => (vec![int(), i32.clone()], i32),
             BuiltinFunctionExternal::FloatRepr => (vec![float(), i32.clone()], i32),
             BuiltinFunctionExternal::UtfCodepointRepr => (vec![utf_codepoint(), i32.clone()], i32),
-            BuiltinFunctionExternal::StringRepr => (vec![string(), i32.clone()], int()),
+            BuiltinFunctionExternal::StringRepr => (vec![string(), i32.clone()], i32),
             BuiltinFunctionExternal::StringToMemory => (vec![string(), i32.clone()], i32),
             BuiltinFunctionExternal::MemoryToString => (vec![i32.clone(), i32], string()),
             BuiltinFunctionExternal::ParseInt => (vec![string()], result(int(), nil())),
@@ -494,7 +499,10 @@ impl BuiltinFunctionExternal {
             | BuiltinFunctionExternal::StringRepr
             | BuiltinFunctionExternal::StringToMemory
             | BuiltinFunctionExternal::MemoryToString => &[],
-            BuiltinFunctionExternal::IntToUtfCodepoint => &[I32_IS_CODEPOINT],
+            BuiltinFunctionExternal::IntToUtfCodepoint => match int {
+                IntType::I32 => &[I32_IS_CODEPOINT],
+                IntType::I64 => &[I64_IS_CODEPOINT],
+            },
             BuiltinFunctionExternal::IntRepr => match int {
                 IntType::I32 => &[I32_TO_STR],
                 IntType::I64 => &[I64_TO_STR],
@@ -1405,6 +1413,7 @@ impl<'a> Generator<'a> {
                 self.consts.push(WasmConst::Struct {
                     global_index: id.index,
                     type_index,
+                    tag: None,
                     elements: elements.clone(),
                 });
                 id
@@ -1442,8 +1451,8 @@ impl<'a> Generator<'a> {
                         let value = values.iter().position(|value| value == name).unwrap();
                         self.add_const(
                             const_name,
-                            self.int.val_type(),
-                            self.int.int_const(&value.into()),
+                            ValType::I32,
+                            ConstExpr::i32_const(value as i32),
                             export,
                             false,
                         )
@@ -1465,6 +1474,7 @@ impl<'a> Generator<'a> {
                         self.consts.push(WasmConst::Struct {
                             global_index: id.index,
                             type_index,
+                            tag: None,
                             elements: arguments.iter().map(|e| &e.value).cloned().collect(),
                         });
                         id
@@ -1485,13 +1495,8 @@ impl<'a> Generator<'a> {
                         self.consts.push(WasmConst::Struct {
                             global_index: id.index,
                             type_index,
-                            elements: iter::once(TypedConstant::Int {
-                                location: SrcSpan::new(0, 0),
-                                value: "".into(),
-                                int_value: index.into(),
-                            })
-                            .chain(arguments.iter().map(|e| &e.value).cloned())
-                            .collect(),
+                            tag: Some(index.into()),
+                            elements: arguments.iter().map(|e| &e.value).cloned().collect(),
                         });
                         id
                     }
@@ -1506,7 +1511,7 @@ impl<'a> Generator<'a> {
                 } else if let Some((custom_type, args)) = self.custom_type(type_) {
                     match custom_type {
                         CustomType::ExternalI32 | CustomType::Enum { .. } => {
-                            (self.int.int_const(&0.into()), self.int.val_type())
+                            (ConstExpr::i32_const(0), ValType::I32)
                         }
                         CustomType::Struct {
                             custom_type,
@@ -1931,8 +1936,9 @@ impl<'a> Generator<'a> {
                 body,
                 ..
             } => {
+                let type_name = self.type_pretty_name(type_).replace(" ", "");
                 let name: EcoString =
-                    format!("anonymous@{}-{}", location.start, location.end).into();
+                    format!("anonymous@{}-{}:{type_name}", location.start, location.end).into();
                 let id = self.function_local(name, type_, arguments, body);
                 let _ = instructions.ref_func(id.index);
             }
@@ -2860,8 +2866,12 @@ impl<'a> Generator<'a> {
                 WasmConst::Struct {
                     global_index,
                     type_index,
+                    tag,
                     elements,
                 } => {
+                    if let Some(tag) = tag {
+                        let _ = instructions.i32_const(tag);
+                    }
                     let _ = instructions
                         .constants(self, &elements)
                         .struct_new(type_index)
@@ -3081,7 +3091,7 @@ impl<'a> Generator<'a> {
               .i32_to_int()
               .call(ok_index)
             .else_()
-              .i32_const(0)
+              .i32_const(0) // FIXME: use nil constructor
               .call(error_index)
             .end()
             .end();
@@ -3307,6 +3317,15 @@ impl<'a> Generator<'a> {
         type_index: u32,
         types: impl IntoIterator<Item = Arc<Type>>,
     ) -> Function {
+        self.code_compisite_or_union_eq(type_index, false, types)
+    }
+
+    fn code_compisite_or_union_eq(
+        &mut self,
+        type_index: u32,
+        union_: bool,
+        types: impl IntoIterator<Item = Arc<Type>>,
+    ) -> Function {
         let mut function = Function::new(vec![]);
         let mut instructions = function.extend_instructions(self);
         // params
@@ -3323,12 +3342,13 @@ impl<'a> Generator<'a> {
               .return_()
             .end();
         for (field_index, type_) in types.into_iter().enumerate() {
+            let field_index = field_index as u32 + union_ as u32;
             #[rustfmt::skip]
             let _ = instructions
                 .local_get(a)
-                .struct_get(type_index, field_index as u32)
+                .struct_get(type_index, field_index)
                 .local_get(b)
-                .struct_get(type_index, field_index as u32)
+                .struct_get(type_index, field_index)
                 .eq(self.function_eq(&type_))
                 .bool_not()
                 .if_(BlockType::Empty)
@@ -3376,6 +3396,7 @@ impl<'a> Generator<'a> {
             .end()
             .block(BlockType::Empty);
 
+        // FIXME: use br_table?
         for (target_tag, constructor) in custom_type.constructors.iter().enumerate() {
             let (_, type_index, types) =
                 self.mono_union_subtype_index(type_, custom_type, constructor, args);
@@ -3384,8 +3405,7 @@ impl<'a> Generator<'a> {
             let index = if let Some(index) = self.builtins.get(&builtin) {
                 *index
             } else {
-                let code =
-                    self.code_composite_eq(type_index, iter::once(type_::int()).chain(types));
+                let code = self.code_compisite_or_union_eq(type_index, true, types);
                 self.add_function_builtin(builtin, code).index
             };
 
@@ -3450,7 +3470,10 @@ impl<'a> Generator<'a> {
         // params
         let i = 0; // Int
         // return Result(UtfCodepoint, Nil)
-        let is_codepoint = self.find_global_expect(I32_IS_CODEPOINT);
+        let is_codepoint = match self.int {
+            IntType::I32 => self.find_global_expect(I32_IS_CODEPOINT),
+            IntType::I64 => self.find_global_expect(I64_IS_CODEPOINT),
+        };
         let ok_index = self.ok_variant_constructor(type_::utf_codepoint(), type_::nil());
         let error_index = self.error_variant_constructor(type_::utf_codepoint(), type_::nil());
         // FIXME: check int to i32 conversion
@@ -3458,14 +3481,13 @@ impl<'a> Generator<'a> {
         let _ = function
             .extend_instructions(self)
             .local_get(i)
-            .int_to_i32()
             .call(is_codepoint.index)
             .if_(BlockType::Result(self.val_type(&type_::result(type_::utf_codepoint(), type_::nil()))))
               .local_get(i)
               .int_to_i32()
               .call(ok_index)
             .else_()
-              .i32_const(0)
+              .i32_const(0) // FIXME: use nil constructor
               .call(error_index)
             .end()
             .end();
@@ -4095,7 +4117,7 @@ impl<'a> Generator<'a> {
               .local_get(r)
               .call(ok_index)
             .else_()
-              .i32_const(0) // get nil
+              .i32_const(0) // FIXME: use nil constructor
               .call(error_index)
             .end()
             .end();
@@ -4550,6 +4572,8 @@ impl<'a> ExtendedInstructionSink<'a> {
                 .local_set(divisor)
                 .local_set(dividend)
                 .local_get(divisor)
+                .i64_const(0)
+                .i64_ne()
                 .if_(BlockType::Result(ValType::I64))
                   .local_get(dividend)
                   .local_get(divisor)
