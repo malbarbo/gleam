@@ -508,6 +508,7 @@ impl BuiltinFunctionExternal {
                 IntType::I64 => &[I64_TO_STR],
             },
             BuiltinFunctionExternal::FloatRepr => match float {
+                FloatType::F32 => &[F32_TO_STR],
                 FloatType::F64 => &[F64_TO_STR],
             },
             BuiltinFunctionExternal::ParseInt => match int {
@@ -515,6 +516,7 @@ impl BuiltinFunctionExternal {
                 IntType::I64 => &[I64_PARSE, HEAP_BASE],
             },
             BuiltinFunctionExternal::ParseFloat => match float {
+                FloatType::F32 => &[F32_PARSE, HEAP_BASE],
                 FloatType::F64 => &[F64_PARSE, HEAP_BASE],
             },
         }
@@ -3572,6 +3574,7 @@ impl<'a> Generator<'a> {
     fn code_float_repr(&self) -> Function {
         let mut function = Function::new(vec![]);
         let id = match self.float {
+            FloatType::F32 => self.find_global_expect(F32_TO_STR),
             FloatType::F64 => self.find_global_expect(F64_TO_STR),
         };
         let _ = function
@@ -4062,6 +4065,7 @@ impl<'a> Generator<'a> {
 
     fn code_parse_float(&mut self) -> Function {
         let parse = match self.float {
+            FloatType::F32 => self.find_global_expect(F32_PARSE),
             FloatType::F64 => self.find_global_expect(F64_PARSE),
         };
         self.code_parse(type_::float(), parse.index)
@@ -4610,15 +4614,20 @@ impl<'a> ExtendedInstructionSink<'a> {
     int_op!(int_ge, i32_ge_s, i64_ge_s);
 }
 
+#[allow(unused)]
 #[derive(Debug, Copy, Clone)]
 enum FloatType {
+    F32,
     F64,
 }
 
 macro_rules! float_op {
-    ($name:ident, $f64:ident) => {
+    ($name:ident, $f32:ident, $f64:ident) => {
         fn $name(&mut self) -> &mut Self {
-            let _ = self.instructions.$f64();
+            let _ = match self.float {
+                FloatType::F32 => self.instructions.$f32(),
+                FloatType::F64 => self.instructions.$f64(),
+            };
             self
         }
     };
@@ -4626,50 +4635,83 @@ macro_rules! float_op {
 
 impl FloatType {
     fn val_type(&self) -> ValType {
-        ValType::F64
+        match self {
+            FloatType::F32 => ValType::F32,
+            FloatType::F64 => ValType::F64,
+        }
     }
 
     fn float_const(&self, value: &EcoString) -> ConstExpr {
-        ConstExpr::f64_const(value.parse::<f64>().unwrap().into())
+        let value = value.replace("_", "");
+        match self {
+            FloatType::F32 => ConstExpr::f32_const(value.parse::<f32>().unwrap().into()),
+            FloatType::F64 => ConstExpr::f64_const(value.parse::<f64>().unwrap().into()),
+        }
     }
 }
 
 impl<'a> ExtendedInstructionSink<'a> {
     fn float_const(&mut self, value: &str) -> &mut Self {
         let value = value.replace("_", "");
-        let _ = self
-            .instructions
-            .f64_const(value.parse::<f64>().unwrap().into());
+        let _ = match self.float {
+            FloatType::F32 => self
+                .instructions
+                .f32_const(value.parse::<f32>().unwrap().into()),
+            FloatType::F64 => self
+                .instructions
+                .f64_const(value.parse::<f64>().unwrap().into()),
+        };
         self
     }
 
     fn float_div(&mut self, dividend: u32, divisor: u32) -> &mut Self {
-        #[rustfmt::skip]
-        let _ = self
-            .instructions
-            .local_set(divisor)
-            .local_set(dividend)
-            .local_get(divisor)
-            .f64_const(0.0f64.into())
-            .f64_ne()
-            .if_(BlockType::Result(ValType::F64))
-              .local_get(dividend)
-              .local_get(divisor)
-              .f64_div()
-            .else_()
-              .f64_const(0.0f64.into())
-            .end();
+        match self.float {
+            FloatType::F32 => {
+                #[rustfmt::skip]
+                let _ = self
+                    .instructions
+                    .local_set(divisor)
+                    .local_set(dividend)
+                    .local_get(divisor)
+                    .f32_const(0.0f32.into())
+                    .f32_ne()
+                    .if_(BlockType::Result(ValType::F32))
+                      .local_get(dividend)
+                      .local_get(divisor)
+                      .f32_div()
+                    .else_()
+                      .f32_const(0.0f32.into())
+                    .end();
+            }
+            FloatType::F64 => {
+                #[rustfmt::skip]
+                let _ = self
+                    .instructions
+                    .local_set(divisor)
+                    .local_set(dividend)
+                    .local_get(divisor)
+                    .f64_const(0.0f64.into())
+                    .f64_ne()
+                    .if_(BlockType::Result(ValType::F64))
+                      .local_get(dividend)
+                      .local_get(divisor)
+                      .f64_div()
+                    .else_()
+                      .f64_const(0.0f64.into())
+                    .end();
+            }
+        }
         self
     }
 
-    float_op!(float_add, f64_add);
-    float_op!(float_sub, f64_sub);
-    float_op!(float_mul, f64_mul);
-    float_op!(float_eq, f64_eq);
-    float_op!(float_lt, f64_lt);
-    float_op!(float_le, f64_le);
-    float_op!(float_gt, f64_gt);
-    float_op!(float_ge, f64_ge);
+    float_op!(float_add, f32_add, f64_add);
+    float_op!(float_sub, f32_sub, f64_sub);
+    float_op!(float_mul, f32_mul, f64_mul);
+    float_op!(float_eq, f32_eq, f64_eq);
+    float_op!(float_lt, f32_lt, f64_lt);
+    float_op!(float_le, f32_le, f64_le);
+    float_op!(float_gt, f32_gt, f64_gt);
+    float_op!(float_ge, f32_ge, f64_ge);
 }
 
 #[derive(Clone, Copy)]
