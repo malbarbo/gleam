@@ -2258,6 +2258,20 @@ impl<A, B> ClauseGuard<A, B> {
             | ClauseGuard::Block { .. } => None,
         }
     }
+
+    pub fn is_var(&self) -> bool {
+        match self {
+            ClauseGuard::Var { .. } => true,
+            _ => false,
+        }
+    }
+
+    pub fn var_name(&self) -> Option<&EcoString> {
+        match self {
+            ClauseGuard::Var { name, .. } => Some(name),
+            _ => None,
+        }
+    }
 }
 
 impl TypedClauseGuard {

@@ -788,6 +788,13 @@ impl TypedExpr {
         }
     }
 
+    pub fn var_name(&self) -> Option<&EcoString> {
+        match self {
+            Self::Var { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
     pub(crate) fn get_documentation(&self) -> Option<&str> {
         match self {
             TypedExpr::Var { constructor, .. } => constructor.get_documentation(),

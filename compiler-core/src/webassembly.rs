@@ -2127,7 +2127,7 @@ impl<'a> Generator<'a> {
             BinOp::SubInt => instructions.int_sub(),
             BinOp::MultInt => instructions.int_mul(),
             BinOp::DivInt => {
-                let (left, right) = locals.for_div(left, right);
+                let (left, right) = locals.for_div(&scope, left, right);
                 instructions.int_div(left, right)
             }
             BinOp::RemainderInt => instructions.int_rem(),
@@ -2140,7 +2140,7 @@ impl<'a> Generator<'a> {
             BinOp::SubFloat => instructions.float_sub(),
             BinOp::MultFloat => instructions.float_mul(),
             BinOp::DivFloat => {
-                let (left, right) = locals.for_div(left, right);
+                let (left, right) = locals.for_div(&scope, left, right);
                 instructions.float_div(left, right)
             }
             BinOp::LtFloat => instructions.float_lt(),
@@ -2245,21 +2245,7 @@ impl<'a> Generator<'a> {
         name: &EcoString,
         type_: &Arc<Type>,
     ) {
-        let id = if let Some(id) = scope.find(name) {
-            id
-        } else if let Some(variant) = self.variants.get(name).cloned() {
-            let index = self.variant_constructor(type_, variant);
-
-            if type_.fn_types().is_none() {
-                // a variant with no args
-                let _ = instructions.call(index);
-                return;
-            }
-
-            Id::func(name.clone(), index)
-        } else {
-            self.var(name, type_)
-        };
+        let id = self.expression_var_id(scope, name, type_);
 
         let is_ref_non_null = |type_: &Arc<Type>| {
             type_.is_string() || type_.tuple_types().is_some() || {
@@ -2272,7 +2258,13 @@ impl<'a> Generator<'a> {
         };
 
         let _ = match id.kind {
-            IdKind::Func => instructions.ref_func(id.index),
+            IdKind::Func => {
+                if self.variants.contains_key(name) && type_.fn_types().is_none() {
+                    instructions.call(id.index)
+                } else {
+                    instructions.ref_func(id.index)
+                }
+            }
             IdKind::Global => {
                 if is_ref_non_null(type_) {
                     instructions.global_as_non_null(id.index)
@@ -2282,6 +2274,16 @@ impl<'a> Generator<'a> {
             }
             IdKind::Local => instructions.local_get(id.index),
         };
+    }
+
+    fn expression_var_id(&mut self, scope: &Scope, name: &EcoString, type_: &Arc<Type>) -> Id {
+        if let Some(id) = scope.find(name) {
+            id
+        } else if let Some(variant) = self.variants.get(name).cloned() {
+            Id::func(name.clone(), self.variant_constructor(type_, variant))
+        } else {
+            self.var(name, type_)
+        }
     }
 
     fn expression_echo(
@@ -2308,7 +2310,12 @@ impl<'a> Generator<'a> {
                 .into(),
             );
 
-            let (dest, expr) = locals.for_echo(echo, expression);
+            let (dest, expr) = locals.for_echo(echo);
+
+            let expr = match expr {
+                Ok(expr) => expr,
+                Err(name) => self.expression_var_id(scope, name, &echo.type_()).index,
+            };
 
             let _ = instructions
                 .expression(self, locals, scope.clone(), expression)
@@ -2667,7 +2674,7 @@ impl<'a> Generator<'a> {
                     .int_rem();
             }
             ClauseGuard::DivInt { left, right, .. } => {
-                let (a, b) = locals.for_guard_div(left, right);
+                let (a, b) = locals.for_guard_div(scope, left, right);
                 let _ = instructions
                     .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
                     .int_div(a, b);
@@ -2709,7 +2716,7 @@ impl<'a> Generator<'a> {
                     .float_mul();
             }
             ClauseGuard::DivFloat { left, right, .. } => {
-                let (a, b) = locals.for_guard_div(left, right);
+                let (a, b) = locals.for_guard_div(scope, left, right);
                 let _ = instructions
                     .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
                     .float_div(a, b);
@@ -4870,9 +4877,15 @@ impl Locals {
 
     fn insert_assignment(&mut self, generator: &mut Generator<'_>, assignment: &TypedAssignment) {
         if matches!(assignment.kind, AssignmentKind::Let) && assignment.pattern.is_variable() {
-            //we use the local variable
+            // use var name
         } else {
-            self._insert(generator, assignment, &assignment.type_());
+            self._insert(
+                generator,
+                assignment,
+                &assignment.type_(),
+                "assignment",
+                assignment.location,
+            );
         }
     }
 
@@ -4885,12 +4898,36 @@ impl Locals {
     }
 
     fn insert_div(&mut self, generator: &mut Generator<'_>, left: &TypedExpr, right: &TypedExpr) {
-        self._insert(generator, left, &left.type_());
-        self._insert(generator, right, &right.type_());
+        if !left.is_var() {
+            self._insert(generator, left, &left.type_(), "div_left", left.location());
+        } else {
+            // use var name
+        }
+        if !right.is_var() {
+            self._insert(
+                generator,
+                right,
+                &right.type_(),
+                "div_right",
+                right.location(),
+            );
+        } else {
+            // use var name
+        }
     }
 
-    fn for_div(&self, left: &TypedExpr, right: &TypedExpr) -> (u32, u32) {
-        (self._get(left), self._get(right))
+    fn for_div(&self, scope: &Scope, left: &TypedExpr, right: &TypedExpr) -> (u32, u32) {
+        let left = if let Some(name) = left.var_name() {
+            scope.find(name).unwrap().index
+        } else {
+            self._get(left)
+        };
+        let right = if let Some(name) = right.var_name() {
+            scope.find(name).unwrap().index
+        } else {
+            self._get(right)
+        };
+        (left, right)
     }
 
     fn insert_guard_div(
@@ -4899,17 +4936,46 @@ impl Locals {
         left: &TypedClauseGuard,
         right: &TypedClauseGuard,
     ) {
-        self._insert(generator, left, &left.type_());
-        self._insert(generator, right, &right.type_());
+        if !left.is_var() {
+            self._insert(generator, left, &left.type_(), "div_left", left.location());
+        } else {
+            // use var name
+        }
+        if !right.is_var() {
+            self._insert(
+                generator,
+                right,
+                &right.type_(),
+                "div_right",
+                right.location(),
+            );
+        } else {
+            // use var name
+        }
     }
 
-    fn for_guard_div(&self, left: &TypedClauseGuard, right: &TypedClauseGuard) -> (u32, u32) {
-        (self._get(left), self._get(right))
+    fn for_guard_div(
+        &self,
+        scope: &Scope,
+        left: &TypedClauseGuard,
+        right: &TypedClauseGuard,
+    ) -> (u32, u32) {
+        let left = if let Some(name) = left.var_name() {
+            scope.find(name).unwrap().index
+        } else {
+            self._get(left)
+        };
+        let right = if let Some(name) = right.var_name() {
+            scope.find(name).unwrap().index
+        } else {
+            self._get(right)
+        };
+        (left, right)
     }
 
     fn insert_call(&mut self, generator: &mut Generator<'_>, fun: &TypedExpr) {
         if !fun.is_var() {
-            self._insert(generator, fun, &fun.type_())
+            self._insert(generator, fun, &fun.type_(), "fun", fun.location())
         } else {
             set_ubound_or_generic(&fun.type_(), &type_::nil());
         }
@@ -4923,11 +4989,13 @@ impl Locals {
     fn insert_subjects(&mut self, generator: &mut Generator<'_>, subjects: &[TypedExpr]) {
         for subject in subjects {
             // FIXME: do not create a local if the subject is var
-            let name = format!(
-                "subject@{}",
-                generator.line_numbers.line_number(subject.location().start)
+            self._insert(
+                generator,
+                subject,
+                &subject.type_(),
+                "subject",
+                subject.location(),
             );
-            self._insert_named(generator, subject, &subject.type_(), Some(name.into()));
         }
     }
 
@@ -4938,14 +5006,22 @@ impl Locals {
     fn insert_pattern(&mut self, generator: &mut Generator<'_>, pattern: &TypedPattern) {
         match pattern {
             TypedPattern::Variable { name, .. } => {
-                self._insert_named(generator, pattern, &pattern.type_(), Some(name.clone()));
+                self._insert(
+                    generator,
+                    pattern,
+                    &pattern.type_(),
+                    name,
+                    pattern.location(),
+                );
             }
             _ => {
-                let name = format!(
-                    "pattern@{}",
-                    generator.line_numbers.line_number(pattern.location().start)
+                self._insert(
+                    generator,
+                    pattern,
+                    &pattern.type_(),
+                    "pattern",
+                    pattern.location(),
                 );
-                self._insert_named(generator, pattern, &pattern.type_(), Some(name.into()));
             }
         }
     }
@@ -4959,41 +5035,52 @@ impl Locals {
         generator: &mut Generator<'_>,
         assignment: &TypedPipelineAssignment,
     ) {
-        self._insert(generator, assignment, &assignment.type_());
+        self._insert(
+            generator,
+            assignment,
+            &assignment.type_(),
+            "pipeline_assignment",
+            assignment.location,
+        );
     }
 
     fn for_pipeline_assignment(&self, assignment: &TypedPipelineAssignment) -> u32 {
         self._get(assignment)
     }
 
-    fn insert_echo(
-        &mut self,
-        generator: &mut Generator<'_>,
-        echo: &TypedExpr,
-        expression: &TypedExpr,
-    ) {
+    fn insert_echo(&mut self, generator: &mut Generator<'_>, echo: &TypedExpr) {
         // the number of written bytes
-        self._insert_with_val_type(echo, ValType::I32);
-        self._insert(generator, expression, &echo.type_());
+        self._insert_with_val_type(echo.location(), ValType::I32);
+        if !echo.is_var() {
+            self._insert(generator, echo, &echo.type_(), "echo", echo.location());
+        }
     }
 
-    fn for_echo(&self, echo: &TypedExpr, expression: &TypedExpr) -> (u32, u32) {
-        (self._get(echo), self._get(expression))
+    fn for_echo<'echo>(&self, echo: &'echo TypedExpr) -> (u32, Result<u32, &'echo EcoString>) {
+        (
+            self._get(echo.location()),
+            if let Some(name) = echo.var_name() {
+                Err(name)
+            } else {
+                Ok(self._get(echo))
+            },
+        )
     }
 
-    fn _insert(&mut self, generator: &mut Generator<'_>, key: impl LocalHash, type_: &Arc<Type>) {
-        self._insert_named(generator, key, type_, None);
-    }
-
-    fn _insert_named(
+    fn _insert(
         &mut self,
         generator: &mut Generator<'_>,
         key: impl LocalHash,
         type_: &Arc<Type>,
-        name: Option<EcoString>,
+        prefix: &str,
+        location: SrcSpan,
     ) {
         let index = self.locals.len() as u32 + self.params.len() as u32;
-        let name = name.map(|name| {
+        let lc = generator
+            .line_numbers
+            .line_and_column_number(location.start);
+        let name: EcoString = format!("{prefix}@{}:{}", lc.line, lc.column).into();
+        let name = {
             let count = self.names.entry(name.clone()).or_insert(0);
             *count += 1;
             if *count == 1 {
@@ -5001,8 +5088,12 @@ impl Locals {
             } else {
                 name + "'".repeat(*count - 1).as_str()
             }
-        });
-        if self.locals.insert(key.hash(), (index, name)).is_some() {
+        };
+        if self
+            .locals
+            .insert(key.hash(), (index, Some(name)))
+            .is_some()
+        {
             panic!("Locals collision.");
         }
         // Some local variable can still be unbound or generic,
@@ -5102,9 +5193,8 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
     }
 
     fn visit_typed_expr(&mut self, expr: &'ast TypedExpr) {
-        if let echo @ TypedExpr::Echo { expression, .. } = expr {
-            self.locals
-                .insert_echo(self.generator, echo, expression.as_ref().unwrap());
+        if let echo @ TypedExpr::Echo { .. } = expr {
+            self.locals.insert_echo(self.generator, echo);
         }
         visit_typed_expr(self, expr);
     }
@@ -5119,6 +5209,12 @@ impl<T> LocalHash for &T {
         // We started using location as key, but we got collision on generated
         // assigments. Let's hope we do not get collisions with this.
         ptr::from_ref(*self) as u64
+    }
+}
+
+impl LocalHash for SrcSpan {
+    fn hash(&self) -> u64 {
+        (self.start as u64) << 32 | self.end as u64
     }
 }
 
