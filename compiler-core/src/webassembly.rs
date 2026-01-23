@@ -323,11 +323,9 @@ enum WasmTypeKind {
 
 #[derive(Clone)]
 enum WasmConst {
-    // The index in the global section for the const string name and
-    // the index in the global section for the string literal
     String {
-        from: u32,
-        to: u32,
+        dest: u32,
+        src: u32,
     },
     List {
         global_index: u32,
@@ -339,6 +337,10 @@ enum WasmConst {
         type_index: u32,
         tag: Option<i32>,
         elements: Vec<TypedConstant>,
+    },
+    Function {
+        dest: u32,
+        src: u32,
     },
     Var {
         global_index: u32,
@@ -1111,7 +1113,7 @@ impl<'a> Generator<'a> {
                 && !is_generic_type(&function_type(function))
                 && function.external_webassembly.is_none()
             {
-                let id = self.function(function, true);
+                let id = self.function(function, None, true);
                 if is_main_funtion(function) {
                     self.main = Some(id.index)
                 }
@@ -1180,6 +1182,42 @@ impl<'a> Generator<'a> {
             nullable: true,
         }
         .into()
+    }
+
+    fn type_index(&mut self, type_: &Arc<Type>) -> u32 {
+        if type_.is_string() {
+            self.string.type_index
+        } else if let Some(item_type) = type_.list_type() {
+            self.list_type_index(&item_type)
+        } else if let Some(types) = type_.tuple_types() {
+            self.tuple_type_index(types)
+        } else if let Some((params, return_)) = type_.fn_types() {
+            self.function_type_index(params, Some(return_))
+        } else if let Some((custom_type, args)) = self.custom_type(type_) {
+            match custom_type {
+                CustomType::ExternalI32 | CustomType::Enum { .. } => panic!(),
+                CustomType::Struct {
+                    custom_type,
+                    constructor,
+                } => {
+                    let (type_index, _) =
+                        self.mono_struct_type_index(type_, &custom_type, &constructor, &args);
+                    type_index
+                }
+                CustomType::Union { custom_type } => {
+                    if let Some(constructor) = custom_type_inferred_constructor(&custom_type, type_)
+                    {
+                        let (_, type_index, _) =
+                            self.mono_union_subtype_index(type_, &custom_type, constructor, &args);
+                        type_index
+                    } else {
+                        self.mono_union_supertype_index(type_, &custom_type)
+                    }
+                }
+            }
+        } else {
+            panic!("type index for:\n{type_:?}");
+        }
     }
 
     fn function_type_index(
@@ -1398,8 +1436,11 @@ impl<'a> Generator<'a> {
                     export,
                     true,
                 );
-                let from = self.string_index(value);
-                self.consts.push(WasmConst::String { from, to: id.index });
+                let src = self.string_index(value);
+                self.consts.push(WasmConst::String {
+                    dest: id.index,
+                    src,
+                });
                 id
             }
             Constant::Tuple { elements, .. } => {
@@ -1510,39 +1551,32 @@ impl<'a> Generator<'a> {
                     (self.int.int_const(&0.into()), self.int.val_type())
                 } else if type_.is_float() {
                     (self.float.float_const(&"0".into()), self.float.val_type())
-                } else if let Some((custom_type, args)) = self.custom_type(type_) {
-                    match custom_type {
-                        CustomType::ExternalI32 | CustomType::Enum { .. } => {
-                            (ConstExpr::i32_const(0), ValType::I32)
-                        }
-                        CustomType::Struct {
-                            custom_type,
-                            constructor,
-                        } => {
-                            let (type_index, _) = self.mono_struct_type_index(
-                                type_,
-                                &custom_type,
-                                &constructor,
-                                &args,
-                            );
-                            (
-                                const_expr_ref_null(type_index),
-                                self.val_type_ref_nullable(type_index),
-                            )
-                        }
-                        CustomType::Union { .. } => todo!(),
-                    }
+                } else if let Some((CustomType::ExternalI32 | CustomType::Enum { .. }, _)) =
+                    self.custom_type(type_)
+                {
+                    (ConstExpr::i32_const(0), ValType::I32)
                 } else {
-                    todo!()
+                    let type_index = self.type_index(type_);
+                    (
+                        const_expr_ref_null(type_index),
+                        self.val_type_ref_nullable(type_index),
+                    )
                 };
                 let id = self.add_const(const_name, val_type, expr, export, true);
-                self.consts.push(WasmConst::Var {
-                    global_index: id.index,
-                    name: name.clone(),
-                });
+                let var_id = self.var_id(&Scope::Global(self.globals.clone()), name, type_);
+                if let IdKind::Func = var_id.kind {
+                    self.consts.push(WasmConst::Function {
+                        dest: id.index,
+                        src: var_id.index,
+                    });
+                } else {
+                    self.consts.push(WasmConst::Var {
+                        global_index: id.index,
+                        name: name.clone(),
+                    });
+                }
                 id
             }
-
             _ => panic!(),
         }
     }
@@ -1600,8 +1634,30 @@ impl<'a> Generator<'a> {
                     .constants(self, elements)
                     .struct_new(type_index);
             }
-            Constant::Record { name, type_, .. } if type_.is_bool() => {
-                let _ = instructions.bool_const(name == "True");
+            Constant::Record {
+                name,
+                arguments,
+                type_,
+                ..
+            } => {
+                if let Some((CustomType::Enum { values }, _)) = self.custom_type(type_) {
+                    let value = values.iter().position(|v| v == name).unwrap();
+                    let _ = instructions.i32_const(value as i32);
+                } else {
+                    let variant = self.variants.get(name).unwrap().clone();
+                    let id = self.variant_constructor(
+                        arguments.iter().map(|arg| arg.value.type_()).collect(),
+                        type_.clone(),
+                        variant,
+                    );
+                    let _ = instructions
+                        .constants(self, arguments.iter().map(|arg| &arg.value))
+                        .call(id);
+                }
+            }
+            Constant::Var { name, type_, .. } => {
+                let scope = Scope::Global(self.globals.clone());
+                self.expression_var(&scope, instructions, name, type_);
             }
             _ => todo!("Constant not supported: {:#?}", const_),
         }
@@ -1621,34 +1677,14 @@ impl<'a> Generator<'a> {
 
         for function in &self.module.definitions.functions {
             if function_name(function) == name {
-                let declared_type = function_type(function);
-                return if is_generic_type(&declared_type) {
-                    match self.find_global(&self.mangle(name, required_type)) {
-                        Some(id) => id, // the function has already been monomorphized
-                        None => {
-                            let mut function = Monomorphizer::new(&declared_type, required_type)
-                                .function(function);
-                            let name = self.mangle(function_name(&function), required_type);
-                            set_function_name(&mut function, name);
-
-                            if is_generic_type(&function_type(&function))
-                                || function
-                                    .body
-                                    .iter()
-                                    .any(|statement| is_generic_type(&statement.type_()))
-                            {
-                                panic!(
-                                    "Could not monomorphize:\n{required_type:#?}\n{function:#?}"
-                                );
-                            }
-                            self.function(&function, function.publicity.is_public())
-                        }
-                    }
+                if let Some((_, fname, _)) = &function.external_webassembly {
+                    return self.find_global_expect(fname);
+                }
+                let export = function.publicity.is_public();
+                return if is_generic_type(&function_type(function)) {
+                    self.function(function, Some(required_type), export)
                 } else {
-                    if let Some((_, fname, _)) = &function.external_webassembly {
-                        return self.find_global_expect(fname);
-                    }
-                    self.function(function, function.publicity.is_public())
+                    self.function(function, None, export)
                 };
             }
         }
@@ -1659,18 +1695,57 @@ impl<'a> Generator<'a> {
         );
     }
 
+    fn var_id(&mut self, scope: &Scope, name: &EcoString, type_: &Arc<Type>) -> Id {
+        if let Some(id) = scope.find(name) {
+            id
+        } else if let Some(variant) = self.variants.get(name).cloned() {
+            let id = if let Some((params, return_)) = type_.fn_types() {
+                self.variant_constructor(params, return_, variant)
+            } else {
+                self.variant_constructor(vec![], type_.clone(), variant)
+            };
+            Id::func(name.clone(), id)
+        } else {
+            self.var(name, type_)
+        }
+    }
+
     fn function_next_id(&mut self) -> u32 {
         let id = self.function_next_id;
         self.function_next_id += 1;
         id
     }
 
-    fn function(&mut self, function: &TypedFunction, export: bool) -> Id {
+    fn function(
+        &mut self,
+        function: &TypedFunction,
+        required_type: Option<&Arc<Type>>,
+        export: bool,
+    ) -> Id {
         let name = function_name(function);
+        let name = if let Some(required_type) = required_type {
+            self.mangle(name, required_type)
+        } else {
+            name.into()
+        };
 
-        if let Some(id) = self.find_global(name) {
+        if let Some(id) = self.find_global(&name) {
             return id;
         }
+
+        let type_ = function_type(function);
+
+        let function = if is_generic_type(&type_) {
+            let required_type = required_type.unwrap();
+            if is_generic_type(required_type) {
+                panic!()
+            }
+            let mut function = Monomorphizer::with_bound(&type_, required_type).function(function);
+            set_function_name(&mut function, name.clone());
+            function
+        } else {
+            Monomorphizer::new().function(function)
+        };
 
         let index = self.function_next_id();
         let id = self.add_function_to_globals(name.clone(), index);
@@ -1686,11 +1761,11 @@ impl<'a> Generator<'a> {
         let _ = instructions.end();
 
         let type_index = self.function_type_index(
-            function_params_types(function),
+            function_params_types(&function),
             Some(function.return_type.clone()),
         );
         let _ = self.functions.insert(WasmFunction {
-            name: name.clone(),
+            name,
             index,
             type_index,
             code: code.into_raw_body().into(),
@@ -2238,6 +2313,16 @@ impl<'a> Generator<'a> {
         let _ = instructions.unreachable().end();
     }
 
+    fn is_ref_non_null(&self, type_: &Arc<Type>) -> bool {
+        type_.is_string() || type_.tuple_types().is_some() || {
+            if let Some((custom_type, _)) = self.custom_type(type_) {
+                custom_type.is_ref_non_null()
+            } else {
+                false
+            }
+        }
+    }
+
     fn expression_var(
         &mut self,
         scope: &Scope,
@@ -2245,28 +2330,19 @@ impl<'a> Generator<'a> {
         name: &EcoString,
         type_: &Arc<Type>,
     ) {
-        let id = self.expression_var_id(scope, name, type_);
-
-        let is_ref_non_null = |type_: &Arc<Type>| {
-            type_.is_string() || type_.tuple_types().is_some() || {
-                if let Some((custom_type, _)) = self.custom_type(type_) {
-                    custom_type.is_ref_non_null()
-                } else {
-                    false
-                }
-            }
-        };
+        let id = self.var_id(scope, name, type_);
 
         let _ = match id.kind {
             IdKind::Func => {
                 if self.variants.contains_key(name) && type_.fn_types().is_none() {
+                    // variant with no args must be called
                     instructions.call(id.index)
                 } else {
                     instructions.ref_func(id.index)
                 }
             }
             IdKind::Global => {
-                if is_ref_non_null(type_) {
+                if self.is_ref_non_null(type_) {
                     instructions.global_as_non_null(id.index)
                 } else {
                     instructions.global_get(id.index)
@@ -2274,16 +2350,6 @@ impl<'a> Generator<'a> {
             }
             IdKind::Local => instructions.local_get(id.index),
         };
-    }
-
-    fn expression_var_id(&mut self, scope: &Scope, name: &EcoString, type_: &Arc<Type>) -> Id {
-        if let Some(id) = scope.find(name) {
-            id
-        } else if let Some(variant) = self.variants.get(name).cloned() {
-            Id::func(name.clone(), self.variant_constructor(type_, variant))
-        } else {
-            self.var(name, type_)
-        }
     }
 
     fn expression_echo(
@@ -2314,7 +2380,7 @@ impl<'a> Generator<'a> {
 
             let expr = match expr {
                 Ok(expr) => expr,
-                Err(name) => self.expression_var_id(scope, name, &echo.type_()).index,
+                Err(name) => self.var_id(scope, name, &echo.type_()).index,
             };
 
             let _ = instructions
@@ -2858,8 +2924,8 @@ impl<'a> Generator<'a> {
         // constants
         for const_ in self.consts.clone() {
             match const_ {
-                WasmConst::String { from, to } => {
-                    let _ = instructions.global_get(from).global_set(to);
+                WasmConst::String { dest, src } => {
+                    let _ = instructions.global_get(src).global_set(dest);
                 }
                 WasmConst::List {
                     global_index,
@@ -2886,6 +2952,9 @@ impl<'a> Generator<'a> {
                         .struct_new(type_index)
                         .global_set(global_index);
                 }
+                WasmConst::Function { dest, src } => {
+                    let _ = instructions.ref_func(src).global_set(dest);
+                }
                 WasmConst::Var { global_index, name } => {
                     let _ = instructions
                         .global_get(self.find_global_expect(&name).index)
@@ -2901,13 +2970,12 @@ impl<'a> Generator<'a> {
         function
     }
 
-    fn variant_constructor(&mut self, type_: &Arc<Type>, variant: Variant) -> u32 {
-        let (params, return_) = if let Some((params, return_)) = type_.fn_types() {
-            (params, return_)
-        } else {
-            (vec![], type_.clone())
-        };
-
+    fn variant_constructor(
+        &mut self,
+        params: Vec<Arc<Type>>,
+        return_: Arc<Type>,
+        variant: Variant,
+    ) -> u32 {
         let mut constructor_name = self.type_pretty_name(&return_);
         if let CustomType::Union { .. } = &variant.custom_type {
             constructor_name += ".";
@@ -2953,13 +3021,19 @@ impl<'a> Generator<'a> {
     }
 
     fn ok_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> u32 {
-        let ok_type = type_::fn_(vec![ok.clone()], type_::result(ok, error));
-        self.variant_constructor(&ok_type, self.variants.get("Ok").unwrap().clone())
+        self.variant_constructor(
+            vec![ok.clone()],
+            type_::result(ok, error),
+            self.variants.get("Ok").unwrap().clone(),
+        )
     }
 
     fn error_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> u32 {
-        let error_type = type_::fn_(vec![error.clone()], type_::result(ok, error));
-        self.variant_constructor(&error_type, self.variants.get("Error").unwrap().clone())
+        self.variant_constructor(
+            vec![error.clone()],
+            type_::result(ok, error),
+            self.variants.get("Error").unwrap().clone(),
+        )
     }
 
     fn string_index(&mut self, string: &EcoString) -> u32 {
@@ -3108,7 +3182,9 @@ impl<'a> Generator<'a> {
     }
 
     fn function_eq(&mut self, type_: &Arc<Type>) -> Eq {
-        if type_.is_int() {
+        if type_.fn_types().is_some() {
+            panic!("function equality is not supported");
+        } else if type_.is_int() {
             return Eq::Int;
         } else if type_.is_float() {
             return Eq::Float;
@@ -5096,12 +5172,6 @@ impl Locals {
         {
             panic!("Locals collision.");
         }
-        // Some local variable can still be unbound or generic,
-        // like [], None, etc, so we choose arbitrarily to monormorphize
-        // the types to nil. The locals are determined before code generation,
-        // so we choose to do the monomorphization here to avoid doing a
-        // another complete pass in the ast before the code generation.
-        set_ubound_or_generic(type_, &type_::nil());
         self.val_types.push(generator.val_type(type_));
     }
 
@@ -5237,10 +5307,14 @@ struct Monomorphizer {
 }
 
 impl Monomorphizer {
-    fn new(from: &Arc<Type>, to: &Arc<Type>) -> Monomorphizer {
-        let mut mono = Monomorphizer {
+    fn new() -> Monomorphizer {
+        Monomorphizer {
             map: HashMap::new(),
-        };
+        }
+    }
+
+    fn with_bound(from: &Arc<Type>, to: &Arc<Type>) -> Monomorphizer {
+        let mut mono = Monomorphizer::new();
         let _ = mono.bound(from, to);
         mono
     }
@@ -5250,9 +5324,7 @@ impl Monomorphizer {
         constructor: &TypedRecordConstructor,
         args: &[Arc<Type>],
     ) -> Vec<Arc<Type>> {
-        let mut mono = Monomorphizer {
-            map: HashMap::new(),
-        };
+        let mut mono = Monomorphizer::new();
 
         for (from, to) in custom_type.typed_parameters.iter().zip(args) {
             let _ = mono.bound(from, to);
@@ -5326,7 +5398,11 @@ impl Monomorphizer {
 
     fn type_(&self, old: &Arc<Type>) -> Arc<Type> {
         if let Some(id) = get_unbound_or_generic_id(old) {
-            self.map.get(&id).unwrap().clone()
+            if let Some(to) = self.map.get(&id) {
+                to.clone()
+            } else {
+                Monomorphizer::with_bound(old, &type_::nil()).type_(old)
+            }
         } else if let Some(type_) = old.list_type() {
             Type::list(self.type_(&type_)).into()
         } else if let Some(elements) = old.tuple_types() {
@@ -5519,6 +5595,32 @@ impl Monomorphizer {
                 for argument in arguments {
                     self.expression(&mut argument.value);
                 }
+            }
+            TypedExpr::Echo {
+                type_,
+                expression,
+                message,
+                ..
+            } => {
+                *type_ = self.type_(type_);
+                if let Some(expression) = expression {
+                    self.expression(expression);
+                }
+                if let Some(message) = message {
+                    self.expression(message);
+                }
+            }
+            TypedExpr::Pipeline {
+                first_value,
+                assignments,
+                finally,
+                ..
+            } => {
+                self.expression(&mut first_value.value);
+                for (assignment, _) in assignments {
+                    self.expression(&mut assignment.value)
+                }
+                self.expression(finally);
             }
             TypedExpr::Int { .. }
             | TypedExpr::Float { .. }
