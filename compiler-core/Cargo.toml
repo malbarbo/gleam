@@ -6,6 +6,7 @@ edition = "2024"
 license-file = "LICENCE"
 
 [features]
+default = ["dep:globset"]
 disable-erlang = []
 disable-hide-internal = []
 
@@ -31,7 +32,7 @@ spdx = "0"
 # Binary format de-serialization
 bincode = { version = "2", features = ["alloc", "serde"] }
 # cross platform single glob and glob set matching
-globset = { version = "0", features = ["serde1"] }
+globset = { version = "0", features = ["serde1"], optional = true }
 # Checksums
 xxhash-rust = { version = "0", features = ["xxh3"] }
 # Pubgrub dependency resolution algorithm
@@ -68,7 +69,6 @@ im.workspace = true
 itertools.workspace = true
 lsp-server.workspace = true
 lsp-types.workspace = true
-regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 strum.workspace = true

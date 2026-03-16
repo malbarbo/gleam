@@ -29,7 +29,7 @@ toml = "0.9"
 # Enum trait impl macros
 strum = { version = "0", features = ["derive"] }
 # Hex package manager client
-hexpm = "5"
+hexpm = { git = "https://github.com/malbarbo/hexpm-rust.git", branch = "sgleam" }
 # Creation of tar file archives
 tar = "0"
 # gzip compression

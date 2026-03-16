@@ -8,6 +8,7 @@ use crate::version::COMPILER_VERSION;
 use crate::{Error, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use ecow::EcoString;
+#[cfg(not(feature = "disable-hide-internal"))]
 use globset::Glob;
 use hexpm::version::{self, LowestVersion, Version};
 use http::Uri;
@@ -177,6 +178,7 @@ pub struct PackageConfig {
     pub javascript: JavaScriptConfig,
     #[serde(default = "erlang_target")]
     pub target: Target,
+    #[cfg(not(feature = "disable-hide-internal"))]
     #[serde(default)]
     pub internal_modules: Option<Vec<Glob>>,
 }
@@ -706,6 +708,7 @@ impl Default for PackageConfig {
             dev_dependencies: Default::default(),
             licences: Default::default(),
             links: Default::default(),
+            #[cfg(not(feature = "disable-hide-internal"))]
             internal_modules: Default::default(),
             target: Target::Erlang,
         }

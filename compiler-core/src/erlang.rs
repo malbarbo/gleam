@@ -24,9 +24,7 @@ use crate::{
 use camino::Utf8Path;
 use ecow::{EcoString, eco_format};
 use itertools::Itertools;
-use regex::{Captures, Regex};
 use std::collections::HashSet;
-use std::sync::OnceLock;
 use std::{collections::HashMap, ops::Deref, str::FromStr, sync::Arc};
 use vec1::Vec1;
 
@@ -645,16 +643,20 @@ fn atom_string(value: EcoString) -> Document<'static> {
     escape_atom_string(value).to_doc()
 }
 
-fn atom_pattern() -> &'static Regex {
-    static ATOM_PATTERN: OnceLock<Regex> = OnceLock::new();
-    ATOM_PATTERN.get_or_init(|| Regex::new(r"^[a-z][a-z0-9_@]*$").expect("atom RE regex"))
+fn is_unquoted_atom(value: &str) -> bool {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some('a'..='z') => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '@')
 }
 
 fn atom(value: &str) -> Document<'_> {
     if is_erlang_reserved_word(value) {
         // Escape because of keyword collision
         eco_format!("'{value}'").to_doc()
-    } else if atom_pattern().is_match(value) {
+    } else if is_unquoted_atom(value) {
         // No need to escape
         EcoString::from(value).to_doc()
     } else {
@@ -667,7 +669,7 @@ pub fn escape_atom_string(value: EcoString) -> EcoString {
     if is_erlang_reserved_word(&value) {
         // Escape because of keyword collision
         eco_format!("'{value}'")
-    } else if atom_pattern().is_match(&value) {
+    } else if is_unquoted_atom(&value) {
         value
     } else {
         // Escape because of characters contained
@@ -675,27 +677,40 @@ pub fn escape_atom_string(value: EcoString) -> EcoString {
     }
 }
 
-fn unicode_escape_sequence_pattern() -> &'static Regex {
-    static PATTERN: OnceLock<Regex> = OnceLock::new();
-    PATTERN.get_or_init(|| {
-        Regex::new(r#"(\\+)(u)"#).expect("Unicode escape sequence regex cannot be constructed")
-    })
+/// Replace `\u` with `\x` but leave `\\u` alone (even number of backslashes
+/// before `u` keeps `u`).
+fn replace_unicode_escape_sequences(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            let mut slashes = 1;
+            while chars.peek() == Some(&'\\') {
+                slashes += 1;
+                let _ = chars.next();
+            }
+            if chars.peek() == Some(&'u') && slashes % 2 != 0 {
+                // Odd backslashes before 'u': replace last \u with \x
+                for _ in 0..slashes - 1 {
+                    result.push('\\');
+                }
+                result.push('\\');
+                result.push('x');
+                let _ = chars.next(); // consume 'u'
+            } else {
+                for _ in 0..slashes {
+                    result.push('\\');
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 fn string_inner(value: &str) -> Document<'_> {
-    let content = unicode_escape_sequence_pattern()
-        // `\\u`-s should not be affected, so that "\\u..." is not converted to
-        // "\\x...". That's why capturing groups is used to exclude cases that
-        // shouldn't be replaced.
-        .replace_all(value, |caps: &Captures<'_>| {
-            let slashes = caps.get(1).map_or("", |m| m.as_str());
-
-            if slashes.len().is_multiple_of(2) {
-                format!("{slashes}u")
-            } else {
-                format!("{slashes}x")
-            }
-        });
+    let content = replace_unicode_escape_sequences(value);
     EcoString::from(content).to_doc()
 }
 
