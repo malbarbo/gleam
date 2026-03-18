@@ -3110,7 +3110,7 @@ impl<'a> Generator<'a> {
     }
 
     fn code_string_concat(&self) -> Function {
-        let mut function = Function::new(vec![(3, ValType::I32), (1, self.string.val_type())]);
+        let mut function = Function::new(vec![(2, ValType::I32), (1, self.string.val_type())]);
         let mut instructions = function.extend_instructions(self);
         // params
         let a = 0; // String
@@ -3118,76 +3118,40 @@ impl<'a> Generator<'a> {
         // locals
         let len_a = 2; // I32
         let len_b = 3; // I32
-        let i = 4; // I32
         // return
-        let r = 5; // String
+        let r = 4; // String
         #[rustfmt::skip]
         let _ = instructions
-            // len_a = a.len; push len_a
+            // len_a = a.len
             .local_get(a)
             .string_len()
-            .local_tee(len_a)
-            // len_b = b.len; push len_b
+            .local_set(len_a)
+            // len_b = b.len
             .local_get(b)
             .string_len()
-            .local_tee(len_b)
+            .local_set(len_b)
             // r = array.new_default(len_a + len_b)
+            .local_get(len_a)
+            .local_get(len_b)
             .i32_add()
             .string_new()
             .local_set(r)
-            // i = 0
+            // array.copy r[0..] from a[0..len_a]
+            .local_get(r)
             .i32_const(0)
-            .local_set(i)
-            // loop copy a to r[0..len_a]
-            .loop_(BlockType::Empty)
-              // if i <= len_a
-              .local_get(i)
-              .local_get(len_a)
-              .i32_lt_u()
-              .if_(BlockType::Empty)
-                // r[i] = a[i]
-                .local_get(r)
-                .local_get(i)
-                .local_get(a)
-                .local_get(i)
-                .string_get()
-                .string_set()
-                .i32_inc(i)
-                // loop
-                .br(1)
-              // end if i <= len_a
-              .end()
-            // end loop
-            .end()
-            // i = 0
+            .local_get(a)
             .i32_const(0)
-            .local_set(i)
-            // loop copy b to r[len_a..len_a+len_b]
-            .loop_(BlockType::Empty)
-              // if i <= len_b
-              .local_get(i)
-              .local_get(len_b)
-              .i32_lt_u()
-              .if_(BlockType::Empty)
-                // r[len_a + i] = b[i]
-                .local_get(r)
-                .local_get(len_a)
-                .local_get(i)
-                .i32_add()
-                .local_get(b)
-                .local_get(i)
-                .string_get()
-                .string_set()
-                .i32_inc(i)
-                // loop
-                .br(1)
-              // end if i <= len_b
-              .end()
-            // end loop
-            .end()
+            .local_get(len_a)
+            .string_copy()
+            // array.copy r[len_a..] from b[0..len_b]
+            .local_get(r)
+            .local_get(len_a)
+            .local_get(b)
+            .i32_const(0)
+            .local_get(len_b)
+            .string_copy()
             // return r
             .local_get(r)
-            // function
             .end();
         function
     }
@@ -4452,12 +4416,12 @@ impl<'a> ExtendedInstructionSink<'a> {
         self.array_get_u(self.string.type_index)
     }
 
-    fn string_set(&mut self) -> &mut Self {
-        self.array_set(self.string.type_index)
-    }
-
     fn string_len(&mut self) -> &mut Self {
         self.array_len()
+    }
+
+    fn string_copy(&mut self) -> &mut Self {
+        self.array_copy(self.string.type_index, self.string.type_index)
     }
 
     fn byte_store(&mut self, byte: u8) -> &mut Self {
@@ -4624,6 +4588,7 @@ impl<'a> ExtendedInstructionSink<'a> {
         array_len(),
         array_get_u(type_index: u32),
         array_set(type_index: u32),
+        array_copy(array_type_index_dst: u32, array_type_index_src: u32),
         return_(),
         i32_const(x: i32),
         i32_eq(),
