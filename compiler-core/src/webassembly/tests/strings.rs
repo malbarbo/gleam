@@ -76,3 +76,59 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn string_prefix_basic() {
+    run_ok(
+        r#"
+pub fn main() {
+    assert case "Hello, World" {
+        "Hello, " <> name -> name == "World"
+        _ -> False
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn string_prefix_empty() {
+    run_ok(
+        r#"
+pub fn main() {
+    assert case "anything" {
+        "" <> rest -> rest == "anything"
+        _ -> False
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn string_prefix_with_assignment() {
+    run_ok(
+        r#"
+pub fn main() {
+    assert case "Hello, World" {
+        "Hello, " as greeting <> name -> greeting == "Hello, " && name == "World"
+        _ -> False
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn string_prefix_no_match() {
+    run_ok(
+        r#"
+pub fn main() {
+    assert case "Goodbye" {
+        "Hello, " <> _ -> False
+        _ -> True
+    }
+}
+"#,
+    );
+}
