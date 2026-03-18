@@ -1,4 +1,7 @@
 #![allow(clippy::todo, clippy::unwrap_used)]
+#[cfg(test)]
+mod tests;
+
 use ecow::EcoString;
 use itertools::Itertools;
 use num_bigint::BigInt;
