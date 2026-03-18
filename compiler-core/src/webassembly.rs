@@ -530,7 +530,10 @@ impl BuiltinFunctionExternal {
 
 #[derive(Debug, Clone)]
 enum CustomType {
-    ExternalI32,
+    External {
+        val_type: ValType,
+        to_str: &'static str,
+    },
     Enum {
         values: Vec<EcoString>,
     },
@@ -638,20 +641,58 @@ impl<'a> Generator<'a> {
         &mut self,
         builtins: Vec<(BuiltinFunctionExternal, EcoString, Arc<Type>)>,
     ) {
-        let i32 = type_::named("wasm", &self.module.name, "I32", Publicity::Private, vec![]);
-        for (builtin, name, type_) in builtins {
-            let (arguments, result) = builtin.type_(i32.clone());
+        for (builtin, _name, type_) in &builtins {
+            let i32 = self.extract_external_type(builtin, type_);
+            let (arguments, result) = builtin.type_(i32);
             let expected = type_::fn_(arguments, result);
-            if !expected.same_as(&type_) {
+            if !expected.same_as(type_) {
                 panic!(
                     "{expected:#?}\n{type_:#?}\n{} != {}",
                     self.type_pretty_name(&expected),
-                    self.type_pretty_name(&type_)
+                    self.type_pretty_name(type_)
                 );
             }
+        }
+        for (builtin, name, _) in builtins {
             let index = self.get_function_builtin_external(builtin);
             let _ = self.add_function_to_globals(name, index);
         }
+    }
+
+    /// Extract the actual external type from a builtin function's Gleam type signature.
+    /// Returns a dummy type for builtins that don't use external types.
+    fn extract_external_type(
+        &self,
+        builtin: &BuiltinFunctionExternal,
+        fn_type: &Arc<Type>,
+    ) -> Arc<Type> {
+        let (params, return_) = fn_type.fn_types().expect("Expected function type");
+        // For builtins that return I32, use the return type
+        match builtin {
+            BuiltinFunctionExternal::IntToI32
+            | BuiltinFunctionExternal::IntRepr
+            | BuiltinFunctionExternal::FloatRepr
+            | BuiltinFunctionExternal::UtfCodepointRepr
+            | BuiltinFunctionExternal::StringRepr
+            | BuiltinFunctionExternal::StringToMemory => return_,
+            // For builtins that take I32 as first param, use params[0]
+            BuiltinFunctionExternal::I32ToInt => params.into_iter().next().unwrap(),
+            // For MemoryToString: params are [i32, i32], use first
+            BuiltinFunctionExternal::MemoryToString => params.into_iter().next().unwrap(),
+            // Builtins without I32 — return a dummy (unused by type_())
+            _ => type_::int(),
+        }
+    }
+
+    /// Find any External type from the types registry and construct an Arc<Type> for it.
+    fn find_external_type(&self) -> Arc<Type> {
+        self.types
+            .iter()
+            .find(|(_, ct)| matches!(ct, CustomType::External { .. }))
+            .map(|((module, name), _)| type_::named("", module, name, Publicity::Private, vec![]))
+            .unwrap_or_else(|| {
+                type_::named("", &self.module.name, "I32", Publicity::Private, vec![])
+            })
     }
 
     fn add_function_to_globals(&mut self, name: EcoString, index: u32) -> Id {
@@ -729,10 +770,18 @@ impl<'a> Generator<'a> {
             let type_ = if let Some((module, name, _)) = &custom_type.external_webassembly {
                 assert!(custom_type.constructors.is_empty());
                 assert_eq!(module, "builtins");
-                assert_eq!(name, "I32");
-                CustomType::ExternalI32
+                match name.as_str() {
+                    "I32" => CustomType::External {
+                        val_type: ValType::I32,
+                        to_str: I32_TO_STR,
+                    },
+                    other => panic!("Unsupported external type: {other}"),
+                }
             } else if custom_type.name == "I32" {
-                CustomType::ExternalI32
+                CustomType::External {
+                    val_type: ValType::I32,
+                    to_str: I32_TO_STR,
+                }
             } else {
                 continue;
             };
@@ -1198,7 +1247,7 @@ impl<'a> Generator<'a> {
             self.function_type_index(params, Some(return_))
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             match custom_type {
-                CustomType::ExternalI32 | CustomType::Enum { .. } => panic!(),
+                CustomType::External { .. } | CustomType::Enum { .. } => panic!(),
                 CustomType::Struct {
                     custom_type,
                     constructor,
@@ -1392,7 +1441,7 @@ impl<'a> Generator<'a> {
         args: Vec<Arc<Type>>,
     ) -> ValType {
         match custom_type {
-            CustomType::ExternalI32 => ValType::I32,
+            CustomType::External { val_type, .. } => *val_type,
             CustomType::Enum { .. } => ValType::I32,
             CustomType::Struct {
                 custom_type,
@@ -1546,7 +1595,7 @@ impl<'a> Generator<'a> {
                         });
                         id
                     }
-                    CustomType::ExternalI32 => todo!(),
+                    CustomType::External { .. } => todo!(),
                 }
             }
             Constant::Var { name, type_, .. } => {
@@ -1554,9 +1603,11 @@ impl<'a> Generator<'a> {
                     (self.int.int_const(&0.into()), self.int.val_type())
                 } else if type_.is_float() {
                     (self.float.float_const(&"0".into()), self.float.val_type())
-                } else if let Some((CustomType::ExternalI32 | CustomType::Enum { .. }, _)) =
+                } else if let Some((CustomType::External { val_type, .. }, _)) =
                     self.custom_type(type_)
                 {
+                    (ConstExpr::i32_const(0), val_type)
+                } else if let Some((CustomType::Enum { .. }, _)) = self.custom_type(type_) {
                     (ConstExpr::i32_const(0), ValType::I32)
                 } else {
                     let type_index = self.type_index(type_);
@@ -2101,7 +2152,7 @@ impl<'a> Generator<'a> {
                             .expression(self, locals, scope, constructor)
                             .call_ref(index);
                     }
-                    CustomType::ExternalI32 | CustomType::Enum { .. } => todo!(),
+                    CustomType::External { .. } | CustomType::Enum { .. } => todo!(),
                 }
             }
             _ => todo!("Expression not supported: {:#?}", expression),
@@ -2639,7 +2690,7 @@ impl<'a> Generator<'a> {
                               .bool_const(false)
                             .end();
                     }
-                    CustomType::ExternalI32 => panic!(),
+                    CustomType::External { .. } => panic!(),
                 };
             }
             Pattern::Variable { name, .. } => {
@@ -2845,7 +2896,7 @@ impl<'a> Generator<'a> {
                 let index = index.expect("FieldAccess index") as u32;
                 let (custom_type, args) = self.custom_type(&type_).unwrap();
                 match custom_type {
-                    CustomType::ExternalI32 | CustomType::Enum { .. } => todo!(),
+                    CustomType::External { .. } | CustomType::Enum { .. } => todo!(),
                     CustomType::Struct {
                         custom_type,
                         constructor,
@@ -2997,7 +3048,7 @@ impl<'a> Generator<'a> {
             let num_fields = params.len() as u32;
             let (_, _, args) = return_.named_type_information().unwrap();
             let (type_index, tag) = match variant.custom_type {
-                CustomType::ExternalI32 | CustomType::Enum { .. } => panic!(),
+                CustomType::External { .. } | CustomType::Enum { .. } => panic!(),
                 CustomType::Struct {
                     custom_type,
                     constructor,
@@ -3193,9 +3244,10 @@ impl<'a> Generator<'a> {
             return Eq::Float;
         } else if type_.is_utf_codepoint() {
             return Eq::I32;
-        } else if let Some((CustomType::ExternalI32 | CustomType::Enum { .. }, _)) =
+        } else if let Some((CustomType::External { .. } | CustomType::Enum { .. }, _)) =
             self.custom_type(type_)
         {
+            // External types and Enums are all i32 at the WASM level
             return Eq::I32;
         }
 
@@ -3966,12 +4018,12 @@ impl<'a> Generator<'a> {
             self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
         let mut instructions = function.extend_instructions(self);
         match custom_type {
-            CustomType::ExternalI32 => {
-                let i32_to_str = self.find_global_expect(I32_TO_STR);
+            CustomType::External { to_str, .. } => {
+                let to_str_fn = self.find_global_expect(to_str);
                 let _ = instructions
                     .local_get(value)
                     .local_get(ptr)
-                    .call(i32_to_str.index)
+                    .call(to_str_fn.index)
                     .end();
             }
             CustomType::Enum { values } => {
@@ -4252,8 +4304,7 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::ParseInt => self.code_parse_int(),
             BuiltinFunctionExternal::ParseFloat => self.code_parse_float(),
         };
-        // FIXME: create an appropriated type
-        let i32 = type_::named("", &self.module.name, "I32", Publicity::Private, vec![]);
+        let i32 = self.find_external_type();
         let (params, result) = builtin.type_(i32);
         let params = self.val_types(params);
         let result = self.val_type(&result);
