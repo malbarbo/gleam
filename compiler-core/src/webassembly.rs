@@ -80,6 +80,9 @@ const STDERR: i32 = 2;
 
 const BOOL_VALTYPE: ValType = ValType::I32;
 
+const OK_GENERIC_ID: u64 = u64::MAX;
+const ERROR_GENERIC_ID: u64 = u64::MAX - 1;
+
 pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
     let mut generator = Generator::new(module, line_numbers);
     let start = generator.generate();
@@ -1067,8 +1070,8 @@ impl<'a> Generator<'a> {
             vec![],
         );
 
-        let type_ok = type_::generic_var(u64::MAX - 1);
-        let type_err = type_::generic_var(u64::MAX);
+        let type_ok = type_::generic_var(OK_GENERIC_ID);
+        let type_err = type_::generic_var(ERROR_GENERIC_ID);
         let result = custom_type(
             "Result",
             vec![
@@ -5806,6 +5809,7 @@ struct Externals {
     todo_panic: bool,
     assert: bool,
     echo_any: bool,
+    echo_i32: bool,
     echo_int: bool,
     echo_float: bool,
     echo: usize,
@@ -5821,6 +5825,7 @@ impl Externals {
             todo_panic: false,
             assert: false,
             echo_any: false,
+            echo_i32: false,
             echo_int: false,
             echo_float: false,
             echo: 0,
@@ -5854,6 +5859,10 @@ impl Externals {
 
         if externals.assert || externals.todo_panic {
             externals.insert_external(EXIT);
+        }
+
+        if externals.echo_i32 {
+            externals.insert_external(I32_TO_STR);
         }
 
         if externals.echo_int {
@@ -5983,6 +5992,12 @@ impl Externals {
                     .find(|custom_type| &custom_type.name == name)
                 {
                     let custom_type = custom_type.clone();
+                    let i32 = if let Some((m, n, _)) = &custom_type.external_webassembly {
+                        m == "builtins" && n == "I32"
+                    } else {
+                        custom_type.name == "I32" && custom_type.constructors.is_empty()
+                    };
+                    self.echo_i32 |= i32;
                     for type_ in custom_type
                         .constructors
                         .iter()
