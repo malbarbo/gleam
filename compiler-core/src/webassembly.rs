@@ -26,8 +26,8 @@ use wasm_encoder::{
 
 use crate::{
     ast::{
-        AssignmentKind, BinOp, ClauseGuard, Constant, OperatorKind, Pattern, Publicity, SrcSpan,
-        Statement, TodoKind, TypeAst, TypeAstVar, TypedArg, TypedAssert, TypedAssignment,
+        AssignName, AssignmentKind, BinOp, ClauseGuard, Constant, OperatorKind, Pattern, Publicity,
+        SrcSpan, Statement, TodoKind, TypeAst, TypeAstVar, TypedArg, TypedAssert, TypedAssignment,
         TypedClause, TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr, TypedFunction,
         TypedModule, TypedModuleConstant, TypedPattern, TypedPipelineAssignment,
         TypedRecordConstructor, TypedRecordConstructorArg, TypedStatement,
@@ -2313,6 +2313,30 @@ impl<'a> Generator<'a> {
                 .expression(self, locals, scope.clone(), subject)
                 .local_set(*index);
         }
+        // WASM requires ref locals to be initialized before any block
+        for clause in clauses {
+            for patterns in iter::once(&clause.pattern).chain(&clause.alternative_patterns) {
+                for pattern in patterns {
+                    if let Pattern::StringPrefix {
+                        right_location,
+                        right_side_assignment,
+                        left_location,
+                        left_side_assignment,
+                        ..
+                    } = pattern
+                    {
+                        if let AssignName::Variable(_) = right_side_assignment {
+                            let local = locals._get(right_location);
+                            let _ = instructions.i32_const(0).string_new().local_set(local);
+                        }
+                        if left_side_assignment.is_some() {
+                            let local = locals._get(left_location);
+                            let _ = instructions.i32_const(0).string_new().local_set(local);
+                        }
+                    }
+                }
+            }
+        }
         // block case
         let _ = instructions.block(BlockType::Result(self.val_type(type_)));
         for clause in clauses {
@@ -2700,6 +2724,72 @@ impl<'a> Generator<'a> {
                 let right = locals.for_pattern(pattern);
                 scope = scope.insert_local(name.clone(), right);
                 let _ = instructions.local_set(right).bool_const(true);
+            }
+            Pattern::StringPrefix {
+                left_side_string,
+                left_side_assignment,
+                left_location,
+                right_location,
+                right_side_assignment,
+                ..
+            } => {
+                let subject = locals.for_pattern(pattern);
+                let prefix_len = unescape(left_side_string).len() as i32;
+                let starts_with = self.function_string_starts_with();
+                let prefix_index = self.string_index(left_side_string);
+
+                if let AssignName::Variable(_) = right_side_assignment {
+                    let rest_local = locals._get(right_location);
+                    let _ = instructions.i32_const(0).string_new().local_set(rest_local);
+                }
+                if left_side_assignment.is_some() {
+                    let local = locals._get(left_location);
+                    let _ = instructions.i32_const(0).string_new().local_set(local);
+                }
+
+                #[rustfmt::skip]
+                let _ = instructions
+                    .local_tee(subject)
+                    .global_as_non_null(prefix_index)
+                    .call(starts_with)
+                    .if_(BlockType::Result(BOOL_VALTYPE));
+
+                if let Some((name, _)) = left_side_assignment {
+                    let local = locals._get(left_location);
+                    scope = scope.insert_local(name.clone(), local);
+                    let _ = instructions
+                        .global_as_non_null(prefix_index)
+                        .local_set(local);
+                }
+
+                if let AssignName::Variable(name) = right_side_assignment {
+                    let rest_local = locals._get(right_location);
+                    scope = scope.insert_local(name.clone(), rest_local);
+                    // rest = subject[prefix_len..]
+                    let _ = instructions
+                        .local_get(subject)
+                        .string_len()
+                        .i32_const(prefix_len)
+                        .i32_sub()
+                        .string_new()
+                        .local_set(rest_local)
+                        .local_get(rest_local)
+                        .i32_const(0)
+                        .local_get(subject)
+                        .i32_const(prefix_len)
+                        .local_get(subject)
+                        .string_len()
+                        .i32_const(prefix_len)
+                        .i32_sub()
+                        .string_copy();
+                }
+
+                #[rustfmt::skip]
+                let _ = instructions
+                      .bool_const(true)
+                    .else_()
+                      .bool_const(false)
+                    .end();
             }
             _ => todo!("Assigment Assert Pattern not implemented: {:#?}", pattern),
         }
@@ -3331,6 +3421,73 @@ impl<'a> Generator<'a> {
             .end()
             .bool_const(true)
             // end function
+            .end();
+        function
+    }
+
+    fn function_string_starts_with(&mut self) -> u32 {
+        let builtin = BuiltinFunction::Equal(self.string.val_type(), "string_starts_with".into());
+        if let Some(index) = self.builtins.get(&builtin) {
+            return *index;
+        }
+        let function = self.add_function_builtin(builtin, self.code_string_starts_with());
+        function.index
+    }
+
+    fn code_string_starts_with(&self) -> Function {
+        let mut function = Function::new(vec![(2, ValType::I32)]);
+        let mut instructions = function.extend_instructions(self);
+        // params
+        let a = 0; // String
+        let b = 1; // String
+        // locals
+        let i = 2; // I32
+        let prefix_len = 3; // I32
+        #[rustfmt::skip]
+        let _ = instructions
+            .local_get(b)
+            .string_len()
+            .local_set(prefix_len)
+            // if a.len < prefix_len
+            .local_get(a)
+            .string_len()
+            .local_get(prefix_len)
+            .i32_lt_u()
+            .if_(BlockType::Empty)
+              .bool_const(false)
+              .return_()
+            .end()
+            .i32_const(0)
+            .local_set(i)
+            // loop
+            .loop_(BlockType::Empty)
+              .local_get(i)
+              .local_get(prefix_len)
+              .i32_ge_u()
+              .if_(BlockType::Empty)
+                .bool_const(true)
+                .return_()
+              .end()
+              // a[i]
+              .local_get(a)
+              .local_get(i)
+              .string_get()
+              // b[i]
+              .local_get(b)
+              .local_get(i)
+              .string_get()
+              .i32_ne()
+              // if a[i] != b[i]
+              .if_(BlockType::Empty)
+                .bool_const(false)
+                .return_()
+              .end()
+              .i32_inc(i)
+              // loop
+              .br(0)
+            // end loop
+            .end()
+            .bool_const(true)
             .end();
         function
     }
@@ -5112,6 +5269,9 @@ impl Locals {
                     pattern.location(),
                 );
             }
+            TypedPattern::Discard { .. } => {
+                self._insert_with_val_type(pattern, ValType::I32);
+            }
             _ => {
                 self._insert(
                     generator,
@@ -5276,6 +5436,26 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
     fn visit_typed_pattern(&mut self, pattern: &'ast TypedPattern) {
         self.locals.insert_pattern(self.generator, pattern);
         visit_typed_pattern(self, pattern);
+    }
+
+    fn visit_typed_pattern_string_prefix(
+        &mut self,
+        _location: &'ast SrcSpan,
+        left_location: &'ast SrcSpan,
+        left_side_assignment: &'ast Option<(EcoString, SrcSpan)>,
+        right_location: &'ast SrcSpan,
+        _left_side_string: &'ast EcoString,
+        right_side_assignment: &'ast AssignName,
+    ) {
+        let string_val_type = self.generator.string.val_type();
+        if let AssignName::Variable(_) = right_side_assignment {
+            self.locals
+                ._insert_with_val_type(right_location, string_val_type);
+        }
+        if left_side_assignment.is_some() {
+            self.locals
+                ._insert_with_val_type(left_location, string_val_type);
+        }
     }
 
     fn visit_typed_pipeline_assignment(&mut self, assignment: &'ast TypedPipelineAssignment) {
