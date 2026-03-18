@@ -2,9 +2,6 @@ use ecow::EcoString;
 use petgraph::{Direction, algo::Cycle, graph::NodeIndex};
 use std::collections::{HashMap, HashSet};
 
-#[cfg(test)]
-use pretty_assertions::assert_eq;
-
 /// Take a sequence of values and their deps, and return the values in
 /// order so that deps come before the dependants.
 ///
@@ -90,7 +87,8 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Error, toposort_deps};
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn toposort_deps_test() {
