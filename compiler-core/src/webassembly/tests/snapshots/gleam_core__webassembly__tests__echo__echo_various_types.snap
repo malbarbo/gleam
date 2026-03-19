@@ -1,0 +1,29 @@
+---
+source: compiler-core/src/webassembly/tests/echo.rs
+expression: "\npub fn main() {\n    let x = 10\n    echo echo x\n    echo [\"1\\n2\", echo \"10\", \"9\"]\n    echo []\n    echo #(1, 2.0, \"home\", #(), main)\n    True\n}\n"
+---
+----- SOURCE CODE
+
+pub fn main() {
+    let x = 10
+    echo echo x
+    echo ["1\n2", echo "10", "9"]
+    echo []
+    echo #(1, 2.0, "home", #(), main)
+    True
+}
+
+
+----- STDERR
+src/my/mod.gleam:4
+10
+src/my/mod.gleam:4
+10
+src/my/mod.gleam:5
+"10"
+src/my/mod.gleam:5
+["1\n2", "10", "9"]
+src/my/mod.gleam:6
+[]
+src/my/mod.gleam:7
+#(1, 2.0, "home", #, //fn() -> Bool { ... })

@@ -3954,9 +3954,9 @@ impl<'a> Generator<'a> {
                       align: 0,
                       memory_index: 0,
                   })
+                  .i32_inc(dest)
                 // block
                 .end()
-                .i32_inc(dest)
                 .i32_inc(i)
                 .br(1)
               // if

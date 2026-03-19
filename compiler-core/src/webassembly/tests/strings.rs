@@ -45,22 +45,12 @@ pub fn main() {
 
 #[test]
 fn string_escape() {
-    // echo output goes to stderr in the WASM backend
-    let result = super::run_wasm(
+    assert_wasm_echo!(
         r#"
 pub fn main() {
     echo "\" \n \r \t \f \\ "
 }
 "#,
-        vec![],
-    );
-    assert!(result.status.success());
-    // The echo output contains the Gleam string representation with escaped chars.
-    // Null bytes appear between characters due to WASM string encoding.
-    assert!(
-        result.stderr.contains("\\\"") && result.stderr.contains("\\\\"),
-        "Expected escaped string in stderr, got:\n{:?}",
-        result.stderr
     );
 }
 
