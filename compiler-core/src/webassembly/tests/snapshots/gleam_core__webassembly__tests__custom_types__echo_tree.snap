@@ -1,0 +1,22 @@
+---
+source: compiler-core/src/webassembly/tests/custom_types.rs
+expression: "\npub type Tree(a) {\n    Empty\n    Node(value: a, left: Tree(a), right: Tree(a))\n}\n\npub fn main() {\n    echo Empty\n    echo Node(10, Empty, Empty)\n}\n"
+---
+----- SOURCE CODE
+
+pub type Tree(a) {
+    Empty
+    Node(value: a, left: Tree(a), right: Tree(a))
+}
+
+pub fn main() {
+    echo Empty
+    echo Node(10, Empty, Empty)
+}
+
+
+----- STDERR
+src/my/mod.gleam:8
+Empty
+src/my/mod.gleam:9
+Node(10, Empty, Empty)

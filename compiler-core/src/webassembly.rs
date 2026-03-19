@@ -738,6 +738,22 @@ impl<'a> Generator<'a> {
         }
     }
 
+    fn null_variant_tag(custom_type: &TypedCustomType) -> Option<usize> {
+        let zero_arg_count = custom_type
+            .constructors
+            .iter()
+            .filter(|c| c.arguments.is_empty())
+            .count();
+        if zero_arg_count == 1 {
+            custom_type
+                .constructors
+                .iter()
+                .position(|c| c.arguments.is_empty())
+        } else {
+            None
+        }
+    }
+
     fn is_external_type(&self, type_: &Arc<Type>) -> bool {
         // FIXME: this function is not right
         if let Some((module, name, args)) = type_.named_type_information()
@@ -2687,34 +2703,65 @@ impl<'a> Generator<'a> {
                     }
                     CustomType::Union { custom_type } => {
                         let custom_type = custom_type.clone();
+                        let null_tag = Self::null_variant_tag(&custom_type);
                         let (tag, constructor) = custom_type
                             .constructors
                             .iter()
                             .enumerate()
                             .find(|(_, c)| &c.name == name)
                             .unwrap();
-                        let (supertype_index, type_index, _) =
-                            self.mono_union_subtype_index(type_, &custom_type, constructor, &args);
                         let right = locals.for_pattern(pattern);
-                        #[rustfmt::skip]
-                        let _ = instructions
-                            .local_tee(right)
-                            .struct_get(supertype_index, 0)
-                            .i32_const(tag as i32)
-                            .i32_eq()
-                            .if_(BlockType::Result(BOOL_VALTYPE))
-                              .local_get(right)
-                              .patterns(
-                                self,
-                                locals,
-                                &mut scope,
-                                (supertype_index, Some(type_index)),
-                                pattern,
-                                arguments.iter().map(|arg| &arg.value),
-                              )
-                            .else_()
-                              .bool_const(false)
-                            .end();
+                        if null_tag == Some(tag) {
+                            // Null-optimized variant: check ref_is_null
+                            #[rustfmt::skip]
+                            let _ = instructions
+                                .local_set(right)
+                                .local_get(right)
+                                .ref_is_null();
+                        } else {
+                            let (supertype_index, type_index, _) = self.mono_union_subtype_index(
+                                type_,
+                                &custom_type,
+                                constructor,
+                                &args,
+                            );
+                            let _ = instructions.local_tee(right);
+                            // If union has a null variant, check not-null first
+                            if null_tag.is_some() {
+                                #[rustfmt::skip]
+                                let _ = instructions
+                                    .ref_is_null()
+                                    .if_(BlockType::Result(BOOL_VALTYPE))
+                                      .bool_const(false)
+                                    .else_()
+                                      .local_get(right)
+                                      .struct_get(supertype_index, 0)
+                                      .i32_const(tag as i32)
+                                      .i32_eq()
+                                    .end();
+                            } else {
+                                #[rustfmt::skip]
+                                let _ = instructions
+                                    .struct_get(supertype_index, 0)
+                                    .i32_const(tag as i32)
+                                    .i32_eq();
+                            }
+                            #[rustfmt::skip]
+                            let _ = instructions
+                                .if_(BlockType::Result(BOOL_VALTYPE))
+                                  .local_get(right)
+                                  .patterns(
+                                    self,
+                                    locals,
+                                    &mut scope,
+                                    (supertype_index, Some(type_index)),
+                                    pattern,
+                                    arguments.iter().map(|arg| &arg.value),
+                                  )
+                                .else_()
+                                  .bool_const(false)
+                                .end();
+                        }
                     }
                     CustomType::External { .. } => panic!(),
                 };
@@ -3139,28 +3186,42 @@ impl<'a> Generator<'a> {
         } else {
             let num_fields = params.len() as u32;
             let (_, _, args) = return_.named_type_information().unwrap();
-            let (type_index, tag) = match variant.custom_type {
+            let (type_index, tag) = match &variant.custom_type {
                 CustomType::External { .. } | CustomType::Enum { .. } => panic!(),
                 CustomType::Struct {
                     custom_type,
                     constructor,
                     ..
                 } => (
-                    self.mono_struct_type_index(&return_, &custom_type, &constructor, &args)
+                    self.mono_struct_type_index(&return_, custom_type, constructor, &args)
                         .0,
                     None,
                 ),
                 CustomType::Union { custom_type } => {
                     let (_, type_index, _) = self.mono_union_subtype_index(
                         &return_,
-                        &custom_type,
+                        custom_type,
                         &variant.constructor,
                         &args,
                     );
                     (type_index, variant.tag)
                 }
             };
-            let function = self.code_variant_constructor(type_index, num_fields, tag);
+            let null_supertype = if num_fields == 0 {
+                if let CustomType::Union { custom_type } = &variant.custom_type {
+                    if Self::null_variant_tag(custom_type).is_some() {
+                        Some(self.mono_union_supertype_index(&return_, custom_type))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let function =
+                self.code_variant_constructor(type_index, num_fields, tag, null_supertype);
             let id = self.add_function_builtin(builtin, function);
             id.index
         }
@@ -3658,6 +3719,7 @@ impl<'a> Generator<'a> {
         // locals
         let tag = 2;
         // return Bool
+        let null_tag = Self::null_variant_tag(custom_type);
         #[rustfmt::skip]
         let _ = instructions
             .local_get(a)
@@ -3666,11 +3728,31 @@ impl<'a> Generator<'a> {
             .if_(BlockType::Empty)
               .bool_const(true)
               .return_()
-            .end()
+            .end();
+
+        if null_tag.is_some() {
+            // If either is null but not both (ref_eq already handled both-null)
+            #[rustfmt::skip]
+            let _ = instructions
+                .local_get(a)
+                .ref_is_null()
+                .local_get(b)
+                .ref_is_null()
+                .i32_or()
+                .if_(BlockType::Empty)
+                  .bool_const(false)
+                  .return_()
+                .end();
+        }
+
+        #[rustfmt::skip]
+        let _ = instructions
             .local_get(a)
+            .ref_as_non_null()
             .struct_get(supertype_index, 0)
             .local_tee(tag)
             .local_get(b)
+            .ref_as_non_null()
             .struct_get(supertype_index, 0)
             .i32_ne()
             .if_(BlockType::Empty)
@@ -3684,18 +3766,22 @@ impl<'a> Generator<'a> {
             let _ = instructions.block(BlockType::Empty);
         }
         let _ = instructions.local_get(tag).br_table(0..n - 1, n - 1);
-        for constructor in &custom_type.constructors {
-            let (type_index, eq_index) =
-                self.function_variant_eq(type_, custom_type, constructor, args);
-            #[rustfmt::skip]
-            let _ = instructions
-                .end()
-                .local_get(a)
-                .ref_cast_non_null(HeapType::Concrete(type_index))
-                .local_get(b)
-                .ref_cast_non_null(HeapType::Concrete(type_index))
-                .call(eq_index)
-                .return_();
+        for (i, constructor) in custom_type.constructors.iter().enumerate() {
+            let _ = instructions.end();
+            if null_tag == Some(i) {
+                let _ = instructions.unreachable();
+            } else {
+                let (type_index, eq_index) =
+                    self.function_variant_eq(type_, custom_type, constructor, args);
+                #[rustfmt::skip]
+                let _ = instructions
+                    .local_get(a)
+                    .ref_cast_non_null(HeapType::Concrete(type_index))
+                    .local_get(b)
+                    .ref_cast_non_null(HeapType::Concrete(type_index))
+                    .call(eq_index)
+                    .return_();
+            }
         }
         let _ = instructions.end();
         function
@@ -3706,9 +3792,16 @@ impl<'a> Generator<'a> {
         struct_index: u32,
         num_fields: u32,
         tag: Option<i32>,
+        null_supertype: Option<u32>,
     ) -> Function {
         let mut function = Function::new(vec![]);
         let mut instructions = function.extend_instructions(self);
+        if let Some(supertype_index) = null_supertype {
+            let _ = instructions
+                .ref_null(HeapType::Concrete(supertype_index))
+                .end();
+            return function;
+        }
         if let Some(tag) = tag {
             let _ = instructions.i32_const(tag);
         }
@@ -4228,30 +4321,58 @@ impl<'a> Generator<'a> {
             CustomType::Union { custom_type } => {
                 let _ = instructions.block(BlockType::Result(ValType::I32));
                 let supertype_index = self.mono_union_supertype_index(type_, custom_type);
+                let null_tag = Self::null_variant_tag(custom_type);
+
+                // Handle null variant before struct_get
+                if let Some(null_idx) = null_tag {
+                    let null_name = custom_type
+                        .constructors
+                        .get(null_idx)
+                        .expect("null variant")
+                        .name
+                        .clone();
+                    let string_index = self.string_index(&null_name);
+                    #[rustfmt::skip]
+                    let _ = instructions
+                        .local_get(value)
+                        .ref_is_null()
+                        .if_(BlockType::Empty)
+                          .global_as_non_null(string_index)
+                          .local_get(ptr)
+                          .call(string_to_memory)
+                          .br(1)
+                        .end();
+                }
+
                 let n = custom_type.constructors.len() as u32;
                 for _ in 0..n {
                     let _ = instructions.block(BlockType::Empty);
                 }
                 let _ = instructions
                     .local_get(value)
+                    .ref_as_non_null()
                     .struct_get(supertype_index, 0)
                     .br_table(0..n - 1, n - 1);
                 for (i, constructor) in custom_type.constructors.iter().enumerate() {
-                    let (type_index, repr_index) = self.function_variant_repr(
-                        type_,
-                        custom_type,
-                        constructor,
-                        supertype_index,
-                        args,
-                    );
-                    #[rustfmt::skip]
-                    let _ = instructions
-                        .end()
-                        .local_get(value)
-                        .ref_cast_non_null(HeapType::Concrete(type_index))
-                        .local_get(ptr)
-                        .call(repr_index)
-                        .br(n - 1 - i as u32);
+                    let _ = instructions.end();
+                    if null_tag == Some(i) {
+                        let _ = instructions.unreachable();
+                    } else {
+                        let (type_index, repr_index) = self.function_variant_repr(
+                            type_,
+                            custom_type,
+                            constructor,
+                            supertype_index,
+                            args,
+                        );
+                        #[rustfmt::skip]
+                        let _ = instructions
+                            .local_get(value)
+                            .ref_cast_non_null(HeapType::Concrete(type_index))
+                            .local_get(ptr)
+                            .call(repr_index)
+                            .br(n - 1 - i as u32);
+                    }
                 }
                 let _ = instructions.end().end();
             }
@@ -4790,6 +4911,7 @@ impl<'a> ExtendedInstructionSink<'a> {
         i32_lt_u(),
         i32_add(),
         i32_and(),
+        i32_or(),
         i32_sub(),
         i32_store8(m: MemArg),
         i32_store(m: MemArg),
