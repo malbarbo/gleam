@@ -982,7 +982,6 @@ impl<'a> Generator<'a> {
                 .iter()
                 .map(|c| (c, PRELUDE_MODULE_NAME)),
         );
-
         // Add String
         let index = self.wasm_types.len() as u32;
         self.string.type_index = *self
@@ -3285,7 +3284,7 @@ impl<'a> Generator<'a> {
               .i32_to_int()
               .call(ok_index)
             .else_()
-              .i32_const(0) // FIXME: use nil constructor
+              .nil_const()
               .call(error_index)
             .end()
             .end();
@@ -3762,7 +3761,7 @@ impl<'a> Generator<'a> {
               .int_to_i32()
               .call(ok_index)
             .else_()
-              .i32_const(0) // FIXME: use nil constructor
+              .nil_const()
               .call(error_index)
             .end()
             .end();
@@ -4412,7 +4411,7 @@ impl<'a> Generator<'a> {
               .local_get(r)
               .call(ok_index)
             .else_()
-              .i32_const(0) // FIXME: use nil constructor
+              .nil_const()
               .call(error_index)
             .end()
             .end();
@@ -4803,6 +4802,10 @@ impl<'a> ExtendedInstructionSink<'a> {
     fn bool_const(&mut self, value: bool) -> &mut Self {
         let _ = self.instructions.i32_const(value as _);
         self
+    }
+
+    fn nil_const(&mut self) -> &mut Self {
+        self.i32_const(0)
     }
 
     fn bool_not(&mut self) -> &mut Self {
