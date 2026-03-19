@@ -175,3 +175,30 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn enum_with_result_nil() {
+    run_ok(
+        r#"
+pub type Foo {
+    A
+    B
+    C
+}
+
+fn to_result(f: Foo) -> Result(Int, Nil) {
+    case f {
+        A -> Ok(1)
+        B -> Ok(2)
+        C -> Error(Nil)
+    }
+}
+
+pub fn main() {
+    assert to_result(A) == Ok(1)
+    assert to_result(B) == Ok(2)
+    assert to_result(C) == Error(Nil)
+}
+"#,
+    );
+}
