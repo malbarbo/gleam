@@ -1,0 +1,14 @@
+---
+source: compiler-core/src/webassembly/tests/strings.rs
+expression: "\npub fn main() {\n    echo \"\\\" \\n \\r \\t \\f \\\\ \"\n}\n"
+---
+----- SOURCE CODE
+
+pub fn main() {
+    echo "\" \n \r \t \f \\ "
+}
+
+
+----- STDERR
+src/my/mod.gleam:3
+"\" \n \r \t \f \\ "

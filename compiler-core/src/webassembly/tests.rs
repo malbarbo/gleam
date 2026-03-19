@@ -148,6 +148,22 @@ pub fn run_fail_stderr(src: &str, expected: &str) {
     );
 }
 
+macro_rules! assert_wasm_echo {
+    ($src:expr $(,)?) => {{
+        let result = super::run_wasm($src, vec![]);
+        assert!(
+            result.status.success(),
+            "WASM execution failed:\n{}",
+            result.stderr
+        );
+        let output = format!(
+            "----- SOURCE CODE\n{}\n\n----- STDERR\n{}",
+            $src, result.stderr
+        );
+        insta::assert_snapshot!(insta::internals::AutoName, output, $src);
+    }};
+}
+
 mod bools;
 mod case_;
 mod consts;

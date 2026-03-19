@@ -1,8 +1,6 @@
-use super::run_ok;
-
 #[test]
 fn echo_various_types() {
-    run_ok(
+    assert_wasm_echo!(
         r#"
 pub fn main() {
     let x = 10
