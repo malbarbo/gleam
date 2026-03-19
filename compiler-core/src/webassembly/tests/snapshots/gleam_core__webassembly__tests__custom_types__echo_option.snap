@@ -1,0 +1,25 @@
+---
+source: compiler-core/src/webassembly/tests/custom_types.rs
+expression: "\npub type Option(a) {\n    None\n    Some(a)\n}\n\npub fn main() {\n    echo None\n    echo Some(10)\n    echo Some(Some(\"a\"))\n}\n"
+---
+----- SOURCE CODE
+
+pub type Option(a) {
+    None
+    Some(a)
+}
+
+pub fn main() {
+    echo None
+    echo Some(10)
+    echo Some(Some("a"))
+}
+
+
+----- STDERR
+src/my/mod.gleam:8
+None
+src/my/mod.gleam:9
+Some(10)
+src/my/mod.gleam:10
+Some(Some("a"))

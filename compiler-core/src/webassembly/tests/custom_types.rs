@@ -202,3 +202,38 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn echo_option() {
+    assert_wasm_echo!(
+        r#"
+pub type Option(a) {
+    None
+    Some(a)
+}
+
+pub fn main() {
+    echo None
+    echo Some(10)
+    echo Some(Some("a"))
+}
+"#,
+    );
+}
+
+#[test]
+fn echo_tree() {
+    assert_wasm_echo!(
+        r#"
+pub type Tree(a) {
+    Empty
+    Node(value: a, left: Tree(a), right: Tree(a))
+}
+
+pub fn main() {
+    echo Empty
+    echo Node(10, Empty, Empty)
+}
+"#,
+    );
+}
