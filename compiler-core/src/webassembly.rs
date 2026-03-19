@@ -85,6 +85,7 @@ const BOOL_VALTYPE: ValType = ValType::I32;
 
 const OK_GENERIC_ID: u64 = u64::MAX;
 const ERROR_GENERIC_ID: u64 = u64::MAX - 1;
+const LIST_ITEM_GENERIC_ID: u64 = u64::MAX - 2;
 
 pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
     let mut generator = Generator::new(module, line_numbers);
@@ -94,24 +95,11 @@ pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
 
     // type section
     let mut type_section = TypeSection::new();
-    for (type_, index) in generator.wasm_types.iter().sorted_by(|a, b| a.1.cmp(b.1)) {
+    for (type_, _index) in generator.wasm_types.iter().sorted_by(|a, b| a.1.cmp(b.1)) {
         match &type_.kind {
             WasmTypeKind::Array(storage_type) => type_section.ty().array(storage_type, true),
             WasmTypeKind::Function(params, results) => {
                 type_section.ty().function(params.clone(), results.clone())
-            }
-            WasmTypeKind::List(val_type) => {
-                let list_val_type = generator.list_val_type(*index);
-                type_section.ty().struct_(vec![
-                    FieldType {
-                        element_type: StorageType::Val(list_val_type),
-                        mutable: false,
-                    },
-                    FieldType {
-                        element_type: StorageType::Val(*val_type),
-                        mutable: false,
-                    },
-                ]);
             }
             WasmTypeKind::Struct(val_types) => {
                 type_section
@@ -243,10 +231,6 @@ pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
     for (type_, index) in &generator.wasm_types {
         let mut name_map = NameMap::new();
         match &type_.kind {
-            WasmTypeKind::List(_) => {
-                name_map.append(0, "rest");
-                name_map.append(1, "first");
-            }
             WasmTypeKind::Struct(items) => {
                 for (index, (name, _)) in items.iter().enumerate() {
                     name_map.append(index as u32, name);
@@ -291,14 +275,6 @@ impl WasmType {
         }
     }
 
-    // FIXME: use list val type
-    fn list(name: EcoString, item_val_type: ValType) -> WasmType {
-        WasmType {
-            name: Some(name),
-            kind: WasmTypeKind::List(item_val_type),
-        }
-    }
-
     fn struct_(name: EcoString, fields: Vec<(EcoString, ValType)>) -> WasmType {
         WasmType {
             name: Some(name),
@@ -322,7 +298,6 @@ impl WasmType {
 enum WasmTypeKind {
     Array(StorageType),
     Function(Vec<ValType>, Vec<ValType>),
-    List(ValType),
     Struct(Vec<(EcoString, ValType)>),
     Union(Vec<(EcoString, ValType)>, Option<u32>),
 }
@@ -335,7 +310,7 @@ enum WasmConst {
     },
     List {
         global_index: u32,
-        type_index: u32,
+        type_: Arc<Type>,
         elements: Vec<TypedConstant>,
     },
     Struct {
@@ -1004,8 +979,6 @@ impl<'a> Generator<'a> {
             .wasm_types
             .entry(StringType::wasm_type())
             .or_insert(index);
-
-        // TODO: Add List to avoid special handling
     }
 
     fn add_custom_types<'b>(
@@ -1158,7 +1131,24 @@ impl<'a> Generator<'a> {
             vec![type_ok, type_err],
         );
 
-        vec![nil, bool_, result]
+        let type_item = type_::generic_var(LIST_ITEM_GENERIC_ID);
+        let list = custom_type(
+            "List",
+            vec![
+                record_constructor("Empty", vec![]),
+                record_constructor(
+                    "Cons",
+                    vec![
+                        record_constructor_arg(ast_var("rest"), type_::list(type_item.clone())),
+                        record_constructor_arg(ast_var("first"), type_item.clone()),
+                    ],
+                ),
+            ],
+            vec![(Default::default(), "a".into())],
+            vec![type_item],
+        );
+
+        vec![nil, bool_, result, list]
     }
 
     fn custom_type(&self, type_: &Arc<Type>) -> Option<(CustomType, Vec<Arc<Type>>)> {
@@ -1202,9 +1192,6 @@ impl<'a> Generator<'a> {
             self.float.val_type()
         } else if type_.is_string() {
             self.string.val_type()
-        } else if let Some(item_type) = type_.list_type() {
-            let type_index = self.list_type_index(&item_type);
-            self.list_val_type(type_index)
         } else if let Some(types) = type_.tuple_types() {
             let type_index = self.tuple_type_index(types);
             self.composite_val_type(type_index)
@@ -1257,8 +1244,6 @@ impl<'a> Generator<'a> {
     fn type_index(&mut self, type_: &Arc<Type>) -> u32 {
         if type_.is_string() {
             self.string.type_index
-        } else if let Some(item_type) = type_.list_type() {
-            self.list_type_index(&item_type)
         } else if let Some(types) = type_.tuple_types() {
             self.tuple_type_index(types)
         } else if let Some((params, return_)) = type_.fn_types() {
@@ -1314,22 +1299,6 @@ impl<'a> Generator<'a> {
 
     fn function_val_type(&self, type_index: u32) -> ValType {
         self.val_type_ref(type_index)
-    }
-
-    fn list_type_index(&mut self, item_type: &Arc<Type>) -> u32 {
-        let item_val_type = self.val_type(item_type);
-        let index = self.wasm_types.len() as u32;
-        *self
-            .wasm_types
-            .entry(WasmType::list(
-                type_pretty_name(&self.module.names, &type_::list(item_type.clone())),
-                item_val_type,
-            ))
-            .or_insert(index)
-    }
-
-    fn list_val_type(&self, type_index: u32) -> ValType {
-        self.val_type_ref_nullable(type_index)
     }
 
     fn tuple_type_index(&mut self, types: impl IntoIterator<Item = Arc<Type>>) -> u32 {
@@ -1428,7 +1397,6 @@ impl<'a> Generator<'a> {
         supertype_index: Option<u32>,
         args: &[Arc<Type>],
     ) -> (u32, Vec<Arc<Type>>) {
-        let index = self.wasm_types.len() as u32;
         let mut name = self.type_pretty_name(type_);
         let (fields, types) = if let Some(constructor) = constructor {
             name += ".";
@@ -1439,6 +1407,7 @@ impl<'a> Generator<'a> {
             (vec![], vec![])
         };
 
+        let index = self.wasm_types.len() as u32;
         (
             *self
                 .wasm_types
@@ -1534,19 +1503,22 @@ impl<'a> Generator<'a> {
             Constant::List {
                 elements, type_, ..
             } => {
-                let item_type = type_.list_type().unwrap();
-                let type_index = self.list_type_index(&item_type);
-                let val_type = self.list_val_type(type_index);
+                let (custom_type, _) = self.custom_type(type_).unwrap();
+                let CustomType::Union { custom_type } = custom_type else {
+                    panic!()
+                };
+                let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
+                let val_type = self.val_type_ref_nullable(supertype_index);
                 let id = self.add_const(
                     const_name,
                     val_type,
-                    const_expr_ref_null(type_index),
+                    const_expr_ref_null(supertype_index),
                     export,
                     true,
                 );
                 self.consts.push(WasmConst::List {
                     global_index: id.index,
-                    type_index,
+                    type_: type_.clone(),
                     elements: elements.clone(),
                 });
                 id
@@ -1693,11 +1665,22 @@ impl<'a> Generator<'a> {
             Constant::List {
                 elements, type_, ..
             } => {
-                let item_type = type_.list_type().unwrap();
-                let type_index = self.list_type_index(&item_type);
-                let _ = instructions.list_null(type_index);
+                let (custom_type, args) = self.custom_type(type_).unwrap();
+                let CustomType::Union { custom_type } = custom_type else {
+                    panic!()
+                };
+                let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
+                let cons = custom_type.constructors.get(1).expect("Cons");
+                let cons_variant = self.variants.get(&cons.name).unwrap().clone();
+                let item_type = args.first().expect("List item type");
+                let cons_fn = self.variant_constructor(
+                    vec![type_::list(item_type.clone()), item_type.clone()],
+                    type_.clone(),
+                    cons_variant,
+                );
+                let _ = instructions.ref_null(HeapType::Concrete(supertype_index));
                 for element in elements.iter().rev() {
-                    let _ = instructions.constant(self, element).list_new(type_index);
+                    let _ = instructions.constant(self, element).call(cons_fn);
                 }
             }
             Constant::Tuple { elements, .. } => {
@@ -1986,17 +1969,31 @@ impl<'a> Generator<'a> {
                 tail,
                 ..
             } => {
-                let item_type = type_.list_type().unwrap();
-                let type_index = self.list_type_index(&item_type);
+                let (custom_type, args) = self.custom_type(type_).unwrap();
+                let CustomType::Union { custom_type } = custom_type else {
+                    panic!()
+                };
+                let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
+                let cons = custom_type.constructors.get(1).expect("Cons constructor");
+                let _ = self.mono_union_subtype_index(type_, &custom_type, cons, &args);
                 if let Some(rest) = tail {
                     let _ = instructions.expression(self, locals, scope.clone(), rest);
                 } else {
-                    let _ = instructions.list_null(type_index);
+                    let _ = instructions.ref_null(HeapType::Concrete(supertype_index));
                 }
+                let item_type = args.first().expect("List item type");
+                let cons_variant = self.variants.get(&cons.name).unwrap().clone();
+                let cons_fn = self.variant_constructor(
+                    vec![type_::list(item_type.clone()), item_type.clone()],
+                    type_.clone(),
+                    cons_variant,
+                );
                 for element in elements.iter().rev() {
+                    // Stack: [rest]
+                    // Cons(rest, first) — constructor takes (rest, first) and adds tag
                     let _ = instructions
                         .expression(self, locals, scope.clone(), element)
-                        .list_new(type_index);
+                        .call(cons_fn);
                 }
             }
             TypedExpr::Tuple { elements, .. } => {
@@ -2606,8 +2603,13 @@ impl<'a> Generator<'a> {
                 type_,
                 ..
             } => {
-                let item_type = type_.list_type().unwrap();
-                let type_index = self.list_type_index(&item_type);
+                let (custom_type, args) = self.custom_type(type_).unwrap();
+                let CustomType::Union { custom_type } = custom_type else {
+                    panic!()
+                };
+                let cons = custom_type.constructors.get(1).expect("Cons");
+                let (_, cons_index, _) =
+                    self.mono_union_subtype_index(type_, &custom_type, cons, &args);
                 let right = locals.for_pattern(pattern);
                 let _ = instructions
                     .local_set(right)
@@ -2623,10 +2625,13 @@ impl<'a> Generator<'a> {
                         .end();
                 }
                 for element in elements {
+                    // Cast to Cons subtype, then access fields
+                    // Cons struct: {tag: 0, rest: 1, first: 2}
                     #[rustfmt::skip]
                     let _ = instructions
                         .local_get(right)
-                        .list_first(type_index)
+                        .ref_cast_non_null(HeapType::Concrete(cons_index))
+                        .struct_get(cons_index, 2) // first
                         .pattern(self, locals, &mut scope, element)
                         .bool_not()
                         .if_(BlockType::Empty)
@@ -2634,7 +2639,8 @@ impl<'a> Generator<'a> {
                           .br(1)
                         .end()
                         .local_get(right)
-                        .list_rest(type_index)
+                        .ref_cast_non_null(HeapType::Concrete(cons_index))
+                        .struct_get(cons_index, 1) // rest
                         .local_set(right);
                 }
                 if let Some(tail) = tail {
@@ -3122,13 +3128,15 @@ impl<'a> Generator<'a> {
                 }
                 WasmConst::List {
                     global_index,
-                    type_index,
+                    type_,
                     elements,
                 } => {
-                    let _ = instructions.global_get(global_index);
-                    for element in elements.iter().rev() {
-                        let _ = instructions.constant(self, element).list_new(type_index);
-                    }
+                    let list_const = Constant::List {
+                        location: Default::default(),
+                        type_: type_.clone(),
+                        elements: elements.clone(),
+                    };
+                    let _ = instructions.constant(self, &list_const);
                     let _ = instructions.global_set(global_index);
                 }
                 WasmConst::Struct {
@@ -3380,10 +3388,6 @@ impl<'a> Generator<'a> {
 
         let code = if type_.is_string() {
             self.code_string_eq()
-        } else if let Some(item_type) = type_.list_type() {
-            let type_index = self.list_type_index(&item_type);
-            let item_eq = self.function_eq(&item_type);
-            self.code_list_eq(type_index, item_eq)
         } else if let Some(types) = type_.tuple_types() {
             let type_index = self.tuple_type_index(types.clone());
             self.code_composite_eq(type_index, types)
@@ -3569,90 +3573,6 @@ impl<'a> Generator<'a> {
             .end()
             .bool_const(true)
             .end();
-        function
-    }
-
-    fn code_list_eq(&self, type_index: u32, item_eq: Eq) -> Function {
-        let mut function = Function::new(vec![]);
-        let mut instructions = function.extend_instructions(self);
-        // params
-        let a = 0; // List(a)
-        let b = 1; // List(a)
-        // return Bool
-        #[rustfmt::skip]
-        let _ = instructions
-            .loop_(BlockType::Empty)
-              // if ref a == ref b
-              .local_get(a)
-              .local_get(b)
-              .ref_eq()
-              .if_(BlockType::Empty)
-                .bool_const(true)
-                .return_()
-              .end()
-              // if a == null
-              .local_get(a)
-              .ref_is_null()
-              .if_(BlockType::Empty)
-                // a == null
-                // if b == null
-                .local_get(b)
-                .ref_is_null()
-                .if_(BlockType::Empty)
-                  // a == null and b == bull
-                  .bool_const(true)
-                  .return_()
-                .else_()
-                  // a != null and b == null
-                  .bool_const(false)
-                  .return_()
-                // end if b == null
-                .end()
-              .else_()
-                // a == null
-                // if b == null
-                .local_get(b)
-                .ref_is_null()
-                .if_(BlockType::Empty)
-                  // a != null and b == null
-                  .bool_const(false)
-                  .return_()
-                .else_()
-                  // a != null and b != null
-                  // a.value
-                  .local_get(a)
-                  .list_first(type_index)
-                  // b.value
-                  .local_get(b)
-                  .list_first(type_index)
-                  .eq(item_eq)
-                  // if a.value == b.value
-                  .if_(BlockType::Empty)
-                    // a = a.rest
-                    .local_get(a)
-                    .list_rest(type_index)
-                    .local_set(a)
-                    // b = b.rest
-                    .local_get(b)
-                    .list_rest(type_index)
-                    .local_set(b)
-                  .else_()
-                    // a.value != b.value
-                    .bool_const(false)
-                    .return_()
-                  // end if a.value == b.value
-                  .end()
-                // end if b == null
-                .end()
-               // end if a == null
-               .end()
-            // loop with a = a.rest and b = b.rest
-            .br(0)
-          // end loop
-          .end()
-          .bool_const(false)
-          // end function
-          .end();
         function
     }
 
@@ -4091,7 +4011,14 @@ impl<'a> Generator<'a> {
     }
 
     fn code_list_repr(&mut self, item_type: &Arc<Type>) -> Function {
-        let struct_index = self.list_type_index(item_type);
+        let list_type = type_::list(item_type.clone());
+        let (custom_type, args) = self.custom_type(&list_type).unwrap();
+        let CustomType::Union { custom_type } = custom_type else {
+            panic!()
+        };
+        let cons = custom_type.constructors.get(1).expect("Cons");
+        let (_, struct_index, _) =
+            self.mono_union_subtype_index(&list_type, &custom_type, cons, &args);
         let mut function = Function::new(vec![(1, ValType::I32)]);
         // params
         let lst = 0; // List(a)
@@ -4114,7 +4041,8 @@ impl<'a> Generator<'a> {
               .return_()
             .else_()
               .local_get(lst)
-              .struct_get(struct_index, 1)
+              .ref_cast_non_null(HeapType::Concrete(struct_index))
+              .struct_get(struct_index, 2) // first
               .local_get(dest)
               .call(self.function_repr(item_type))
               .local_get(dest)
@@ -4124,7 +4052,8 @@ impl<'a> Generator<'a> {
             .end()
             .loop_(BlockType::Empty)
               .local_get(lst)
-              .struct_get(struct_index, 0)
+              .ref_cast_non_null(HeapType::Concrete(struct_index))
+              .struct_get(struct_index, 1) // rest
               .local_tee(lst)
               .ref_is_null()
               .if_(BlockType::Empty)
@@ -4139,7 +4068,8 @@ impl<'a> Generator<'a> {
                 .byte_store(b' ')
                 .i32_inc(dest)
                 .local_get(lst)
-                .struct_get(struct_index, 1)
+                .ref_cast_non_null(HeapType::Concrete(struct_index))
+                .struct_get(struct_index, 2) // first
                 .local_get(dest)
                 .call(self.function_repr(item_type))
                 .local_get(dest)
@@ -4704,22 +4634,6 @@ impl<'a> ExtendedInstructionSink<'a> {
     {
         let _ = self.instructions.br_table(labels, default);
         self
-    }
-
-    fn list_null(&mut self, type_index: u32) -> &mut Self {
-        self.ref_null(HeapType::Concrete(type_index))
-    }
-
-    fn list_new(&mut self, type_index: u32) -> &mut Self {
-        self.struct_new(type_index)
-    }
-
-    fn list_first(&mut self, type_index: u32) -> &mut Self {
-        self.struct_get(type_index, 1)
-    }
-
-    fn list_rest(&mut self, type_index: u32) -> &mut Self {
-        self.struct_get(type_index, 0)
     }
 
     fn string_new(&mut self) -> &mut Self {

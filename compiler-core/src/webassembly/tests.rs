@@ -103,7 +103,9 @@ pub fn run_wasm(src: &str, deps: Vec<(&str, &str, &str)>) -> WasmOutput {
         .arg(&tmp)
         .output()
         .expect("wasmtime not found — install it to run WASM tests");
-    let _ = std::fs::remove_file(&tmp);
+    if output.status.success() {
+        let _ = std::fs::remove_file(&tmp);
+    }
     WasmOutput {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
