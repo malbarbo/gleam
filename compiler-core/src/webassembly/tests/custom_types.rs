@@ -237,3 +237,26 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn user_constructor_shadows_prelude() {
+    run_ok(
+        r#"
+pub type Direction {
+    Left
+    Right
+    True
+    False
+}
+
+pub fn main() {
+    assert True == True
+    assert Left != True
+    assert Left != Right
+    assert Left == Left
+    assert False == False
+    assert True != False
+}
+"#,
+    );
+}
