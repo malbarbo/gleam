@@ -3354,6 +3354,26 @@ impl<'a> Generator<'a> {
         eq
     }
 
+    fn function_variant_eq(
+        &mut self,
+        type_: &Arc<Type>,
+        custom_type: &TypedCustomType,
+        constructor: &TypedRecordConstructor,
+        args: &[Arc<Type>],
+    ) -> (u32, u32) {
+        let (_, type_index, types) =
+            self.mono_union_subtype_index(type_, custom_type, constructor, args);
+        let name = self.type_pretty_name(type_) + "." + constructor.name.clone();
+        let builtin = BuiltinFunction::Equal(self.val_type_ref(type_index), name);
+        let eq_index = if let Some(index) = self.builtins.get(&builtin) {
+            *index
+        } else {
+            let code = self.code_compisite_or_union_eq(type_index, true, types);
+            self.add_function_builtin(builtin, code).index
+        };
+        (type_index, eq_index)
+    }
+
     fn code_string_eq(&self) -> Function {
         let mut function = Function::new(vec![(2, ValType::I32)]);
         let mut instructions = function.extend_instructions(self);
@@ -3658,36 +3678,27 @@ impl<'a> Generator<'a> {
               .bool_const(false)
               .return_()
             .end()
-            .block(BlockType::Empty);
+            ;
 
-        // FIXME: use br_table?
-        for (target_tag, constructor) in custom_type.constructors.iter().enumerate() {
-            let (_, type_index, types) =
-                self.mono_union_subtype_index(type_, custom_type, constructor, args);
-            let name = self.type_pretty_name(type_) + "." + constructor.name.clone();
-            let builtin = BuiltinFunction::Equal(self.val_type_ref(type_index), name);
-            let index = if let Some(index) = self.builtins.get(&builtin) {
-                *index
-            } else {
-                let code = self.code_compisite_or_union_eq(type_index, true, types);
-                self.add_function_builtin(builtin, code).index
-            };
-
+        let n = custom_type.constructors.len() as u32;
+        for _ in 0..n {
+            let _ = instructions.block(BlockType::Empty);
+        }
+        let _ = instructions.local_get(tag).br_table(0..n - 1, n - 1);
+        for constructor in &custom_type.constructors {
+            let (type_index, eq_index) =
+                self.function_variant_eq(type_, custom_type, constructor, args);
             #[rustfmt::skip]
             let _ = instructions
-                .local_get(tag)
-                .i32_const(target_tag as i32)
-                .i32_eq()
-                .if_(BlockType::Empty)
-                  .local_get(a)
-                  .ref_cast_non_null(HeapType::Concrete(type_index))
-                  .local_get(b)
-                  .ref_cast_non_null(HeapType::Concrete(type_index))
-                  .call(index)
-                  .return_()
-                .end();
+                .end()
+                .local_get(a)
+                .ref_cast_non_null(HeapType::Concrete(type_index))
+                .local_get(b)
+                .ref_cast_non_null(HeapType::Concrete(type_index))
+                .call(eq_index)
+                .return_();
         }
-        let _ = instructions.end().unreachable().end();
+        let _ = instructions.end();
         function
     }
 
@@ -3831,6 +3842,41 @@ impl<'a> Generator<'a> {
             .call(id.index)
             .end();
         function
+    }
+
+    fn function_variant_repr(
+        &mut self,
+        type_: &Arc<Type>,
+        custom_type: &TypedCustomType,
+        constructor: &TypedRecordConstructor,
+        supertype_index: u32,
+        args: &[Arc<Type>],
+    ) -> (u32, u32) {
+        let name = self.type_pretty_name(type_);
+        let (type_index, types) = self.mono_union_type_index(
+            type_,
+            custom_type,
+            Some(constructor),
+            Some(supertype_index),
+            args,
+        );
+        let builtin = BuiltinFunction::CustomTypeRepr(
+            self.val_type_ref(type_index),
+            name + "." + constructor.name.clone(),
+            Some(constructor.name.clone()),
+        );
+        let repr_index = if let Some(index) = self.builtins.get(&builtin) {
+            *index
+        } else {
+            let code = self.code_composite_repr(
+                &constructor.name,
+                true,
+                type_index,
+                &iter::once(type_::int()).chain(types).collect_vec(),
+            );
+            self.add_function_builtin(builtin, code).index
+        };
+        (type_index, repr_index)
     }
 
     fn code_float_repr(&self) -> Function {
@@ -4183,49 +4229,32 @@ impl<'a> Generator<'a> {
             CustomType::Union { custom_type } => {
                 let _ = instructions.block(BlockType::Result(ValType::I32));
                 let supertype_index = self.mono_union_supertype_index(type_, custom_type);
-                let name = self.type_pretty_name(type_);
-                for (tag, constructor) in custom_type.constructors.iter().enumerate() {
-                    let (type_index, types) = self.mono_union_type_index(
+                let n = custom_type.constructors.len() as u32;
+                for _ in 0..n {
+                    let _ = instructions.block(BlockType::Empty);
+                }
+                let _ = instructions
+                    .local_get(value)
+                    .struct_get(supertype_index, 0)
+                    .br_table(0..n - 1, n - 1);
+                for (i, constructor) in custom_type.constructors.iter().enumerate() {
+                    let (type_index, repr_index) = self.function_variant_repr(
                         type_,
                         custom_type,
-                        Some(constructor),
-                        Some(supertype_index),
+                        constructor,
+                        supertype_index,
                         args,
                     );
-                    let builtin = BuiltinFunction::CustomTypeRepr(
-                        self.val_type_ref(type_index),
-                        name.clone() + "." + constructor.name.clone(),
-                        Some(constructor.name.clone()),
-                    );
-                    let repr_index = if let Some(index) = self.builtins.get(&builtin) {
-                        *index
-                    } else {
-                        let code = self.code_composite_repr(
-                            &constructor.name,
-                            true,
-                            type_index,
-                            &iter::once(type_::int()).chain(types).collect_vec(),
-                        );
-                        self.add_function_builtin(builtin, code).index
-                    };
                     #[rustfmt::skip]
                     let _ = instructions
+                        .end()
                         .local_get(value)
-                        .struct_get(supertype_index, 0)
-                        .i32_const(tag as i32)
-                        .i32_eq()
-                        //.local_get(value)
-                        //.ref_test_non_null(HeapType::Concrete(type_index))
-                        //.i32_and()
-                        .if_(BlockType::Empty)
-                          .local_get(value)
-                          .ref_cast_non_null(HeapType::Concrete(type_index))
-                          .local_get(ptr)
-                          .call(repr_index)
-                          .br(1)
-                        .end();
+                        .ref_cast_non_null(HeapType::Concrete(type_index))
+                        .local_get(ptr)
+                        .call(repr_index)
+                        .br(n - 1 - i as u32);
                 }
-                let _ = instructions.unreachable().end().end();
+                let _ = instructions.end().end();
             }
         };
 
@@ -4547,6 +4576,14 @@ impl<'a> ExtendedInstructionSink<'a> {
             .i32_const(1)
             .i32_add()
             .local_set(local)
+    }
+
+    fn br_table<I: IntoIterator<Item = u32>>(&mut self, labels: I, default: u32) -> &mut Self
+    where
+        I::IntoIter: ExactSizeIterator,
+    {
+        let _ = self.instructions.br_table(labels, default);
+        self
     }
 
     fn list_null(&mut self, type_index: u32) -> &mut Self {
