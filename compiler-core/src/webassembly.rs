@@ -367,6 +367,8 @@ enum BuiltinFunction {
     FunctionRepr(ValType, EcoString),
     CustomTypeRepr(ValType, EcoString, Option<EcoString>),
     VariantConstructor(Vec<ValType>, ValType, EcoString),
+    Inspect(ValType, EcoString),
+    StringStartsWith,
 }
 
 impl BuiltinFunction {
@@ -384,6 +386,8 @@ impl BuiltinFunction {
                 }
             }
             BuiltinFunction::VariantConstructor(_, _, name) => format!("_create({name})").into(),
+            BuiltinFunction::Inspect(_, name) => format!("_inspect({name})").into(),
+            BuiltinFunction::StringStartsWith => "_string_starts_with".into(),
         }
     }
 }
@@ -709,6 +713,13 @@ impl<'a> Generator<'a> {
             }
             BuiltinFunction::VariantConstructor(params, return_, _) => {
                 (params.clone(), vec![*return_])
+            }
+            BuiltinFunction::Inspect(val_type, _) => {
+                (vec![*val_type], vec![self.string.val_type()])
+            }
+            BuiltinFunction::StringStartsWith => {
+                let s = self.string.val_type();
+                (vec![s, s], vec![BOOL_VALTYPE])
             }
         }
     }
@@ -1740,6 +1751,9 @@ impl<'a> Generator<'a> {
         for function in &self.module.definitions.functions {
             if function_name(function) == name {
                 if let Some((_, fname, _)) = &function.external_webassembly {
+                    if fname == "_inspect" {
+                        return self.function_inspect(required_type);
+                    }
                     return self.find_global_expect(fname);
                 }
                 let export = function.publicity.is_public();
@@ -3211,50 +3225,10 @@ impl<'a> Generator<'a> {
             constructor_name.clone(),
         );
 
-        if let Some(index) = self.builtins.get(&builtin) {
-            *index
-        } else {
-            let num_fields = params.len() as u32;
-            let (_, _, args) = return_.named_type_information().unwrap();
-            let (type_index, tag) = match &variant.custom_type {
-                CustomType::External { .. } | CustomType::Enum { .. } => panic!(),
-                CustomType::Struct {
-                    custom_type,
-                    constructor,
-                    ..
-                } => (
-                    self.mono_struct_type_index(&return_, custom_type, constructor, &args)
-                        .0,
-                    None,
-                ),
-                CustomType::Union { custom_type } => {
-                    let (_, type_index, _) = self.mono_union_subtype_index(
-                        &return_,
-                        custom_type,
-                        &variant.constructor,
-                        &args,
-                    );
-                    (type_index, variant.tag)
-                }
-            };
-            let null_supertype = if num_fields == 0 {
-                if let CustomType::Union { custom_type } = &variant.custom_type {
-                    if Self::null_variant_tag(custom_type).is_some() {
-                        Some(self.mono_union_supertype_index(&return_, custom_type))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            let function =
-                self.code_variant_constructor(type_index, num_fields, tag, null_supertype);
-            let id = self.add_function_builtin(builtin, function);
-            id.index
-        }
+        let num_fields = params.len() as u32;
+        self.get_function_builtin(builtin, |s| {
+            s.code_variant_constructor_for(return_, variant, num_fields)
+        })
     }
 
     fn ok_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> u32 {
@@ -3404,17 +3378,31 @@ impl<'a> Generator<'a> {
             return Eq::I32;
         }
 
-        let eq = BuiltinFunction::Equal(self.val_type(type_), self.type_pretty_name(type_));
+        let builtin = BuiltinFunction::Equal(self.val_type(type_), self.type_pretty_name(type_));
+        let type_ = type_.clone();
+        let index = self.get_function_builtin(builtin, |s| s.code_eq(&type_));
+        Eq::Call(index)
+    }
 
-        if let Some(index) = self.builtins.get(&eq) {
-            return Eq::Call(*index);
-        }
+    fn function_variant_eq(
+        &mut self,
+        type_: &Arc<Type>,
+        custom_type: &TypedCustomType,
+        constructor: &TypedRecordConstructor,
+        args: &[Arc<Type>],
+    ) -> (u32, u32) {
+        let (_, type_index, types) =
+            self.mono_union_subtype_index(type_, custom_type, constructor, args);
+        let name = self.type_pretty_name(type_) + "." + constructor.name.clone();
+        let builtin = BuiltinFunction::Equal(self.val_type_ref(type_index), name);
+        let eq_index = self.get_function_builtin(builtin, |s| {
+            s.code_compisite_or_union_eq(type_index, true, types)
+        });
+        (type_index, eq_index)
+    }
 
-        // We register an empty function to get the builtin index,
-        // so we avoid problems with recursive types.
-        let mut function = self.add_function_builtin(eq.clone(), Function::new(vec![]));
-
-        let code = if type_.is_string() {
+    fn code_eq(&mut self, type_: &Arc<Type>) -> Function {
+        if type_.is_string() {
             self.code_string_eq()
         } else if let Some(types) = type_.tuple_types() {
             let type_index = self.tuple_type_index(types.clone());
@@ -3437,33 +3425,7 @@ impl<'a> Generator<'a> {
             }
         } else {
             panic!()
-        };
-
-        // Now we update the function
-        function.code = code.into_raw_body().into();
-        let eq = Eq::Call(function.index);
-        assert!(self.functions.replace(function).is_some());
-        eq
-    }
-
-    fn function_variant_eq(
-        &mut self,
-        type_: &Arc<Type>,
-        custom_type: &TypedCustomType,
-        constructor: &TypedRecordConstructor,
-        args: &[Arc<Type>],
-    ) -> (u32, u32) {
-        let (_, type_index, types) =
-            self.mono_union_subtype_index(type_, custom_type, constructor, args);
-        let name = self.type_pretty_name(type_) + "." + constructor.name.clone();
-        let builtin = BuiltinFunction::Equal(self.val_type_ref(type_index), name);
-        let eq_index = if let Some(index) = self.builtins.get(&builtin) {
-            *index
-        } else {
-            let code = self.code_compisite_or_union_eq(type_index, true, types);
-            self.add_function_builtin(builtin, code).index
-        };
-        (type_index, eq_index)
+        }
     }
 
     fn code_string_eq(&self) -> Function {
@@ -3538,12 +3500,9 @@ impl<'a> Generator<'a> {
     }
 
     fn function_string_starts_with(&mut self) -> u32 {
-        let builtin = BuiltinFunction::Equal(self.string.val_type(), "string_starts_with".into());
-        if let Some(index) = self.builtins.get(&builtin) {
-            return *index;
-        }
-        let function = self.add_function_builtin(builtin, self.code_string_starts_with());
-        function.index
+        self.get_function_builtin(BuiltinFunction::StringStartsWith, |s| {
+            s.code_string_starts_with()
+        })
     }
 
     fn code_string_starts_with(&self) -> Function {
@@ -3735,6 +3694,50 @@ impl<'a> Generator<'a> {
         function
     }
 
+    fn code_variant_constructor_for(
+        &mut self,
+        return_: Arc<Type>,
+        variant: Variant,
+        num_fields: u32,
+    ) -> Function {
+        let (_, _, args) = return_.named_type_information().unwrap();
+        let (type_index, tag) = match &variant.custom_type {
+            CustomType::External { .. } | CustomType::Enum { .. } => panic!(),
+            CustomType::Struct {
+                custom_type,
+                constructor,
+                ..
+            } => (
+                self.mono_struct_type_index(&return_, custom_type, constructor, &args)
+                    .0,
+                None,
+            ),
+            CustomType::Union { custom_type } => {
+                let (_, type_index, _) = self.mono_union_subtype_index(
+                    &return_,
+                    custom_type,
+                    &variant.constructor,
+                    &args,
+                );
+                (type_index, variant.tag)
+            }
+        };
+        let null_supertype = if num_fields == 0 {
+            if let CustomType::Union { custom_type } = &variant.custom_type {
+                if Self::null_variant_tag(custom_type).is_some() {
+                    Some(self.mono_union_supertype_index(&return_, custom_type))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        self.code_variant_constructor(type_index, num_fields, tag, null_supertype)
+    }
+
     fn code_variant_constructor(
         &mut self,
         struct_index: u32,
@@ -3809,6 +3812,46 @@ impl<'a> Generator<'a> {
         function
     }
 
+    fn function_inspect(&mut self, fn_type: &Arc<Type>) -> Id {
+        let (params, _) = fn_type.fn_types().expect("inspect must be a function type");
+        let arg_type = params
+            .into_iter()
+            .next()
+            .expect("inspect takes one argument");
+
+        let builtin =
+            BuiltinFunction::Inspect(self.val_type(&arg_type), self.type_pretty_name(&arg_type));
+        let name = builtin.name();
+        let index = self.get_function_builtin(builtin, |s| s.code_inspect(&arg_type));
+        let _ = self.add_function_to_globals(name.clone(), index);
+        Id::func(name, index)
+    }
+
+    fn code_inspect(&mut self, arg_type: &Arc<Type>) -> Function {
+        let repr_index = self.function_repr(arg_type);
+        let heap_base = self.find_global_expect(HEAP_BASE);
+        let memory_to_string =
+            self.get_function_builtin_external(BuiltinFunctionExternal::MemoryToString);
+
+        let mut function = Function::new(vec![(1, ValType::I32)]);
+        let mut instructions = function.extend_instructions(self);
+        // params
+        let value = 0;
+        // locals
+        let ptr = 1;
+        #[rustfmt::skip]
+        let _ = instructions
+            .call(heap_base.index)
+            .local_set(ptr)
+            .local_get(ptr)
+            .local_get(value)
+            .local_get(ptr)
+            .call(repr_index)
+            .call(memory_to_string)
+            .end();
+        function
+    }
+
     fn function_repr(&mut self, type_: &Arc<Type>) -> u32 {
         if type_.is_int() {
             return self.get_function_builtin_external(BuiltinFunctionExternal::IntRepr);
@@ -3842,31 +3885,8 @@ impl<'a> Generator<'a> {
             todo!("function_repr\n{type_:#?}");
         };
 
-        if let Some(id) = self.builtins.get(&repr) {
-            return *id;
-        }
-
-        // We register an empty function to get the builtin index,
-        // so we avoid problems with recursive types.
-        let mut function = self.add_function_builtin(repr.clone(), Function::new(vec![]));
-
-        let code = if let Some(item_type) = type_.list_type() {
-            self.code_list_repr(&item_type)
-        } else if let Some(types) = type_.tuple_types() {
-            self.code_tuple_repr(&types)
-        } else if type_.fn_types().is_some() {
-            self.code_function_repr(type_)
-        } else if let Some((custom_type, args)) = self.custom_type(type_) {
-            self.code_custom_type_repr(type_, &custom_type, &args)
-        } else {
-            todo!("function_repr\n{type_:#?}");
-        };
-
-        // Now we update the function
-        function.code = code.into_raw_body().into();
-        let index = function.index;
-        assert!(self.functions.replace(function.clone()).is_some());
-        index
+        let type_ = type_.clone();
+        self.get_function_builtin(repr, |s| s.code_repr(&type_))
     }
 
     fn code_int_repr(&self) -> Function {
@@ -3900,22 +3920,20 @@ impl<'a> Generator<'a> {
             Some(supertype_index),
             args,
         );
+        let constructor_name = constructor.name.clone();
         let builtin = BuiltinFunction::CustomTypeRepr(
             self.val_type_ref(type_index),
-            name + "." + constructor.name.clone(),
-            Some(constructor.name.clone()),
+            name + "." + constructor_name.clone(),
+            Some(constructor_name.clone()),
         );
-        let repr_index = if let Some(index) = self.builtins.get(&builtin) {
-            *index
-        } else {
-            let code = self.code_composite_repr(
-                &constructor.name,
+        let repr_index = self.get_function_builtin(builtin, |s| {
+            s.code_composite_repr(
+                &constructor_name,
                 true,
                 type_index,
                 &iter::once(type_::int()).chain(types).collect_vec(),
-            );
-            self.add_function_builtin(builtin, code).index
-        };
+            )
+        });
         (type_index, repr_index)
     }
 
@@ -4036,6 +4054,20 @@ impl<'a> Generator<'a> {
         }
 
         function
+    }
+
+    fn code_repr(&mut self, type_: &Arc<Type>) -> Function {
+        if let Some(item_type) = type_.list_type() {
+            self.code_list_repr(&item_type)
+        } else if let Some(types) = type_.tuple_types() {
+            self.code_tuple_repr(&types)
+        } else if type_.fn_types().is_some() {
+            self.code_function_repr(type_)
+        } else if let Some((custom_type, args)) = self.custom_type(type_) {
+            self.code_custom_type_repr(type_, &custom_type, &args)
+        } else {
+            todo!("code_repr\n{type_:#?}");
+        }
     }
 
     fn code_list_repr(&mut self, item_type: &Arc<Type>) -> Function {
@@ -4495,6 +4527,22 @@ impl<'a> Generator<'a> {
             .end()
             .end();
         function
+    }
+
+    fn get_function_builtin(
+        &mut self,
+        builtin: BuiltinFunction,
+        code_fn: impl FnOnce(&mut Self) -> Function,
+    ) -> u32 {
+        if let Some(index) = self.builtins.get(&builtin) {
+            return *index;
+        }
+        // Register empty function first to handle recursive types
+        let mut function = self.add_function_builtin(builtin, Function::new(vec![]));
+        let code = code_fn(self);
+        function.code = code.into_raw_body().into();
+        assert!(self.functions.replace(function.clone()).is_some());
+        function.index
     }
 
     fn add_function_builtin(
@@ -6262,6 +6310,20 @@ impl Externals {
                     }
                 } else if let Some(builtin) = BuiltinFunctionExternal::by_name(name) {
                     self.insert_builtin(builtin, name.into(), function_type(function));
+                } else if name == "_inspect" {
+                    assert!(
+                        function.arguments.len() == 1
+                            && function
+                                .arguments
+                                .first()
+                                .is_some_and(|arg| is_generic_type(&arg.type_))
+                            && function.return_type.is_string(),
+                        "_inspect must have signature (a) -> String"
+                    );
+                    self.echo_any = true;
+                    self.echo_int = true;
+                    self.echo_float = true;
+                    self.echo_i32 = true;
                 } else {
                     panic!("There is no function {name} in {module} module.");
                 }
