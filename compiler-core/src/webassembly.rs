@@ -550,7 +550,7 @@ struct Generator<'a> {
     global_names: NameMap,
     wasm_types: HashMap<WasmType, u32>,
     types: HashMap<(EcoString, EcoString), CustomType>,
-    variants: HashMap<EcoString, Variant>,
+    variants: HashMap<(EcoString, EcoString), Variant>,
     functions: BTreeSet<WasmFunction>,
     function_next_id: u32,
     builtins: HashMap<BuiltinFunction, u32>,
@@ -992,12 +992,14 @@ impl<'a> Generator<'a> {
                 .iter()
                 .all(|constructor| constructor.arguments.is_empty())
             {
+                let export =
+                    custom_type.publicity.is_public() && module_name != PRELUDE_MODULE_NAME;
                 for (value, constructor) in custom_type.constructors.iter().enumerate() {
                     let _ = self.add_const(
                         &constructor.name,
                         ValType::I32,
                         ConstExpr::i32_const(value as i32),
-                        custom_type.publicity.is_public(),
+                        export,
                         false,
                     );
                 }
@@ -1022,7 +1024,7 @@ impl<'a> Generator<'a> {
 
             for (tag, constructor) in custom_type.constructors.iter().enumerate() {
                 let _ = self.variants.insert(
-                    constructor.name.clone(),
+                    (module_name.into(), constructor.name.clone()),
                     Variant {
                         custom_type: type_.clone(),
                         constructor: constructor.clone(),
@@ -1671,7 +1673,11 @@ impl<'a> Generator<'a> {
                 };
                 let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
                 let cons = custom_type.constructors.get(1).expect("Cons");
-                let cons_variant = self.variants.get(&cons.name).unwrap().clone();
+                let cons_variant = self
+                    .variants
+                    .get(&(PRELUDE_MODULE_NAME.into(), cons.name.clone()))
+                    .unwrap()
+                    .clone();
                 let item_type = args.first().expect("List item type");
                 let cons_fn = self.variant_constructor(
                     vec![type_::list(item_type.clone()), item_type.clone()],
@@ -1699,7 +1705,8 @@ impl<'a> Generator<'a> {
                     let value = values.iter().position(|v| v == name).unwrap();
                     let _ = instructions.i32_const(value as i32);
                 } else {
-                    let variant = self.variants.get(name).unwrap().clone();
+                    let (module, _, _) = type_.named_type_information().unwrap();
+                    let variant = self.variants.get(&(module, name.clone())).unwrap().clone();
                     let id = self.variant_constructor(
                         arguments.iter().map(|arg| arg.value.type_()).collect(),
                         type_.clone(),
@@ -1753,7 +1760,12 @@ impl<'a> Generator<'a> {
     fn var_id(&mut self, scope: &Scope, name: &EcoString, type_: &Arc<Type>) -> Id {
         if let Some(id) = scope.find(name) {
             id
-        } else if let Some(variant) = self.variants.get(name).cloned() {
+        } else if let Some(variant) = {
+            let return_type = type_.fn_types().map_or(type_.clone(), |(_, r)| r);
+            return_type
+                .named_type_information()
+                .and_then(|(module, _, _)| self.variants.get(&(module, name.clone())).cloned())
+        } {
             let id = if let Some((params, return_)) = type_.fn_types() {
                 self.variant_constructor(params, return_, variant)
             } else {
@@ -1982,7 +1994,11 @@ impl<'a> Generator<'a> {
                     let _ = instructions.ref_null(HeapType::Concrete(supertype_index));
                 }
                 let item_type = args.first().expect("List item type");
-                let cons_variant = self.variants.get(&cons.name).unwrap().clone();
+                let cons_variant = self
+                    .variants
+                    .get(&(PRELUDE_MODULE_NAME.into(), cons.name.clone()))
+                    .unwrap()
+                    .clone();
                 let cons_fn = self.variant_constructor(
                     vec![type_::list(item_type.clone()), item_type.clone()],
                     type_.clone(),
@@ -2427,7 +2443,13 @@ impl<'a> Generator<'a> {
 
         let _ = match id.kind {
             IdKind::Func => {
-                if self.variants.contains_key(name) && type_.fn_types().is_none() {
+                if type_.fn_types().is_none()
+                    && type_
+                        .named_type_information()
+                        .is_some_and(|(module, _, _)| {
+                            self.variants.contains_key(&(module, name.clone()))
+                        })
+                {
                     // variant with no args must be called
                     instructions.call(id.index)
                 } else {
@@ -3239,7 +3261,10 @@ impl<'a> Generator<'a> {
         self.variant_constructor(
             vec![ok.clone()],
             type_::result(ok, error),
-            self.variants.get("Ok").unwrap().clone(),
+            self.variants
+                .get(&(PRELUDE_MODULE_NAME.into(), "Ok".into()))
+                .unwrap()
+                .clone(),
         )
     }
 
@@ -3247,7 +3272,10 @@ impl<'a> Generator<'a> {
         self.variant_constructor(
             vec![error.clone()],
             type_::result(ok, error),
-            self.variants.get("Error").unwrap().clone(),
+            self.variants
+                .get(&(PRELUDE_MODULE_NAME.into(), "Error".into()))
+                .unwrap()
+                .clone(),
         )
     }
 
