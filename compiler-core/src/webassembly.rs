@@ -49,6 +49,8 @@ const BUILTINS_WASM: &[u8] =
     include_bytes!("../../builtins-wasm/target/wasm32-unknown-unknown/release/builtins_wasm.wasm");
 
 const MAIN: &str = "main";
+const BUILTINS_MODULE: &str = "builtins";
+const INSPECT: &str = "_inspect";
 
 const HEAP_BASE: &str = "_heap_base";
 const EXIT: &str = "_exit";
@@ -87,9 +89,35 @@ const OK_GENERIC_ID: u64 = u64::MAX;
 const ERROR_GENERIC_ID: u64 = u64::MAX - 1;
 const LIST_ITEM_GENERIC_ID: u64 = u64::MAX - 2;
 
-pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub enum Error {
+    UnknownExternalType {
+        location: SrcSpan,
+        name: EcoString,
+    },
+    UnknownBuiltinFunction {
+        location: SrcSpan,
+        name: EcoString,
+    },
+    WrongBuiltinFunctionSignature {
+        location: SrcSpan,
+        name: EcoString,
+        expected: EcoString,
+        got: EcoString,
+    },
+    UnknownExternalModule {
+        location: SrcSpan,
+        module: EcoString,
+    },
+    UnsupportedFeature {
+        location: SrcSpan,
+        feature: EcoString,
+    },
+}
+
+pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Result<Vec<u8>, Error> {
     let mut generator = Generator::new(module, line_numbers);
-    let start = generator.generate();
+    let start = generator.generate()?;
 
     let mut module = Module::default();
 
@@ -251,7 +279,7 @@ pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Vec<u8> {
     let _ = module.section(&names);
 
     // finalize
-    module.finish()
+    Ok(module.finish())
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -408,6 +436,14 @@ enum BuiltinFunctionExternal {
     MemoryToString,
     ParseInt,
     ParseFloat,
+}
+
+pub fn builtin_function_names() -> Vec<EcoString> {
+    BuiltinFunctionExternal::all()
+        .iter()
+        .map(|b| b.name().into())
+        .chain(iter::once(INSPECT.into()))
+        .collect()
 }
 
 impl BuiltinFunctionExternal {
@@ -602,21 +638,24 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn generate(&mut self) -> u32 {
-        if !self.module.definitions.imports.is_empty() {
-            todo!("Imports\n{:#?}", self.module.definitions.imports);
+    fn generate(&mut self) -> Result<u32, Error> {
+        if let Some(import) = self.module.definitions.imports.first() {
+            return Err(Error::UnsupportedFeature {
+                location: import.location,
+                feature: "Module imports".into(),
+            });
         }
 
         // External types, like I32, must come first because of the external function type checking.
         // Externals functions come first because of the indexes in the builtin wasm file.
-        self.types_external();
-        let builtins = self.functions_external();
+        self.types_external()?;
+        let builtins = self.functions_external()?;
         self.types_prelude();
         self.functions_builtins(builtins);
         self.types();
         self.constants();
         self.functions();
-        self.function_start()
+        Ok(self.function_start())
     }
 
     fn functions_builtins(
@@ -770,17 +809,27 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn types_external(&mut self) {
+    fn types_external(&mut self) -> Result<(), Error> {
         for custom_type in &self.module.definitions.custom_types {
-            let type_ = if let Some((module, name, _)) = &custom_type.external_webassembly {
+            let type_ = if let Some((module, name, span)) = &custom_type.external_webassembly {
                 assert!(custom_type.constructors.is_empty());
-                assert_eq!(module, "builtins");
+                if module != BUILTINS_MODULE {
+                    return Err(Error::UnknownExternalModule {
+                        location: *span,
+                        module: module.clone(),
+                    });
+                }
                 match name.as_str() {
                     "I32" => CustomType::External {
                         val_type: ValType::I32,
                         to_str: I32_TO_STR,
                     },
-                    other => panic!("Unsupported external type: {other}"),
+                    _ => {
+                        return Err(Error::UnknownExternalType {
+                            location: *span,
+                            name: name.clone(),
+                        });
+                    }
                 }
             } else if custom_type.name == "I32" {
                 CustomType::External {
@@ -794,11 +843,14 @@ impl<'a> Generator<'a> {
                 .types
                 .insert((self.module.name.clone(), custom_type.name.clone()), type_);
         }
+        Ok(())
     }
 
-    fn functions_external(&mut self) -> Vec<(BuiltinFunctionExternal, EcoString, Arc<Type>)> {
+    fn functions_external(
+        &mut self,
+    ) -> Result<Vec<(BuiltinFunctionExternal, EcoString, Arc<Type>)>, Error> {
         // FIXME: move this code to Externals
-        let externals = Externals::new(self);
+        let externals = Externals::new(self)?;
 
         let module = prepare_wasm_module(
             BUILTINS_WASM,
@@ -959,7 +1011,7 @@ impl<'a> Generator<'a> {
         for (builtin, (name, type_)) in externals.builtins {
             builtins.push((builtin, name, type_));
         }
-        builtins
+        Ok(builtins)
     }
 
     fn types(&mut self) {
@@ -1751,7 +1803,7 @@ impl<'a> Generator<'a> {
         for function in &self.module.definitions.functions {
             if function_name(function) == name {
                 if let Some((_, fname, _)) = &function.external_webassembly {
-                    if fname == "_inspect" {
+                    if fname == INSPECT {
                         return self.function_inspect(required_type);
                     }
                     return self.find_global_expect(fname);
@@ -6167,7 +6219,7 @@ struct Externals {
 }
 
 impl Externals {
-    fn new(generator: &mut Generator<'_>) -> Externals {
+    fn new(generator: &mut Generator<'_>) -> Result<Externals, Error> {
         let mut externals = Externals {
             externals: HashMap::new(),
             builtins: HashMap::new(),
@@ -6201,7 +6253,7 @@ impl Externals {
             }
         }
 
-        externals.functions(generator, &generator.module.definitions.functions);
+        externals.functions(generator, &generator.module.definitions.functions)?;
 
         if externals.echo_any || externals.assert || externals.todo_panic {
             externals.insert_external(HEAP_BASE);
@@ -6238,7 +6290,7 @@ impl Externals {
             }
         }
 
-        externals
+        Ok(externals)
     }
 
     fn insert_available(&mut self, name: EcoString, function: ExternalFunction) {
@@ -6277,11 +6329,15 @@ impl Externals {
         &mut self,
         generator: &mut Generator<'_>,
         functions: impl IntoIterator<Item = &'a TypedFunction>,
-    ) {
+    ) -> Result<(), Error> {
         for function in functions {
             if let Some((module, name, _)) = &function.external_webassembly {
-                // FIXME: handle error
-                assert_eq!(module, "builtins");
+                if module != BUILTINS_MODULE {
+                    return Err(Error::UnknownExternalModule {
+                        location: function.location,
+                        module: module.clone(),
+                    });
+                }
                 if let Some(ExternalFunction {
                     params,
                     results,
@@ -6300,36 +6356,49 @@ impl Externals {
                         || !generator.is_external_type(&function.return_type)
                         || (&wasm_params, &wasm_results) != (params, results)
                     {
-                        // FIXME: improve error
-                        panic!(
-                            "Wrong type for {module}/{name}. Expected {:?}, but got ({:?}) -> ({:?}).",
-                            generator.type_pretty_name(&function_type(function)),
-                            params,
-                            results
-                        );
+                        return Err(Error::WrongBuiltinFunctionSignature {
+                            location: function.location,
+                            name: name.clone(),
+                            expected: format!(
+                                "fn({}) -> {}",
+                                params.iter().map(|p| format!("{p:?}")).join(", "),
+                                results.iter().map(|r| format!("{r:?}")).join(", "),
+                            )
+                            .into(),
+                            got: generator.type_pretty_name(&function_type(function)).clone(),
+                        });
                     }
                 } else if let Some(builtin) = BuiltinFunctionExternal::by_name(name) {
                     self.insert_builtin(builtin, name.into(), function_type(function));
-                } else if name == "_inspect" {
-                    assert!(
-                        function.arguments.len() == 1
-                            && function
-                                .arguments
-                                .first()
-                                .is_some_and(|arg| is_generic_type(&arg.type_))
-                            && function.return_type.is_string(),
-                        "_inspect must have signature (a) -> String"
-                    );
+                } else if name == INSPECT {
+                    if !(function.arguments.len() == 1
+                        && function
+                            .arguments
+                            .first()
+                            .is_some_and(|arg| is_generic_type(&arg.type_))
+                        && function.return_type.is_string())
+                    {
+                        return Err(Error::WrongBuiltinFunctionSignature {
+                            location: function.location,
+                            name: name.clone(),
+                            expected: "fn(a) -> String".into(),
+                            got: generator.type_pretty_name(&function_type(function)).clone(),
+                        });
+                    }
                     self.echo_any = true;
                     self.echo_int = true;
                     self.echo_float = true;
                     self.echo_i32 = true;
                 } else {
-                    panic!("There is no function {name} in {module} module.");
+                    return Err(Error::UnknownBuiltinFunction {
+                        location: function.location,
+                        name: name.clone(),
+                    });
                 }
             }
             self.visit_typed_function(function);
         }
+        Ok(())
     }
 
     fn visit_type(&mut self, type_: &Arc<Type>) {
@@ -6358,7 +6427,7 @@ impl Externals {
                 {
                     let custom_type = custom_type.clone();
                     let i32 = if let Some((m, n, _)) = &custom_type.external_webassembly {
-                        m == "builtins" && n == "I32"
+                        m == BUILTINS_MODULE && n == "I32"
                     } else {
                         custom_type.name == "I32" && custom_type.constructors.is_empty()
                     };

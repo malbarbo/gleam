@@ -83,7 +83,13 @@ pub fn compile(src: &str, deps: Vec<(&str, &str, &str)>) -> TypedModule {
 pub fn compile_wasm(src: &str, deps: Vec<(&str, &str, &str)>) -> Vec<u8> {
     let ast = compile(src, deps);
     let line_numbers = LineNumbers::new(src);
-    crate::webassembly::module(&ast, &line_numbers)
+    crate::webassembly::module(&ast, &line_numbers).expect("wasm codegen failed")
+}
+
+pub fn compile_wasm_error(src: &str) -> crate::webassembly::Error {
+    let ast = compile(src, vec![]);
+    let line_numbers = LineNumbers::new(src);
+    crate::webassembly::module(&ast, &line_numbers).expect_err("expected codegen error")
 }
 
 pub struct WasmOutput {
@@ -166,11 +172,20 @@ macro_rules! assert_wasm_echo {
     }};
 }
 
+macro_rules! assert_wasm_error {
+    ($src:expr $(,)?) => {{
+        let error = super::compile_wasm_error($src);
+        let output = format!("----- SOURCE CODE\n{}\n\n----- ERROR\n{:?}", $src, error);
+        insta::assert_snapshot!(insta::internals::AutoName, output, $src);
+    }};
+}
+
 mod bools;
 mod case_;
 mod consts;
 mod custom_types;
 mod echo;
+mod errors;
 mod fail;
 mod functions;
 mod lists;

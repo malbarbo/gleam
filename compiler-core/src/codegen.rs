@@ -299,9 +299,16 @@ impl<'a> WebAssembly<'a> {
         wasm_name: &str,
     ) -> Result<()> {
         let name = format!("{wasm_name}.wasm");
+        println!("Generating {name}");
         let path = self.output_directory.join(&name);
         let line_numbers = LineNumbers::new(&module.code);
-        let output = webassembly::module(&module.ast, &line_numbers);
+        let output = webassembly::module(&module.ast, &line_numbers).map_err(|error| {
+            crate::Error::WebAssembly {
+                path: module.input_path.clone(),
+                src: module.code.clone(),
+                error,
+            }
+        })?;
         tracing::debug!(name = ?name, "Generated WebAssembly module");
         writer.write_bytes(&path, &output)
     }

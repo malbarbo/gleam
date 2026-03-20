@@ -68,6 +68,13 @@ pub enum Error {
         error: Box<crate::parse::error::ParseError>,
     },
 
+    #[error("WebAssembly code generation error")]
+    WebAssembly {
+        path: Utf8PathBuf,
+        src: EcoString,
+        error: crate::webassembly::Error,
+    },
+
     #[error("type checking failed")]
     Type {
         path: Utf8PathBuf,
@@ -4085,6 +4092,67 @@ with no constructors."
                             span: location,
                         },
                         extra_labels,
+                    }),
+                    hint,
+                }]
+            }
+
+            Error::WebAssembly { path, src, error } => {
+                let (title, text, hint, location) = match error {
+                    crate::webassembly::Error::UnknownExternalType { location, name } => (
+                        "Unknown external type",
+                        format!(
+                            "The external type \"{name}\" is not supported by the WebAssembly target."
+                        ),
+                        None,
+                        *location,
+                    ),
+                    crate::webassembly::Error::UnknownBuiltinFunction { location, name } => (
+                        "Unknown builtin function",
+                        format!("The function \"{name}\" is not available in the builtins module."),
+                        did_you_mean(name, &crate::webassembly::builtin_function_names()),
+                        *location,
+                    ),
+                    crate::webassembly::Error::WrongBuiltinFunctionSignature {
+                        location,
+                        name,
+                        expected,
+                        got,
+                    } => (
+                        "Wrong builtin function signature",
+                        format!(
+                            "The function \"{name}\" has an incorrect signature for the WebAssembly target.\n\nExpected: {expected}\n     Got: {got}"
+                        ),
+                        None,
+                        *location,
+                    ),
+                    crate::webassembly::Error::UnknownExternalModule { location, module } => (
+                        "Unknown external module",
+                        format!(
+                            "The module \"{module}\" is not available. Only \"builtins\" is supported for the WebAssembly target."
+                        ),
+                        None,
+                        *location,
+                    ),
+                    crate::webassembly::Error::UnsupportedFeature { location, feature } => (
+                        "Unsupported feature",
+                        format!("{feature} is not yet supported by the WebAssembly target."),
+                        None,
+                        *location,
+                    ),
+                };
+                vec![Diagnostic {
+                    title: title.into(),
+                    text,
+                    level: Level::Error,
+                    location: Some(Location {
+                        src: src.clone(),
+                        path: path.clone(),
+                        label: Label {
+                            text: None,
+                            span: location,
+                        },
+                        extra_labels: vec![],
                     }),
                     hint,
                 }]
