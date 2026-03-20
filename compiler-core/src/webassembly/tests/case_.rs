@@ -44,3 +44,31 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn pattern_assign() {
+    run_ok(
+        r#"
+pub fn main() {
+    assert case [1, 2, 3] {
+        [_, _] as the_list -> False
+        [1, ..] as the_list -> the_list == [1, 2, 3]
+        _ -> False
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn pattern_assign_tuple() {
+    run_ok(
+        r#"
+pub fn main() {
+    let assert #(1, x) as pair = #(1, 2)
+    assert x == 2
+    assert pair == #(1, 2)
+}
+"#,
+    );
+}
