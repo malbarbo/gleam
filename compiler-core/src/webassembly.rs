@@ -4071,7 +4071,7 @@ impl<'a> Generator<'a> {
     }
 
     fn code_string_repr(&self) -> Function {
-        let mut function = Function::new(vec![(4, ValType::I32)]);
+        let mut function = Function::new(vec![(5, ValType::I32)]);
         // params
         let s = 0; // String
         let ptr = 1; // I32
@@ -4080,10 +4080,21 @@ impl<'a> Generator<'a> {
         let i = 3; // I32
         let s_i = 4; // I32
         let dest = 5; // I32
+        let needed = 6; // I32
         // return I32 - number of written bytes
         let mut instructions = function.extend_instructions(self);
         #[rustfmt::skip]
         let _ = instructions
+            // max output = ptr + 2 + len * 2
+            .local_get(ptr)
+            .local_get(s)
+            .string_len()
+            .i32_const(2)
+            .i32_mul()
+            .i32_add()
+            .i32_const(2)
+            .i32_add()
+            .ensure_memory(needed)
             .local_get(ptr)
             .local_tee(dest)
             .byte_store(b'"')
@@ -4490,13 +4501,14 @@ impl<'a> Generator<'a> {
     }
 
     fn code_string_to_memory(&self) -> Function {
-        let mut function = Function::new(vec![(2, ValType::I32)]);
+        let mut function = Function::new(vec![(3, ValType::I32)]);
         // params
         let s = 0; // String
         let dest = 1; // I32
         // locals
         let len = 2; // I32
         let i = 3; // I32
+        let needed = 4; // I32
         // result len - I32
         let mut instructions = function.extend_instructions(self);
         #[rustfmt::skip]
@@ -4504,6 +4516,10 @@ impl<'a> Generator<'a> {
             .local_get(s)
             .array_len()
             .local_set(len)
+            .local_get(dest)
+            .local_get(len)
+            .i32_add()
+            .ensure_memory(needed)
             .i32_const(0)
             .local_set(i)
             // while i <= len
@@ -4846,6 +4862,30 @@ impl<'a> ExtendedInstructionSink<'a> {
         self.array_copy(self.string.type_index, self.string.type_index)
     }
 
+    /// Ensure linear memory is large enough to access the given address.
+    /// Takes the required end address on the stack, leaves nothing.
+    fn ensure_memory(&mut self, local: u32) -> &mut Self {
+        #[rustfmt::skip]
+        let _ = self
+            .memory_size(0)
+            .i32_const(16)
+            .i32_shl()
+            .i32_sub()
+            .local_tee(local)
+            .i32_const(0)
+            .i32_gt_s()
+            .if_(BlockType::Empty)
+              .local_get(local)
+              .i32_const(65535)
+              .i32_add()
+              .i32_const(16)
+              .i32_shr_u()
+              .memory_grow(0)
+              .drop()
+            .end();
+        self
+    }
+
     fn byte_store(&mut self, byte: u8) -> &mut Self {
         self.i32_const(byte as i32).i32_store8(MemArg {
             offset: 0,
@@ -5031,6 +5071,12 @@ impl<'a> ExtendedInstructionSink<'a> {
         i32_store(m: MemArg),
         i32_load8_u(m: MemArg),
         i32_load(m: MemArg),
+        i32_mul(),
+        i32_shl(),
+        i32_shr_u(),
+        i32_gt_s(),
+        memory_size(mem: u32),
+        memory_grow(mem: u32),
     }
 }
 
