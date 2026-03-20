@@ -890,7 +890,7 @@ impl<'a> Generator<'a> {
                         let (_, import) = item.expect("Import entry");
                         let type_index = match import.ty {
                             wasmparser::TypeRef::Func(index) => index,
-                            _ => panic!("Import type not expected"),
+                            _ => panic!("unexpected import type in builtins module"),
                         };
                         let _ = self.import_section.import(
                             import.module,
@@ -1315,7 +1315,9 @@ impl<'a> Generator<'a> {
             self.function_type_index(params, Some(return_))
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             match custom_type {
-                CustomType::External { .. } | CustomType::Enum { .. } => panic!(),
+                CustomType::External { .. } | CustomType::Enum { .. } => {
+                    panic!("external/enum types should not reach code generation here")
+                }
                 CustomType::Struct {
                     custom_type,
                     constructor,
@@ -1336,7 +1338,7 @@ impl<'a> Generator<'a> {
                 }
             }
         } else {
-            panic!("type index for:\n{type_:?}");
+            panic!("unsupported type should not reach code generation: {type_:?}");
         }
     }
 
@@ -1650,7 +1652,9 @@ impl<'a> Generator<'a> {
                         });
                         id
                     }
-                    CustomType::External { .. } => todo!(),
+                    CustomType::External { .. } => {
+                        panic!("external types should not reach code generation here")
+                    }
                 }
             }
             Constant::Var { name, type_, .. } => {
@@ -1686,7 +1690,13 @@ impl<'a> Generator<'a> {
                 }
                 id
             }
-            _ => panic!(),
+            Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
+            Constant::StringConcatenation { .. } => {
+                todo!("String concatenation constants are not yet supported")
+            }
+            Constant::Invalid { .. } => {
+                panic!("invalid constants should not reach code generation")
+            }
         }
     }
 
@@ -1707,7 +1717,13 @@ impl<'a> Generator<'a> {
                 }
             }
             Constant::Var { .. } => {}
-            _ => todo!("Constant not supported: {:#?}", const_),
+            Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
+            Constant::StringConcatenation { .. } => {
+                todo!("String concatenation constants are not yet supported")
+            }
+            Constant::Invalid { .. } => {
+                panic!("invalid constants should not reach code generation")
+            }
         }
     }
 
@@ -1784,13 +1800,19 @@ impl<'a> Generator<'a> {
                 let scope = Scope::Global(self.globals.clone());
                 self.expression_var(&scope, instructions, name, type_);
             }
-            _ => todo!("Constant not supported: {:#?}", const_),
+            Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
+            Constant::StringConcatenation { .. } => {
+                todo!("String concatenation constants are not yet supported")
+            }
+            Constant::Invalid { .. } => {
+                panic!("invalid constants should not reach code generation")
+            }
         }
     }
 
     fn var(&mut self, name: &EcoString, required_type: &Arc<Type>) -> Id {
         if is_generic_type(required_type) {
-            panic!("Required type is generic:\n{required_type:#?}");
+            panic!("generic type should not reach code generation: {required_type:#?}");
         }
 
         for module_constant in &self.module.definitions.constants {
@@ -2217,7 +2239,9 @@ impl<'a> Generator<'a> {
                             .ref_cast_non_null(HeapType::Concrete(type_index))
                             .struct_get(type_index, *index as u32 + 1);
                     }
-                    _ => panic!(),
+                    CustomType::External { .. } | CustomType::Enum { .. } => {
+                        panic!("external/enum types should not reach code generation here")
+                    }
                 }
             }
             TypedExpr::RecordUpdate {
@@ -2249,10 +2273,18 @@ impl<'a> Generator<'a> {
                             .expression(self, locals, scope, constructor)
                             .call_ref(index);
                     }
-                    CustomType::External { .. } | CustomType::Enum { .. } => todo!(),
+                    CustomType::External { .. } | CustomType::Enum { .. } => {
+                        panic!("external/enum types should not reach code generation here")
+                    }
                 }
             }
-            _ => todo!("Expression not supported: {:#?}", expression),
+            TypedExpr::BitArray { .. } => todo!("BitArray expressions are not yet supported"),
+            TypedExpr::ModuleSelect { .. } => {
+                todo!("Module select expressions are not yet supported")
+            }
+            TypedExpr::Invalid { .. } => {
+                panic!("invalid expressions should not reach code generation")
+            }
         };
     }
 
@@ -2854,7 +2886,9 @@ impl<'a> Generator<'a> {
                                 .end();
                         }
                     }
-                    CustomType::External { .. } => panic!(),
+                    CustomType::External { .. } => {
+                        panic!("external types should not reach code generation here")
+                    }
                 };
             }
             Pattern::Variable { name, .. } => {
@@ -2928,7 +2962,15 @@ impl<'a> Generator<'a> {
                       .bool_const(false)
                     .end();
             }
-            _ => todo!("Assigment Assert Pattern not implemented: {:#?}", pattern),
+            Pattern::BitArray { .. } | Pattern::BitArraySize(_) => {
+                todo!("BitArray patterns are not yet supported")
+            }
+            Pattern::Assign { .. } => {
+                todo!("Assign patterns are not yet supported")
+            }
+            Pattern::Invalid { .. } => {
+                panic!("invalid patterns should not reach code generation")
+            }
         }
         scope
     }
@@ -3126,7 +3168,9 @@ impl<'a> Generator<'a> {
                 let index = index.expect("FieldAccess index") as u32;
                 let (custom_type, args) = self.custom_type(&type_).unwrap();
                 match custom_type {
-                    CustomType::External { .. } | CustomType::Enum { .. } => todo!(),
+                    CustomType::External { .. } | CustomType::Enum { .. } => {
+                        panic!("external/enum types should not reach code generation here")
+                    }
                     CustomType::Struct {
                         custom_type,
                         constructor,
@@ -3149,7 +3193,9 @@ impl<'a> Generator<'a> {
                     }
                 }
             }
-            ClauseGuard::ModuleSelect { .. } => todo!("Guard\n{guard:#?}"),
+            ClauseGuard::ModuleSelect { .. } => {
+                todo!("module select guards are not yet supported: {guard:#?}")
+            }
         }
     }
 
@@ -3413,7 +3459,7 @@ impl<'a> Generator<'a> {
 
     fn function_eq(&mut self, type_: &Arc<Type>) -> Eq {
         if type_.fn_types().is_some() {
-            panic!("function equality is not supported");
+            todo!("function equality is not yet supported");
         } else if type_.is_int() {
             return Eq::Int;
         } else if type_.is_float() {
@@ -3470,7 +3516,9 @@ impl<'a> Generator<'a> {
                     let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
                     self.code_union_eq(type_, supertype_index, &custom_type, &args)
                 }
-                _ => panic!(),
+                CustomType::External { .. } | CustomType::Enum { .. } => {
+                    panic!("external/enum types should not reach code generation here")
+                }
             }
         } else {
             panic!()
@@ -3751,7 +3799,9 @@ impl<'a> Generator<'a> {
     ) -> Function {
         let (_, _, args) = return_.named_type_information().unwrap();
         let (type_index, tag) = match &variant.custom_type {
-            CustomType::External { .. } | CustomType::Enum { .. } => panic!(),
+            CustomType::External { .. } | CustomType::Enum { .. } => {
+                panic!("external/enum types should not reach code generation here")
+            }
             CustomType::Struct {
                 custom_type,
                 constructor,
@@ -3931,7 +3981,7 @@ impl<'a> Generator<'a> {
                 None,
             )
         } else {
-            todo!("function_repr\n{type_:#?}");
+            todo!("unsupported type for repr: {type_:#?}");
         };
 
         let type_ = type_.clone();
@@ -4115,7 +4165,7 @@ impl<'a> Generator<'a> {
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             self.code_custom_type_repr(type_, &custom_type, &args)
         } else {
-            todo!("code_repr\n{type_:#?}");
+            todo!("unsupported type for repr: {type_:#?}");
         }
     }
 
@@ -5559,7 +5609,7 @@ impl Locals {
             .insert(key.hash(), (index, Some(name)))
             .is_some()
         {
-            panic!("Locals collision.");
+            panic!("locals collision should not happen during code generation");
         }
         self.val_types.push(generator.val_type(type_));
     }
@@ -5567,7 +5617,7 @@ impl Locals {
     fn _insert_with_val_type(&mut self, key: impl LocalHash, val_type: ValType) {
         let index = self.locals.len() as u32 + self.params.len() as u32;
         if self.locals.insert(key.hash(), (index, None)).is_some() {
-            panic!("Locals collision.");
+            panic!("locals collision should not happen during code generation");
         }
         self.val_types.push(val_type);
     }
@@ -5576,7 +5626,7 @@ impl Locals {
         let id = key.hash();
         self.locals
             .get(&id)
-            .unwrap_or_else(|| panic!("Local with id {id} not found."))
+            .unwrap_or_else(|| panic!("local not found during code generation: {id}"))
             .0
     }
 }
@@ -6036,7 +6086,13 @@ impl Monomorphizer {
             | TypedExpr::String { .. }
             | TypedExpr::NegateBool { .. }
             | TypedExpr::NegateInt { .. } => {}
-            _ => todo!("Expression not supported: {:#?}", expression),
+            TypedExpr::BitArray { .. } => todo!("BitArray expressions are not yet supported"),
+            TypedExpr::ModuleSelect { .. } => {
+                todo!("Module select expressions are not yet supported")
+            }
+            TypedExpr::Invalid { .. } => {
+                panic!("invalid expressions should not reach code generation")
+            }
         }
     }
 
@@ -6549,7 +6605,7 @@ fn prepare_wasm_module<'a>(
                 continue 'loop_;
             }
         }
-        panic!("External not found: \"{external}\".");
+        panic!("external not found during code generation: \"{external}\"");
     }
 
     // Find functions and globals used by root functions
@@ -6648,7 +6704,7 @@ fn walrus_type_to_wasmencoder_type(type_: &walrus::ValType) -> ValType {
             walrus::RefType::Externref => ValType::Ref(RefType::EXTERNREF),
             walrus::RefType::Funcref => ValType::Ref(RefType::FUNCREF),
             walrus::RefType::Exnref => ValType::Ref(RefType::EXNREF),
-            _ => todo!(),
+            _ => panic!("unexpected walrus ref type during code generation"),
         },
     }
 }
@@ -6707,7 +6763,7 @@ fn const_expr_i32_const(const_: &wasmparser::ConstExpr<'_>) -> ConstExpr {
                 i32_value = value;
             }
             wasmparser::Operator::End => {}
-            op => panic!("Operator not expected: {:?}", op),
+            op => panic!("unexpected operator during code generation: {op:?}"),
         }
     }
     ConstExpr::i32_const(i32_value)
@@ -6730,7 +6786,7 @@ pub fn unescape(s: &str) -> String {
             Some('r') => '\r',
             Some('t') => '\t',
             Some('u') => unescape_unicode(&mut chars),
-            _ => panic!(),
+            _ => panic!("invalid escape sequence during code generation"),
         };
         r.push(ch);
     }
