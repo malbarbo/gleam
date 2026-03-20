@@ -779,12 +779,11 @@ impl<'a> Generator<'a> {
     }
 
     fn is_external_type(&self, type_: &Arc<Type>) -> bool {
-        // FIXME: this function is not right
-        if let Some((module, name, args)) = type_.named_type_information()
-            && args.is_empty()
-            && self.types.contains_key(&(module, name))
-        {
-            true
+        if let Some((module, name, _)) = type_.named_type_information() {
+            matches!(
+                self.types.get(&(module, name)),
+                Some(CustomType::External { .. })
+            )
         } else {
             false
         }
