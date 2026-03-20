@@ -3,6 +3,7 @@
 mod tests;
 
 use ecow::EcoString;
+use indexmap::IndexMap;
 use itertools::Itertools;
 use num_bigint::BigInt;
 use std::{
@@ -123,7 +124,7 @@ pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Result<Vec<u8
 
     // type section
     let mut type_section = TypeSection::new();
-    for (type_, _index) in generator.wasm_types.iter().sorted_by(|a, b| a.1.cmp(b.1)) {
+    for (type_, _index) in &generator.wasm_types {
         match &type_.kind {
             WasmTypeKind::Array(storage_type) => type_section.ty().array(storage_type, true),
             WasmTypeKind::Function(params, results) => {
@@ -587,7 +588,7 @@ struct Generator<'a> {
     export_section: ExportSection,
     data_section: DataSection,
     global_names: NameMap,
-    wasm_types: HashMap<WasmType, u32>,
+    wasm_types: IndexMap<WasmType, u32>,
     types: HashMap<(EcoString, EcoString), CustomType>,
     variants: HashMap<(EcoString, EcoString), Variant>,
     functions: BTreeSet<WasmFunction>,
@@ -618,7 +619,7 @@ impl<'a> Generator<'a> {
             export_section: ExportSection::new(),
             data_section: DataSection::new(),
             global_names: NameMap::new(),
-            wasm_types: HashMap::new(),
+            wasm_types: IndexMap::new(),
             types: HashMap::new(),
             variants: HashMap::new(),
             functions: BTreeSet::new(),

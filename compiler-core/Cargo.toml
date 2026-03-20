@@ -54,6 +54,8 @@ bitvec = { version = "1", features = ["serde"] }
 wasm-encoder = "0.240.0"
 walrus = "0.24.4"
 wasmparser = "0.240.0"
+# Insertion-order preserving hashmap
+indexmap = "2"
 
 async-trait.workspace = true
 base16.workspace = true
