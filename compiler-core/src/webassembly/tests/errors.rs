@@ -70,6 +70,10 @@ fn to_str(value: I32) -> I32
     );
 }
 
+// is_external_type correctly rejects non-external types like Bool.
+// This is tested indirectly by wrong_external_function_type which
+// uses Int (a non-external type) in a function signature.
+
 // Module imports are not yet supported but the test infrastructure
 // doesn't support multi-module compilation, so we can't test this
 // error here yet.
