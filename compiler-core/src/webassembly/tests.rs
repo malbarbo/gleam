@@ -189,6 +189,7 @@ mod errors;
 mod fail;
 mod functions;
 mod lists;
+mod memory;
 mod numbers;
 mod strings;
 mod tuples;
