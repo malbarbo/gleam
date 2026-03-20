@@ -330,3 +330,27 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn inferred_variant_field_access() {
+    run_ok(
+        r#"
+pub type Shape {
+    Circle(radius: Float)
+    Rect(width: Float, height: Float)
+}
+
+pub fn area(s: Shape) -> Float {
+    case s {
+        Circle(r) -> r *. r *. 3.14
+        Rect(..) -> s.width *. s.height
+    }
+}
+
+pub fn main() {
+    assert area(Circle(10.0)) == 314.0
+    assert area(Rect(3.0, 4.0)) == 12.0
+}
+"#,
+    );
+}
