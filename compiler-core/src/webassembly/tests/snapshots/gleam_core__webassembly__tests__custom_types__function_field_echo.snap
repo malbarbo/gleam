@@ -1,0 +1,18 @@
+---
+source: compiler-core/src/webassembly/tests/custom_types.rs
+expression: "\npub type Handler {\n    Handler(on_click: fn() -> Int)\n}\n\npub fn main() {\n    echo Handler(fn() { 42 })\n}\n"
+---
+----- SOURCE CODE
+
+pub type Handler {
+    Handler(on_click: fn() -> Int)
+}
+
+pub fn main() {
+    echo Handler(fn() { 42 })
+}
+
+
+----- STDERR
+src/my/mod.gleam:7
+Handler(//fn() -> Int { ... })

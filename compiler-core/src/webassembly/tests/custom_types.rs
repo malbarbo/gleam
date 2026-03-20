@@ -260,3 +260,73 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn function_field_access() {
+    run_ok(
+        r#"
+pub type Handler {
+    Handler(on_click: fn() -> Int)
+}
+
+pub fn main() {
+    let h = Handler(fn() { 42 })
+    assert h.on_click() == 42
+}
+"#,
+    );
+}
+
+#[test]
+fn function_field_pattern() {
+    run_ok(
+        r#"
+pub type Handler {
+    Handler(on_click: fn() -> Int)
+}
+
+pub fn main() {
+    let h = Handler(fn() { 42 })
+    let Handler(f) = h
+    assert f() == 42
+}
+"#,
+    );
+}
+
+#[test]
+fn function_field_echo() {
+    assert_wasm_echo!(
+        r#"
+pub type Handler {
+    Handler(on_click: fn() -> Int)
+}
+
+pub fn main() {
+    echo Handler(fn() { 42 })
+}
+"#,
+    );
+}
+
+#[test]
+fn function_field_const() {
+    run_ok(
+        r#"
+pub type Pair {
+    Pair(first: fn(Int) -> Int, second: Int)
+}
+
+fn double(x: Int) -> Int {
+    x * 2
+}
+
+const p = Pair(double, 10)
+
+pub fn main() {
+    assert p.first(5) == 10
+    assert p.second == 10
+}
+"#,
+    );
+}

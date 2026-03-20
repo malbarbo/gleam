@@ -72,3 +72,18 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn case_returns_function() {
+    run_ok(
+        r#"
+pub fn main() {
+    let f = case True {
+        True -> fn(x) { x + 1 }
+        False -> fn(x) { x * 2 }
+    }
+    assert f(10) == 11
+}
+"#,
+    );
+}
