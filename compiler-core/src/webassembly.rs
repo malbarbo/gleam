@@ -2965,8 +2965,15 @@ impl<'a> Generator<'a> {
             Pattern::BitArray { .. } | Pattern::BitArraySize(_) => {
                 todo!("BitArray patterns are not yet supported")
             }
-            Pattern::Assign { .. } => {
-                todo!("Assign patterns are not yet supported")
+            Pattern::Assign {
+                name,
+                pattern: inner,
+                ..
+            } => {
+                let right = locals.for_pattern(pattern);
+                scope = scope.insert_local(name.clone(), right);
+                let _ = instructions.local_tee(right);
+                scope = self._pattern(locals, scope, instructions, inner);
             }
             Pattern::Invalid { .. } => {
                 panic!("invalid patterns should not reach code generation")
