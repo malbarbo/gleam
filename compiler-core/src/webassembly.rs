@@ -1994,13 +1994,14 @@ impl<'a> Generator<'a> {
         assert: &crate::ast::Assert<TypedExpr>,
     ) {
         assert!(assert.value.type_().is_bool());
-        let msg: EcoString = format!(
-            "Assertion failed at src/{}.gleam:{}.\n",
+        let prefix = self.string_index(&"Assertion failed at ".into());
+        let location: EcoString = format!(
+            "src/{}.gleam:{}.\n",
             self.module.name,
             self.line_numbers.line_number(assert.location.start)
         )
         .into();
-        let string_index = self.string_index(&msg);
+        let location = self.string_index(&location);
         let string_to_memory =
             self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
         let heap_base = self.find_global_expect(HEAP_BASE);
@@ -2012,8 +2013,7 @@ impl<'a> Generator<'a> {
             .if_(BlockType::Result(BOOL_VALTYPE))
               .bool_const(true)
             .else_()
-              .show_error_message(string_index, string_to_memory, heap_base.index, print.index)
-              .drop()
+              .show_error_message(prefix, location, string_to_memory, heap_base.index, print.index)
               .i32_const(1)
               .call(exit.index)
               .unreachable()
@@ -2264,20 +2264,19 @@ impl<'a> Generator<'a> {
         expression: &TypedExpr,
         message: &Option<Box<TypedExpr>>,
     ) {
-        let msg: EcoString = format!(
-            "{} at src/{}.gleam:{}{}",
-            if expression.is_panic() {
-                "panic"
-            } else {
-                "todo"
-            },
+        let prefix = self.string_index(&if expression.is_panic() {
+            "panic at ".into()
+        } else {
+            "todo at ".into()
+        });
+        let location: EcoString = format!(
+            "src/{}.gleam:{}{}",
             self.module.name,
             self.line_numbers.line_number(expression.location().start),
             if message.is_none() { ".\n" } else { "\n  " },
         )
         .into();
-
-        let string_index = self.string_index(&msg);
+        let location = self.string_index(&location);
         let string_to_memory =
             self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
         let heap_base = self.find_global_expect(HEAP_BASE);
@@ -2285,7 +2284,8 @@ impl<'a> Generator<'a> {
         let exit = self.find_global_expect(EXIT);
 
         let _ = instructions.show_error_message(
-            string_index,
+            prefix,
+            location,
             string_to_memory,
             heap_base.index,
             print.index,
@@ -2308,11 +2308,7 @@ impl<'a> Generator<'a> {
                 .call(print.index);
         }
 
-        let _ = instructions
-            .drop()
-            .i32_const(1)
-            .call(exit.index)
-            .unreachable();
+        let _ = instructions.i32_const(1).call(exit.index).unreachable();
     }
 
     fn expression_bin_op(
@@ -2628,13 +2624,15 @@ impl<'a> Generator<'a> {
             .local_tee(right);
         match assignment.kind {
             AssignmentKind::Assert { .. } => {
-                let msg: EcoString = format!(
-                    "Pattern match failed, no pattern matched the value at src/{}.gleam:{}.\n",
+                let prefix = self
+                    .string_index(&"Pattern match failed, no pattern matched the value at ".into());
+                let location: EcoString = format!(
+                    "src/{}.gleam:{}.\n",
                     self.module.name,
                     self.line_numbers.line_number(assignment.location.start)
                 )
                 .into();
-                let string_index = self.string_index(&msg);
+                let location = self.string_index(&location);
                 let string_to_memory =
                     self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
                 let heap_base = self.find_global_expect(HEAP_BASE);
@@ -2646,8 +2644,7 @@ impl<'a> Generator<'a> {
                     .if_(BlockType::Result(self.val_type(&assignment.value.type_())))
                       .local_get(right)
                     .else_()
-                      .show_error_message(string_index, string_to_memory, heap_base.index, print.index)
-                      .drop()
+                      .show_error_message(prefix, location, string_to_memory, heap_base.index, print.index)
                       .i32_const(1)
                       .call(exit.index)
                       .unreachable()
@@ -4901,17 +4898,23 @@ impl<'a> ExtendedInstructionSink<'a> {
 
     fn show_error_message(
         &mut self,
-        string_index: u32,
+        prefix: u32,
+        location: u32,
         string_to_memory: u32,
         heap_base: u32,
         print: u32,
     ) -> &mut Self {
-        self.i32_const(STDERR)
-            .call(heap_base)
-            .global_as_non_null(string_index)
-            .call(heap_base)
-            .call(string_to_memory)
-            .call(print)
+        for string_index in [prefix, location] {
+            let _ = self
+                .i32_const(STDERR)
+                .call(heap_base)
+                .global_as_non_null(string_index)
+                .call(heap_base)
+                .call(string_to_memory)
+                .call(print)
+                .drop();
+        }
+        self
     }
 
     delegate! {
