@@ -1,0 +1,16 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+expression: "\n@external(webassembly, \"builtins\", \"_unknown_func\")\nfn unknown(a: Int) -> Int\n\npub fn main() {\n    unknown(1)\n}\n"
+---
+----- SOURCE CODE
+
+@external(webassembly, "builtins", "_unknown_func")
+fn unknown(a: Int) -> Int
+
+pub fn main() {
+    unknown(1)
+}
+
+
+----- ERROR
+UnknownBuiltinFunction { location: SrcSpan { start: 53, end: 71 }, name: "_unknown_func" }

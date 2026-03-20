@@ -1,0 +1,14 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+expression: "\ntype I32 {}\n\n@external(webassembly, \"builtins\", \"_i32_to_str\")\nfn to_str(value: I32) -> I32\n"
+---
+----- SOURCE CODE
+
+type I32 {}
+
+@external(webassembly, "builtins", "_i32_to_str")
+fn to_str(value: I32) -> I32
+
+
+----- ERROR
+WrongBuiltinFunctionSignature { location: SrcSpan { start: 64, end: 85 }, name: "_i32_to_str", expected: "fn(I32, I32) -> I32", got: "fn(I32) -> I32" }

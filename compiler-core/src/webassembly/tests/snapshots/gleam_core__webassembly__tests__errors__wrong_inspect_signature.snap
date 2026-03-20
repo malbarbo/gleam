@@ -1,0 +1,16 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+expression: "\n@external(webassembly, \"builtins\", \"_inspect\")\nfn inspect(a: Int, b: Int) -> String\n\npub fn main() {\n    inspect(1, 2)\n}\n"
+---
+----- SOURCE CODE
+
+@external(webassembly, "builtins", "_inspect")
+fn inspect(a: Int, b: Int) -> String
+
+pub fn main() {
+    inspect(1, 2)
+}
+
+
+----- ERROR
+WrongBuiltinFunctionSignature { location: SrcSpan { start: 48, end: 74 }, name: "_inspect", expected: "fn(a) -> String", got: "fn(Int, Int) -> String" }

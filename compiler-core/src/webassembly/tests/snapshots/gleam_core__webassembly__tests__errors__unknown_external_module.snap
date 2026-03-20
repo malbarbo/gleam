@@ -1,0 +1,12 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+expression: "\n@external(webassembly, \"other\", \"I32\")\ntype Foo\n"
+---
+----- SOURCE CODE
+
+@external(webassembly, "other", "I32")
+type Foo
+
+
+----- ERROR
+UnknownExternalModule { location: SrcSpan { start: 1, end: 39 }, module: "other" }
