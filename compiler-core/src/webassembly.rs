@@ -171,17 +171,18 @@ pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Result<Vec<u8
     }
     let _ = module.section(&function_section);
 
-    // memory section
-    // FIXME: create only if it is necessary
-    let mut memory_section = MemorySection::new();
-    let _ = memory_section.memory(MemoryType {
-        minimum: 17,
-        maximum: None,
-        memory64: false,
-        shared: false,
-        page_size_log2: None,
-    });
-    let _ = module.section(&memory_section);
+    // memory section (only needed when builtins use linear memory)
+    if !generator.import_section.is_empty() {
+        let mut memory_section = MemorySection::new();
+        let _ = memory_section.memory(MemoryType {
+            minimum: 17,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        let _ = module.section(&memory_section);
+    }
 
     // global section
     let _ = module.section(&generator.global_section);
@@ -926,7 +927,12 @@ impl<'a> Generator<'a> {
                         let kind = match export.kind {
                             wasmparser::ExternalKind::Func => ExportKind::Func,
                             wasmparser::ExternalKind::Table => ExportKind::Table,
-                            wasmparser::ExternalKind::Memory => ExportKind::Memory,
+                            wasmparser::ExternalKind::Memory => {
+                                if self.import_section.is_empty() {
+                                    continue;
+                                }
+                                ExportKind::Memory
+                            }
                             wasmparser::ExternalKind::Global => ExportKind::Global,
                             wasmparser::ExternalKind::Tag => ExportKind::Tag,
                         };
