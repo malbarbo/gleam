@@ -100,3 +100,19 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn const_string_concatenation() {
+    run_ok(
+        r#"
+const greeting = "Hello, " <> "World!"
+const prefix = "ab"
+const full = prefix <> "cd"
+
+pub fn main() {
+    assert greeting == "Hello, World!"
+    assert full == "abcd"
+}
+"#,
+    );
+}

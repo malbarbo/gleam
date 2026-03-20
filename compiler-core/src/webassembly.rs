@@ -336,10 +336,9 @@ enum WasmConst {
         dest: u32,
         src: u32,
     },
-    List {
+    Constant {
         global_index: u32,
-        type_: Arc<Type>,
-        elements: Vec<TypedConstant>,
+        value: Box<TypedConstant>,
     },
     Struct {
         global_index: u32,
@@ -1567,9 +1566,7 @@ impl<'a> Generator<'a> {
                 });
                 id
             }
-            Constant::List {
-                elements, type_, ..
-            } => {
+            Constant::List { type_, .. } => {
                 let (custom_type, _) = self.custom_type(type_).unwrap();
                 let CustomType::Union { custom_type } = custom_type else {
                     panic!()
@@ -1583,10 +1580,9 @@ impl<'a> Generator<'a> {
                     export,
                     true,
                 );
-                self.consts.push(WasmConst::List {
+                self.consts.push(WasmConst::Constant {
                     global_index: id.index,
-                    type_: type_.clone(),
-                    elements: elements.clone(),
+                    value: Box::new(module_constant.value.as_ref().clone()),
                 });
                 id
             }
@@ -1692,7 +1688,18 @@ impl<'a> Generator<'a> {
             }
             Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
             Constant::StringConcatenation { .. } => {
-                todo!("String concatenation constants are not yet supported")
+                let id = self.add_const(
+                    const_name,
+                    self.string.val_type_nullable(),
+                    ConstExpr::ref_null(self.string.heap_type()),
+                    export,
+                    true,
+                );
+                self.consts.push(WasmConst::Constant {
+                    global_index: id.index,
+                    value: Box::new(module_constant.value.as_ref().clone()),
+                });
+                id
             }
             Constant::Invalid { .. } => {
                 panic!("invalid constants should not reach code generation")
@@ -1718,8 +1725,9 @@ impl<'a> Generator<'a> {
             }
             Constant::Var { .. } => {}
             Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
-            Constant::StringConcatenation { .. } => {
-                todo!("String concatenation constants are not yet supported")
+            Constant::StringConcatenation { left, right, .. } => {
+                self.register_string_const(left);
+                self.register_string_const(right);
             }
             Constant::Invalid { .. } => {
                 panic!("invalid constants should not reach code generation")
@@ -1801,8 +1809,13 @@ impl<'a> Generator<'a> {
                 self.expression_var(&scope, instructions, name, type_);
             }
             Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
-            Constant::StringConcatenation { .. } => {
-                todo!("String concatenation constants are not yet supported")
+            Constant::StringConcatenation { left, right, .. } => {
+                let concat =
+                    self.get_function_builtin_external(BuiltinFunctionExternal::StringConcat);
+                let _ = instructions
+                    .constant(self, left)
+                    .constant(self, right)
+                    .call(concat);
             }
             Constant::Invalid { .. } => {
                 panic!("invalid constants should not reach code generation")
@@ -3264,18 +3277,11 @@ impl<'a> Generator<'a> {
                 WasmConst::String { dest, src } => {
                     let _ = instructions.global_get(src).global_set(dest);
                 }
-                WasmConst::List {
+                WasmConst::Constant {
                     global_index,
-                    type_,
-                    elements,
+                    value,
                 } => {
-                    let list_const = Constant::List {
-                        location: Default::default(),
-                        type_: type_.clone(),
-                        elements: elements.clone(),
-                    };
-                    let _ = instructions.constant(self, &list_const);
-                    let _ = instructions.global_set(global_index);
+                    let _ = instructions.constant(self, &value).global_set(global_index);
                 }
                 WasmConst::Struct {
                     global_index,
