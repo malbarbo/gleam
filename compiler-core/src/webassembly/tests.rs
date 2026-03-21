@@ -86,6 +86,26 @@ pub fn compile_wasm(src: &str, deps: Vec<(&str, &str, &str)>) -> Vec<u8> {
     crate::webassembly::module(&ast, &line_numbers).expect("wasm codegen failed")
 }
 
+/// Extract type names from the wasm binary's name section.
+pub fn wasm_type_names(wasm_bytes: &[u8]) -> Vec<String> {
+    let mut names = vec![];
+    for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
+        if let wasmparser::Payload::CustomSection(section) = payload.unwrap() {
+            if let wasmparser::KnownCustom::Name(name_section) = section.as_known() {
+                for subsection in name_section {
+                    if let wasmparser::Name::Type(type_names) = subsection.unwrap() {
+                        for naming in type_names {
+                            let naming = naming.unwrap();
+                            names.push(naming.name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
 pub fn compile_wasm_error(src: &str) -> crate::webassembly::Error {
     let ast = compile(src, vec![]);
     let line_numbers = LineNumbers::new(src);

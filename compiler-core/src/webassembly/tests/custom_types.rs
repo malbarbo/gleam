@@ -1,4 +1,4 @@
-use super::run_ok;
+use super::{compile_wasm, run_ok, wasm_type_names};
 
 #[test]
 fn enum_constants() {
@@ -352,5 +352,33 @@ pub fn main() {
     assert area(Rect(3.0, 4.0)) == 12.0
 }
 "#,
+    );
+}
+
+#[test]
+fn generic_union_shared_supertype() {
+    let src = r#"
+pub type Option(a) {
+    None
+    Some(a)
+}
+
+pub fn main() {
+    let a = Some(1)
+    let b = Some("hello")
+    let c = Some(1.0)
+    assert a == Some(1)
+    assert b == Some("hello")
+    assert c == Some(1.0)
+    0
+}
+"#;
+    let wasm = compile_wasm(src, vec![]);
+    let names = wasm_type_names(&wasm);
+    // All monomorphizations (Option(Int), Option(String), Option(Float))
+    // should share a single "Option" supertype.
+    assert_eq!(
+        names.iter().filter(|n| n.as_str() == "Option").count(),
+        1,
     );
 }
