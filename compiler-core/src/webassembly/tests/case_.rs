@@ -87,3 +87,54 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn list_pattern_guard_field_access() {
+    run_ok(
+        r#"
+pub type Pair(a, b) {
+    Pair(first: a, second: b)
+}
+
+pub fn lookup(lst: List(Pair(a, b)), key: a) -> Result(b, Nil) {
+    case lst {
+        [] -> Error(Nil)
+        [p, ..] if p.first == key -> Ok(p.second)
+        [_, ..rest] -> lookup(rest, key)
+    }
+}
+
+pub fn main() {
+    assert lookup([], "x") == Error(Nil)
+    assert lookup([Pair("a", 1), Pair("b", 2)], "b") == Ok(2)
+    assert lookup([Pair("a", 1), Pair("b", 2)], "c") == Error(Nil)
+}
+"#,
+    );
+}
+
+#[test]
+fn union_pattern_guard_field_access() {
+    run_ok(
+        r#"
+pub type Box(a) {
+    Empty
+    Full(value: a)
+}
+
+pub fn get_or(box: Box(a), default: a) -> a {
+    case box {
+        Full(v) if v == default -> v
+        Full(_) -> default
+        Empty -> default
+    }
+}
+
+pub fn main() {
+    assert get_or(Full("a"), "a") == "a"
+    assert get_or(Full("b"), "a") == "a"
+    assert get_or(Empty, "x") == "x"
+}
+"#,
+    );
+}

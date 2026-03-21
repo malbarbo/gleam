@@ -567,10 +567,10 @@ enum CustomType {
 
 impl CustomType {
     fn is_ref_non_null(&self) -> bool {
-        if let CustomType::Struct { .. } | CustomType::Union { .. } = self {
-            true
-        } else {
-            false
+        match self {
+            CustomType::Struct { .. } => true,
+            CustomType::Union { custom_type } => Generator::null_variant_tag(custom_type).is_none(),
+            _ => false,
         }
     }
 }
@@ -1291,14 +1291,9 @@ impl<'a> Generator<'a> {
     }
 
     fn val_type_ref(&self, type_index: u32) -> ValType {
-        // FIXME: set nullable to false
-        // The way we perform pattern matching can leave local variables of
-        // Wasm structure types uninitialized, causing the generated code to
-        // fail validation. If the structures can be null, they are initialized
-        // by default with null and the code validates.
         RefType {
             heap_type: HeapType::Concrete(type_index),
-            nullable: true,
+            nullable: false,
         }
         .into()
     }
@@ -1513,7 +1508,11 @@ impl<'a> Generator<'a> {
             }
             CustomType::Union { custom_type } => {
                 let struct_index = self.mono_union_supertype_index(type_, custom_type);
-                self.composite_val_type(struct_index)
+                if Self::null_variant_tag(custom_type).is_some() {
+                    self.val_type_ref_nullable(struct_index)
+                } else {
+                    self.composite_val_type(struct_index)
+                }
             }
         }
     }
@@ -2454,82 +2453,32 @@ impl<'a> Generator<'a> {
                 .expression(self, locals, scope.clone(), subject)
                 .local_set(*index);
         }
-        // WASM requires ref locals to be initialized before any block
-        for clause in clauses {
-            for patterns in iter::once(&clause.pattern).chain(&clause.alternative_patterns) {
-                for pattern in patterns {
-                    if let Pattern::StringPrefix {
-                        right_location,
-                        right_side_assignment,
-                        left_location,
-                        left_side_assignment,
-                        ..
-                    } = pattern
-                    {
-                        if let AssignName::Variable(_) = right_side_assignment {
-                            let local = locals._get(right_location);
-                            let _ = instructions.i32_const(0).string_new().local_set(local);
-                        }
-                        if left_side_assignment.is_some() {
-                            let local = locals._get(left_location);
-                            let _ = instructions.i32_const(0).string_new().local_set(local);
-                        }
-                    }
-                }
-            }
-        }
         // block case
         let _ = instructions.block(BlockType::Result(self.val_type(type_)));
         for clause in clauses {
-            // block clause
-            let _ = instructions.block(BlockType::Result(BOOL_VALTYPE));
             let mut scope = scope.clone();
             for patterns in iter::once(&clause.pattern).chain(&clause.alternative_patterns) {
-                // block patterns
-                let _ = instructions.block(BlockType::Result(BOOL_VALTYPE));
+                // block alt — _pattern with Some(0) branches here on failure
+                let _ = instructions.block(BlockType::Empty);
                 for (pattern, subject_local) in patterns.iter().zip(&subjects_locals) {
-                    #[rustfmt::skip]
-                    let _ = instructions
-                        .local_get(*subject_local)
-                        .pattern(self, locals, &mut scope, pattern)
-                        .bool_not()
-                        .if_(BlockType::Empty)
-                          .bool_const(false)
-                          // exit block patterns
-                          .br(1)
-                        .end();
+                    let _ = instructions.local_get(*subject_local);
+                    scope = self._pattern(locals, scope, instructions, pattern, Some(0));
                 }
-                let _ = instructions
-                    // none of the patterns failed to match
-                    .bool_const(true)
-                    // end block patterns
-                    .end()
-                    // if matches
-                    .if_(BlockType::Empty);
+                // All patterns matched — check guard if present
                 if let Some(guard) = &clause.guard {
                     #[rustfmt::skip]
                     let _ = instructions
                         .clause_guard(self, locals, &scope, guard)
-                        .if_(BlockType::Empty)
-                          .bool_const(true)
-                          .br(2) // exit block clause
-                        .end();
-                } else {
-                    // exit block clause
-                    let _ = instructions.bool_const(true).br(1);
+                        .bool_not()
+                        .br_if(0);
                 }
-                // end if matches
+                let _ = instructions
+                    .expression(self, locals, scope.clone(), &clause.then)
+                    // exit block case
+                    .br(1);
+                // end block alt
                 let _ = instructions.end();
             }
-            #[rustfmt::skip]
-            let _ = instructions
-                .bool_const(false)
-                // end block clause
-                .end()
-                .if_(BlockType::Empty)
-                  .expression(self, locals, scope, &clause.then)
-                  .br(1) // exit block case
-                .end();
         }
         // end block case
         let _ = instructions.unreachable().end();
@@ -2717,6 +2666,7 @@ impl<'a> Generator<'a> {
         mut scope: Scope,
         instructions: &mut ExtendedInstructionSink<'_>,
         pattern: &TypedPattern,
+        fail_depth: Option<u32>,
     ) -> Scope {
         match pattern {
             Pattern::Discard { .. } => {
@@ -2747,60 +2697,104 @@ impl<'a> Generator<'a> {
                 let (_, cons_index, _) =
                     self.mono_union_subtype_index(type_, &custom_type, cons, &args);
                 let right = locals.for_pattern(pattern);
-                let _ = instructions
-                    .local_set(right)
-                    .block(BlockType::Result(BOOL_VALTYPE));
-                if !elements.is_empty() {
-                    #[rustfmt::skip]
-                    let _ = instructions
-                        .local_get(right)
-                        .ref_is_null()
-                        .if_(BlockType::Empty)
-                          .bool_const(false)
-                          .br(1)
-                        .end();
-                }
-                for element in elements {
-                    // Cast to Cons subtype, then access fields
-                    // Cons struct: {tag: 0, rest: 1, first: 2}
-                    #[rustfmt::skip]
-                    let _ = instructions
-                        .local_get(right)
-                        .ref_cast_non_null(HeapType::Concrete(cons_index))
-                        .struct_get(cons_index, 2) // first
-                        .pattern(self, locals, &mut scope, element)
-                        .bool_not()
-                        .if_(BlockType::Empty)
-                          .bool_const(false)
-                          .br(1)
-                        .end()
-                        .local_get(right)
-                        .ref_cast_non_null(HeapType::Concrete(cons_index))
-                        .struct_get(cons_index, 1) // rest
-                        .local_set(right);
-                }
-                if let Some(tail) = tail {
-                    #[rustfmt::skip]
-                    let _ = instructions
-                        .local_get(right)
-                        .pattern(self, locals, &mut scope, &tail.pattern)
-                        .bool_not()
-                        .if_(BlockType::Empty)
-                          .bool_const(false)
-                          .br(1)
-                        .end();
+                if let Some(fail_depth) = fail_depth {
+                    let _ = instructions.local_set(right);
+                    if !elements.is_empty() {
+                        #[rustfmt::skip]
+                        let _ = instructions
+                            .local_get(right)
+                            .ref_is_null()
+                            .br_if(fail_depth);
+                    }
+                    for element in elements {
+                        // Cast to Cons subtype, then access fields
+                        // Cons struct: {tag: 0, rest: 1, first: 2}
+                        #[rustfmt::skip]
+                        let _ = instructions
+                            .local_get(right)
+                            .ref_cast_non_null(HeapType::Concrete(cons_index))
+                            .struct_get(cons_index, 2); // first
+                        scope =
+                            self._pattern(locals, scope, instructions, element, Some(fail_depth));
+                        let _ = instructions
+                            .local_get(right)
+                            .ref_cast_non_null(HeapType::Concrete(cons_index))
+                            .struct_get(cons_index, 1) // rest
+                            .local_set(right);
+                    }
+                    if let Some(tail) = tail {
+                        let _ = instructions.local_get(right);
+                        scope = self._pattern(
+                            locals,
+                            scope,
+                            instructions,
+                            &tail.pattern,
+                            Some(fail_depth),
+                        );
+                    } else {
+                        #[rustfmt::skip]
+                        let _ = instructions
+                            .local_get(right)
+                            .ref_is_null()
+                            .bool_not()
+                            .br_if(fail_depth);
+                    }
                 } else {
-                    #[rustfmt::skip]
                     let _ = instructions
-                        .local_get(right)
-                        .ref_is_null()
-                        .bool_not()
-                        .if_(BlockType::Empty)
-                          .bool_const(false)
-                          .br(1)
-                        .end();
+                        .local_set(right)
+                        .block(BlockType::Result(BOOL_VALTYPE));
+                    if !elements.is_empty() {
+                        #[rustfmt::skip]
+                        let _ = instructions
+                            .local_get(right)
+                            .ref_is_null()
+                            .if_(BlockType::Empty)
+                              .bool_const(false)
+                              .br(1)
+                            .end();
+                    }
+                    for element in elements {
+                        // Cast to Cons subtype, then access fields
+                        // Cons struct: {tag: 0, rest: 1, first: 2}
+                        #[rustfmt::skip]
+                        let _ = instructions
+                            .local_get(right)
+                            .ref_cast_non_null(HeapType::Concrete(cons_index))
+                            .struct_get(cons_index, 2) // first
+                            .pattern(self, locals, &mut scope, element)
+                            .bool_not()
+                            .if_(BlockType::Empty)
+                              .bool_const(false)
+                              .br(1)
+                            .end()
+                            .local_get(right)
+                            .ref_cast_non_null(HeapType::Concrete(cons_index))
+                            .struct_get(cons_index, 1) // rest
+                            .local_set(right);
+                    }
+                    if let Some(tail) = tail {
+                        #[rustfmt::skip]
+                        let _ = instructions
+                            .local_get(right)
+                            .pattern(self, locals, &mut scope, &tail.pattern)
+                            .bool_not()
+                            .if_(BlockType::Empty)
+                              .bool_const(false)
+                              .br(1)
+                            .end();
+                    } else {
+                        #[rustfmt::skip]
+                        let _ = instructions
+                            .local_get(right)
+                            .ref_is_null()
+                            .bool_not()
+                            .if_(BlockType::Empty)
+                              .bool_const(false)
+                              .br(1)
+                            .end();
+                    }
+                    let _ = instructions.bool_const(true).end();
                 }
-                let _ = instructions.bool_const(true).end();
             }
             Pattern::Tuple { elements, .. } => {
                 let type_index = self.tuple_type_index(elements.iter().map(|e| e.type_()));
@@ -2853,56 +2847,104 @@ impl<'a> Generator<'a> {
                             .find(|(_, c)| &c.name == name)
                             .unwrap();
                         let right = locals.for_pattern(pattern);
-                        if null_tag == Some(tag) {
-                            // Null-optimized variant: check ref_is_null
-                            #[rustfmt::skip]
-                            let _ = instructions
-                                .local_set(right)
-                                .local_get(right)
-                                .ref_is_null();
-                        } else {
-                            let (supertype_index, type_index, _) = self.mono_union_subtype_index(
-                                type_,
-                                &custom_type,
-                                constructor,
-                                &args,
-                            );
-                            let _ = instructions.local_tee(right);
-                            // If union has a null variant, check not-null first
-                            if null_tag.is_some() {
-                                #[rustfmt::skip]
+                        if let Some(fail_depth) = fail_depth {
+                            if null_tag == Some(tag) {
+                                // Null-optimized variant: check ref_is_null
                                 let _ = instructions
+                                    .local_set(right)
+                                    .local_get(right)
                                     .ref_is_null()
-                                    .if_(BlockType::Result(BOOL_VALTYPE))
-                                      .bool_const(false)
-                                    .else_()
-                                      .local_get(right)
-                                      .struct_get(supertype_index, 0)
-                                      .i32_const(tag as i32)
-                                      .i32_eq()
-                                    .end();
+                                    .bool_not()
+                                    .br_if(fail_depth);
                             } else {
-                                #[rustfmt::skip]
-                                let _ = instructions
-                                    .struct_get(supertype_index, 0)
-                                    .i32_const(tag as i32)
-                                    .i32_eq();
-                            }
-                            #[rustfmt::skip]
-                            let _ = instructions
-                                .if_(BlockType::Result(BOOL_VALTYPE))
-                                  .local_get(right)
-                                  .patterns(
+                                let (supertype_index, type_index, _) = self
+                                    .mono_union_subtype_index(
+                                        type_,
+                                        &custom_type,
+                                        constructor,
+                                        &args,
+                                    );
+                                let _ = instructions.local_tee(right);
+                                if null_tag.is_some() {
+                                    #[rustfmt::skip]
+                                    let _ = instructions
+                                        .ref_is_null()
+                                        .br_if(fail_depth);
+                                    let _ = instructions
+                                        .local_get(right)
+                                        .struct_get(supertype_index, 0)
+                                        .i32_const(tag as i32)
+                                        .i32_ne()
+                                        .br_if(fail_depth);
+                                } else {
+                                    let _ = instructions
+                                        .struct_get(supertype_index, 0)
+                                        .i32_const(tag as i32)
+                                        .i32_ne()
+                                        .br_if(fail_depth);
+                                }
+                                let _ = instructions.local_get(right).patterns(
                                     self,
                                     locals,
                                     &mut scope,
                                     (supertype_index, Some(type_index)),
                                     pattern,
                                     arguments.iter().map(|arg| &arg.value),
-                                  )
-                                .else_()
-                                  .bool_const(false)
-                                .end();
+                                );
+                            }
+                        } else {
+                            if null_tag == Some(tag) {
+                                // Null-optimized variant: check ref_is_null
+                                #[rustfmt::skip]
+                                let _ = instructions
+                                    .local_set(right)
+                                    .local_get(right)
+                                    .ref_is_null();
+                            } else {
+                                let (supertype_index, type_index, _) = self
+                                    .mono_union_subtype_index(
+                                        type_,
+                                        &custom_type,
+                                        constructor,
+                                        &args,
+                                    );
+                                let _ = instructions.local_tee(right);
+                                // If union has a null variant, check not-null first
+                                if null_tag.is_some() {
+                                    #[rustfmt::skip]
+                                    let _ = instructions
+                                        .ref_is_null()
+                                        .if_(BlockType::Result(BOOL_VALTYPE))
+                                          .bool_const(false)
+                                        .else_()
+                                          .local_get(right)
+                                          .struct_get(supertype_index, 0)
+                                          .i32_const(tag as i32)
+                                          .i32_eq()
+                                        .end();
+                                } else {
+                                    #[rustfmt::skip]
+                                    let _ = instructions
+                                        .struct_get(supertype_index, 0)
+                                        .i32_const(tag as i32)
+                                        .i32_eq();
+                                }
+                                #[rustfmt::skip]
+                                let _ = instructions
+                                    .if_(BlockType::Result(BOOL_VALTYPE))
+                                      .local_get(right)
+                                      .patterns(
+                                        self,
+                                        locals,
+                                        &mut scope,
+                                        (supertype_index, Some(type_index)),
+                                        pattern,
+                                        arguments.iter().map(|arg| &arg.value),
+                                      )
+                                    .else_()
+                                      .bool_const(false)
+                                    .end();
+                            }
                         }
                     }
                     CustomType::External { .. } => {
@@ -2992,10 +3034,36 @@ impl<'a> Generator<'a> {
                 let right = locals.for_pattern(pattern);
                 scope = scope.insert_local(name.clone(), right);
                 let _ = instructions.local_tee(right);
-                scope = self._pattern(locals, scope, instructions, inner);
+                scope = self._pattern(locals, scope, instructions, inner, fail_depth);
             }
             Pattern::Invalid { .. } => {
                 panic!("invalid patterns should not reach code generation")
+            }
+        }
+        // Generic handler: when fail_depth is Some, convert the bool result
+        // to br_if for patterns that don't handle it internally.
+        // Skip List (with Some) and Assign, which handle fail_depth internally.
+        if let Some(fail_depth) = fail_depth {
+            let needs_conversion = match pattern {
+                Pattern::List { .. } => false,
+                Pattern::Assign { .. } => false,
+                Pattern::Constructor { type_, name, .. } => {
+                    // Union null-tag variants handle it internally
+                    if let Some((CustomType::Union { custom_type }, _)) = self.custom_type(type_) {
+                        let null_tag = Self::null_variant_tag(&custom_type);
+                        let tag = custom_type
+                            .constructors
+                            .iter()
+                            .position(|c| &c.name == name);
+                        null_tag != tag
+                    } else {
+                        true
+                    }
+                }
+                _ => true,
+            };
+            if needs_conversion {
+                let _ = instructions.bool_not().br_if(fail_depth);
             }
         }
         scope
@@ -3011,29 +3079,35 @@ impl<'a> Generator<'a> {
         elements: impl IntoIterator<Item = &'b Pattern<Arc<Type>>> + Clone,
     ) {
         let right = locals.for_pattern(pattern);
-        let _ = instructions
-            .local_set(right)
-            .block(BlockType::Result(BOOL_VALTYPE));
-        for (field_index, element) in elements.into_iter().enumerate() {
+        let _ = instructions.local_set(right);
+        let elements: Vec<_> = elements.into_iter().enumerate().collect();
+        let num_fields = elements.len();
+        if num_fields == 0 {
+            let _ = instructions.bool_const(true);
+            return;
+        }
+        // Nest field checks: each field's pattern is inside the previous
+        // field's if-matched block, ensuring locals are proven initialized.
+        for (field_index, element) in &elements {
             let _ = instructions.local_get(right);
             if let Some(subtype_index) = subtype_index {
                 // cast and skip tag
                 let _ = instructions
                     .ref_cast_non_null(HeapType::Concrete(subtype_index))
-                    .struct_get(subtype_index, field_index as u32 + 1);
+                    .struct_get(subtype_index, *field_index as u32 + 1);
             } else {
-                let _ = instructions.struct_get(type_index, field_index as u32);
+                let _ = instructions.struct_get(type_index, *field_index as u32);
             }
-            #[rustfmt::skip]
-            let _ = instructions
-                .pattern(self, locals, scope, element)
-                .bool_not()
-                .if_(BlockType::Empty)
-                  .bool_const(false)
-                  .br(1)
-                .end();
+            let _ = instructions.pattern(self, locals, scope, element);
+            // Last field: leave bool on stack; others: nest with if
+            if *field_index < num_fields - 1 {
+                let _ = instructions.if_(BlockType::Result(BOOL_VALTYPE));
+            }
         }
-        let _ = instructions.bool_const(true).end();
+        // Close nested ifs with false else branches
+        for _ in 0..num_fields.saturating_sub(1) {
+            let _ = instructions.else_().bool_const(false).end();
+        }
     }
 
     fn _clause_guard(
@@ -4957,7 +5031,7 @@ impl<'a> ExtendedInstructionSink<'a> {
         scope: &mut Scope,
         pattern: &TypedPattern,
     ) -> &mut Self {
-        *scope = generator._pattern(locals, scope.clone(), self, pattern);
+        *scope = generator._pattern(locals, scope.clone(), self, pattern, None);
         self
     }
 
