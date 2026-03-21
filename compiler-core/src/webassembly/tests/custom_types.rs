@@ -377,8 +377,5 @@ pub fn main() {
     let names = wasm_type_names(&wasm);
     // All monomorphizations (Option(Int), Option(String), Option(Float))
     // should share a single "Option" supertype.
-    assert_eq!(
-        names.iter().filter(|n| n.as_str() == "Option").count(),
-        1,
-    );
+    assert_eq!(names.iter().filter(|n| n.as_str() == "Option").count(), 1,);
 }

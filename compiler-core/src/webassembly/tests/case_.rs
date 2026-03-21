@@ -138,3 +138,69 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn let_assert_union_ref_binding() {
+    run_ok(
+        r#"
+pub fn main() {
+    let assert Ok(name) = Ok("hello")
+    assert name == "hello"
+}
+"#,
+    );
+}
+
+#[test]
+fn multi_subject_case() {
+    run_ok(
+        r#"
+pub fn main() {
+    assert case 1, True {
+        1, True -> 10
+        _, _ -> 0
+    } == 10
+    assert case 2, False {
+        1, True -> 10
+        x, _ -> x
+    } == 2
+}
+"#,
+    );
+}
+
+#[test]
+fn alternative_patterns() {
+    run_ok(
+        r#"
+pub fn main() {
+    assert case 2 {
+        1 | 2 | 3 -> True
+        _ -> False
+    }
+    assert case 5 {
+        1 | 2 | 3 -> True
+        _ -> False
+    } == False
+}
+"#,
+    );
+}
+
+#[test]
+fn multi_field_struct_ref_pattern() {
+    run_ok(
+        r#"
+pub type Pair {
+    Pair(first: String, second: String)
+}
+
+pub fn main() {
+    let p = Pair("hello", "world")
+    assert case p {
+        Pair(a, b) -> a == "hello" && b == "world"
+    }
+}
+"#,
+    );
+}

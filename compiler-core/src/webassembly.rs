@@ -41,7 +41,7 @@ use crate::{
     },
     line_numbers::LineNumbers,
     type_::{
-        self, PRELUDE_MODULE_NAME, Type, TypeVar,
+        self, ModuleValueConstructor, PRELUDE_MODULE_NAME, Type, TypeVar, ValueConstructorVariant,
         printer::{Names, Printer},
     },
 };
@@ -116,8 +116,12 @@ pub enum Error {
     },
 }
 
-pub fn module(module: &TypedModule, line_numbers: &LineNumbers) -> Result<Vec<u8>, Error> {
-    let mut generator = Generator::new(module, line_numbers);
+pub fn module(
+    module: &TypedModule,
+    line_numbers: &LineNumbers,
+    all_modules: &HashMap<EcoString, &TypedModule>,
+) -> Result<Vec<u8>, Error> {
+    let mut generator = Generator::new(module, line_numbers, all_modules);
     let start = generator.generate()?;
 
     let mut module = Module::default();
@@ -606,6 +610,7 @@ struct Generator<'a> {
     string: StringType,
     module: &'a TypedModule,
     line_numbers: &'a LineNumbers,
+    all_modules: &'a HashMap<EcoString, &'a TypedModule>,
 }
 
 fn find_global(name: &str, globals: &RefCell<Vec<Id>>) -> Option<Id> {
@@ -613,7 +618,11 @@ fn find_global(name: &str, globals: &RefCell<Vec<Id>>) -> Option<Id> {
 }
 
 impl<'a> Generator<'a> {
-    fn new(module: &'a TypedModule, line_numbers: &'a LineNumbers) -> Self {
+    fn new(
+        module: &'a TypedModule,
+        line_numbers: &'a LineNumbers,
+        all_modules: &'a HashMap<EcoString, &'a TypedModule>,
+    ) -> Self {
         Generator {
             global_section: GlobalSection::new(),
             import_section: ImportSection::new(),
@@ -636,17 +645,11 @@ impl<'a> Generator<'a> {
             string: StringType { type_index: 0 },
             module,
             line_numbers,
+            all_modules,
         }
     }
 
     fn generate(&mut self) -> Result<u32, Error> {
-        if let Some(import) = self.module.definitions.imports.first() {
-            return Err(Error::UnsupportedFeature {
-                location: import.location,
-                feature: "Module imports".into(),
-            });
-        }
-
         // External types, like I32, must come first because of the external function type checking.
         // Externals functions come first because of the indexes in the builtin wasm file.
         self.types_external()?;
@@ -654,6 +657,7 @@ impl<'a> Generator<'a> {
         self.types_prelude();
         self.functions_builtins(builtins);
         self.types();
+        self.types_imported();
         self.constants();
         self.functions();
         Ok(self.function_start())
@@ -1020,17 +1024,54 @@ impl<'a> Generator<'a> {
     }
 
     fn types(&mut self) {
-        fn is_not_external(custom_type: &TypedCustomType) -> bool {
-            custom_type.external_webassembly.is_none() && !custom_type.constructors.is_empty()
+        self.add_module_types(self.module);
+    }
+
+    fn types_imported(&mut self) {
+        let mut visited = HashSet::new();
+        let _ = visited.insert(self.module.name.clone());
+        let mut queue: Vec<EcoString> = self
+            .module
+            .definitions
+            .imports
+            .iter()
+            .map(|i| i.module.clone())
+            .collect();
+
+        while let Some(name) = queue.pop() {
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            let dep_module = self.imported_module(&name);
+            let next_imports: Vec<EcoString> = dep_module
+                .definitions
+                .imports
+                .iter()
+                .map(|i| i.module.clone())
+                .collect();
+            self.add_module_types(dep_module);
+            queue.extend(next_imports);
+        }
+    }
+
+    fn imported_module(&self, name: &EcoString) -> &'a TypedModule {
+        self.all_modules
+            .get(name)
+            .unwrap_or_else(|| panic!("imported module not found during code generation: {name}"))
+    }
+
+    fn add_module_types(&mut self, module: &TypedModule) {
+        fn is_external(custom_type: &TypedCustomType) -> bool {
+            custom_type.external_webassembly.is_some() || custom_type.constructors.is_empty()
         }
 
         self.add_custom_types(
-            self.module
+            module
                 .definitions
                 .custom_types
                 .iter()
-                .filter(|t| is_not_external(t))
-                .map(|c| (c, self.module.name.as_str())),
+                .filter(|t| !is_external(t))
+                .map(|c| (c, module.name.as_str())),
         )
     }
 
@@ -1865,6 +1906,36 @@ impl<'a> Generator<'a> {
         );
     }
 
+    fn imported_function(
+        &mut self,
+        module_name: &EcoString,
+        fn_name: &EcoString,
+        required_type: &Arc<Type>,
+    ) -> Id {
+        let dep_module = self.imported_module(module_name);
+
+        for function in &dep_module.definitions.functions {
+            if function_name(function) == fn_name {
+                if let Some((_, fname, _)) = &function.external_webassembly {
+                    if fname == INSPECT {
+                        return self.function_inspect(required_type);
+                    }
+                    return self.find_global_expect(fname);
+                }
+                // Build a module-qualified name to avoid collisions
+                let base_name: EcoString = format!("{module_name}.{fn_name}").into();
+                let is_generic = is_generic_type(&function_type(function));
+                return if is_generic {
+                    self.function_named(function, Some(required_type), false, base_name)
+                } else {
+                    self.function_named(function, None, false, base_name)
+                };
+            }
+        }
+
+        panic!("imported function not found during code generation: {module_name}.{fn_name}");
+    }
+
     fn var_id(&mut self, scope: &Scope, name: &EcoString, type_: &Arc<Type>) -> Id {
         if let Some(id) = scope.find(name) {
             id
@@ -1897,13 +1968,26 @@ impl<'a> Generator<'a> {
         required_type: Option<&Arc<Type>>,
         export: bool,
     ) -> Id {
-        let name = function_name(function);
-        let name = if let Some(required_type) = required_type {
-            self.mangle(name, required_type)
-        } else {
-            name.into()
-        };
+        self.function_named(
+            function,
+            required_type,
+            export,
+            function_name(function).into(),
+        )
+    }
 
+    fn function_named(
+        &mut self,
+        function: &TypedFunction,
+        required_type: Option<&Arc<Type>>,
+        export: bool,
+        base_name: EcoString,
+    ) -> Id {
+        let name = if let Some(required_type) = required_type {
+            self.mangle(&base_name, required_type)
+        } else {
+            base_name
+        };
         if let Some(id) = self.find_global(&name) {
             return id;
         }
@@ -1996,11 +2080,23 @@ impl<'a> Generator<'a> {
         locals: &Locals,
         statements: &[TypedStatement],
     ) {
-        for statement in statements {
-            scope = self.statement(instructions, scope, locals, statement);
-            if Some(statement) != statements.last() {
-                let _ = instructions.drop();
+        let mut remaining = statements;
+        while let Some((statement, rest)) = remaining.split_first() {
+            match statement {
+                Statement::Assignment(assignment)
+                    if matches!(assignment.kind, AssignmentKind::Assert { .. }) =>
+                {
+                    self.assignment_assert(locals, scope, instructions, assignment, rest);
+                    return;
+                }
+                _ => {
+                    scope = self.statement(instructions, scope, locals, statement);
+                    if !rest.is_empty() {
+                        let _ = instructions.drop();
+                    }
+                }
             }
+            remaining = rest;
         }
     }
 
@@ -2172,9 +2268,22 @@ impl<'a> Generator<'a> {
                 }
                 let _ = instructions.expression(self, locals, scope, finally);
             }
-            TypedExpr::Var { name, .. } => {
-                self.expression_var(&scope, instructions, name, &expression.type_());
-            }
+            TypedExpr::Var {
+                name, constructor, ..
+            } => match &constructor.variant {
+                ValueConstructorVariant::ModuleFn { module, name, .. }
+                    if module.as_str() != self.module.name.as_str() =>
+                {
+                    let id = self.imported_function(module, name, &expression.type_());
+                    let _ = instructions.ref_func(id.index);
+                }
+                ValueConstructorVariant::ModuleConstant { literal, .. } => {
+                    self._constant(instructions, literal);
+                }
+                _ => {
+                    self.expression_var(&scope, instructions, name, &expression.type_());
+                }
+            },
             TypedExpr::Call {
                 type_,
                 fun,
@@ -2299,9 +2408,23 @@ impl<'a> Generator<'a> {
                 }
             }
             TypedExpr::BitArray { .. } => todo!("BitArray expressions are not yet supported"),
-            TypedExpr::ModuleSelect { .. } => {
-                todo!("Module select expressions are not yet supported")
-            }
+            TypedExpr::ModuleSelect {
+                constructor,
+                module_name,
+                label,
+                ..
+            } => match constructor {
+                ModuleValueConstructor::Fn { .. } => {
+                    let id = self.imported_function(module_name, label, &expression.type_());
+                    let _ = instructions.ref_func(id.index);
+                }
+                ModuleValueConstructor::Record { name, .. } => {
+                    self.expression_var(&scope, instructions, name, &expression.type_());
+                }
+                ModuleValueConstructor::Constant { literal, .. } => {
+                    self._constant(instructions, literal);
+                }
+            },
             TypedExpr::Invalid { .. } => {
                 panic!("invalid expressions should not reach code generation")
             }
@@ -2439,6 +2562,21 @@ impl<'a> Generator<'a> {
         };
     }
 
+    /// Generates a case expression. Each clause alternative is wrapped
+    /// in a block that `_pattern` branches out of on failure.
+    ///
+    /// ```wat
+    /// block case (result T):
+    ///   block alt:
+    ///     pattern(fail_depth=0)
+    ///     guard check            ;; br_if 0 on failure
+    ///     <body>
+    ///     br 1                   ;; exit case with result
+    ///   end alt
+    ///   ... next clause ...
+    ///   unreachable
+    /// end case
+    /// ```
     fn expression_case(
         &mut self,
         locals: &Locals,
@@ -2464,11 +2602,10 @@ impl<'a> Generator<'a> {
                 let _ = instructions.block(BlockType::Empty);
                 for (pattern, subject_local) in patterns.iter().zip(&subjects_locals) {
                     let _ = instructions.local_get(*subject_local);
-                    scope = self._pattern(locals, scope, instructions, pattern, Some(0));
+                    scope = self._pattern(locals, scope, instructions, pattern, 0);
                 }
                 // All patterns matched — check guard if present
                 if let Some(guard) = &clause.guard {
-                    #[rustfmt::skip]
                     let _ = instructions
                         .clause_guard(self, locals, &scope, guard)
                         .bool_not()
@@ -2623,67 +2760,125 @@ impl<'a> Generator<'a> {
         let right = locals.for_assigment(assignment);
         let _ = instructions
             .expression(self, locals, scope.clone(), &assignment.value)
-            .local_tee(right);
-        match assignment.kind {
-            AssignmentKind::Assert { .. } => {
-                let prefix = self
-                    .string_index(&"Pattern match failed, no pattern matched the value at ".into());
-                let location: EcoString = format!(
-                    "src/{}.gleam:{}.\n",
-                    self.module.name,
-                    self.line_numbers.line_number(assignment.location.start)
-                )
-                .into();
-                let location = self.string_index(&location);
-                let string_to_memory =
-                    self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
-                let heap_base = self.find_global_expect(HEAP_BASE);
-                let print = self.find_global_expect(PRINT);
-                let exit = self.find_global_expect(EXIT);
-                #[rustfmt::skip]
-                let _ = instructions
-                    .pattern(self, locals, &mut scope, &assignment.pattern)
-                    .if_(BlockType::Result(self.val_type(&assignment.value.type_())))
-                      .local_get(right)
-                    .else_()
-                      .show_error_message(prefix, location, string_to_memory, heap_base.index, print.index)
-                      .i32_const(1)
-                      .call(exit.index)
-                      .unreachable()
-                    .end();
-            }
-            AssignmentKind::Let | AssignmentKind::Generated => {
-                let _ = instructions
-                    .pattern(self, locals, &mut scope, &assignment.pattern)
-                    .drop()
-                    .local_get(right);
-            }
-        }
+            .local_tee(right)
+            .pattern(self, locals, &mut scope, &assignment.pattern, 0)
+            .local_get(right);
         scope
     }
 
+    /// Generates a case-like structure for `let assert` assignments.
+    /// Remaining statements are processed inside the success block so
+    /// that pattern locals are proven initialized when used.
+    ///
+    /// ```wat
+    /// block skip (result T):
+    ///   block fail:
+    ///     local.get right
+    ///     pattern(fail_depth=0)     ;; br_if 0 on failure
+    ///     <remaining statements>
+    ///     br 1                      ;; exit skip with result
+    ///   end fail
+    ///   error_message + exit        ;; dead path
+    ///   unreachable
+    /// end skip
+    /// ```
+    fn assignment_assert(
+        &mut self,
+        locals: &Locals,
+        scope: Scope,
+        instructions: &mut ExtendedInstructionSink<'_>,
+        assignment: &TypedAssignment,
+        remaining: &[TypedStatement],
+    ) {
+        let right = locals.for_assigment(assignment);
+        let _ = instructions
+            .expression(self, locals, scope.clone(), &assignment.value)
+            .local_set(right);
+
+        let last_type = remaining
+            .last()
+            .map_or(assignment.value.type_(), |s| s.type_());
+        let result_type = self.val_type(&last_type);
+
+        let prefix =
+            self.string_index(&"Pattern match failed, no pattern matched the value at ".into());
+        let location: EcoString = format!(
+            "src/{}.gleam:{}.\n",
+            self.module.name,
+            self.line_numbers.line_number(assignment.location.start)
+        )
+        .into();
+        let location = self.string_index(&location);
+        let string_to_memory =
+            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
+        let heap_base = self.find_global_expect(HEAP_BASE);
+        let print = self.find_global_expect(PRINT);
+        let exit = self.find_global_expect(EXIT);
+
+        let mut scope = scope;
+        #[rustfmt::skip]
+        let _ = instructions
+            // block skip (result T): success exits here with the final result
+            .block(BlockType::Result(result_type))
+              // block fail: pattern failure branches here
+              .block(BlockType::Empty)
+                .local_get(right)
+                .pattern(self, locals, &mut scope, &assignment.pattern, 0);
+        // Pattern matched — remaining statements run here.
+        if !remaining.is_empty() {
+            self.statements(instructions, scope, locals, remaining);
+        } else {
+            let _ = instructions.local_get(right);
+        }
+        #[rustfmt::skip]
+        let _ = instructions
+                .br(1) // exit block skip with result
+              .end() // end block fail
+              // error handler (dead path — unreachable tells validator)
+              .show_error_message(prefix, location, string_to_memory, heap_base.index, print.index)
+              .i32_const(1)
+              .call(exit.index)
+              .unreachable()
+            .end(); // end block skip
+    }
+
+    /// Checks if the subject (on the stack) matches the pattern. On
+    /// failure, branches to `fail_depth`. On success, falls through
+    /// with pattern locals set.
+    ///
+    /// ```wat
+    /// block alt:
+    ///   local.get subject
+    ///   pattern(fail_depth=0)   ;; br_if 0 on failure
+    ///   <body>                  ;; pattern locals are initialized here
+    /// end alt
+    /// ```
     fn _pattern(
         &mut self,
         locals: &Locals,
         mut scope: Scope,
         instructions: &mut ExtendedInstructionSink<'_>,
         pattern: &TypedPattern,
-        fail_depth: Option<u32>,
+        fail_depth: u32,
     ) -> Scope {
         match pattern {
             Pattern::Discard { .. } => {
-                let _ = instructions.drop().bool_const(true);
+                let _ = instructions.drop();
             }
             Pattern::Int { int_value, .. } => {
-                let _ = instructions.int_const(int_value).int_eq();
+                let _ = instructions.int_const(int_value).int_ne().br_if(fail_depth);
             }
             Pattern::Float { value, .. } => {
-                let _ = instructions.float_const(value).float_eq();
+                let _ = instructions.float_const(value).float_ne().br_if(fail_depth);
             }
             Pattern::String { value, .. } => {
                 let index = self.string_index(value);
                 let eq = self.function_eq(&type_::string());
-                let _ = instructions.global_as_non_null(index).eq(eq);
+                let _ = instructions
+                    .global_as_non_null(index)
+                    .eq(eq)
+                    .bool_not()
+                    .br_if(fail_depth);
             }
             Pattern::List {
                 elements,
@@ -2699,103 +2894,35 @@ impl<'a> Generator<'a> {
                 let (_, cons_index, _) =
                     self.mono_union_subtype_index(type_, &custom_type, cons, &args);
                 let right = locals.for_pattern(pattern);
-                if let Some(fail_depth) = fail_depth {
-                    let _ = instructions.local_set(right);
-                    if !elements.is_empty() {
-                        #[rustfmt::skip]
-                        let _ = instructions
-                            .local_get(right)
-                            .ref_is_null()
-                            .br_if(fail_depth);
-                    }
-                    for element in elements {
-                        // Cast to Cons subtype, then access fields
-                        // Cons struct: {tag: 0, rest: 1, first: 2}
-                        #[rustfmt::skip]
-                        let _ = instructions
-                            .local_get(right)
-                            .ref_cast_non_null(HeapType::Concrete(cons_index))
-                            .struct_get(cons_index, 2); // first
-                        scope =
-                            self._pattern(locals, scope, instructions, element, Some(fail_depth));
-                        let _ = instructions
-                            .local_get(right)
-                            .ref_cast_non_null(HeapType::Concrete(cons_index))
-                            .struct_get(cons_index, 1) // rest
-                            .local_set(right);
-                    }
-                    if let Some(tail) = tail {
-                        let _ = instructions.local_get(right);
-                        scope = self._pattern(
-                            locals,
-                            scope,
-                            instructions,
-                            &tail.pattern,
-                            Some(fail_depth),
-                        );
-                    } else {
-                        #[rustfmt::skip]
-                        let _ = instructions
-                            .local_get(right)
-                            .ref_is_null()
-                            .bool_not()
-                            .br_if(fail_depth);
-                    }
+                let _ = instructions.local_set(right);
+                if !elements.is_empty() {
+                    let _ = instructions
+                        .local_get(right)
+                        .ref_is_null()
+                        .br_if(fail_depth);
+                }
+                for element in elements {
+                    // Cons struct: {tag: 0, rest: 1, first: 2}
+                    let _ = instructions
+                        .local_get(right)
+                        .ref_cast_non_null(HeapType::Concrete(cons_index))
+                        .struct_get(cons_index, 2); // first
+                    scope = self._pattern(locals, scope, instructions, element, fail_depth);
+                    let _ = instructions
+                        .local_get(right)
+                        .ref_cast_non_null(HeapType::Concrete(cons_index))
+                        .struct_get(cons_index, 1) // rest
+                        .local_set(right);
+                }
+                if let Some(tail) = tail {
+                    let _ = instructions.local_get(right);
+                    scope = self._pattern(locals, scope, instructions, &tail.pattern, fail_depth);
                 } else {
                     let _ = instructions
-                        .local_set(right)
-                        .block(BlockType::Result(BOOL_VALTYPE));
-                    if !elements.is_empty() {
-                        #[rustfmt::skip]
-                        let _ = instructions
-                            .local_get(right)
-                            .ref_is_null()
-                            .if_(BlockType::Empty)
-                              .bool_const(false)
-                              .br(1)
-                            .end();
-                    }
-                    for element in elements {
-                        // Cast to Cons subtype, then access fields
-                        // Cons struct: {tag: 0, rest: 1, first: 2}
-                        #[rustfmt::skip]
-                        let _ = instructions
-                            .local_get(right)
-                            .ref_cast_non_null(HeapType::Concrete(cons_index))
-                            .struct_get(cons_index, 2) // first
-                            .pattern(self, locals, &mut scope, element)
-                            .bool_not()
-                            .if_(BlockType::Empty)
-                              .bool_const(false)
-                              .br(1)
-                            .end()
-                            .local_get(right)
-                            .ref_cast_non_null(HeapType::Concrete(cons_index))
-                            .struct_get(cons_index, 1) // rest
-                            .local_set(right);
-                    }
-                    if let Some(tail) = tail {
-                        #[rustfmt::skip]
-                        let _ = instructions
-                            .local_get(right)
-                            .pattern(self, locals, &mut scope, &tail.pattern)
-                            .bool_not()
-                            .if_(BlockType::Empty)
-                              .bool_const(false)
-                              .br(1)
-                            .end();
-                    } else {
-                        #[rustfmt::skip]
-                        let _ = instructions
-                            .local_get(right)
-                            .ref_is_null()
-                            .bool_not()
-                            .if_(BlockType::Empty)
-                              .bool_const(false)
-                              .br(1)
-                            .end();
-                    }
-                    let _ = instructions.bool_const(true).end();
+                        .local_get(right)
+                        .ref_is_null()
+                        .bool_not()
+                        .br_if(fail_depth);
                 }
             }
             Pattern::Tuple { elements, .. } => {
@@ -2807,6 +2934,7 @@ impl<'a> Generator<'a> {
                     (type_index, None),
                     pattern,
                     elements.iter(),
+                    fail_depth,
                 );
             }
             Pattern::Constructor {
@@ -2819,7 +2947,10 @@ impl<'a> Generator<'a> {
                 match custom_type {
                     CustomType::Enum { values } => {
                         let value = values.iter().position(|n| n == name).unwrap();
-                        let _ = instructions.i32_const(value as i32).i32_eq();
+                        let _ = instructions
+                            .i32_const(value as i32)
+                            .i32_ne()
+                            .br_if(fail_depth);
                     }
                     CustomType::Struct {
                         custom_type,
@@ -2837,6 +2968,7 @@ impl<'a> Generator<'a> {
                             (type_index, None),
                             pattern,
                             arguments.iter().map(|arg| &arg.value),
+                            fail_depth,
                         );
                     }
                     CustomType::Union { custom_type } => {
@@ -2849,104 +2981,45 @@ impl<'a> Generator<'a> {
                             .find(|(_, c)| &c.name == name)
                             .unwrap();
                         let right = locals.for_pattern(pattern);
-                        if let Some(fail_depth) = fail_depth {
-                            if null_tag == Some(tag) {
-                                // Null-optimized variant: check ref_is_null
+                        if null_tag == Some(tag) {
+                            // Null-optimized variant: check ref_is_null
+                            let _ = instructions
+                                .local_tee(right)
+                                .ref_is_null()
+                                .bool_not()
+                                .br_if(fail_depth);
+                        } else {
+                            let (supertype_index, type_index, _) = self.mono_union_subtype_index(
+                                type_,
+                                &custom_type,
+                                constructor,
+                                &args,
+                            );
+                            let _ = instructions.local_tee(right);
+                            if null_tag.is_some() {
+                                let _ = instructions.ref_is_null().br_if(fail_depth);
                                 let _ = instructions
-                                    .local_set(right)
                                     .local_get(right)
-                                    .ref_is_null()
-                                    .bool_not()
+                                    .struct_get(supertype_index, 0)
+                                    .i32_const(tag as i32)
+                                    .i32_ne()
                                     .br_if(fail_depth);
                             } else {
-                                let (supertype_index, type_index, _) = self
-                                    .mono_union_subtype_index(
-                                        type_,
-                                        &custom_type,
-                                        constructor,
-                                        &args,
-                                    );
-                                let _ = instructions.local_tee(right);
-                                if null_tag.is_some() {
-                                    #[rustfmt::skip]
-                                    let _ = instructions
-                                        .ref_is_null()
-                                        .br_if(fail_depth);
-                                    let _ = instructions
-                                        .local_get(right)
-                                        .struct_get(supertype_index, 0)
-                                        .i32_const(tag as i32)
-                                        .i32_ne()
-                                        .br_if(fail_depth);
-                                } else {
-                                    let _ = instructions
-                                        .struct_get(supertype_index, 0)
-                                        .i32_const(tag as i32)
-                                        .i32_ne()
-                                        .br_if(fail_depth);
-                                }
-                                let _ = instructions.local_get(right).patterns(
-                                    self,
-                                    locals,
-                                    &mut scope,
-                                    (supertype_index, Some(type_index)),
-                                    pattern,
-                                    arguments.iter().map(|arg| &arg.value),
-                                );
-                            }
-                        } else {
-                            if null_tag == Some(tag) {
-                                // Null-optimized variant: check ref_is_null
-                                #[rustfmt::skip]
                                 let _ = instructions
-                                    .local_set(right)
-                                    .local_get(right)
-                                    .ref_is_null();
-                            } else {
-                                let (supertype_index, type_index, _) = self
-                                    .mono_union_subtype_index(
-                                        type_,
-                                        &custom_type,
-                                        constructor,
-                                        &args,
-                                    );
-                                let _ = instructions.local_tee(right);
-                                // If union has a null variant, check not-null first
-                                if null_tag.is_some() {
-                                    #[rustfmt::skip]
-                                    let _ = instructions
-                                        .ref_is_null()
-                                        .if_(BlockType::Result(BOOL_VALTYPE))
-                                          .bool_const(false)
-                                        .else_()
-                                          .local_get(right)
-                                          .struct_get(supertype_index, 0)
-                                          .i32_const(tag as i32)
-                                          .i32_eq()
-                                        .end();
-                                } else {
-                                    #[rustfmt::skip]
-                                    let _ = instructions
-                                        .struct_get(supertype_index, 0)
-                                        .i32_const(tag as i32)
-                                        .i32_eq();
-                                }
-                                #[rustfmt::skip]
-                                let _ = instructions
-                                    .if_(BlockType::Result(BOOL_VALTYPE))
-                                      .local_get(right)
-                                      .patterns(
-                                        self,
-                                        locals,
-                                        &mut scope,
-                                        (supertype_index, Some(type_index)),
-                                        pattern,
-                                        arguments.iter().map(|arg| &arg.value),
-                                      )
-                                    .else_()
-                                      .bool_const(false)
-                                    .end();
+                                    .struct_get(supertype_index, 0)
+                                    .i32_const(tag as i32)
+                                    .i32_ne()
+                                    .br_if(fail_depth);
                             }
+                            let _ = instructions.local_get(right).patterns(
+                                self,
+                                locals,
+                                &mut scope,
+                                (supertype_index, Some(type_index)),
+                                pattern,
+                                arguments.iter().map(|arg| &arg.value),
+                                fail_depth,
+                            );
                         }
                     }
                     CustomType::External { .. } => {
@@ -2957,7 +3030,7 @@ impl<'a> Generator<'a> {
             Pattern::Variable { name, .. } => {
                 let right = locals.for_pattern(pattern);
                 scope = scope.insert_local(name.clone(), right);
-                let _ = instructions.local_set(right).bool_const(true);
+                let _ = instructions.local_set(right);
             }
             Pattern::StringPrefix {
                 left_side_string,
@@ -2972,21 +3045,12 @@ impl<'a> Generator<'a> {
                 let starts_with = self.function_string_starts_with();
                 let prefix_index = self.string_index(left_side_string);
 
-                if let AssignName::Variable(_) = right_side_assignment {
-                    let rest_local = locals._get(right_location);
-                    let _ = instructions.i32_const(0).string_new().local_set(rest_local);
-                }
-                if left_side_assignment.is_some() {
-                    let local = locals._get(left_location);
-                    let _ = instructions.i32_const(0).string_new().local_set(local);
-                }
-
-                #[rustfmt::skip]
                 let _ = instructions
                     .local_tee(subject)
                     .global_as_non_null(prefix_index)
                     .call(starts_with)
-                    .if_(BlockType::Result(BOOL_VALTYPE));
+                    .bool_not()
+                    .br_if(fail_depth);
 
                 if let Some((name, _)) = left_side_assignment {
                     let local = locals._get(left_location);
@@ -3017,13 +3081,6 @@ impl<'a> Generator<'a> {
                         .i32_sub()
                         .string_copy();
                 }
-
-                #[rustfmt::skip]
-                let _ = instructions
-                      .bool_const(true)
-                    .else_()
-                      .bool_const(false)
-                    .end();
             }
             Pattern::BitArray { .. } | Pattern::BitArraySize(_) => {
                 todo!("BitArray patterns are not yet supported")
@@ -3042,32 +3099,6 @@ impl<'a> Generator<'a> {
                 panic!("invalid patterns should not reach code generation")
             }
         }
-        // Generic handler: when fail_depth is Some, convert the bool result
-        // to br_if for patterns that don't handle it internally.
-        // Skip List (with Some) and Assign, which handle fail_depth internally.
-        if let Some(fail_depth) = fail_depth {
-            let needs_conversion = match pattern {
-                Pattern::List { .. } => false,
-                Pattern::Assign { .. } => false,
-                Pattern::Constructor { type_, name, .. } => {
-                    // Union null-tag variants handle it internally
-                    if let Some((CustomType::Union { custom_type }, _)) = self.custom_type(type_) {
-                        let null_tag = Self::null_variant_tag(&custom_type);
-                        let tag = custom_type
-                            .constructors
-                            .iter()
-                            .position(|c| &c.name == name);
-                        null_tag != tag
-                    } else {
-                        true
-                    }
-                }
-                _ => true,
-            };
-            if needs_conversion {
-                let _ = instructions.bool_not().br_if(fail_depth);
-            }
-        }
         scope
     }
 
@@ -3079,36 +3110,21 @@ impl<'a> Generator<'a> {
         (type_index, subtype_index): (u32, Option<u32>),
         pattern: &Pattern<Arc<Type>>,
         elements: impl IntoIterator<Item = &'b Pattern<Arc<Type>>> + Clone,
+        fail_depth: u32,
     ) {
         let right = locals.for_pattern(pattern);
         let _ = instructions.local_set(right);
-        let elements: Vec<_> = elements.into_iter().enumerate().collect();
-        let num_fields = elements.len();
-        if num_fields == 0 {
-            let _ = instructions.bool_const(true);
-            return;
-        }
-        // Nest field checks: each field's pattern is inside the previous
-        // field's if-matched block, ensuring locals are proven initialized.
-        for (field_index, element) in &elements {
+        for (field_index, element) in elements.into_iter().enumerate() {
             let _ = instructions.local_get(right);
             if let Some(subtype_index) = subtype_index {
                 // cast and skip tag
                 let _ = instructions
                     .ref_cast_non_null(HeapType::Concrete(subtype_index))
-                    .struct_get(subtype_index, *field_index as u32 + 1);
+                    .struct_get(subtype_index, field_index as u32 + 1);
             } else {
-                let _ = instructions.struct_get(type_index, *field_index as u32);
+                let _ = instructions.struct_get(type_index, field_index as u32);
             }
-            let _ = instructions.pattern(self, locals, scope, element);
-            // Last field: leave bool on stack; others: nest with if
-            if *field_index < num_fields - 1 {
-                let _ = instructions.if_(BlockType::Result(BOOL_VALTYPE));
-            }
-        }
-        // Close nested ifs with false else branches
-        for _ in 0..num_fields.saturating_sub(1) {
-            let _ = instructions.else_().bool_const(false).end();
+            *scope = self._pattern(locals, scope.clone(), instructions, element, fail_depth);
         }
     }
 
@@ -3295,8 +3311,8 @@ impl<'a> Generator<'a> {
                     }
                 }
             }
-            ClauseGuard::ModuleSelect { .. } => {
-                todo!("module select guards are not yet supported: {guard:#?}")
+            ClauseGuard::ModuleSelect { literal, .. } => {
+                let _ = instructions.constant(self, literal);
             }
         }
     }
@@ -5032,8 +5048,9 @@ impl<'a> ExtendedInstructionSink<'a> {
         locals: &Locals,
         scope: &mut Scope,
         pattern: &TypedPattern,
+        fail_depth: u32,
     ) -> &mut Self {
-        *scope = generator._pattern(locals, scope.clone(), self, pattern, None);
+        *scope = generator._pattern(locals, scope.clone(), self, pattern, fail_depth);
         self
     }
 
@@ -5045,6 +5062,7 @@ impl<'a> ExtendedInstructionSink<'a> {
         (type_index, subtype_index): (u32, Option<u32>),
         pattern: &Pattern<Arc<Type>>,
         elements: impl IntoIterator<Item = &'b Pattern<Arc<Type>>> + Clone,
+        fail_depth: u32,
     ) -> &mut Self {
         generator._patterns(
             locals,
@@ -5053,6 +5071,7 @@ impl<'a> ExtendedInstructionSink<'a> {
             (type_index, subtype_index),
             pattern,
             elements,
+            fail_depth,
         );
         self
     }
@@ -5268,6 +5287,7 @@ impl<'a> ExtendedInstructionSink<'a> {
     int_op!(int_mul, i32_mul, i64_mul);
     int_op!(int_rem, i32_rem_s, i64_rem_s);
     int_op!(int_eq, i32_eq, i64_eq);
+    int_op!(int_ne, i32_ne, i64_ne);
     int_op!(int_lt, i32_lt_s, i64_lt_s);
     int_op!(int_le, i32_le_s, i64_le_s);
     int_op!(int_gt, i32_gt_s, i64_gt_s);
@@ -5368,6 +5388,7 @@ impl<'a> ExtendedInstructionSink<'a> {
     float_op!(float_sub, f32_sub, f64_sub);
     float_op!(float_mul, f32_mul, f64_mul);
     float_op!(float_eq, f32_eq, f64_eq);
+    float_op!(float_ne, f32_ne, f64_ne);
     float_op!(float_lt, f32_lt, f64_lt);
     float_op!(float_le, f32_le, f64_le);
     float_op!(float_gt, f32_gt, f64_gt);
@@ -6228,8 +6249,8 @@ impl Monomorphizer {
             | TypedExpr::NegateBool { .. }
             | TypedExpr::NegateInt { .. } => {}
             TypedExpr::BitArray { .. } => todo!("BitArray expressions are not yet supported"),
-            TypedExpr::ModuleSelect { .. } => {
-                todo!("Module select expressions are not yet supported")
+            TypedExpr::ModuleSelect { type_, .. } => {
+                *type_ = self.type_(type_);
             }
             TypedExpr::Invalid { .. } => {
                 panic!("invalid expressions should not reach code generation")
@@ -6325,7 +6346,9 @@ impl Monomorphizer {
                 *type_ = self.type_(type_);
                 self.guard(container);
             }
-            ClauseGuard::ModuleSelect { .. } => todo!(),
+            ClauseGuard::ModuleSelect { type_, .. } => {
+                *type_ = self.type_(type_);
+            }
         }
     }
 }
