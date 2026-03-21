@@ -1464,14 +1464,16 @@ impl<'a> Generator<'a> {
         supertype_index: Option<u32>,
         args: &[Arc<Type>],
     ) -> (u32, Vec<Arc<Type>>) {
-        let mut name = self.type_pretty_name(type_);
-        let (fields, types) = if let Some(constructor) = constructor {
+        let (name, fields, types) = if let Some(constructor) = constructor {
+            let mut name = self.type_pretty_name(type_);
             name += ".";
             name += constructor.name.clone();
             let types = Monomorphizer::variant_constructor(custom_type, constructor, args);
-            (self.fields(constructor, &types), types)
+            (name, self.fields(constructor, &types), types)
         } else {
-            (vec![], vec![])
+            // Supertype only has the discriminant (tag) — shared across
+            // all monomorphizations of this generic union type.
+            (custom_type.name.clone(), vec![], vec![])
         };
 
         let index = self.wasm_types.len() as u32;
