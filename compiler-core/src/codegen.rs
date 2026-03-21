@@ -1,5 +1,6 @@
 use crate::{
     Result,
+    ast::TypedModule,
     build::{
         ErlangAppCodegenConfiguration, Module, module_erlang_name, package_compiler::StdlibPackage,
     },
@@ -13,6 +14,7 @@ use crate::{
 use ecow::EcoString;
 use erlang::escape_atom_string;
 use itertools::Itertools;
+use std::collections::HashMap;
 use std::fmt::Debug;
 
 use camino::Utf8Path;
@@ -285,9 +287,10 @@ impl<'a> WebAssembly<'a> {
     }
 
     pub fn render(&self, writer: &impl FileSystemWriter, modules: &[Module]) -> Result<()> {
+        let all_modules: HashMap<_, _> = modules.iter().map(|m| (m.name.clone(), &m.ast)).collect();
         for module in modules {
             let wasm_name = module.name.clone();
-            self.wasm_module(writer, module, &wasm_name)?
+            self.wasm_module(writer, module, &wasm_name, &all_modules)?
         }
         Ok(())
     }
@@ -297,18 +300,20 @@ impl<'a> WebAssembly<'a> {
         writer: &Writer,
         module: &Module,
         wasm_name: &str,
+        all_modules: &HashMap<EcoString, &TypedModule>,
     ) -> Result<()> {
         let name = format!("{wasm_name}.wasm");
         println!("Generating {name}");
         let path = self.output_directory.join(&name);
         let line_numbers = LineNumbers::new(&module.code);
-        let output = webassembly::module(&module.ast, &line_numbers).map_err(|error| {
-            crate::Error::WebAssembly {
-                path: module.input_path.clone(),
-                src: module.code.clone(),
-                error,
-            }
-        })?;
+        let output =
+            webassembly::module(&module.ast, &line_numbers, all_modules).map_err(|error| {
+                crate::Error::WebAssembly {
+                    path: module.input_path.clone(),
+                    src: module.code.clone(),
+                    error,
+                }
+            })?;
         tracing::debug!(name = ?name, "Generated WebAssembly module");
         writer.write_bytes(&path, &output)
     }

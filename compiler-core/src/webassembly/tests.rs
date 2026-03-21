@@ -12,10 +12,14 @@ use crate::{
     warning::{TypeWarningEmitter, WarningEmitter},
 };
 use camino::Utf8PathBuf;
+use ecow::EcoString;
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub fn compile(src: &str, deps: Vec<(&str, &str, &str)>) -> TypedModule {
+pub fn compile(
+    src: &str,
+    deps: Vec<(&str, &str, &str)>,
+) -> (TypedModule, HashMap<EcoString, TypedModule>) {
     let mut modules = im::HashMap::new();
     let ids = UniqueIdGenerator::new();
     let _ = modules.insert(
@@ -23,6 +27,7 @@ pub fn compile(src: &str, deps: Vec<(&str, &str, &str)>) -> TypedModule {
         crate::type_::build_prelude(&ids),
     );
     let mut direct_dependencies = HashMap::from_iter(vec![]);
+    let mut dep_modules = HashMap::new();
 
     deps.iter().for_each(|(dep_package, dep_name, dep_src)| {
         let mut dep_config = PackageConfig::default();
@@ -50,8 +55,9 @@ pub fn compile(src: &str, deps: Vec<(&str, &str, &str)>) -> TypedModule {
         }
         .infer_module(ast, line_numbers, "".into())
         .expect("should successfully infer");
-        let _ = modules.insert((*dep_name).into(), dep.type_info);
+        let _ = modules.insert((*dep_name).into(), dep.type_info.clone());
         let _ = direct_dependencies.insert((*dep_package).into(), ());
+        let _ = dep_modules.insert(EcoString::from(*dep_name), dep);
     });
 
     let parsed =
@@ -77,27 +83,33 @@ pub fn compile(src: &str, deps: Vec<(&str, &str, &str)>) -> TypedModule {
     .infer_module(ast, line_numbers, "src/module.gleam".into())
     .expect("should successfully infer");
 
-    module
+    (module, dep_modules)
 }
 
 pub fn compile_wasm(src: &str, deps: Vec<(&str, &str, &str)>) -> Vec<u8> {
-    let ast = compile(src, deps);
+    let (main_module, dep_modules) = compile(src, deps);
     let line_numbers = LineNumbers::new(src);
-    crate::webassembly::module(&ast, &line_numbers).expect("wasm codegen failed")
+    let mut all_modules: HashMap<_, _> = dep_modules
+        .iter()
+        .map(|(name, m)| (name.clone(), m))
+        .collect();
+    let _ = all_modules.insert(main_module.name.clone(), &main_module);
+    crate::webassembly::module(&main_module, &line_numbers, &all_modules)
+        .expect("wasm codegen failed")
 }
 
 /// Extract type names from the wasm binary's name section.
 pub fn wasm_type_names(wasm_bytes: &[u8]) -> Vec<String> {
     let mut names = vec![];
     for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
-        if let wasmparser::Payload::CustomSection(section) = payload.unwrap() {
-            if let wasmparser::KnownCustom::Name(name_section) = section.as_known() {
-                for subsection in name_section {
-                    if let wasmparser::Name::Type(type_names) = subsection.unwrap() {
-                        for naming in type_names {
-                            let naming = naming.unwrap();
-                            names.push(naming.name.to_string());
-                        }
+        if let wasmparser::Payload::CustomSection(section) = payload.unwrap()
+            && let wasmparser::KnownCustom::Name(name_section) = section.as_known()
+        {
+            for subsection in name_section {
+                if let wasmparser::Name::Type(type_names) = subsection.unwrap() {
+                    for naming in type_names {
+                        let naming = naming.unwrap();
+                        names.push(naming.name.to_string());
                     }
                 }
             }
@@ -107,9 +119,12 @@ pub fn wasm_type_names(wasm_bytes: &[u8]) -> Vec<String> {
 }
 
 pub fn compile_wasm_error(src: &str) -> crate::webassembly::Error {
-    let ast = compile(src, vec![]);
+    let (main_module, _) = compile(src, vec![]);
     let line_numbers = LineNumbers::new(src);
-    crate::webassembly::module(&ast, &line_numbers).expect_err("expected codegen error")
+    let main_ref: &TypedModule = &main_module;
+    let all_modules = HashMap::from([(main_module.name.clone(), main_ref)]);
+    crate::webassembly::module(&main_module, &line_numbers, &all_modules)
+        .expect_err("expected codegen error")
 }
 
 pub struct WasmOutput {
