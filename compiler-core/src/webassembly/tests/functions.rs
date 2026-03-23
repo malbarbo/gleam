@@ -771,3 +771,338 @@ pub fn get(w: Wrapper(a)) -> a {
         result.stderr
     );
 }
+
+#[test]
+fn mono_local_generic_function() {
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let id = fn(a: a) { a }
+    assert id(42) == 42
+    assert id("hello") == "hello"
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_generic_function_from_case() {
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let a = fn(a: a) {
+        echo 1
+        a
+    }
+    let b = fn(a: a) {
+        echo 2
+        a
+    }
+    let c = fn(a: a) {
+        echo 3
+        a
+    }
+    let f1 = case 1 {
+        1 -> a
+        2 -> b
+        _ -> c
+    }
+    let f2 = case 2 {
+        1 -> a
+        2 -> b
+        _ -> c
+    }
+    let f3 = case 3 {
+        1 -> a
+        2 -> b
+        _ -> c
+    }
+    assert f1(42) == 42
+    assert f2("hello") == "hello"
+    assert f3(99) == 99
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+    assert_eq!(
+        result.stderr,
+        "src/my/mod.gleam:4\n1\nsrc/my/mod.gleam:8\n2\nsrc/my/mod.gleam:12\n3\n"
+    );
+}
+
+#[test]
+fn mono_local_generic_function_name_collision() {
+    let result = run_wasm(
+        r#"
+fn bar() -> Int {
+    let id = fn(a: a) {
+        echo 2
+        a
+    }
+    assert id(42) == 42
+    assert id("bar") == "bar"
+    0
+}
+
+pub fn main() {
+    let id = fn(a: a) {
+        echo 1
+        a
+    }
+    assert id(42) == 42
+    bar()
+    assert id("main") == "main"
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+    assert_eq!(
+        result.stderr,
+        "src/my/mod.gleam:14\n1\nsrc/my/mod.gleam:4\n2\nsrc/my/mod.gleam:4\n2\nsrc/my/mod.gleam:14\n1\n"
+    );
+}
+
+#[test]
+fn mono_local_generic_function_multiple_type_params() {
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let swap = fn(a: a, b: b) { #(b, a) }
+    assert swap(1, "hi") == #("hi", 1)
+    assert swap("hi", 1) == #(1, "hi")
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_generic_function_as_argument() {
+    let result = run_wasm(
+        r#"
+fn apply(f: fn(a) -> a, x: a) -> a {
+    f(x)
+}
+
+pub fn main() {
+    let id = fn(a: a) { a }
+    assert apply(id, 42) == 42
+    assert apply(id, "hello") == "hello"
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_generic_function_complex_return() {
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let wrap = fn(a: a) { [a] }
+    assert wrap(42) == [42]
+    assert wrap("hi") == ["hi"]
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_generic_function_nested() {
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let outer = fn(a: a) {
+        let inner = fn(b: b) { b }
+        inner(a)
+    }
+    assert outer(42) == 42
+    assert outer("hello") == "hello"
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_generic_function_nested_transitive() {
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let outer = fn(a: a) {
+        let middle = fn(b: b) { b }
+        let inner = fn(c: c) { c }
+        inner(middle(a))
+    }
+    assert outer(42) == 42
+    assert outer("hello") == "hello"
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_generic_function_passed_to_different_callers() {
+    let result = run_wasm(
+        r#"
+fn use_int(f: fn(Int) -> Int) -> Int {
+    f(42)
+}
+
+fn use_string(f: fn(String) -> String) -> String {
+    f("hello")
+}
+
+pub fn main() {
+    let id = fn(a: a) { a }
+    assert use_int(id) == 42
+    assert use_string(id) == "hello"
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn import_lambda_name_collision_across_modules() {
+    // Both modules have a lambda at the same byte offset with the same type
+    // but different bodies (x*2 vs x*3, same length so same SrcSpan).
+    let result = run_wasm(
+        r#"
+import thepackage/mod_a
+import thepackage/mod_b
+
+pub fn main() {
+    assert mod_a.apply(10) == 20
+    assert mod_b.apply(10) == 30
+    0
+}
+"#,
+        vec![
+            (
+                "thepackage",
+                "thepackage/mod_a",
+                "\npub fn apply(x: Int) -> Int {\n  let f = fn(y: Int) { y * 2 }\n  f(x)\n}\n",
+            ),
+            (
+                "thepackage",
+                "thepackage/mod_b",
+                "\npub fn apply(x: Int) -> Int {\n  let f = fn(y: Int) { y * 3 }\n  f(x)\n}\n",
+            ),
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_generic_function_nested_mixed_params() {
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let outer = fn(a: a) {
+        let inner = fn(x: a, y: b) { #(x, y) }
+        #(inner(a, "hello"), inner(a, 1))
+    }
+    assert outer(42) == #(#(42, "hello"), #(42, 1))
+    assert outer("world") == #(#("world", "hello"), #("world", 1))
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_generic_function_return_only_type_var() {
+    // make() returns a type var that only appears in the return type (via panic).
+    // The WASM must compile correctly even though the type var is not in the params.
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let outer = fn(a: a) {
+        let make = fn() -> b { panic }
+        #(a, make())
+    }
+    outer(42)
+    0
+}
+"#,
+        vec![],
+    );
+    // outer(42) calls make() which panics at runtime, but WASM compilation must succeed.
+    assert!(
+        !result.status.success(),
+        "Expected runtime panic but got success"
+    );
+    assert!(
+        result.stderr.contains("panic"),
+        "Expected panic message, got: {}",
+        result.stderr
+    );
+}

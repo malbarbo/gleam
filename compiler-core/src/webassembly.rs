@@ -41,7 +41,8 @@ use crate::{
     },
     line_numbers::LineNumbers,
     type_::{
-        self, ModuleValueConstructor, PRELUDE_MODULE_NAME, Type, TypeVar, ValueConstructorVariant,
+        self, ModuleValueConstructor, PRELUDE_MODULE_NAME, Type, TypeVar, TypedCallArg,
+        ValueConstructorVariant,
         printer::{Names, Printer},
     },
 };
@@ -586,6 +587,15 @@ struct Variant {
     tag: Option<i32>,
 }
 
+#[derive(Clone)]
+struct LocalFunction {
+    location: SrcSpan,
+    parent_id: u32,
+    type_: Arc<Type>,
+    arguments: Vec<TypedArg>,
+    body: Vec<TypedStatement>,
+}
+
 struct Generator<'a> {
     // FIXME: generate all sections and names in function module?
     global_section: GlobalSection,
@@ -598,6 +608,7 @@ struct Generator<'a> {
     variants: HashMap<(EcoString, EcoString), Variant>,
     functions: BTreeSet<WasmFunction>,
     function_next_id: u32,
+    local_functions: HashMap<EcoString, LocalFunction>,
     builtins: HashMap<BuiltinFunction, u32>,
     builtins_external: HashMap<BuiltinFunctionExternal, u32>,
     main: Option<u32>,
@@ -634,6 +645,7 @@ impl<'a> Generator<'a> {
             variants: HashMap::new(),
             functions: BTreeSet::new(),
             function_next_id: 0,
+            local_functions: HashMap::new(),
             builtins: HashMap::new(),
             builtins_external: HashMap::new(),
             main: None,
@@ -1042,19 +1054,19 @@ impl<'a> Generator<'a> {
             if !visited.insert(name.clone()) {
                 continue;
             }
-            let dep_module = self.imported_module(&name);
-            let next_imports: Vec<EcoString> = dep_module
+            let module = self.module_imported(&name);
+            let next_imports: Vec<EcoString> = module
                 .definitions
                 .imports
                 .iter()
                 .map(|i| i.module.clone())
                 .collect();
-            self.add_module_types(dep_module);
+            self.add_module_types(module);
             queue.extend(next_imports);
         }
     }
 
-    fn imported_module(&self, name: &EcoString) -> &'a TypedModule {
+    fn module_imported(&self, name: &EcoString) -> &'a TypedModule {
         self.all_modules
             .get(name)
             .unwrap_or_else(|| panic!("imported module not found during code generation: {name}"))
@@ -1284,7 +1296,7 @@ impl<'a> Generator<'a> {
                 && !is_generic_type(&function_type(function))
                 && function.external_webassembly.is_none()
             {
-                let id = self.function(function, None, true);
+                let id = self.function(function, true, function_name(function).into());
                 if is_main_funtion(function) {
                     self.main = Some(id.index)
                 }
@@ -1892,10 +1904,11 @@ impl<'a> Generator<'a> {
                     return self.find_global_expect(fname);
                 }
                 let export = function.publicity.is_public();
+                let base_name = function_name(function).into();
                 return if is_generic_type(&function_type(function)) {
-                    self.function(function, Some(required_type), export)
+                    self.function_generic(function, required_type, export, base_name)
                 } else {
-                    self.function(function, None, export)
+                    self.function(function, export, base_name)
                 };
             }
         }
@@ -1904,36 +1917,6 @@ impl<'a> Generator<'a> {
             "Name not found: {:?}. Are you using closures? They are not supporte yet.",
             name
         );
-    }
-
-    fn imported_function(
-        &mut self,
-        module_name: &EcoString,
-        fn_name: &EcoString,
-        required_type: &Arc<Type>,
-    ) -> Id {
-        let dep_module = self.imported_module(module_name);
-
-        for function in &dep_module.definitions.functions {
-            if function_name(function) == fn_name {
-                if let Some((_, fname, _)) = &function.external_webassembly {
-                    if fname == INSPECT {
-                        return self.function_inspect(required_type);
-                    }
-                    return self.find_global_expect(fname);
-                }
-                // Build a module-qualified name to avoid collisions
-                let base_name: EcoString = format!("{module_name}.{fn_name}").into();
-                let is_generic = is_generic_type(&function_type(function));
-                return if is_generic {
-                    self.function_named(function, Some(required_type), false, base_name)
-                } else {
-                    self.function_named(function, None, false, base_name)
-                };
-            }
-        }
-
-        panic!("imported function not found during code generation: {module_name}.{fn_name}");
     }
 
     fn var_id(&mut self, scope: &Scope, name: &EcoString, type_: &Arc<Type>) -> Id {
@@ -1962,61 +1945,27 @@ impl<'a> Generator<'a> {
         id
     }
 
-    fn function(
+    fn _function(
         &mut self,
-        function: &TypedFunction,
-        required_type: Option<&Arc<Type>>,
+        function: TypedFunction,
+        name: EcoString,
         export: bool,
+        original_local_functions: HashMap<EcoString, LocalFunction>,
     ) -> Id {
-        self.function_named(
-            function,
-            required_type,
-            export,
-            function_name(function).into(),
-        )
-    }
-
-    fn function_named(
-        &mut self,
-        function: &TypedFunction,
-        required_type: Option<&Arc<Type>>,
-        export: bool,
-        base_name: EcoString,
-    ) -> Id {
-        let name = if let Some(required_type) = required_type {
-            self.mangle(&base_name, required_type)
-        } else {
-            base_name
-        };
-        if let Some(id) = self.find_global(&name) {
-            return id;
-        }
-
-        let type_ = function_type(function);
-
-        let function = if is_generic_type(&type_) {
-            let required_type = required_type.unwrap();
-            if is_generic_type(required_type) {
-                panic!()
-            }
-            let mut function = Monomorphizer::with_bound(&type_, required_type).function(function);
-            set_function_name(&mut function, name.clone());
-            function
-        } else {
-            Monomorphizer::new().function(function)
-        };
-
         let index = self.function_next_id();
         let id = self.add_function_to_globals(name.clone(), index);
         let locals = Locals::new(self, &function.arguments, &function.body);
         let mut code = Function::new(locals.val_types());
         let mut instructions = code.extend_instructions(self);
+        let saved_local_functions =
+            std::mem::replace(&mut self.local_functions, original_local_functions);
         self.statements(
             &mut instructions,
             Scope::with_params(self.globals.clone(), &function.arguments),
             &locals,
             &function.body,
         );
+        self.local_functions = saved_local_functions;
         let _ = instructions.end();
 
         let type_index = self.function_type_index(
@@ -2035,28 +1984,54 @@ impl<'a> Generator<'a> {
         id
     }
 
-    fn function_local(
+    fn function(&mut self, function: &TypedFunction, export: bool, base_name: EcoString) -> Id {
+        if let Some(id) = self.find_global(&base_name) {
+            return id;
+        }
+        let original_local_functions = collect_local_functions(&function.body, self.function_next_id);
+        // Resolve Generic type vars (from inner lambdas) to Nil for valid WASM types.
+        let function = Monomorphizer::new().function(function);
+        self._function(function, base_name, export, original_local_functions)
+    }
+
+    fn function_generic(
+        &mut self,
+        function: &TypedFunction,
+        required_type: &Arc<Type>,
+        export: bool,
+        base_name: EcoString,
+    ) -> Id {
+        let name = self.mangle(&base_name, required_type);
+        if let Some(id) = self.find_global(&name) {
+            return id;
+        }
+        let original_local_functions = collect_local_functions(&function.body, self.function_next_id);
+        let type_ = function_type(function);
+        let mut function = Monomorphizer::with_bound(&type_, required_type).function(function);
+        set_function_name(&mut function, name.clone());
+        self._function(function, name, export, original_local_functions)
+    }
+
+    fn _function_local(
         &mut self,
         name: EcoString,
         type_: &Arc<Type>,
         arguments: &[TypedArg],
         body: &[TypedStatement],
     ) -> Id {
-        if let Some(id) = self.find_global(&name) {
-            return id;
-        }
-
         let index = self.function_next_id();
         let id = self.add_function_to_globals(name.clone(), index);
         let locals = Locals::new(self, arguments, body);
         let mut code = Function::new(locals.val_types());
         let mut instructions = code.extend_instructions(self);
+        let saved_local_functions = self.local_functions.clone();
         self.statements(
             &mut instructions,
             Scope::with_params(self.globals.clone(), arguments),
             &locals,
             body,
         );
+        self.local_functions = saved_local_functions;
         let _ = instructions.end();
 
         let (params, return_) = type_.fn_types().unwrap();
@@ -2071,6 +2046,64 @@ impl<'a> Generator<'a> {
         });
 
         id
+    }
+
+    fn function_local(
+        &mut self,
+        name: EcoString,
+        type_: &Arc<Type>,
+        arguments: &[TypedArg],
+        body: &[TypedStatement],
+    ) -> Id {
+        if let Some(id) = self.find_global(&name) {
+            return id;
+        }
+        self._function_local(name, type_, arguments, body)
+    }
+
+    fn function_local_generic(&mut self, info: &LocalFunction, required_type: &Arc<Type>) -> Id {
+        let type_name = self.type_pretty_name(required_type).replace(" ", "");
+        let name: EcoString = format!(
+            "anonymous@{}-{}#{}:{type_name}",
+            info.location.start, info.location.end, info.parent_id
+        )
+        .into();
+
+        if let Some(id) = self.find_global(&name) {
+            return id;
+        }
+
+        let (args, body) = Monomorphizer::function_local(info, required_type);
+        self._function_local(name, required_type, &args, &body)
+    }
+
+    fn function_imported(
+        &mut self,
+        module_name: &EcoString,
+        fn_name: &EcoString,
+        required_type: &Arc<Type>,
+    ) -> Id {
+        let module = self.module_imported(module_name);
+
+        for function in &module.definitions.functions {
+            if function_name(function) == fn_name {
+                if let Some((_, fname, _)) = &function.external_webassembly {
+                    if fname == INSPECT {
+                        return self.function_inspect(required_type);
+                    }
+                    return self.find_global_expect(fname);
+                }
+                // Build a module-qualified name to avoid collisions
+                let base_name: EcoString = format!("{module_name}.{fn_name}").into();
+                return if is_generic_type(&function_type(function)) {
+                    self.function_generic(function, required_type, false, base_name)
+                } else {
+                    self.function(function, false, base_name)
+                };
+            }
+        }
+
+        panic!("imported function not found during code generation: {module_name}.{fn_name}");
     }
 
     fn statements(
@@ -2274,7 +2307,7 @@ impl<'a> Generator<'a> {
                 ValueConstructorVariant::ModuleFn { module, name, .. }
                     if module.as_str() != self.module.name.as_str() =>
                 {
-                    let id = self.imported_function(module, name, &expression.type_());
+                    let id = self.function_imported(module, name, &expression.type_());
                     let _ = instructions.ref_func(id.index);
                 }
                 ValueConstructorVariant::ModuleConstant { literal, .. } => {
@@ -2415,7 +2448,7 @@ impl<'a> Generator<'a> {
                 ..
             } => match constructor {
                 ModuleValueConstructor::Fn { .. } => {
-                    let id = self.imported_function(module_name, label, &expression.type_());
+                    let id = self.function_imported(module_name, label, &expression.type_());
                     let _ = instructions.ref_func(id.index);
                 }
                 ModuleValueConstructor::Record { name, .. } => {
@@ -2640,6 +2673,13 @@ impl<'a> Generator<'a> {
         name: &EcoString,
         type_: &Arc<Type>,
     ) {
+        if let Some(info) = self.local_functions.get(name).cloned() {
+            if type_.fn_types().is_some() {
+                let id = self.function_local_generic(&info, type_);
+                let _ = instructions.ref_func(id.index);
+                return;
+            }
+        }
         let id = self.var_id(scope, name, type_);
 
         let _ = match id.kind {
@@ -5824,7 +5864,7 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
         location: &'ast SrcSpan,
         type_: &'ast Arc<Type>,
         fun: &'ast TypedExpr,
-        arguments: &'ast [type_::TypedCallArg],
+        arguments: &'ast [TypedCallArg],
     ) {
         self.locals.insert_call(self.generator, fun);
         visit_typed_expr_call(self, location, type_, fun, arguments);
@@ -6003,6 +6043,67 @@ impl Monomorphizer {
         self
     }
 
+    fn bound_by_var_cell(&mut self, from: &Arc<Type>, to: &Arc<Type>) {
+        match (from.as_ref(), to.as_ref()) {
+            (Type::Var { type_ }, _) => {
+                let _ = self.map.insert(Arc::as_ptr(type_) as u64, to.clone());
+            }
+            (
+                Type::Named {
+                    arguments: from, ..
+                },
+                Type::Named { arguments: to, .. },
+            ) => {
+                for (f, t) in from.iter().zip(to) {
+                    self.bound_by_var_cell(f, t);
+                }
+            }
+            (Type::Tuple { elements: from }, Type::Tuple { elements: to }) => {
+                for (f, t) in from.iter().zip(to) {
+                    self.bound_by_var_cell(f, t);
+                }
+            }
+            (
+                Type::Fn {
+                    arguments: from_args,
+                    return_: from_return,
+                },
+                Type::Fn {
+                    arguments: to_args,
+                    return_: to_return,
+                },
+            ) => {
+                self.bound_by_var_cell(from_return, to_return);
+                for (f, t) in from_args.iter().zip(to_args) {
+                    self.bound_by_var_cell(f, t);
+                }
+            }
+            (_, _) => {}
+        }
+    }
+
+    fn function_local(
+        from: &LocalFunction,
+        to: &Arc<Type>,
+    ) -> (Vec<TypedArg>, Vec<TypedStatement>) {
+        fn propagate_call_mappings(
+            map: &mut HashMap<u64, Arc<Type>>,
+            statements: &[TypedStatement],
+        ) {
+            propagate_call_type_vars(map, statements);
+        }
+        let mut mono = Monomorphizer::new();
+        mono.bound_by_var_cell(&from.type_, to);
+        propagate_call_mappings(&mut mono.map, &from.body);
+        let mut args = from.arguments.clone();
+        for arg in &mut args {
+            arg.type_ = mono.type_(&arg.type_);
+        }
+        let mut body = from.body.clone();
+        mono.statements(&mut body);
+        (args, body)
+    }
+
     fn function(&self, function: &TypedFunction) -> TypedFunction {
         let mut function = function.clone();
 
@@ -6018,6 +6119,12 @@ impl Monomorphizer {
     }
 
     fn type_(&self, old: &Arc<Type>) -> Arc<Type> {
+        if let Type::Var { type_: cell } = old.as_ref() {
+            let ptr_id = Arc::as_ptr(cell) as u64;
+            if let Some(mapped) = self.map.get(&ptr_id) {
+                return mapped.clone();
+            }
+        }
         if let Some(id) = get_unbound_or_generic_id(old) {
             if let Some(to) = self.map.get(&id) {
                 to.clone()
@@ -6349,6 +6456,138 @@ impl Monomorphizer {
             ClauseGuard::ModuleSelect { type_, .. } => {
                 *type_ = self.type_(type_);
             }
+        }
+    }
+}
+
+/// Collects original local.
+/// Preserves Generic type vars for later monomorphization.
+fn collect_local_functions(
+    body: &[TypedStatement],
+    parent_id: u32,
+) -> HashMap<EcoString, LocalFunction> {
+    struct LocalFunctionCollector<'a> {
+        map: &'a mut HashMap<EcoString, LocalFunction>,
+        parent_id: u32,
+    }
+
+    impl<'ast> Visit<'ast> for LocalFunctionCollector<'_> {
+        fn visit_typed_assignment(&mut self, assignment: &'ast TypedAssignment) {
+            if let TypedExpr::Fn {
+                location,
+                type_,
+                arguments,
+                body,
+                ..
+            } = &assignment.value
+                && let Pattern::Variable { name, .. } = &assignment.pattern
+            {
+                let _ = self.map.insert(
+                    name.clone(),
+                    LocalFunction {
+                        location: *location,
+                        parent_id: self.parent_id,
+                        type_: type_.clone(),
+                        arguments: arguments.clone(),
+                        body: body.to_vec(),
+                    },
+                );
+            }
+            visit_typed_assignment(self, assignment);
+        }
+    }
+
+    let mut map = HashMap::new();
+    let mut collector = LocalFunctionCollector {
+        map: &mut map,
+        parent_id,
+    };
+    for statement in body {
+        collector.visit_typed_statement(statement);
+    }
+    map
+}
+
+/// Walks Call expressions and propagates Rc-pointer type var mappings
+/// from arguments to function parameters. Runs until fixpoint.
+fn propagate_call_type_vars(map: &mut HashMap<u64, Arc<Type>>, statements: &[TypedStatement]) {
+    struct Propagator<'a> {
+        map: &'a mut HashMap<u64, Arc<Type>>,
+        changed: &'a mut bool,
+    }
+
+    impl<'ast> Visit<'ast> for Propagator<'_> {
+        fn visit_typed_expr_call(
+            &mut self,
+            _location: &'ast SrcSpan,
+            _type_: &'ast Arc<Type>,
+            fun: &'ast TypedExpr,
+            arguments: &'ast [TypedCallArg],
+        ) {
+            if let Some((params, _)) = fun.type_().fn_types() {
+                for (param, arg) in params.iter().zip(arguments) {
+                    propagate_between_types(self.map, &param, &arg.value.type_(), self.changed);
+                }
+            }
+            visit_typed_expr_call(self, _location, _type_, fun, arguments);
+        }
+    }
+
+    fn propagate_between_types(
+        map: &mut HashMap<u64, Arc<Type>>,
+        param: &Arc<Type>,
+        arg: &Arc<Type>,
+        changed: &mut bool,
+    ) {
+        match (param.as_ref(), arg.as_ref()) {
+            (Type::Var { type_: p }, Type::Var { type_: a }) => {
+                let p_ptr = Arc::as_ptr(p) as u64;
+                let a_ptr = Arc::as_ptr(a) as u64;
+                if !map.contains_key(&p_ptr) {
+                    if let Some(target) = map.get(&a_ptr).cloned() {
+                        let _ = map.insert(p_ptr, target);
+                        *changed = true;
+                    }
+                }
+            }
+            (
+                Type::Fn {
+                    arguments: pa,
+                    return_: pr,
+                },
+                Type::Fn {
+                    arguments: aa,
+                    return_: ar,
+                },
+            ) => {
+                for (p, a) in pa.iter().zip(aa) {
+                    propagate_between_types(map, p, a, changed);
+                }
+                propagate_between_types(map, pr, ar, changed);
+            }
+            (Type::Named { arguments: pa, .. }, Type::Named { arguments: aa, .. }) => {
+                for (p, a) in pa.iter().zip(aa) {
+                    propagate_between_types(map, p, a, changed);
+                }
+            }
+            (Type::Tuple { elements: pe }, Type::Tuple { elements: ae }) => {
+                for (p, a) in pe.iter().zip(ae) {
+                    propagate_between_types(map, p, a, changed);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let mut visitor = Propagator {
+            map,
+            changed: &mut changed,
+        };
+        for statement in statements {
+            visitor.visit_typed_statement(statement);
         }
     }
 }
