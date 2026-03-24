@@ -288,9 +288,13 @@ impl<'a> WebAssembly<'a> {
 
     pub fn render(&self, writer: &impl FileSystemWriter, modules: &[Module]) -> Result<()> {
         let all_modules: HashMap<_, _> = modules.iter().map(|m| (m.name.clone(), &m.ast)).collect();
+        let all_line_numbers: HashMap<_, _> = modules
+            .iter()
+            .map(|m| (m.name.clone(), LineNumbers::new(&m.code)))
+            .collect();
         for module in modules {
             let wasm_name = module.name.clone();
-            self.wasm_module(writer, module, &wasm_name, &all_modules)?
+            self.wasm_module(writer, module, &wasm_name, &all_modules, &all_line_numbers)?
         }
         Ok(())
     }
@@ -301,18 +305,17 @@ impl<'a> WebAssembly<'a> {
         module: &Module,
         wasm_name: &str,
         all_modules: &HashMap<EcoString, &TypedModule>,
+        all_line_numbers: &HashMap<EcoString, LineNumbers>,
     ) -> Result<()> {
         let name = format!("{wasm_name}.wasm");
         println!("Generating {name}");
         let path = self.output_directory.join(&name);
         let line_numbers = LineNumbers::new(&module.code);
-        let output =
-            webassembly::module(&module.ast, &line_numbers, all_modules).map_err(|error| {
-                crate::Error::WebAssembly {
-                    path: module.input_path.clone(),
-                    src: module.code.clone(),
-                    error,
-                }
+        let output = webassembly::module(&module.ast, &line_numbers, all_modules, all_line_numbers)
+            .map_err(|error| crate::Error::WebAssembly {
+                path: module.input_path.clone(),
+                src: module.code.clone(),
+                error,
             })?;
         tracing::debug!(name = ?name, "Generated WebAssembly module");
         writer.write_bytes(&path, &output)

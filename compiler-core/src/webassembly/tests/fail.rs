@@ -1,4 +1,4 @@
-use super::{run_fail, run_fail_stderr};
+use super::{run_fail, run_fail_stderr, run_wasm};
 
 #[test]
 fn assert_failure() {
@@ -48,5 +48,33 @@ pub fn main() {
 }
 "#,
         "missing",
+    );
+}
+
+#[test]
+fn assert_failure_in_imported_function() {
+    let result = run_wasm(
+        r#"
+import dep/mod
+
+pub fn main() {
+  mod.fail()
+}
+"#,
+        vec![(
+            "thepackage",
+            "dep/mod",
+            r#"
+pub fn fail() {
+  assert 1 == 2
+}
+"#,
+        )],
+    );
+    assert!(!result.status.success());
+    assert!(
+        result.stderr.contains("src/dep/mod.gleam:3"),
+        "Expected location 'src/dep/mod.gleam:3', got:\n{}",
+        result.stderr
     );
 }
