@@ -506,3 +506,67 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn external_type_i64() {
+    run_ok(
+        r#"
+type I64 {}
+
+@external(webassembly, "builtins", "_int_to_i64")
+fn to_i64(value: Int) -> I64
+
+@external(webassembly, "builtins", "_i64_to_int")
+fn from_i64(value: I64) -> Int
+
+pub fn main() {
+  assert from_i64(to_i64(42)) == 42
+  assert from_i64(to_i64(-1)) == -1
+  0
+}
+"#,
+    );
+}
+
+#[test]
+fn external_type_f32() {
+    run_ok(
+        r#"
+type F32 {}
+
+@external(webassembly, "builtins", "_float_to_f32")
+fn to_f32(value: Float) -> F32
+
+@external(webassembly, "builtins", "_f32_to_float")
+fn from_f32(value: F32) -> Float
+
+pub fn main() {
+  let x = from_f32(to_f32(3.14))
+  // F32 loses precision, so check approximately
+  assert x >. 3.13
+  assert x <. 3.15
+  0
+}
+"#,
+    );
+}
+
+#[test]
+fn external_type_f64() {
+    run_ok(
+        r#"
+type F64 {}
+
+@external(webassembly, "builtins", "_float_to_f64")
+fn to_f64(value: Float) -> F64
+
+@external(webassembly, "builtins", "_f64_to_float")
+fn from_f64(value: F64) -> Float
+
+pub fn main() {
+  assert from_f64(to_f64(3.14)) == 3.14
+  0
+}
+"#,
+    );
+}

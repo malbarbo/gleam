@@ -1,12 +1,14 @@
 ---
 source: compiler-core/src/webassembly/tests/errors.rs
-expression: "\n@external(webassembly, \"builtins\", \"F32\")\ntype MyFloat\n"
+assertion_line: 3
+expression: "\n@external(webassembly, \"builtins\", \"F128\")\ntype MyFloat\n"
+snapshot_kind: text
 ---
 ----- SOURCE CODE
 
-@external(webassembly, "builtins", "F32")
+@external(webassembly, "builtins", "F128")
 type MyFloat
 
 
 ----- ERROR
-UnknownExternalType { location: SrcSpan { start: 1, end: 42 }, name: "F32" }
+UnknownExternalType { location: SrcSpan { start: 1, end: 43 }, name: "F128" }

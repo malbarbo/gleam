@@ -2,7 +2,7 @@
 fn unknown_external_type() {
     assert_wasm_error!(
         r#"
-@external(webassembly, "builtins", "F32")
+@external(webassembly, "builtins", "F128")
 type MyFloat
 "#,
     );
