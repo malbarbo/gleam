@@ -1,4 +1,4 @@
-#![allow(clippy::todo, clippy::unwrap_used)]
+#![allow(clippy::todo)]
 #[cfg(test)]
 mod tests;
 
@@ -114,6 +114,41 @@ pub enum Error {
         location: SrcSpan,
         feature: EcoString,
     },
+    IntLiteralOutOfRange {
+        location: SrcSpan,
+        value: EcoString,
+        target: EcoString,
+    },
+    FloatLiteralOutOfRange {
+        location: SrcSpan,
+        value: EcoString,
+        target: EcoString,
+    },
+}
+
+/// Validate numeric literals for a module with custom int/float types.
+/// Used in tests to check I64 and F32 validation paths.
+#[cfg(test)]
+pub(crate) fn validate_module(
+    module: &TypedModule,
+    all_modules: &HashMap<EcoString, &TypedModule>,
+    int: &str,
+    float: &str,
+) -> Result<(), Error> {
+    let line_numbers = LineNumbers::new("");
+    let all_line_numbers = HashMap::new();
+    let mut generator = Generator::new(module, &line_numbers, all_modules, &all_line_numbers);
+    generator.int = match int {
+        "I32" => IntType::I32,
+        "I64" => IntType::I64,
+        _ => panic!("unknown int type"),
+    };
+    generator.float = match float {
+        "F32" => FloatType::F32,
+        "F64" => FloatType::F64,
+        _ => panic!("unknown float type"),
+    };
+    generator.validate_numeric_literals()
 }
 
 pub fn module(
@@ -781,7 +816,93 @@ impl<'a> Generator<'a> {
         }
     }
 
+    fn validate_numeric_literals(&self) -> Result<(), Error> {
+        struct Validator {
+            int: IntType,
+            float: FloatType,
+            error: Option<Error>,
+        }
+
+        impl<'ast> Visit<'ast> for Validator {
+            fn visit_typed_expr_int(
+                &mut self,
+                location: &'ast SrcSpan,
+                _type_: &'ast Arc<Type>,
+                value: &'ast EcoString,
+            ) {
+                if self.error.is_some() {
+                    return;
+                }
+                let Some(int_value) = crate::parse::parse_int_value(value) else {
+                    return;
+                };
+                let err = match self.int {
+                    IntType::I32 => i32::try_from(&int_value).err().map(|_| ()),
+                    IntType::I64 => i64::try_from(&int_value).err().map(|_| ()),
+                };
+                if err.is_some() {
+                    self.error = Some(Error::IntLiteralOutOfRange {
+                        location: *location,
+                        value: int_value.to_string().into(),
+                        target: match self.int {
+                            IntType::I32 => "I32".into(),
+                            IntType::I64 => "I64".into(),
+                        },
+                    });
+                }
+            }
+
+            fn visit_typed_expr_float(
+                &mut self,
+                location: &'ast SrcSpan,
+                _type_: &'ast Arc<Type>,
+                value: &'ast EcoString,
+            ) {
+                if self.error.is_some() {
+                    return;
+                }
+                let clean = value.replace("_", "");
+                let err = match self.float {
+                    FloatType::F32 => clean
+                        .parse::<f32>()
+                        .ok()
+                        .filter(|f| !f.is_infinite())
+                        .is_none(),
+                    FloatType::F64 => clean
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|f| !f.is_infinite())
+                        .is_none(),
+                };
+                if err {
+                    self.error = Some(Error::FloatLiteralOutOfRange {
+                        location: *location,
+                        value: value.clone(),
+                        target: match self.float {
+                            FloatType::F32 => "F32".into(),
+                            FloatType::F64 => "F64".into(),
+                        },
+                    });
+                }
+            }
+        }
+
+        let mut v = Validator {
+            int: self.int,
+            float: self.float,
+            error: None,
+        };
+        v.visit_typed_module(self.module);
+        match v.error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
     fn generate(&mut self) -> Result<u32, Error> {
+        // Validate all numeric literals fit in the target types before codegen.
+        self.validate_numeric_literals()?;
+
         // External types, like I32, must come first because of the external function type checking.
         // Externals functions come first because of the indexes in the builtin wasm file.
         self.types_external()?;
@@ -824,7 +945,7 @@ impl<'a> Generator<'a> {
         builtin: &BuiltinFunctionExternal,
         fn_type: &Arc<Type>,
     ) -> Arc<Type> {
-        let (params, return_) = fn_type.fn_types().expect("Expected function type");
+        let (params, return_) = fn_type.fn_types().expect("function type");
         // For builtins that return I32, use the return type
         match builtin {
             BuiltinFunctionExternal::IntToI32
@@ -834,9 +955,15 @@ impl<'a> Generator<'a> {
             | BuiltinFunctionExternal::StringRepr
             | BuiltinFunctionExternal::StringToMemory => return_,
             // For builtins that take I32 as first param, use params[0]
-            BuiltinFunctionExternal::I32ToInt => params.into_iter().next().unwrap(),
+            BuiltinFunctionExternal::I32ToInt => params
+                .into_iter()
+                .next()
+                .expect("builtin to have at least one parameter"),
             // For MemoryToString: params are [i32, i32], use first
-            BuiltinFunctionExternal::MemoryToString => params.into_iter().next().unwrap(),
+            BuiltinFunctionExternal::MemoryToString => params
+                .into_iter()
+                .next()
+                .expect("builtin to have at least one parameter"),
             // Builtins without I32 — return a dummy (unused by type_())
             _ => type_::int(),
         }
@@ -864,12 +991,8 @@ impl<'a> Generator<'a> {
     }
 
     fn find_global_expect(&self, name: &str) -> Id {
-        self.find_global(name).unwrap_or_else(|| {
-            panic!(
-                "Global \"{name}\".\n{}",
-                std::backtrace::Backtrace::capture()
-            )
-        })
+        self.find_global(name)
+            .unwrap_or_else(|| panic!("global \"{name}\" to be registered"))
     }
 
     fn builtin_type(&self, function: &BuiltinFunction) -> (Vec<ValType>, Vec<ValType>) {
@@ -995,7 +1118,7 @@ impl<'a> Generator<'a> {
         let mut functions = vec![];
 
         for payload in wasmparser::Parser::new(0).parse_all(&module) {
-            match payload.expect("Payload") {
+            match payload.expect("valid wasm payload") {
                 wasmparser::Payload::TypeSection(section) => {
                     for item in section.into_iter_with_offsets() {
                         let (_, group) = item.expect("Type entry");
@@ -1017,7 +1140,7 @@ impl<'a> Generator<'a> {
                         let (_, import) = item.expect("Import entry");
                         let type_index = match import.ty {
                             wasmparser::TypeRef::Func(index) => index,
-                            _ => panic!("unexpected import type in builtins module"),
+                            other => panic!("unexpected import type in builtins module: {other:?}"),
                         };
                         let _ = self.import_section.import(
                             import.module,
@@ -1030,7 +1153,12 @@ impl<'a> Generator<'a> {
                 wasmparser::Payload::FunctionSection(section) => {
                     for function in section.into_iter_with_offsets() {
                         let (_, type_index) = function.expect("Function entry");
-                        functions_types.push(types.get(type_index as usize).expect("Type").clone());
+                        functions_types.push(
+                            types
+                                .get(type_index as usize)
+                                .expect("function type at index")
+                                .clone(),
+                        );
                     }
                 }
                 wasmparser::Payload::GlobalSection(section) => {
@@ -1112,7 +1240,7 @@ impl<'a> Generator<'a> {
                                             let index =
                                                 (name.index - self.import_section.len()) as usize;
                                             let (params, results, code) =
-                                                functions.get(index).unwrap();
+                                                functions.get(index).expect("function at index");
                                             let _ = self.add_function(
                                                 name.name.into(),
                                                 false,
@@ -1408,6 +1536,47 @@ impl<'a> Generator<'a> {
         }
     }
 
+    fn custom_type_expect(&self, type_: &Arc<Type>) -> (CustomType, Vec<Arc<Type>>) {
+        self.custom_type(type_)
+            .unwrap_or_else(|| panic!("custom type to be registered for {type_:?}"))
+    }
+
+    fn list_type_cons(
+        &self,
+        list_type: &Arc<Type>,
+    ) -> (
+        TypedCustomType,
+        TypedRecordConstructor,
+        Arc<Type>,
+        Vec<Arc<Type>>,
+    ) {
+        let (custom_type, args) = self.custom_type_expect(list_type);
+        let CustomType::Union { custom_type } = custom_type else {
+            panic!("list type to be a union")
+        };
+        let cons = custom_type
+            .constructors
+            .get(1)
+            .expect("Cons constructor for list type")
+            .clone();
+        let item_type = args.first().expect("list item type").clone();
+        (custom_type, cons, item_type, args)
+    }
+
+    fn variant_expect(&self, module: EcoString, name: EcoString) -> Variant {
+        self.variants
+            .get(&(module, name))
+            .expect("variant to be registered")
+            .clone()
+    }
+
+    fn enum_value_index(values: &[EcoString], name: &EcoString) -> usize {
+        values
+            .iter()
+            .position(|v| v == name)
+            .expect("enum value to exist")
+    }
+
     fn constants(&mut self) {
         for module_constant in &self.module.definitions.constants {
             let _ = self.module_constant(module_constant);
@@ -1451,12 +1620,10 @@ impl<'a> Generator<'a> {
             && name == "I32"
         {
             ValType::I32
+        } else if type_.is_bit_array() {
+            todo!("BitArray is not yet supported");
         } else {
-            todo!(
-                "Type not supported: {:#?}\n{}",
-                type_,
-                std::backtrace::Backtrace::capture()
-            );
+            panic!("unexpected type should not reach code generation: {type_:#?}");
         }
     }
 
@@ -1493,7 +1660,7 @@ impl<'a> Generator<'a> {
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             match custom_type {
                 CustomType::External { .. } | CustomType::Enum { .. } => {
-                    panic!("external/enum types should not reach code generation here")
+                    panic!("external/enum types should not reach code generation")
                 }
                 CustomType::Struct {
                     custom_type,
@@ -1515,7 +1682,7 @@ impl<'a> Generator<'a> {
                 }
             }
         } else {
-            panic!("unsupported type should not reach code generation: {type_:?}");
+            panic!("unexpected type should not reach code generation: {type_:?}");
         }
     }
 
@@ -1751,9 +1918,9 @@ impl<'a> Generator<'a> {
                 id
             }
             Constant::List { type_, .. } => {
-                let (custom_type, _) = self.custom_type(type_).unwrap();
+                let (custom_type, _) = self.custom_type_expect(type_);
                 let CustomType::Union { custom_type } = custom_type else {
-                    panic!()
+                    panic!("list type should be a union")
                 };
                 let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
                 let val_type = self.val_type_ref_nullable(supertype_index);
@@ -1776,11 +1943,11 @@ impl<'a> Generator<'a> {
                 name,
                 ..
             } => {
-                let (custom_type, args) = self.custom_type(type_).unwrap();
+                let (custom_type, args) = self.custom_type_expect(type_);
                 match custom_type {
                     CustomType::Enum { values } => {
                         assert!(arguments.is_empty());
-                        let value = values.iter().position(|value| value == name).unwrap();
+                        let value = Self::enum_value_index(&values, name);
                         self.add_const(
                             const_name,
                             ValType::I32,
@@ -1812,8 +1979,13 @@ impl<'a> Generator<'a> {
                         id
                     }
                     CustomType::Union { custom_type } => {
-                        let index = type_.custom_type_inferred_variant().unwrap();
-                        let constructor = custom_type.constructors.get(index as usize).unwrap();
+                        let index = type_
+                            .custom_type_inferred_variant()
+                            .expect("inferred variant index");
+                        let constructor = custom_type
+                            .constructors
+                            .get(index as usize)
+                            .expect("constructor at index");
                         let (_, type_index, _) =
                             self.mono_union_subtype_index(type_, &custom_type, constructor, &args);
                         let val_type = self.val_type_ref_nullable(type_index);
@@ -1833,7 +2005,7 @@ impl<'a> Generator<'a> {
                         id
                     }
                     CustomType::External { .. } => {
-                        panic!("external types should not reach code generation here")
+                        panic!("external types should not reach code generation")
                     }
                 }
             }
@@ -1938,18 +2110,10 @@ impl<'a> Generator<'a> {
             Constant::List {
                 elements, type_, ..
             } => {
-                let (custom_type, args) = self.custom_type(type_).unwrap();
-                let CustomType::Union { custom_type } = custom_type else {
-                    panic!()
-                };
+                let (custom_type, cons, item_type, _) = self.list_type_cons(type_);
                 let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
-                let cons = custom_type.constructors.get(1).expect("Cons");
-                let cons_variant = self
-                    .variants
-                    .get(&(PRELUDE_MODULE_NAME.into(), cons.name.clone()))
-                    .unwrap()
-                    .clone();
-                let item_type = args.first().expect("List item type");
+                let cons_variant =
+                    self.variant_expect(PRELUDE_MODULE_NAME.into(), cons.name.clone());
                 let cons_fn = self.variant_constructor(
                     vec![type_::list(item_type.clone()), item_type.clone()],
                     type_.clone(),
@@ -1973,11 +2137,13 @@ impl<'a> Generator<'a> {
                 ..
             } => {
                 if let Some((CustomType::Enum { values }, _)) = self.custom_type(type_) {
-                    let value = values.iter().position(|v| v == name).unwrap();
+                    let value = Self::enum_value_index(&values, name);
                     let _ = instructions.i32_const(value as i32);
                 } else {
-                    let (module, _, _) = type_.named_type_information().unwrap();
-                    let variant = self.variants.get(&(module, name.clone())).unwrap().clone();
+                    let (module, _, _) = type_
+                        .named_type_information()
+                        .expect("named type information");
+                    let variant = self.variant_expect(module, name.clone());
                     let id = self.variant_constructor(
                         arguments.iter().map(|arg| arg.value.type_()).collect(),
                         type_.clone(),
@@ -2038,7 +2204,7 @@ impl<'a> Generator<'a> {
         }
 
         todo!(
-            "Name not found: {:?}. Are you using closures? They are not supporte yet.",
+            "Name not found: {:?}. Are you using closures? They are not supported yet.",
             name
         );
     }
@@ -2160,7 +2326,7 @@ impl<'a> Generator<'a> {
         self.local_functions = saved_local_functions;
         let _ = instructions.end();
 
-        let (params, return_) = type_.fn_types().unwrap();
+        let (params, return_) = type_.fn_types().expect("function type");
         let type_index = self.function_type_index(params, Some(return_));
         let _ = self.functions.insert(WasmFunction {
             name,
@@ -2345,24 +2511,16 @@ impl<'a> Generator<'a> {
                 tail,
                 ..
             } => {
-                let (custom_type, args) = self.custom_type(type_).unwrap();
-                let CustomType::Union { custom_type } = custom_type else {
-                    panic!()
-                };
+                let (custom_type, cons, item_type, args) = self.list_type_cons(type_);
                 let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
-                let cons = custom_type.constructors.get(1).expect("Cons constructor");
-                let _ = self.mono_union_subtype_index(type_, &custom_type, cons, &args);
+                let _ = self.mono_union_subtype_index(type_, &custom_type, &cons, &args);
                 if let Some(rest) = tail {
                     let _ = instructions.expression(self, locals, scope.clone(), rest);
                 } else {
                     let _ = instructions.ref_null(HeapType::Concrete(supertype_index));
                 }
-                let item_type = args.first().expect("List item type");
-                let cons_variant = self
-                    .variants
-                    .get(&(PRELUDE_MODULE_NAME.into(), cons.name.clone()))
-                    .unwrap()
-                    .clone();
+                let cons_variant =
+                    self.variant_expect(PRELUDE_MODULE_NAME.into(), cons.name.clone());
                 let cons_fn = self.variant_constructor(
                     vec![type_::list(item_type.clone()), item_type.clone()],
                     type_.clone(),
@@ -2383,7 +2541,8 @@ impl<'a> Generator<'a> {
                     .struct_new(type_index);
             }
             TypedExpr::TupleIndex { index, tuple, .. } => {
-                let type_index = self.tuple_type_index(tuple.type_().tuple_types().unwrap());
+                let type_index =
+                    self.tuple_type_index(tuple.type_().tuple_types().expect("tuple type"));
                 let _ = instructions
                     .expression(self, locals, scope.clone(), tuple)
                     .struct_get(type_index, *index as u32);
@@ -2497,7 +2656,7 @@ impl<'a> Generator<'a> {
                 self.expression_echo(locals, &scope, instructions, echo, expression, message);
             }
             TypedExpr::RecordAccess { index, record, .. } => {
-                let (custom_type, args) = self.custom_type(&record.type_()).unwrap();
+                let (custom_type, args) = self.custom_type_expect(&record.type_());
                 match custom_type {
                     CustomType::Struct {
                         custom_type,
@@ -2515,8 +2674,14 @@ impl<'a> Generator<'a> {
                     }
                     CustomType::Union { custom_type } => {
                         // FIXME: handle missing inferred variant (same name, position and type)
-                        let variant = record.type_().custom_type_inferred_variant().unwrap();
-                        let constructor = custom_type.constructors.get(variant as usize).unwrap();
+                        let variant = record
+                            .type_()
+                            .custom_type_inferred_variant()
+                            .expect("inferred variant index");
+                        let constructor = custom_type
+                            .constructors
+                            .get(variant as usize)
+                            .expect("constructor at index");
                         let (_, type_index, _) = self.mono_union_subtype_index(
                             &record.type_(),
                             &custom_type,
@@ -2529,7 +2694,7 @@ impl<'a> Generator<'a> {
                             .struct_get(type_index, *index as u32 + 1);
                     }
                     CustomType::External { .. } | CustomType::Enum { .. } => {
-                        panic!("external/enum types should not reach code generation here")
+                        panic!("external/enum types should not reach code generation")
                     }
                 }
             }
@@ -2547,10 +2712,11 @@ impl<'a> Generator<'a> {
                 } else {
                     scope
                 };
-                let (custom_type, _) = self.custom_type(type_).unwrap();
+                let (custom_type, _) = self.custom_type_expect(type_);
                 match custom_type {
                     CustomType::Struct { .. } | CustomType::Union { .. } => {
-                        let (params, return_) = constructor.type_().fn_types().unwrap();
+                        let (params, return_) =
+                            constructor.type_().fn_types().expect("function type");
                         let index = self.function_type_index(params, Some(return_));
                         let _ = instructions
                             .expressions(
@@ -2563,7 +2729,7 @@ impl<'a> Generator<'a> {
                             .call_ref(index);
                     }
                     CustomType::External { .. } | CustomType::Enum { .. } => {
-                        panic!("external/enum types should not reach code generation here")
+                        panic!("external/enum types should not reach code generation")
                     }
                 }
             }
@@ -3040,13 +3206,9 @@ impl<'a> Generator<'a> {
                 type_,
                 ..
             } => {
-                let (custom_type, args) = self.custom_type(type_).unwrap();
-                let CustomType::Union { custom_type } = custom_type else {
-                    panic!()
-                };
-                let cons = custom_type.constructors.get(1).expect("Cons");
+                let (custom_type, cons, _, args) = self.list_type_cons(type_);
                 let (_, cons_index, _) =
-                    self.mono_union_subtype_index(type_, &custom_type, cons, &args);
+                    self.mono_union_subtype_index(type_, &custom_type, &cons, &args);
                 let right = locals.for_pattern(pattern);
                 let _ = instructions.local_set(right);
                 if !elements.is_empty() {
@@ -3097,10 +3259,10 @@ impl<'a> Generator<'a> {
                 arguments,
                 ..
             } => {
-                let (custom_type, args) = self.custom_type(type_).unwrap();
+                let (custom_type, args) = self.custom_type_expect(type_);
                 match custom_type {
                     CustomType::Enum { values } => {
-                        let value = values.iter().position(|n| n == name).unwrap();
+                        let value = Self::enum_value_index(&values, name);
                         let _ = instructions
                             .i32_const(value as i32)
                             .i32_ne()
@@ -3133,7 +3295,7 @@ impl<'a> Generator<'a> {
                             .iter()
                             .enumerate()
                             .find(|(_, c)| &c.name == name)
-                            .unwrap();
+                            .expect("constructor at index");
                         let right = locals.for_pattern(pattern);
                         if null_tag == Some(tag) {
                             // Null-optimized variant: check ref_is_null
@@ -3177,7 +3339,7 @@ impl<'a> Generator<'a> {
                         }
                     }
                     CustomType::External { .. } => {
-                        panic!("external types should not reach code generation here")
+                        panic!("external types should not reach code generation")
                     }
                 };
             }
@@ -3428,7 +3590,8 @@ impl<'a> Generator<'a> {
                 self.expression_var(scope, instructions, name, type_);
             }
             ClauseGuard::TupleIndex { tuple, index, .. } => {
-                let type_index = self.tuple_type_index(tuple.type_().tuple_types().unwrap());
+                let type_index =
+                    self.tuple_type_index(tuple.type_().tuple_types().expect("tuple type"));
                 let _ = instructions
                     .clause_guard(self, locals, scope, tuple)
                     .struct_get(type_index, *index as u32);
@@ -3438,10 +3601,10 @@ impl<'a> Generator<'a> {
             } => {
                 let type_ = container.type_();
                 let index = index.expect("FieldAccess index") as u32;
-                let (custom_type, args) = self.custom_type(&type_).unwrap();
+                let (custom_type, args) = self.custom_type_expect(&type_);
                 match custom_type {
                     CustomType::External { .. } | CustomType::Enum { .. } => {
-                        panic!("external/enum types should not reach code generation here")
+                        panic!("external/enum types should not reach code generation")
                     }
                     CustomType::Struct {
                         custom_type,
@@ -3454,8 +3617,8 @@ impl<'a> Generator<'a> {
                             .struct_get(type_index, index);
                     }
                     CustomType::Union { custom_type } => {
-                        let constructor =
-                            custom_type_inferred_constructor(&custom_type, &type_).unwrap();
+                        let constructor = custom_type_inferred_constructor(&custom_type, &type_)
+                            .expect("inferred constructor");
                         let (_, type_index, _) =
                             self.mono_union_subtype_index(&type_, &custom_type, constructor, &args);
                         let _ = instructions
@@ -3595,10 +3758,7 @@ impl<'a> Generator<'a> {
         self.variant_constructor(
             vec![ok.clone()],
             type_::result(ok, error),
-            self.variants
-                .get(&(PRELUDE_MODULE_NAME.into(), "Ok".into()))
-                .unwrap()
-                .clone(),
+            self.variant_expect(PRELUDE_MODULE_NAME.into(), "Ok".into()),
         )
     }
 
@@ -3606,10 +3766,7 @@ impl<'a> Generator<'a> {
         self.variant_constructor(
             vec![error.clone()],
             type_::result(ok, error),
-            self.variants
-                .get(&(PRELUDE_MODULE_NAME.into(), "Error".into()))
-                .unwrap()
-                .clone(),
+            self.variant_expect(PRELUDE_MODULE_NAME.into(), "Error".into()),
         )
     }
 
@@ -3782,11 +3939,11 @@ impl<'a> Generator<'a> {
                     self.code_union_eq(type_, supertype_index, &custom_type, &args)
                 }
                 CustomType::External { .. } | CustomType::Enum { .. } => {
-                    panic!("external/enum types should not reach code generation here")
+                    panic!("external/enum types should not reach code generation")
                 }
             }
         } else {
-            panic!()
+            panic!("unexpected type should not reach equality code generation")
         }
     }
 
@@ -4062,10 +4219,12 @@ impl<'a> Generator<'a> {
         variant: Variant,
         num_fields: u32,
     ) -> Function {
-        let (_, _, args) = return_.named_type_information().unwrap();
+        let (_, _, args) = return_
+            .named_type_information()
+            .expect("named type information");
         let (type_index, tag) = match &variant.custom_type {
             CustomType::External { .. } | CustomType::Enum { .. } => {
-                panic!("external/enum types should not reach code generation here")
+                panic!("external/enum types should not reach code generation")
             }
             CustomType::Struct {
                 custom_type,
@@ -4245,8 +4404,10 @@ impl<'a> Generator<'a> {
                 self.type_pretty_name(type_),
                 None,
             )
+        } else if type_.is_bit_array() {
+            todo!("BitArray repr is not yet supported");
         } else {
-            todo!("unsupported type for repr: {type_:#?}");
+            panic!("unexpected type should not reach repr: {type_:#?}");
         };
 
         let type_ = type_.clone();
@@ -4440,20 +4601,18 @@ impl<'a> Generator<'a> {
             self.code_function_repr(type_)
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             self.code_custom_type_repr(type_, &custom_type, &args)
+        } else if type_.is_bit_array() {
+            todo!("BitArray repr is not yet supported");
         } else {
-            todo!("unsupported type for repr: {type_:#?}");
+            panic!("unexpected type should not reach repr: {type_:#?}");
         }
     }
 
     fn code_list_repr(&mut self, item_type: &Arc<Type>) -> Function {
         let list_type = type_::list(item_type.clone());
-        let (custom_type, args) = self.custom_type(&list_type).unwrap();
-        let CustomType::Union { custom_type } = custom_type else {
-            panic!()
-        };
-        let cons = custom_type.constructors.get(1).expect("Cons");
+        let (custom_type, cons, _, args) = self.list_type_cons(&list_type);
         let (_, struct_index, _) =
-            self.mono_union_subtype_index(&list_type, &custom_type, cons, &args);
+            self.mono_union_subtype_index(&list_type, &custom_type, &cons, &args);
         let mut function = Function::new(vec![(1, ValType::I32)]);
         // params
         let lst = 0; // List(a)
@@ -4693,7 +4852,7 @@ impl<'a> Generator<'a> {
                     let null_name = custom_type
                         .constructors
                         .get(null_idx)
-                        .expect("null variant")
+                        .expect("null variant for union type")
                         .name
                         .clone();
                     let string_index = self.string_index(&null_name);
@@ -5362,9 +5521,17 @@ impl IntType {
 
     fn int_const(&self, value: &BigInt) -> ConstExpr {
         match self {
-            IntType::I32 => ConstExpr::i32_const(value.try_into().unwrap()),
-            IntType::I64 => ConstExpr::i64_const(value.try_into().unwrap()),
+            IntType::I32 => ConstExpr::i32_const(self.to_i32(value)),
+            IntType::I64 => ConstExpr::i64_const(self.to_i64(value)),
         }
+    }
+
+    fn to_i32(&self, value: &BigInt) -> i32 {
+        value.try_into().expect("int literal to fit in i32")
+    }
+
+    fn to_i64(&self, value: &BigInt) -> i64 {
+        value.try_into().expect("int literal to fit in i64")
     }
 }
 
@@ -5383,8 +5550,8 @@ macro_rules! int_op {
 impl<'a> ExtendedInstructionSink<'a> {
     fn int_const(&mut self, value: &BigInt) -> &mut Self {
         let _ = match self.int {
-            IntType::I32 => self.instructions.i32_const(value.try_into().unwrap()),
-            IntType::I64 => self.instructions.i64_const(value.try_into().unwrap()),
+            IntType::I32 => self.instructions.i32_const(self.int.to_i32(value)),
+            IntType::I64 => self.instructions.i64_const(self.int.to_i64(value)),
         };
         self
     }
@@ -5478,9 +5645,17 @@ impl FloatType {
     fn float_const(&self, value: &EcoString) -> ConstExpr {
         let value = value.replace("_", "");
         match self {
-            FloatType::F32 => ConstExpr::f32_const(value.parse::<f32>().unwrap().into()),
-            FloatType::F64 => ConstExpr::f64_const(value.parse::<f64>().unwrap().into()),
+            FloatType::F32 => ConstExpr::f32_const(self.to_f32(&value).into()),
+            FloatType::F64 => ConstExpr::f64_const(self.to_f64(&value).into()),
         }
+    }
+
+    fn to_f32(&self, value: &str) -> f32 {
+        value.parse().expect("float literal to fit in f32")
+    }
+
+    fn to_f64(&self, value: &str) -> f64 {
+        value.parse().expect("float literal to fit in f64")
     }
 }
 
@@ -5490,10 +5665,10 @@ impl<'a> ExtendedInstructionSink<'a> {
         let _ = match self.float {
             FloatType::F32 => self
                 .instructions
-                .f32_const(value.parse::<f32>().unwrap().into()),
+                .f32_const(self.float.to_f32(&value).into()),
             FloatType::F64 => self
                 .instructions
-                .f64_const(value.parse::<f64>().unwrap().into()),
+                .f64_const(self.float.to_f64(&value).into()),
         };
         self
     }
@@ -5646,6 +5821,11 @@ impl Scope {
             Scope::Entry(_id, scope) => scope.find(name),
         }
     }
+
+    fn find_expect(&self, name: &EcoString) -> Id {
+        self.find(name)
+            .unwrap_or_else(|| panic!("variable \"{name}\" to be in scope"))
+    }
 }
 
 #[derive(Debug)]
@@ -5746,12 +5926,12 @@ impl Locals {
 
     fn for_div(&self, scope: &Scope, left: &TypedExpr, right: &TypedExpr) -> (u32, u32) {
         let left = if let Some(name) = left.var_name() {
-            scope.find(name).unwrap().index
+            scope.find_expect(name).index
         } else {
             self._get(left)
         };
         let right = if let Some(name) = right.var_name() {
-            scope.find(name).unwrap().index
+            scope.find_expect(name).index
         } else {
             self._get(right)
         };
@@ -5789,12 +5969,12 @@ impl Locals {
         right: &TypedClauseGuard,
     ) -> (u32, u32) {
         let left = if let Some(name) = left.var_name() {
-            scope.find(name).unwrap().index
+            scope.find_expect(name).index
         } else {
             self._get(left)
         };
         let right = if let Some(name) = right.var_name() {
-            scope.find(name).unwrap().index
+            scope.find_expect(name).index
         } else {
             self._get(right)
         };
@@ -6152,7 +6332,7 @@ impl Monomorphizer {
                     let _ = self.bound(from, to);
                 }
             }
-            (_, _) => panic!(),
+            (from, to) => panic!("unexpected type pair in monomorphizer bound: {from:?}, {to:?}"),
         }
         self
     }
@@ -6765,11 +6945,11 @@ fn function_return_type(function: &TypedFunction) -> Arc<Type> {
 }
 
 fn function_name(function: &TypedFunction) -> &EcoString {
-    &function.name.as_ref().unwrap().1
+    &function.name.as_ref().expect("function to have a name").1
 }
 
 fn set_function_name(function: &mut TypedFunction, name: EcoString) {
-    function.name.as_mut().unwrap().1 = name;
+    function.name.as_mut().expect("function to have a name").1 = name;
 }
 
 #[derive(Clone)]
@@ -6791,7 +6971,8 @@ impl Externals {
         };
 
         // find available wasm functions
-        let module = walrus::Module::from_buffer(BUILTINS_WASM).expect("Wasm module");
+        let module =
+            walrus::Module::from_buffer(BUILTINS_WASM).expect("builtins to be a valid wasm module");
         for function in module.functions() {
             if let (Some(name), walrus::FunctionKind::Local(local_function)) =
                 (&function.name, &function.kind)
@@ -6902,7 +7083,8 @@ fn prepare_wasm_module<'a>(
     buffer: &[u8],
     externals: impl IntoIterator<Item = &'a EcoString>,
 ) -> Vec<u8> {
-    let mut module = walrus::Module::from_buffer(buffer).unwrap();
+    let mut module =
+        walrus::Module::from_buffer(buffer).expect("builtins to be a valid wasm module");
     let mut roots = HashSet::new();
     'loop_: for external in externals {
         for func in module.funcs.iter() {
@@ -7010,7 +7192,7 @@ fn walrus_type_to_wasmencoder_type(type_: &walrus::ValType) -> ValType {
             walrus::RefType::EXTERNREF => ValType::Ref(RefType::EXTERNREF),
             walrus::RefType::FUNCREF => ValType::Ref(RefType::FUNCREF),
             walrus::RefType::EXNREF => ValType::Ref(RefType::EXNREF),
-            _ => panic!("unexpected walrus ref type during code generation"),
+            other => panic!("unexpected walrus ref type during code generation: {other:?}"),
         },
     }
 }
@@ -7054,7 +7236,11 @@ fn wasmparser_type_to_wasmencoder_type(type_: &wasmparser::ValType) -> ValType {
             }),
             wasmparser::HeapType::Concrete(unpacked_index) => ValType::Ref(RefType {
                 nullable: ref_type.is_nullable(),
-                heap_type: HeapType::Concrete(unpacked_index.as_module_index().unwrap()),
+                heap_type: HeapType::Concrete(
+                    unpacked_index
+                        .as_module_index()
+                        .expect("concrete type to have a module index"),
+                ),
             }),
         },
     }
@@ -7063,7 +7249,7 @@ fn wasmparser_type_to_wasmencoder_type(type_: &wasmparser::ValType) -> ValType {
 fn const_expr_i32_const(const_: &wasmparser::ConstExpr<'_>) -> ConstExpr {
     let mut i32_value = 0;
     for op in const_.get_operators_reader().into_iter_with_offsets() {
-        match op.expect("operator").0 {
+        match op.expect("valid wasm operator").0 {
             wasmparser::Operator::I32Const { value } => {
                 assert_eq!(i32_value, 0, "Too much ops");
                 i32_value = value;
@@ -7104,7 +7290,8 @@ fn unescape_unicode(chars: &mut Chars<'_>) -> char {
     assert_eq!(chars.next(), Some('{'));
     let num = 1 + chars.take_while(|c| *c != '}').count();
     *chars = s[num + 1..].chars();
-    char::from_u32(u32::from_str_radix(&s[1..num], 16).unwrap()).unwrap()
+    char::from_u32(u32::from_str_radix(&s[1..num], 16).expect("valid hex escape"))
+        .expect("valid unicode codepoint")
 }
 
 #[test]

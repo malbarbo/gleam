@@ -1,0 +1,18 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+assertion_line: 114
+expression: "\npub fn main() {\n    3.5e38\n}\n"
+snapshot_kind: text
+---
+----- SOURCE CODE
+
+pub fn main() {
+    3.5e38
+}
+
+
+----- CONFIG
+int=I32 float=F32
+
+----- ERROR
+FloatLiteralOutOfRange { location: SrcSpan { start: 21, end: 27 }, value: "3.5e38", target: "F32" }

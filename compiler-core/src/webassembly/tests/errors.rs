@@ -74,6 +74,67 @@ fn to_str(value: I32) -> I32
 // This is tested indirectly by wrong_external_function_type which
 // uses Int (a non-external type) in a function signature.
 
+#[test]
+fn int_literal_overflow_i32() {
+    assert_wasm_error!(
+        r#"
+pub fn main() {
+    2147483648
+}
+"#,
+    );
+}
+
+#[test]
+fn int_literal_underflow_i32() {
+    assert_wasm_error!(
+        r#"
+pub fn main() {
+    -2147483649
+}
+"#,
+    );
+}
+
+#[test]
+fn int_literal_overflow_i64() {
+    assert_wasm_validate_error!(
+        r#"
+pub fn main() {
+    9223372036854775808
+}
+"#,
+        "I64",
+        "F64",
+    );
+}
+
+#[test]
+fn int_literal_underflow_i64() {
+    assert_wasm_validate_error!(
+        r#"
+pub fn main() {
+    -9223372036854775809
+}
+"#,
+        "I64",
+        "F64",
+    );
+}
+
+#[test]
+fn float_literal_overflow_f32() {
+    assert_wasm_validate_error!(
+        r#"
+pub fn main() {
+    3.5e38
+}
+"#,
+        "I32",
+        "F32",
+    );
+}
+
 // Module imports are not yet supported but the test infrastructure
 // doesn't support multi-module compilation, so we can't test this
 // error here yet.

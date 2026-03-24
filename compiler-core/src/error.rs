@@ -4140,6 +4140,26 @@ with no constructors."
                         None,
                         *location,
                     ),
+                    crate::webassembly::Error::IntLiteralOutOfRange {
+                        location,
+                        value,
+                        target,
+                    } => (
+                        "Integer literal out of range",
+                        format!("The value {value} does not fit in {target}."),
+                        None,
+                        *location,
+                    ),
+                    crate::webassembly::Error::FloatLiteralOutOfRange {
+                        location,
+                        value,
+                        target,
+                    } => (
+                        "Float literal out of range",
+                        format!("The value {value} does not fit in {target}."),
+                        None,
+                        *location,
+                    ),
                 };
                 vec![Diagnostic {
                     title: title.into(),
