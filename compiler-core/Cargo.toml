@@ -52,7 +52,7 @@ stacker = "0.1.21"
 bitvec = { version = "1", features = ["serde"] }
 # Generate and edit wasm modules
 wasm-encoder = "0.240.0"
-walrus = "0.24.4"
+walrus = { git = "https://github.com/wasm-bindgen/walrus.git", branch = "full-gc-ext" }
 wasmparser = "0.240.0"
 # Insertion-order preserving hashmap
 indexmap = "2"

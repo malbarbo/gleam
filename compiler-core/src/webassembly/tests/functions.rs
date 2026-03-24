@@ -1106,3 +1106,27 @@ pub fn main() {
         result.stderr
     );
 }
+
+#[test]
+fn mono_local_generic_function_echo_param() {
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let show = fn(a: a) { echo a }
+    show(42)
+    show("hello")
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+    assert_eq!(
+        result.stderr,
+        "src/my/mod.gleam:3\n42\nsrc/my/mod.gleam:3\n\"hello\"\n"
+    );
+}

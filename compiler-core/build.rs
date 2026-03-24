@@ -15,6 +15,7 @@ fn main() {
     assert!(
         Command::new("cargo")
             .args(["build", "--release", "--target", "wasm32-unknown-unknown"])
+            .env("RUSTFLAGS", "-C link-arg=--no-merge-data-segments")
             .current_dir(Utf8Path::new("..").join(BUILTINS))
             .status()
             .unwrap_or_else(|_| panic!("Building {BUILTINS}"))
