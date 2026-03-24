@@ -600,6 +600,12 @@ enum BuiltinFunctionExternal {
     StringGetByte,
     I32ToInt,
     IntToI32,
+    I64ToInt,
+    IntToI64,
+    F32ToFloat,
+    FloatToF32,
+    F64ToFloat,
+    FloatToF64,
     IntToUtfCodepoint,
     IntRepr,
     FloatRepr,
@@ -627,6 +633,12 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::StringGetByte,
             BuiltinFunctionExternal::I32ToInt,
             BuiltinFunctionExternal::IntToI32,
+            BuiltinFunctionExternal::I64ToInt,
+            BuiltinFunctionExternal::IntToI64,
+            BuiltinFunctionExternal::F32ToFloat,
+            BuiltinFunctionExternal::FloatToF32,
+            BuiltinFunctionExternal::F64ToFloat,
+            BuiltinFunctionExternal::FloatToF64,
             BuiltinFunctionExternal::IntToUtfCodepoint,
             BuiltinFunctionExternal::IntRepr,
             BuiltinFunctionExternal::FloatRepr,
@@ -650,6 +662,12 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::StringGetByte => "_string_get_byte",
             BuiltinFunctionExternal::I32ToInt => "_i32_to_int",
             BuiltinFunctionExternal::IntToI32 => "_int_to_i32",
+            BuiltinFunctionExternal::I64ToInt => "_i64_to_int",
+            BuiltinFunctionExternal::IntToI64 => "_int_to_i64",
+            BuiltinFunctionExternal::F32ToFloat => "_f32_to_float",
+            BuiltinFunctionExternal::FloatToF32 => "_float_to_f32",
+            BuiltinFunctionExternal::F64ToFloat => "_f64_to_float",
+            BuiltinFunctionExternal::FloatToF64 => "_float_to_f64",
             BuiltinFunctionExternal::IntToUtfCodepoint => "_int_to_utf_codepoint",
             BuiltinFunctionExternal::IntRepr => "_repr_int",
             BuiltinFunctionExternal::FloatRepr => "_repr_float",
@@ -668,8 +686,18 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::StringConcat => (vec![string(), string()], string()),
             BuiltinFunctionExternal::StringNumBytes => (vec![string()], int()),
             BuiltinFunctionExternal::StringGetByte => (vec![string(), int()], result(int(), nil())),
-            BuiltinFunctionExternal::I32ToInt => (vec![i32], int()),
-            BuiltinFunctionExternal::IntToI32 => (vec![int()], i32),
+            BuiltinFunctionExternal::I32ToInt | BuiltinFunctionExternal::I64ToInt => {
+                (vec![i32], int())
+            }
+            BuiltinFunctionExternal::IntToI32 | BuiltinFunctionExternal::IntToI64 => {
+                (vec![int()], i32)
+            }
+            BuiltinFunctionExternal::F32ToFloat | BuiltinFunctionExternal::F64ToFloat => {
+                (vec![i32], float())
+            }
+            BuiltinFunctionExternal::FloatToF32 | BuiltinFunctionExternal::FloatToF64 => {
+                (vec![float()], i32)
+            }
             BuiltinFunctionExternal::IntToUtfCodepoint => {
                 (vec![int()], result(utf_codepoint(), nil()))
             }
@@ -682,6 +710,28 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::ParseInt => (vec![string()], result(int(), nil())),
             BuiltinFunctionExternal::ParseFloat => (vec![string()], result(float(), nil())),
         }
+    }
+
+    /// Get the WASM-level parameter and result types for conversion builtins.
+    /// Returns None for builtins that use complex types (strings, results, etc.).
+    fn wasm_type(&self, int: IntType, float: FloatType) -> Option<(Vec<ValType>, Vec<ValType>)> {
+        let i32 = ValType::I32;
+        let i64 = ValType::I64;
+        let f32 = ValType::F32;
+        let f64 = ValType::F64;
+        let int_vt = int.val_type();
+        let float_vt = float.val_type();
+        Some(match self {
+            BuiltinFunctionExternal::I32ToInt => (vec![i32], vec![int_vt]),
+            BuiltinFunctionExternal::IntToI32 => (vec![int_vt], vec![i32]),
+            BuiltinFunctionExternal::I64ToInt => (vec![i64], vec![int_vt]),
+            BuiltinFunctionExternal::IntToI64 => (vec![int_vt], vec![i64]),
+            BuiltinFunctionExternal::F32ToFloat => (vec![f32], vec![float_vt]),
+            BuiltinFunctionExternal::FloatToF32 => (vec![float_vt], vec![f32]),
+            BuiltinFunctionExternal::F64ToFloat => (vec![f64], vec![float_vt]),
+            BuiltinFunctionExternal::FloatToF64 => (vec![float_vt], vec![f64]),
+            _ => return None,
+        })
     }
 }
 
@@ -949,18 +999,20 @@ impl<'a> Generator<'a> {
         // For builtins that return I32, use the return type
         match builtin {
             BuiltinFunctionExternal::IntToI32
+            | BuiltinFunctionExternal::IntToI64
+            | BuiltinFunctionExternal::FloatToF32
+            | BuiltinFunctionExternal::FloatToF64
             | BuiltinFunctionExternal::IntRepr
             | BuiltinFunctionExternal::FloatRepr
             | BuiltinFunctionExternal::UtfCodepointRepr
             | BuiltinFunctionExternal::StringRepr
             | BuiltinFunctionExternal::StringToMemory => return_,
-            // For builtins that take I32 as first param, use params[0]
-            BuiltinFunctionExternal::I32ToInt => params
-                .into_iter()
-                .next()
-                .expect("builtin to have at least one parameter"),
-            // For MemoryToString: params are [i32, i32], use first
-            BuiltinFunctionExternal::MemoryToString => params
+            // For builtins that take an external type as first param
+            BuiltinFunctionExternal::I32ToInt
+            | BuiltinFunctionExternal::I64ToInt
+            | BuiltinFunctionExternal::F32ToFloat
+            | BuiltinFunctionExternal::F64ToFloat
+            | BuiltinFunctionExternal::MemoryToString => params
                 .into_iter()
                 .next()
                 .expect("builtin to have at least one parameter"),
@@ -1082,6 +1134,18 @@ impl<'a> Generator<'a> {
                     "I32" => CustomType::External {
                         val_type: ValType::I32,
                         to_str: I32_TO_STR,
+                    },
+                    "I64" => CustomType::External {
+                        val_type: ValType::I64,
+                        to_str: I64_TO_STR,
+                    },
+                    "F32" => CustomType::External {
+                        val_type: ValType::F32,
+                        to_str: F32_TO_STR,
+                    },
+                    "F64" => CustomType::External {
+                        val_type: ValType::F64,
+                        to_str: F64_TO_STR,
                     },
                     _ => {
                         return Err(Error::UnknownExternalType {
@@ -1616,10 +1680,14 @@ impl<'a> Generator<'a> {
             self.function_val_type(type_index)
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             self.custom_type_val_type(type_, &custom_type, args)
-        } else if let Some((_, name)) = type_.named_type_name()
-            && name == "I32"
-        {
-            ValType::I32
+        } else if let Some((_, name)) = type_.named_type_name() {
+            match name.as_str() {
+                "I32" => ValType::I32,
+                "I64" => ValType::I64,
+                "F32" => ValType::F32,
+                "F64" => ValType::F64,
+                _ => panic!("unexpected named type should not reach code generation: {name}"),
+            }
         } else if type_.is_bit_array() {
             todo!("BitArray is not yet supported");
         } else {
@@ -4306,6 +4374,66 @@ impl<'a> Generator<'a> {
         function
     }
 
+    fn code_i64_to_int(&self) -> Function {
+        let mut function = Function::new(vec![]);
+        let _ = function
+            .extend_instructions(self)
+            .local_get(0)
+            .i64_to_int()
+            .end();
+        function
+    }
+
+    fn code_int_to_i64(&self) -> Function {
+        let mut function = Function::new(vec![]);
+        let _ = function
+            .extend_instructions(self)
+            .local_get(0)
+            .int_to_i64()
+            .end();
+        function
+    }
+
+    fn code_f32_to_float(&self) -> Function {
+        let mut function = Function::new(vec![]);
+        let _ = function
+            .extend_instructions(self)
+            .local_get(0)
+            .f32_to_float()
+            .end();
+        function
+    }
+
+    fn code_float_to_f32(&self) -> Function {
+        let mut function = Function::new(vec![]);
+        let _ = function
+            .extend_instructions(self)
+            .local_get(0)
+            .float_to_f32()
+            .end();
+        function
+    }
+
+    fn code_f64_to_float(&self) -> Function {
+        let mut function = Function::new(vec![]);
+        let _ = function
+            .extend_instructions(self)
+            .local_get(0)
+            .f64_to_float()
+            .end();
+        function
+    }
+
+    fn code_float_to_f64(&self) -> Function {
+        let mut function = Function::new(vec![]);
+        let _ = function
+            .extend_instructions(self)
+            .local_get(0)
+            .float_to_f64()
+            .end();
+        function
+    }
+
     fn code_int_to_utf_codepoint(&mut self) -> Function {
         let mut function = Function::new(vec![]);
         // params
@@ -5112,6 +5240,12 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::StringGetByte => self.code_string_get_byte(),
             BuiltinFunctionExternal::I32ToInt => self.code_i32_to_int(),
             BuiltinFunctionExternal::IntToI32 => self.code_int_to_i32(),
+            BuiltinFunctionExternal::I64ToInt => self.code_i64_to_int(),
+            BuiltinFunctionExternal::IntToI64 => self.code_int_to_i64(),
+            BuiltinFunctionExternal::F32ToFloat => self.code_f32_to_float(),
+            BuiltinFunctionExternal::FloatToF32 => self.code_float_to_f32(),
+            BuiltinFunctionExternal::F64ToFloat => self.code_f64_to_float(),
+            BuiltinFunctionExternal::FloatToF64 => self.code_float_to_f64(),
             BuiltinFunctionExternal::IntToUtfCodepoint => self.code_int_to_utf_codepoint(),
             BuiltinFunctionExternal::IntRepr => self.code_int_repr(),
             BuiltinFunctionExternal::FloatRepr => self.code_float_repr(),
@@ -5122,15 +5256,21 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::ParseInt => self.code_parse_int(),
             BuiltinFunctionExternal::ParseFloat => self.code_parse_float(),
         };
-        let i32 = self.find_external_type();
-        let (params, result) = builtin.type_(i32);
-        let params = self.val_types(params);
-        let result = self.val_type(&result);
+        let (params, results) = if let Some(wasm_type) = builtin.wasm_type(self.int, self.float) {
+            wasm_type
+        } else {
+            let i32 = self.find_external_type();
+            let (gleam_params, gleam_result) = builtin.type_(i32);
+            (
+                self.val_types(gleam_params),
+                vec![self.val_type(&gleam_result)],
+            )
+        };
         let function = self.add_function(
             builtin.name().into(),
             false,
             params,
-            vec![result],
+            results,
             function.into_raw_body(),
         );
         let _ = self.builtins_external.insert(builtin, function.index);
@@ -5599,6 +5739,48 @@ impl<'a> ExtendedInstructionSink<'a> {
     fn int_to_i32(&mut self) -> &mut Self {
         if let IntType::I64 = self.int {
             let _ = self.instructions.i32_wrap_i64();
+        }
+        self
+    }
+
+    fn i64_to_int(&mut self) -> &mut Self {
+        if let IntType::I32 = self.int {
+            let _ = self.instructions.i32_wrap_i64();
+        }
+        self
+    }
+
+    fn int_to_i64(&mut self) -> &mut Self {
+        if let IntType::I32 = self.int {
+            let _ = self.instructions.i64_extend_i32_s();
+        }
+        self
+    }
+
+    fn f32_to_float(&mut self) -> &mut Self {
+        if let FloatType::F64 = self.float {
+            let _ = self.instructions.f64_promote_f32();
+        }
+        self
+    }
+
+    fn float_to_f32(&mut self) -> &mut Self {
+        if let FloatType::F64 = self.float {
+            let _ = self.instructions.f32_demote_f64();
+        }
+        self
+    }
+
+    fn f64_to_float(&mut self) -> &mut Self {
+        if let FloatType::F32 = self.float {
+            let _ = self.instructions.f32_demote_f64();
+        }
+        self
+    }
+
+    fn float_to_f64(&mut self) -> &mut Self {
+        if let FloatType::F32 = self.float {
+            let _ = self.instructions.f64_promote_f32();
         }
         self
     }
