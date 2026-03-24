@@ -87,14 +87,19 @@ pub fn compile(
 }
 
 pub fn compile_wasm(src: &str, deps: Vec<(&str, &str, &str)>) -> Vec<u8> {
+    let mut all_line_numbers: HashMap<EcoString, LineNumbers> = deps
+        .iter()
+        .map(|(_, name, dep_src)| (EcoString::from(*name), LineNumbers::new(dep_src)))
+        .collect();
     let (main_module, dep_modules) = compile(src, deps);
     let line_numbers = LineNumbers::new(src);
+    let _ = all_line_numbers.insert(main_module.name.clone(), line_numbers.clone());
     let mut all_modules: HashMap<_, _> = dep_modules
         .iter()
         .map(|(name, m)| (name.clone(), m))
         .collect();
     let _ = all_modules.insert(main_module.name.clone(), &main_module);
-    crate::webassembly::module(&main_module, &line_numbers, &all_modules)
+    crate::webassembly::module(&main_module, &line_numbers, &all_modules, &all_line_numbers)
         .expect("wasm codegen failed")
 }
 
@@ -123,7 +128,8 @@ pub fn compile_wasm_error(src: &str) -> crate::webassembly::Error {
     let line_numbers = LineNumbers::new(src);
     let main_ref: &TypedModule = &main_module;
     let all_modules = HashMap::from([(main_module.name.clone(), main_ref)]);
-    crate::webassembly::module(&main_module, &line_numbers, &all_modules)
+    let all_line_numbers = HashMap::from([(main_module.name.clone(), line_numbers.clone())]);
+    crate::webassembly::module(&main_module, &line_numbers, &all_modules, &all_line_numbers)
         .expect_err("expected codegen error")
 }
 

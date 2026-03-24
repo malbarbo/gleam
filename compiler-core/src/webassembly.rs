@@ -120,8 +120,9 @@ pub fn module(
     module: &TypedModule,
     line_numbers: &LineNumbers,
     all_modules: &HashMap<EcoString, &TypedModule>,
+    all_line_numbers: &HashMap<EcoString, LineNumbers>,
 ) -> Result<Vec<u8>, Error> {
-    let mut generator = Generator::new(module, line_numbers, all_modules);
+    let mut generator = Generator::new(module, line_numbers, all_modules, all_line_numbers);
     let start = generator.generate()?;
 
     let mut module = Module::default();
@@ -721,6 +722,9 @@ struct Generator<'a> {
     module: &'a TypedModule,
     line_numbers: &'a LineNumbers,
     all_modules: &'a HashMap<EcoString, &'a TypedModule>,
+    all_line_numbers: &'a HashMap<EcoString, LineNumbers>,
+    /// The module currently being compiled (may differ from self.module for imports).
+    current_module_name: EcoString,
 }
 
 fn find_global(name: &str, globals: &RefCell<Vec<Id>>) -> Option<Id> {
@@ -732,6 +736,7 @@ impl<'a> Generator<'a> {
         module: &'a TypedModule,
         line_numbers: &'a LineNumbers,
         all_modules: &'a HashMap<EcoString, &'a TypedModule>,
+        all_line_numbers: &'a HashMap<EcoString, LineNumbers>,
     ) -> Self {
         Generator {
             global_section: GlobalSection::new(),
@@ -758,6 +763,21 @@ impl<'a> Generator<'a> {
             module,
             line_numbers,
             all_modules,
+            all_line_numbers,
+            current_module_name: module.name.clone(),
+        }
+    }
+
+    /// Get the source location for a byte offset, using the correct module
+    /// name and line numbers for the currently-compiled module.
+    fn source_location(&self, start: u32) -> (EcoString, u32) {
+        if let Some(ln) = self.all_line_numbers.get(self.current_module_name.as_str()) {
+            (self.current_module_name.clone(), ln.line_number(start))
+        } else {
+            (
+                self.module.name.clone(),
+                self.line_numbers.line_number(start),
+            )
         }
     }
 
@@ -2199,13 +2219,18 @@ impl<'a> Generator<'a> {
                     }
                     return self.find_global_expect(fname);
                 }
+                // Track which module we're compiling for correct diagnostics.
+                let prev_module =
+                    std::mem::replace(&mut self.current_module_name, module_name.clone());
                 // Build a module-qualified name to avoid collisions
                 let base_name: EcoString = format!("{module_name}.{fn_name}").into();
-                return if is_generic_type(&function_type(function)) {
+                let id = if is_generic_type(&function_type(function)) {
                     self.function_generic(function, required_type, false, base_name)
                 } else {
                     self.function(function, false, base_name)
                 };
+                self.current_module_name = prev_module;
+                return id;
             }
         }
 
@@ -2272,12 +2297,8 @@ impl<'a> Generator<'a> {
     ) {
         assert!(assert.value.type_().is_bool());
         let prefix = self.string_index(&"Assertion failed at ".into());
-        let location: EcoString = format!(
-            "src/{}.gleam:{}.\n",
-            self.module.name,
-            self.line_numbers.line_number(assert.location.start)
-        )
-        .into();
+        let (mod_name, line) = self.source_location(assert.location.start);
+        let location: EcoString = format!("src/{mod_name}.gleam:{line}.\n").into();
         let location = self.string_index(&location);
         let string_to_memory =
             self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
@@ -2583,13 +2604,9 @@ impl<'a> Generator<'a> {
         } else {
             "todo at ".into()
         });
-        let location: EcoString = format!(
-            "src/{}.gleam:{}{}",
-            self.module.name,
-            self.line_numbers.line_number(expression.location().start),
-            if message.is_none() { ".\n" } else { "\n  " },
-        )
-        .into();
+        let (mod_name, line) = self.source_location(expression.location().start);
+        let suffix = if message.is_none() { ".\n" } else { "\n  " };
+        let location: EcoString = format!("src/{mod_name}.gleam:{line}{suffix}").into();
         let location = self.string_index(&location);
         let string_to_memory =
             self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
@@ -2828,15 +2845,10 @@ impl<'a> Generator<'a> {
             let heap_base = self.find_global_expect(HEAP_BASE);
             let string_to_memory =
                 self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
-            let string_index = self.string_index(
-                &format!(
-                    "src/{}.gleam:{}{}",
-                    self.module.name,
-                    self.line_numbers.line_number(echo.location().start),
-                    if message.is_some() { ' ' } else { '\n' }
-                )
-                .into(),
-            );
+            let (mod_name, line) = self.source_location(echo.location().start);
+            let suffix = if message.is_some() { ' ' } else { '\n' };
+            let string_index =
+                self.string_index(&format!("src/{mod_name}.gleam:{line}{suffix}").into());
 
             let (dest, expr) = locals.for_echo(echo);
 
@@ -2948,12 +2960,8 @@ impl<'a> Generator<'a> {
 
         let prefix =
             self.string_index(&"Pattern match failed, no pattern matched the value at ".into());
-        let location: EcoString = format!(
-            "src/{}.gleam:{}.\n",
-            self.module.name,
-            self.line_numbers.line_number(assignment.location.start)
-        )
-        .into();
+        let (mod_name, line) = self.source_location(assignment.location.start);
+        let location: EcoString = format!("src/{mod_name}.gleam:{line}.\n").into();
         let location = self.string_index(&location);
         let string_to_memory =
             self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
