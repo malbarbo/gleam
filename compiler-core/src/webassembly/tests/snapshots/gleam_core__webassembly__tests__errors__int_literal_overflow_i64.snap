@@ -1,0 +1,18 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+assertion_line: 101
+expression: "\npub fn main() {\n    9223372036854775808\n}\n"
+snapshot_kind: text
+---
+----- SOURCE CODE
+
+pub fn main() {
+    9223372036854775808
+}
+
+
+----- CONFIG
+int=I64 float=F64
+
+----- ERROR
+IntLiteralOutOfRange { location: SrcSpan { start: 21, end: 40 }, value: "9223372036854775808", target: "I64" }

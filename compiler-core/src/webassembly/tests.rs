@@ -221,6 +221,25 @@ macro_rules! assert_wasm_error {
     }};
 }
 
+pub fn compile_validate_error(src: &str, int: &str, float: &str) -> crate::webassembly::Error {
+    let (main_module, _) = compile(src, vec![]);
+    let main_ref: &TypedModule = &main_module;
+    let all_modules = HashMap::from([(main_module.name.clone(), main_ref)]);
+    crate::webassembly::validate_module(&main_module, &all_modules, int, float)
+        .expect_err("expected validation error")
+}
+
+macro_rules! assert_wasm_validate_error {
+    ($src:expr, $int:expr, $float:expr $(,)?) => {{
+        let error = super::compile_validate_error($src, $int, $float);
+        let output = format!(
+            "----- SOURCE CODE\n{}\n\n----- CONFIG\nint={} float={}\n\n----- ERROR\n{:?}",
+            $src, $int, $float, error
+        );
+        insta::assert_snapshot!(insta::internals::AutoName, output, $src);
+    }};
+}
+
 mod bools;
 mod case_;
 mod consts;
