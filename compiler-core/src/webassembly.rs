@@ -149,7 +149,35 @@ pub fn module(
     all_modules: &HashMap<EcoString, &TypedModule>,
     all_line_numbers: &HashMap<EcoString, LineNumbers>,
 ) -> Result<Vec<u8>, Error> {
+    module_with_config(
+        module,
+        line_numbers,
+        all_modules,
+        all_line_numbers,
+        "I32",
+        "F64",
+    )
+}
+
+pub(crate) fn module_with_config(
+    module: &TypedModule,
+    line_numbers: &LineNumbers,
+    all_modules: &HashMap<EcoString, &TypedModule>,
+    all_line_numbers: &HashMap<EcoString, LineNumbers>,
+    int: &str,
+    float: &str,
+) -> Result<Vec<u8>, Error> {
     let mut generator = Generator::new(module, line_numbers, all_modules, all_line_numbers);
+    generator.int = match int {
+        "I32" => IntType::I32,
+        "I64" => IntType::I64,
+        _ => panic!("unknown int type: {int}"),
+    };
+    generator.float = match float {
+        "F32" => FloatType::F32,
+        "F64" => FloatType::F64,
+        _ => panic!("unknown float type: {float}"),
+    };
     let start = generator.generate()?;
 
     let mut module = Module::default();

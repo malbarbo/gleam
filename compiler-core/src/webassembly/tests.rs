@@ -87,6 +87,15 @@ pub fn compile(
 }
 
 pub fn compile_wasm(src: &str, deps: Vec<(&str, &str, &str)>) -> Vec<u8> {
+    compile_wasm_with_config(src, deps, "I32", "F64")
+}
+
+pub fn compile_wasm_with_config(
+    src: &str,
+    deps: Vec<(&str, &str, &str)>,
+    int: &str,
+    float: &str,
+) -> Vec<u8> {
     let mut all_line_numbers: HashMap<EcoString, LineNumbers> = deps
         .iter()
         .map(|(_, name, dep_src)| (EcoString::from(*name), LineNumbers::new(dep_src)))
@@ -99,8 +108,15 @@ pub fn compile_wasm(src: &str, deps: Vec<(&str, &str, &str)>) -> Vec<u8> {
         .map(|(name, m)| (name.clone(), m))
         .collect();
     let _ = all_modules.insert(main_module.name.clone(), &main_module);
-    crate::webassembly::module(&main_module, &line_numbers, &all_modules, &all_line_numbers)
-        .expect("wasm codegen failed")
+    crate::webassembly::module_with_config(
+        &main_module,
+        &line_numbers,
+        &all_modules,
+        &all_line_numbers,
+        int,
+        float,
+    )
+    .expect("wasm codegen failed")
 }
 
 /// Extract type names from the wasm binary's name section.
@@ -141,7 +157,16 @@ pub struct WasmOutput {
 }
 
 pub fn run_wasm(src: &str, deps: Vec<(&str, &str, &str)>) -> WasmOutput {
-    let wasm_bytes = compile_wasm(src, deps);
+    run_wasm_with_config(src, deps, "I32", "F64")
+}
+
+pub fn run_wasm_with_config(
+    src: &str,
+    deps: Vec<(&str, &str, &str)>,
+    int: &str,
+    float: &str,
+) -> WasmOutput {
+    let wasm_bytes = compile_wasm_with_config(src, deps, int, float);
     let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("gleam_wasm_test_{id}.wasm"));
     std::fs::write(&tmp, &wasm_bytes).expect("failed to write temp wasm file");
@@ -167,6 +192,17 @@ pub fn run_ok(src: &str) {
     assert!(
         result.status.success(),
         "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+/// Compile and run WASM with I64 int type, assert it succeeds.
+#[track_caller]
+pub fn run_ok_i64(src: &str) {
+    let result = run_wasm_with_config(src, vec![], "I64", "F64");
+    assert!(
+        result.status.success(),
+        "WASM (I64) execution failed:\n{}",
         result.stderr
     );
 }

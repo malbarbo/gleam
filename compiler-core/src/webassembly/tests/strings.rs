@@ -1,4 +1,46 @@
-use super::run_ok;
+use super::{run_ok, run_ok_i64};
+
+#[test]
+fn int_to_utf_codepoint() {
+    run_ok(
+        r#"
+@external(webassembly, "builtins", "_int_to_utf_codepoint")
+fn utf_codepoint(a: Int) -> Result(UtfCodepoint, Nil)
+
+pub fn main() {
+    // Valid codepoints
+    let assert Ok(_) = utf_codepoint(65)       // 'A'
+    let assert Ok(_) = utf_codepoint(0x10FFFF)  // max valid codepoint
+    // Invalid codepoints
+    let assert Error(_) = utf_codepoint(-1)
+    let assert Error(_) = utf_codepoint(0x110000) // first invalid
+}
+"#,
+    );
+}
+
+#[test]
+fn int_to_utf_codepoint_i64() {
+    run_ok_i64(
+        r#"
+@external(webassembly, "builtins", "_int_to_utf_codepoint")
+fn utf_codepoint(a: Int) -> Result(UtfCodepoint, Nil)
+
+pub fn main() {
+    // Valid codepoints
+    let assert Ok(_) = utf_codepoint(65)       // 'A'
+    let assert Ok(_) = utf_codepoint(0x10FFFF)  // max valid codepoint
+    // Invalid codepoints
+    let assert Error(_) = utf_codepoint(-1)
+    let assert Error(_) = utf_codepoint(0x110000) // first invalid
+    // Values that don't fit in i32 — must be Error
+    let assert Error(_) = utf_codepoint(0x1_0000_0000)
+    // 0x1_0000_0041 would truncate to 65 ('A') after i32_wrap_i64
+    let assert Error(_) = utf_codepoint(0x1_0000_0041)
+}
+"#,
+    );
+}
 
 #[test]
 fn string_const() {
