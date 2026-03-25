@@ -897,7 +897,6 @@ impl<'a> Generator<'a> {
         };
         let ok_index = self.ok_variant_constructor(type_::utf_codepoint(), type_::nil());
         let error_index = self.error_variant_constructor(type_::utf_codepoint(), type_::nil());
-        // FIXME: check int to i32 conversion
         #[rustfmt::skip]
         let _ = function
             .extend_instructions(self)
