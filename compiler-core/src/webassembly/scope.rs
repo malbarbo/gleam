@@ -18,7 +18,7 @@ use crate::{
 
 use super::{Generator, monomorphize::set_ubound_or_generic};
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(super) enum IdKind {
     Global,
     Func,
@@ -265,7 +265,9 @@ impl Locals {
 
     fn insert_subjects(&mut self, generator: &mut Generator<'_>, subjects: &[TypedExpr]) {
         for subject in subjects {
-            // FIXME: do not create a local if the subject is var
+            if subject.is_local_var() {
+                continue;
+            }
             self._insert(
                 generator,
                 subject,
@@ -276,8 +278,8 @@ impl Locals {
         }
     }
 
-    pub(super) fn for_subjects(&self, subjects: &[TypedExpr]) -> Vec<u32> {
-        subjects.iter().map(|subject| self._get(subject)).collect()
+    pub(super) fn for_subject(&self, subject: &TypedExpr) -> u32 {
+        self._get(subject)
     }
 
     fn insert_pattern(&mut self, generator: &mut Generator<'_>, pattern: &TypedPattern) {

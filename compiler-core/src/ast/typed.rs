@@ -788,6 +788,10 @@ impl TypedExpr {
         }
     }
 
+    pub fn is_local_var(&self) -> bool {
+        matches!(self, Self::Var { constructor, .. } if constructor.is_local_variable())
+    }
+
     pub fn var_name(&self) -> Option<&EcoString> {
         match self {
             Self::Var { name, .. } => Some(name),
