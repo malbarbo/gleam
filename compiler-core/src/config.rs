@@ -177,6 +177,8 @@ pub struct PackageConfig {
     pub erlang: ErlangConfig,
     #[serde(default)]
     pub javascript: JavaScriptConfig,
+    #[serde(default)]
+    pub webassembly: WebAssemblyConfig,
     #[serde(default = "erlang_target")]
     pub target: Target,
     #[serde(default)]
@@ -703,6 +705,7 @@ impl Default for PackageConfig {
             dependencies: Default::default(),
             erlang: Default::default(),
             javascript: Default::default(),
+            webassembly: Default::default(),
             repository: Default::default(),
             dev_dependencies: Default::default(),
             licences: Default::default(),
@@ -740,6 +743,84 @@ pub struct JavaScriptConfig {
     pub runtime: Runtime,
     #[serde(default, rename = "deno")]
     pub deno: DenoConfig,
+}
+
+#[derive(Deserialize, Serialize, Debug, PartialEq, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct WebAssemblyConfig {
+    #[serde(default)]
+    pub int: WasmInt,
+    #[serde(default)]
+    pub float: WasmFloat,
+    #[serde(default)]
+    pub opt_level: WasmOptLevel,
+}
+
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy)]
+pub enum WasmInt {
+    #[serde(rename = "I32")]
+    I32,
+    #[serde(rename = "I64")]
+    I64,
+}
+
+impl Default for WasmInt {
+    fn default() -> Self {
+        Self::I32
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy)]
+pub enum WasmFloat {
+    #[serde(rename = "F32")]
+    F32,
+    #[serde(rename = "F64")]
+    F64,
+}
+
+impl Default for WasmFloat {
+    fn default() -> Self {
+        Self::F64
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy)]
+pub enum WasmOptLevel {
+    #[serde(rename = "0")]
+    O0,
+    #[serde(rename = "1")]
+    O1,
+    #[serde(rename = "2")]
+    O2,
+    #[serde(rename = "3")]
+    O3,
+    #[serde(rename = "s")]
+    Os,
+    #[serde(rename = "z")]
+    Oz,
+}
+
+impl WasmOptLevel {
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::O0)
+    }
+
+    pub fn as_flag(self) -> &'static str {
+        match self {
+            Self::O0 => "-O0",
+            Self::O1 => "-O1",
+            Self::O2 => "-O2",
+            Self::O3 => "-O3",
+            Self::Os => "-Os",
+            Self::Oz => "-Oz",
+        }
+    }
+}
+
+impl Default for WasmOptLevel {
+    fn default() -> Self {
+        Self::O0
+    }
 }
 
 #[derive(Deserialize, Debug, PartialEq, Eq, Clone)]

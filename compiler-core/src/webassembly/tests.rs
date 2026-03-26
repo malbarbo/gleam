@@ -87,14 +87,19 @@ pub fn compile(
 }
 
 pub fn compile_wasm(src: &str, deps: Vec<(&str, &str, &str)>) -> Vec<u8> {
-    compile_wasm_with_config(src, deps, "I32", "F64")
+    compile_wasm_with_config(
+        src,
+        deps,
+        crate::config::WasmInt::I32,
+        crate::config::WasmFloat::F64,
+    )
 }
 
 pub fn compile_wasm_with_config(
     src: &str,
     deps: Vec<(&str, &str, &str)>,
-    int: &str,
-    float: &str,
+    int: crate::config::WasmInt,
+    float: crate::config::WasmFloat,
 ) -> Vec<u8> {
     let mut all_line_numbers: HashMap<EcoString, LineNumbers> = deps
         .iter()
@@ -108,7 +113,7 @@ pub fn compile_wasm_with_config(
         .map(|(name, m)| (name.clone(), m))
         .collect();
     let _ = all_modules.insert(main_module.name.clone(), &main_module);
-    crate::webassembly::module_with_config(
+    crate::webassembly::module(
         &main_module,
         &line_numbers,
         &all_modules,
@@ -145,8 +150,15 @@ pub fn compile_wasm_error(src: &str) -> crate::webassembly::Error {
     let main_ref: &TypedModule = &main_module;
     let all_modules = HashMap::from([(main_module.name.clone(), main_ref)]);
     let all_line_numbers = HashMap::from([(main_module.name.clone(), line_numbers.clone())]);
-    crate::webassembly::module(&main_module, &line_numbers, &all_modules, &all_line_numbers)
-        .expect_err("expected codegen error")
+    crate::webassembly::module(
+        &main_module,
+        &line_numbers,
+        &all_modules,
+        &all_line_numbers,
+        crate::config::WasmInt::I32,
+        crate::config::WasmFloat::F64,
+    )
+    .expect_err("expected codegen error")
 }
 
 pub struct WasmOutput {
@@ -157,14 +169,19 @@ pub struct WasmOutput {
 }
 
 pub fn run_wasm(src: &str, deps: Vec<(&str, &str, &str)>) -> WasmOutput {
-    run_wasm_with_config(src, deps, "I32", "F64")
+    run_wasm_with_config(
+        src,
+        deps,
+        crate::config::WasmInt::I32,
+        crate::config::WasmFloat::F64,
+    )
 }
 
 pub fn run_wasm_with_config(
     src: &str,
     deps: Vec<(&str, &str, &str)>,
-    int: &str,
-    float: &str,
+    int: crate::config::WasmInt,
+    float: crate::config::WasmFloat,
 ) -> WasmOutput {
     let wasm_bytes = compile_wasm_with_config(src, deps, int, float);
     let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -199,7 +216,12 @@ pub fn run_ok(src: &str) {
 /// Compile and run WASM with I64 int type, assert it succeeds.
 #[track_caller]
 pub fn run_ok_i64(src: &str) {
-    let result = run_wasm_with_config(src, vec![], "I64", "F64");
+    let result = run_wasm_with_config(
+        src,
+        vec![],
+        crate::config::WasmInt::I64,
+        crate::config::WasmFloat::F64,
+    );
     assert!(
         result.status.success(),
         "WASM (I64) execution failed:\n{}",
@@ -257,7 +279,11 @@ macro_rules! assert_wasm_error {
     }};
 }
 
-pub fn compile_validate_error(src: &str, int: &str, float: &str) -> crate::webassembly::Error {
+pub fn compile_validate_error(
+    src: &str,
+    int: crate::config::WasmInt,
+    float: crate::config::WasmFloat,
+) -> crate::webassembly::Error {
     let (main_module, _) = compile(src, vec![]);
     let main_ref: &TypedModule = &main_module;
     let all_modules = HashMap::from([(main_module.name.clone(), main_ref)]);
@@ -267,10 +293,12 @@ pub fn compile_validate_error(src: &str, int: &str, float: &str) -> crate::webas
 
 macro_rules! assert_wasm_validate_error {
     ($src:expr, $int:expr, $float:expr $(,)?) => {{
-        let error = super::compile_validate_error($src, $int, $float);
+        let int = $int;
+        let float = $float;
+        let error = super::compile_validate_error($src, int, float);
         let output = format!(
-            "----- SOURCE CODE\n{}\n\n----- CONFIG\nint={} float={}\n\n----- ERROR\n{:?}",
-            $src, $int, $float, error
+            "----- SOURCE CODE\n{}\n\n----- CONFIG\nint={:?} float={:?}\n\n----- ERROR\n{:?}",
+            $src, int, float, error
         );
         insta::assert_snapshot!(insta::internals::AutoName, output, $src);
     }};

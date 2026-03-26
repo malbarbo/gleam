@@ -24,10 +24,8 @@
       Não é bug: funções privadas, genéricas e external são compiladas em outro lugar.
       FIXME substituído por comentário explicativo.
 
-- [ ] webassembly.rs:2518 — handle missing inferred variant (same name, position and type)
-      No acesso a campos de union, se inferred_variant retorna None, o código
-      pode falhar. Precisa tratar o caso quando variantes têm mesmo nome,
-      posição e tipo.
+- [x] webassembly.rs:2518 — handle missing inferred variant (same name, position and type)
+      Resolvido: campos compartilhados reordenados no supertype, acesso direto sem cast.
 
 ## Not yet supported (todo!())
 

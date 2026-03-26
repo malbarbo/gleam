@@ -367,7 +367,11 @@ where
             TargetCodegenConfiguration::Erlang { app_file } => {
                 self.perform_erlang_codegen(modules, app_file.as_ref())
             }
-            TargetCodegenConfiguration::WebAssembly => self.perform_webassembly_codegen(modules),
+            TargetCodegenConfiguration::WebAssembly {
+                int,
+                float,
+                opt_level,
+            } => self.perform_webassembly_codegen(modules, *int, *float, *opt_level),
         }
     }
 
@@ -448,8 +452,14 @@ where
         Ok(())
     }
 
-    fn perform_webassembly_codegen(&mut self, modules: &[Module]) -> Result<(), Error> {
-        WebAssembly::new(self.out).render(&self.io, modules)
+    fn perform_webassembly_codegen(
+        &mut self,
+        modules: &[Module],
+        int: crate::config::WasmInt,
+        float: crate::config::WasmFloat,
+        opt_level: crate::config::WasmOptLevel,
+    ) -> Result<(), Error> {
+        WebAssembly::new(self.out, int, float, opt_level).render(&self.io, modules)
     }
 
     fn render_erlang_entrypoint_module(

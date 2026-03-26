@@ -104,8 +104,8 @@ pub fn main() {
     9223372036854775808
 }
 "#,
-        "I64",
-        "F64",
+        crate::config::WasmInt::I64,
+        crate::config::WasmFloat::F64,
     );
 }
 
@@ -117,8 +117,8 @@ pub fn main() {
     -9223372036854775809
 }
 "#,
-        "I64",
-        "F64",
+        crate::config::WasmInt::I64,
+        crate::config::WasmFloat::F64,
     );
 }
 
@@ -130,8 +130,8 @@ pub fn main() {
     3.5e38
 }
 "#,
-        "I32",
-        "F32",
+        crate::config::WasmInt::I32,
+        crate::config::WasmFloat::F32,
     );
 }
 
