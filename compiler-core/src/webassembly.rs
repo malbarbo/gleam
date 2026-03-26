@@ -419,6 +419,7 @@ enum CustomType {
     },
     Union {
         custom_type: TypedCustomType,
+        layout: UnionFieldLayout,
     },
 }
 
@@ -426,7 +427,9 @@ impl CustomType {
     fn is_ref_non_null(&self) -> bool {
         match self {
             CustomType::Struct { .. } => true,
-            CustomType::Union { custom_type } => Generator::null_variant_tag(custom_type).is_none(),
+            CustomType::Union { custom_type, .. } => {
+                Generator::null_variant_tag(custom_type).is_none()
+            }
             _ => false,
         }
     }
@@ -446,6 +449,89 @@ struct LocalFunction {
     type_: Arc<Type>,
     arguments: Vec<TypedArg>,
     body: Vec<TypedStatement>,
+}
+
+/// Maps Gleam field positions to wasm struct field indices for a union type.
+/// Shared fields come first (after the tag), then variant-specific fields.
+#[derive(Debug, Clone)]
+struct UnionFieldLayout {
+    shared_count: usize,
+    field_indices: Vec<Vec<u32>>,
+}
+
+impl UnionFieldLayout {
+    fn compute(custom_type: &TypedCustomType) -> UnionFieldLayout {
+        let constructors = &custom_type.constructors;
+        // Find shared fields: same position, same label, same type across ALL variants
+        let min_fields = constructors
+            .iter()
+            .map(|c| c.arguments.len())
+            .min()
+            .unwrap_or(0);
+        let first_constructor = constructors.first().expect("union to have constructors");
+        let mut shared_positions = vec![];
+        for (pos, first_arg) in first_constructor
+            .arguments
+            .iter()
+            .enumerate()
+            .take(min_fields)
+        {
+            let first_label = first_arg.label.as_ref().map(|(_, l)| l);
+            let is_shared = constructors.iter().skip(1).all(|c| {
+                c.arguments.get(pos).is_some_and(|arg| {
+                    let label = arg.label.as_ref().map(|(_, l)| l);
+                    label == first_label && arg.type_.same_as(&first_arg.type_)
+                })
+            });
+            if is_shared {
+                shared_positions.push(pos);
+            }
+        }
+
+        let shared_count = shared_positions.len();
+
+        let field_indices = constructors
+            .iter()
+            .map(|c| {
+                let mut indices = vec![0u32; c.arguments.len()];
+                let mut next_specific = shared_count as u32 + 1; // after tag + shared
+                for (pos, slot) in indices.iter_mut().enumerate() {
+                    if let Some(shared_idx) = shared_positions.iter().position(|&p| p == pos) {
+                        *slot = shared_idx as u32 + 1; // after tag
+                    } else {
+                        *slot = next_specific;
+                        next_specific += 1;
+                    }
+                }
+                indices
+            })
+            .collect();
+
+        UnionFieldLayout {
+            shared_count,
+            field_indices,
+        }
+    }
+
+    fn fields(&self, variant: usize) -> &[u32] {
+        self.field_indices
+            .get(variant)
+            .expect("variant field indices")
+    }
+
+    fn shared_field(&self, pos: u64) -> u32 {
+        self.fields(0)
+            .get(pos as usize)
+            .copied()
+            .expect("shared field index")
+    }
+
+    fn field(&self, variant: usize, pos: u64) -> u32 {
+        self.fields(variant)
+            .get(pos as usize)
+            .copied()
+            .expect("field index")
+    }
 }
 
 struct Generator<'a> {
@@ -1253,6 +1339,7 @@ impl<'a> Generator<'a> {
             } else {
                 is_union = true;
                 CustomType::Union {
+                    layout: UnionFieldLayout::compute(custom_type),
                     custom_type: custom_type.clone(),
                 }
             };
@@ -1413,7 +1500,7 @@ impl<'a> Generator<'a> {
         Vec<Arc<Type>>,
     ) {
         let (custom_type, args) = self.custom_type_expect(list_type);
-        let CustomType::Union { custom_type } = custom_type else {
+        let CustomType::Union { custom_type, .. } = custom_type else {
             panic!("list type to be a union")
         };
         let cons = custom_type
@@ -1535,7 +1622,7 @@ impl<'a> Generator<'a> {
                         self.mono_struct_type_index(type_, &custom_type, &constructor, &args);
                     type_index
                 }
-                CustomType::Union { custom_type } => {
+                CustomType::Union { custom_type, .. } => {
                     if let Some(constructor) = custom_type_inferred_constructor(&custom_type, type_)
                     {
                         let (_, type_index, _) =
@@ -1638,13 +1725,53 @@ impl<'a> Generator<'a> {
         (self.struct_type_index(name, fields), types)
     }
 
+    fn union_layout(&self, type_: &Arc<Type>) -> UnionFieldLayout {
+        let (module, name, _) = type_
+            .named_type_information()
+            .expect("named type information");
+        match self.types.get(&(module, name)).expect("union type") {
+            CustomType::Union { layout, .. } => layout.clone(),
+            _ => panic!("expected union type"),
+        }
+    }
+
     fn mono_union_supertype_index(
         &mut self,
         type_: &Arc<Type>,
         custom_type: &TypedCustomType,
     ) -> u32 {
-        self.mono_union_type_index(type_, custom_type, None, None, &[])
-            .0
+        let layout = self.union_layout(type_);
+        let first = custom_type
+            .constructors
+            .first()
+            .expect("union to have constructors");
+        let args = type_
+            .named_type_information()
+            .map(|(_, _, a)| a)
+            .unwrap_or_default();
+        let types = Monomorphizer::variant_constructor(custom_type, first, &args);
+
+        // Build shared fields (those with wasm index <= shared_count, i.e. in supertype)
+        let field_indices = layout.fields(0);
+        let mut shared_fields = Vec::with_capacity(layout.shared_count);
+        for (pos, (arg, type_)) in first.arguments.iter().zip(types.iter()).enumerate() {
+            if field_indices.get(pos).copied().expect("field index") > layout.shared_count as u32 {
+                continue;
+            }
+            let label = if let Some((_, label)) = &arg.label {
+                label.clone()
+            } else {
+                pos.to_string().into()
+            };
+            shared_fields.push((label, self.val_type(type_)));
+        }
+
+        let name = custom_type.name.clone();
+        let index = self.wasm_types.len() as u32;
+        *self
+            .wasm_types
+            .entry(WasmType::union(name, shared_fields, None))
+            .or_insert(index)
     }
 
     fn mono_union_subtype_index(
@@ -1654,45 +1781,48 @@ impl<'a> Generator<'a> {
         constructor: &TypedRecordConstructor,
         args: &[Arc<Type>],
     ) -> (u32, u32, Vec<Arc<Type>>) {
+        let layout = self.union_layout(type_);
         let supertype_index = self.mono_union_supertype_index(type_, custom_type);
-        let (type_index, types) = self.mono_union_type_index(
-            type_,
-            custom_type,
-            Some(constructor),
-            Some(supertype_index),
-            args,
-        );
-        (supertype_index, type_index, types)
-    }
+        let types = Monomorphizer::variant_constructor(custom_type, constructor, args);
+        let variant_index = custom_type
+            .constructors
+            .iter()
+            .position(|c| c.name == constructor.name)
+            .expect("constructor in union");
 
-    fn mono_union_type_index(
-        &mut self,
-        type_: &Arc<Type>,
-        custom_type: &TypedCustomType,
-        constructor: Option<&TypedRecordConstructor>,
-        supertype_index: Option<u32>,
-        args: &[Arc<Type>],
-    ) -> (u32, Vec<Arc<Type>>) {
-        let (name, fields, types) = if let Some(constructor) = constructor {
-            let mut name = self.type_pretty_name(type_);
-            name += ".";
-            name += constructor.name.clone();
-            let types = Monomorphizer::variant_constructor(custom_type, constructor, args);
-            (name, self.fields(constructor, &types), types)
-        } else {
-            // Supertype only has the discriminant (tag) — shared across
-            // all monomorphizations of this generic union type.
-            (custom_type.name.clone(), vec![], vec![])
-        };
+        let field_indices = layout.fields(variant_index);
+        let val_types = self.val_types(types.iter().cloned());
+        let mut fields: Vec<(u32, EcoString, ValType)> = constructor
+            .arguments
+            .iter()
+            .zip(val_types.iter())
+            .enumerate()
+            .map(|(pos, (arg, val_type))| {
+                let label = if let Some((_, label)) = &arg.label {
+                    label.clone()
+                } else {
+                    pos.to_string().into()
+                };
+                let idx = field_indices.get(pos).copied().expect("field index");
+                (idx, label, *val_type)
+            })
+            .collect();
+        fields.sort_by_key(|(idx, _, _)| *idx);
+        let fields: Vec<(EcoString, ValType)> = fields
+            .into_iter()
+            .map(|(_, label, val_type)| (label, val_type))
+            .collect();
+
+        let mut name = self.type_pretty_name(type_);
+        name += ".";
+        name += constructor.name.clone();
 
         let index = self.wasm_types.len() as u32;
-        (
-            *self
-                .wasm_types
-                .entry(WasmType::union(name, fields, supertype_index))
-                .or_insert(index),
-            types,
-        )
+        let type_index = *self
+            .wasm_types
+            .entry(WasmType::union(name, fields, Some(supertype_index)))
+            .or_insert(index);
+        (supertype_index, type_index, types)
     }
 
     fn composite_val_type(&self, type_index: u32) -> ValType {
@@ -1717,7 +1847,7 @@ impl<'a> Generator<'a> {
                     self.mono_struct_type_index(type_, custom_type, constructor, &args);
                 self.composite_val_type(struct_index)
             }
-            CustomType::Union { custom_type } => {
+            CustomType::Union { custom_type, .. } => {
                 let struct_index = self.mono_union_supertype_index(type_, custom_type);
                 if Self::null_variant_tag(custom_type).is_some() {
                     self.val_type_ref_nullable(struct_index)
@@ -1784,7 +1914,7 @@ impl<'a> Generator<'a> {
             }
             Constant::List { type_, .. } => {
                 let (custom_type, _) = self.custom_type_expect(type_);
-                let CustomType::Union { custom_type } = custom_type else {
+                let CustomType::Union { custom_type, .. } = custom_type else {
                     panic!("list type should be a union")
                 };
                 let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
@@ -1843,7 +1973,7 @@ impl<'a> Generator<'a> {
                         });
                         id
                     }
-                    CustomType::Union { custom_type } => {
+                    CustomType::Union { custom_type, .. } => {
                         let index = type_
                             .custom_type_inferred_variant()
                             .expect("inferred variant index");
@@ -2537,26 +2667,33 @@ impl<'a> Generator<'a> {
                             .expression(self, locals, scope, record)
                             .struct_get(type_index, *index as u32);
                     }
-                    CustomType::Union { custom_type } => {
-                        // FIXME: handle missing inferred variant (same name, position and type)
-                        let variant = record
-                            .type_()
-                            .custom_type_inferred_variant()
-                            .expect("inferred variant index");
-                        let constructor = custom_type
-                            .constructors
-                            .get(variant as usize)
-                            .expect("constructor at index");
-                        let (_, type_index, _) = self.mono_union_subtype_index(
-                            &record.type_(),
-                            &custom_type,
-                            constructor,
-                            &args,
-                        );
-                        let _ = instructions
-                            .expression(self, locals, scope, record)
-                            .ref_cast_non_null(HeapType::Concrete(type_index))
-                            .struct_get(type_index, *index as u32 + 1);
+                    CustomType::Union { custom_type, .. } => {
+                        let layout = self.union_layout(&record.type_()).clone();
+                        if let Some(variant) = record.type_().custom_type_inferred_variant() {
+                            let constructor = custom_type
+                                .constructors
+                                .get(variant as usize)
+                                .expect("constructor at index");
+                            let (_, type_index, _) = self.mono_union_subtype_index(
+                                &record.type_(),
+                                &custom_type,
+                                constructor,
+                                &args,
+                            );
+                            let field_index = layout.field(variant as usize, *index);
+                            let _ = instructions
+                                .expression(self, locals, scope, record)
+                                .ref_cast_non_null(HeapType::Concrete(type_index))
+                                .struct_get(type_index, field_index);
+                        } else {
+                            // Shared field — access via supertype
+                            let supertype_index =
+                                self.mono_union_supertype_index(&record.type_(), &custom_type);
+                            let field_index = layout.shared_field(*index);
+                            let _ = instructions
+                                .expression(self, locals, scope, record)
+                                .struct_get(supertype_index, field_index);
+                        }
                     }
                     CustomType::External { .. } | CustomType::Enum { .. } => {
                         panic!("external/enum types should not reach code generation")
@@ -3123,6 +3260,7 @@ impl<'a> Generator<'a> {
                     locals,
                     &mut scope,
                     (type_index, None),
+                    None,
                     pattern,
                     elements.iter(),
                     fail_depth,
@@ -3157,12 +3295,13 @@ impl<'a> Generator<'a> {
                             locals,
                             &mut scope,
                             (type_index, None),
+                            None,
                             pattern,
                             arguments.iter().map(|arg| &arg.value),
                             fail_depth,
                         );
                     }
-                    CustomType::Union { custom_type } => {
+                    CustomType::Union { custom_type, .. } => {
                         let custom_type = custom_type.clone();
                         let null_tag = Self::null_variant_tag(&custom_type);
                         let (tag, constructor) = custom_type
@@ -3202,11 +3341,14 @@ impl<'a> Generator<'a> {
                                     .i32_ne()
                                     .br_if(fail_depth);
                             }
+                            let layout = self.union_layout(type_).clone();
+                            let field_mapping = layout.fields(tag);
                             let _ = instructions.local_get(right).patterns(
                                 self,
                                 locals,
                                 &mut scope,
                                 (supertype_index, Some(type_index)),
+                                Some(field_mapping),
                                 pattern,
                                 arguments.iter().map(|arg| &arg.value),
                                 fail_depth,
@@ -3299,6 +3441,7 @@ impl<'a> Generator<'a> {
         scope: &mut Scope,
         instructions: &mut ExtendedInstructionSink<'_>,
         (type_index, subtype_index): (u32, Option<u32>),
+        field_mapping: Option<&[u32]>,
         pattern: &Pattern<Arc<Type>>,
         elements: impl IntoIterator<Item = &'b Pattern<Arc<Type>>> + Clone,
         fail_depth: u32,
@@ -3308,10 +3451,12 @@ impl<'a> Generator<'a> {
         for (field_index, element) in elements.into_iter().enumerate() {
             let _ = instructions.local_get(right);
             if let Some(subtype_index) = subtype_index {
-                // cast and skip tag
+                let field_index = field_mapping
+                    .and_then(|m| m.get(field_index).copied())
+                    .unwrap_or(field_index as u32 + 1);
                 let _ = instructions
                     .ref_cast_non_null(HeapType::Concrete(subtype_index))
-                    .struct_get(subtype_index, field_index as u32 + 1);
+                    .struct_get(subtype_index, field_index);
             } else {
                 let _ = instructions.struct_get(type_index, field_index as u32);
             }
@@ -3491,15 +3636,22 @@ impl<'a> Generator<'a> {
                             .clause_guard(self, locals, scope, container)
                             .struct_get(type_index, index);
                     }
-                    CustomType::Union { custom_type } => {
+                    CustomType::Union { custom_type, .. } => {
+                        let layout = self.union_layout(&type_).clone();
                         let constructor = custom_type_inferred_constructor(&custom_type, &type_)
                             .expect("inferred constructor");
+                        let variant = custom_type
+                            .constructors
+                            .iter()
+                            .position(|c| c.name == constructor.name)
+                            .expect("constructor in union");
                         let (_, type_index, _) =
                             self.mono_union_subtype_index(&type_, &custom_type, constructor, &args);
+                        let field_index = layout.field(variant, index as u64);
                         let _ = instructions
                             .clause_guard(self, locals, scope, container)
                             .ref_cast_non_null(HeapType::Concrete(type_index))
-                            .struct_get(type_index, index + 1);
+                            .struct_get(type_index, field_index);
                     }
                 }
             }
