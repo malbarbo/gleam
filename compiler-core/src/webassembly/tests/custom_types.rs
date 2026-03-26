@@ -1,6 +1,70 @@
 use super::{compile_wasm, run_ok, wasm_type_names};
 
 #[test]
+fn record_access_shared_generic_field() {
+    run_ok(
+        r#"
+pub type Pair(a) {
+    Left(value: a, extra: Int)
+    Right(value: a, name: String)
+}
+
+pub fn value(pair: Pair(a)) -> a {
+    pair.value
+}
+
+pub fn main() {
+    let assert 1 = value(Left(1, 99))
+    let assert 2 = value(Right(2, "x"))
+}
+"#,
+    );
+}
+
+#[test]
+fn record_access_shared_field_with_gap() {
+    run_ok(
+        r#"
+pub type T {
+    A(x: Int, y: String, z: Int)
+    B(x: Int, w: Int, z: Int)
+}
+
+pub fn get_x(t: T) -> Int { t.x }
+pub fn get_z(t: T) -> Int { t.z }
+
+pub fn main() {
+    let assert 1 = get_x(A(1, "s", 3))
+    let assert 2 = get_x(B(2, 4, 5))
+    let assert 3 = get_z(A(1, "s", 3))
+    let assert 5 = get_z(B(2, 4, 5))
+}
+"#,
+    );
+}
+
+#[test]
+fn record_access_shared_field() {
+    run_ok(
+        r#"
+pub type Shape {
+    Circle(label: String, radius: Int)
+    Square(label: String, side: Int, color: String)
+}
+
+pub fn label(shape: Shape) -> String {
+    shape.label
+}
+
+pub fn main() {
+    let assert "c" = label(Circle("c", 1))
+    let assert "s" = label(Square("s", 2, "red"))
+}
+"#,
+    );
+}
+
+#[test]
 fn enum_constants() {
     run_ok(
         r#"
