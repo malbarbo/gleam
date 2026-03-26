@@ -181,7 +181,7 @@ pub(crate) fn module_with_config(
     generator.compile()
 }
 
-fn eliminate_dead_code(wasm: Vec<u8>, builtin_data_names: &[Option<String>]) -> Vec<u8> {
+fn eliminate_dead_code(wasm: Vec<u8>, builtin_data_names: &[String]) -> Vec<u8> {
     let mut module =
         walrus::Module::from_buffer(&wasm).expect("generated wasm to be a valid module");
     // Clear element segments so declared functions are not treated as roots.
@@ -210,7 +210,7 @@ fn eliminate_dead_code(wasm: Vec<u8>, builtin_data_names: &[Option<String>]) -> 
                 walrus::DataKind::Active { memory, offset } => Some((*memory, offset.clone())),
                 _ => None,
             };
-            let name = builtin_data_names.get(idx).cloned().flatten();
+            let name = builtin_data_names.get(idx).cloned();
             (d.id(), name, kind)
         })
         .collect();
@@ -454,7 +454,7 @@ struct Generator<'a> {
     export_section: ExportSection,
     data_section: DataSection,
     /// Names of builtin data segments, indexed by segment index.
-    builtin_data_names: Vec<Option<String>>,
+    builtin_data_names: Vec<String>,
     global_names: NameMap,
     wasm_types: IndexMap<WasmType, u32>,
     types: HashMap<(EcoString, EcoString), CustomType>,
@@ -1078,14 +1078,7 @@ impl<'a> Generator<'a> {
         }
 
         // Add data segment names
-        for (idx, name) in builtins.data_names.iter().enumerate() {
-            if let Some(name) = name {
-                if self.builtin_data_names.len() <= idx {
-                    self.builtin_data_names.resize(idx + 1, None);
-                }
-                self.builtin_data_names[idx] = Some(name.clone());
-            }
-        }
+        self.builtin_data_names = builtins.data_names;
 
         // Validate external function signatures and collect needed builtins
         self.validate_externals(&builtins.available)
