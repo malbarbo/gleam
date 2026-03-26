@@ -29,7 +29,7 @@ pub(super) struct Builtins {
     /// Global names: (index, name)
     pub global_names: Vec<(u32, String)>,
     /// Data segment names, indexed by segment index
-    pub data_names: Vec<Option<String>>,
+    pub data_names: Vec<String>,
     /// Function name → (params, results) for signature validation
     pub available: HashMap<EcoString, (Vec<ValType>, Vec<ValType>)>,
 }
@@ -44,7 +44,7 @@ pub(super) fn parse_builtins(builtins_wasm: &[u8]) -> Builtins {
     let mut exports = vec![];
     let mut data_segments = vec![];
     let mut global_names = vec![];
-    let mut data_names: Vec<Option<String>> = vec![];
+    let mut data_names: Vec<String> = vec![];
     let mut named_functions = vec![];
     let mut available = HashMap::new();
 
@@ -175,11 +175,12 @@ pub(super) fn parse_builtins(builtins_wasm: &[u8]) -> Builtins {
                             wasmparser::Name::Data(section_limited) => {
                                 for item in section_limited.into_iter_with_offsets() {
                                     let (_, name) = item.expect("Name entry");
-                                    let idx = name.index as usize;
-                                    if data_names.len() <= idx {
-                                        data_names.resize(idx + 1, None);
-                                    }
-                                    data_names[idx] = Some(name.name.to_string());
+                                    assert_eq!(
+                                        name.index as usize,
+                                        data_names.len(),
+                                        "data segment names must be in order"
+                                    );
+                                    data_names.push(name.name.to_string());
                                 }
                             }
                             _ => {}
