@@ -1,0 +1,13 @@
+---
+source: language-server/src/tests/hover.rs
+expression: "\ntype Int { Int }\nconst number = 100\n"
+---
+type Int { Int }
+const number = 100
+▔▔▔▔▔▔▔▔▔↑▔▔      
+
+
+----- Hover content (markdown) -----
+```gleam
+gleam.Int
+```

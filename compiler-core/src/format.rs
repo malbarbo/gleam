@@ -10,7 +10,6 @@ use crate::{
     build::Target,
     docvec,
     io::Utf8Writer,
-    parse::SpannedString,
     parse::extra::{Comment, ModuleExtra},
     pretty::{self, *},
     warning::WarningEmitter,
@@ -82,12 +81,12 @@ enum FnCapturePosition {
 /// One of the pieces making a record update arg list: it could be the starting
 /// record being updated, or one of the subsequent arguments.
 ///
-enum RecordUpdatePiece<'a> {
-    Record(&'a RecordBeingUpdated),
-    Argument(&'a UntypedRecordUpdateArg),
+enum RecordUpdatePiece<'a, A> {
+    Record(&'a RecordBeingUpdated<A>),
+    Argument(&'a RecordUpdateArg<A>),
 }
 
-impl HasLocation for RecordUpdatePiece<'_> {
+impl<A> HasLocation for RecordUpdatePiece<'_, A> {
     fn location(&self) -> SrcSpan {
         match self {
             RecordUpdatePiece::Record(record) => record.location,
@@ -95,6 +94,8 @@ impl HasLocation for RecordUpdatePiece<'_> {
         }
     }
 }
+
+type UntypedRecordUpdatePiece<'a> = RecordUpdatePiece<'a, UntypedExpr>;
 
 /// Hayleigh's bane
 #[derive(Debug, Clone, Default)]
@@ -123,10 +124,29 @@ impl<'comments> Formatter<'comments> {
         }
     }
 
+    /// Returns true if there's any comment that comes before the given
+    /// position.
+    ///
     fn any_comments(&self, limit: u32) -> bool {
         self.comments
             .first()
             .is_some_and(|comment| comment.start < limit)
+    }
+
+    /// Returns true if there's any comment that appears inside the given span.
+    ///
+    fn any_comment_between(&self, start: u32, end: u32) -> bool {
+        self.comments
+            .binary_search_by(|comment| {
+                if comment.start < start {
+                    Ordering::Less
+                } else if comment.start > end {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            })
+            .is_ok()
     }
 
     fn any_empty_lines(&self, limit: u32) -> bool {
@@ -366,22 +386,7 @@ impl<'comments> Formatter<'comments> {
         match statement {
             Definition::Function(function) => self.statement_fn(function),
 
-            Definition::TypeAlias(TypeAlias {
-                alias,
-                parameters: arguments,
-                type_ast: resolved_type,
-                publicity,
-                deprecation,
-                location,
-                ..
-            }) => self.type_alias(
-                *publicity,
-                alias,
-                arguments,
-                resolved_type,
-                deprecation,
-                location,
-            ),
+            Definition::TypeAlias(alias) => self.type_alias(alias),
 
             Definition::CustomType(ct) => self.custom_type(ct),
 
@@ -456,7 +461,7 @@ impl<'comments> Formatter<'comments> {
                     None => head,
                     Some(t) => head.append(": ").append(self.type_ast(t)),
                 };
-                head.append(" = ").append(self.const_expr(value))
+                head.append(" = ").append(self.const_expr(value).group())
             }
         }
     }
@@ -561,9 +566,16 @@ impl<'comments> Formatter<'comments> {
                 .append(" ")
                 .append(self.const_expr(right)),
 
-            Constant::Invalid { .. } => {
-                panic!("invalid constants can not be in an untyped ast")
-            }
+            Constant::RecordUpdate {
+                module,
+                name,
+                record,
+                arguments,
+                location,
+                ..
+            } => self.const_record_update(module, name, record, arguments, location),
+
+            Constant::Invalid { .. } => panic!("invalid constants can not be in an untyped ast"),
         };
         commented(document, comments)
     }
@@ -780,21 +792,25 @@ impl<'comments> Formatter<'comments> {
         self.wrap_arguments(arguments, location.end)
     }
 
-    pub fn type_alias<'a>(
-        &mut self,
-        publicity: Publicity,
-        name: &'a str,
-        arguments: &'a [SpannedString],
-        type_: &'a TypeAst,
-        deprecation: &'a Deprecation,
-        location: &SrcSpan,
-    ) -> Document<'a> {
+    pub fn type_alias<'a, A>(&mut self, alias: &'a TypeAlias<A>) -> Document<'a> {
+        let TypeAlias {
+            alias: name,
+            parameters: arguments,
+            type_ast: type_,
+            publicity,
+            deprecation,
+            location,
+            name_location: _,
+            type_: _,
+            documentation: _,
+        } = alias;
+
         let attributes = AttributesPrinter::new()
             .set_deprecation(deprecation)
-            .set_internal(publicity)
+            .set_internal(*publicity)
             .to_doc();
 
-        let head = docvec![attributes, pub_(publicity), "type ", name];
+        let head = docvec![attributes, pub_(*publicity), "type ", name];
         let head = if arguments.is_empty() {
             head
         } else {
@@ -817,24 +833,41 @@ impl<'comments> Formatter<'comments> {
     }
 
     fn statement_fn<'a>(&mut self, function: &'a UntypedFunction) -> Document<'a> {
+        let Function {
+            location,
+            body_start: _,
+            end_position,
+            name,
+            arguments,
+            body,
+            publicity,
+            deprecation,
+            return_annotation,
+            return_type: _,
+            documentation: _,
+            external_erlang,
+            external_javascript,
+            external_webassembly: _,
+            implementations: _,
+            purity: _,
+        } = function;
+
         let attributes = AttributesPrinter::new()
-            .set_deprecation(&function.deprecation)
-            .set_internal(function.publicity)
-            .set_external_erlang(&function.external_erlang)
-            .set_external_javascript(&function.external_javascript)
+            .set_deprecation(deprecation)
+            .set_internal(*publicity)
+            .set_external_erlang(external_erlang)
+            .set_external_javascript(external_javascript)
             .to_doc();
 
         // Fn name and args
-        let arguments = function
-            .arguments
+        let arguments = arguments
             .iter()
             .map(|argument| self.fn_arg(argument))
             .collect_vec();
-        let signature = pub_(function.publicity)
+        let signature = pub_(*publicity)
             .append("fn ")
             .append(
-                &function
-                    .name
+                &name
                     .as_ref()
                     .expect("Function in a statement must be named")
                     .1,
@@ -844,21 +877,20 @@ impl<'comments> Formatter<'comments> {
                     arguments,
                     // Calculate end location of arguments to not consume comments in
                     // return annotation
-                    function
-                        .return_annotation
+                    return_annotation
                         .as_ref()
-                        .map_or(function.location.end, |ann| ann.location().start),
+                        .map_or(location.end, |ann| ann.location().start),
                 ),
             );
 
         // Add return annotation
-        let signature = match &function.return_annotation {
+        let signature = match &return_annotation {
             Some(anno) => signature.append(" -> ").append(self.type_ast(anno)),
             None => signature,
         }
         .group();
 
-        if function.body.is_empty() {
+        if body.is_empty() {
             return attributes.append(signature);
         }
 
@@ -866,10 +898,10 @@ impl<'comments> Formatter<'comments> {
 
         // Format body
 
-        let body = self.statements(&function.body);
+        let body = self.statements(body);
 
         // Add any trailing comments
-        let body = match printed_comments(self.pop_comments(function.end_position), false) {
+        let body = match printed_comments(self.pop_comments(*end_position), false) {
             Some(comments) => body.append(line()).append(comments),
             None => body,
         };
@@ -1225,7 +1257,15 @@ impl<'comments> Formatter<'comments> {
             match expr {
                 Pattern::Tuple { .. } | Pattern::List { .. } | Pattern::BitArray { .. } => true,
                 Pattern::Constructor { arguments, .. } => !arguments.is_empty(),
-                _ => false,
+                Pattern::Int { .. }
+                | Pattern::Float { .. }
+                | Pattern::String { .. }
+                | Pattern::Variable { .. }
+                | Pattern::BitArraySize(_)
+                | Pattern::Assign { .. }
+                | Pattern::Discard { .. }
+                | Pattern::StringPrefix { .. }
+                | Pattern::Invalid { .. } => false,
             }
         }
 
@@ -1350,13 +1390,15 @@ impl<'comments> Formatter<'comments> {
     ) -> Document<'a>
     where
         T: HasLocation,
+        T: std::fmt::Debug,
         ToExpr: Fn(&T) -> &UntypedExpr,
         ToDoc: Fn(&mut Self, &'b T) -> Document<'a>,
     {
         match init_and_last(values) {
             Some((initial_values, last_value))
                 if is_breakable_argument(to_expr(last_value), values.len())
-                    && !self.any_comments(last_value.location().start) =>
+                    && !self.any_comments(last_value.location().start)
+                    && !self.any_comment_between(last_value.location().end, location.end) =>
             {
                 let mut docs = initial_values
                     .iter()
@@ -1428,13 +1470,13 @@ impl<'comments> Formatter<'comments> {
     pub fn record_update<'a>(
         &mut self,
         constructor: &'a UntypedExpr,
-        record: &'a RecordBeingUpdated,
+        record: &'a RecordBeingUpdated<UntypedExpr>,
         arguments: &'a [UntypedRecordUpdateArg],
         location: &SrcSpan,
     ) -> Document<'a> {
         let constructor_doc: Document<'a> = self.expr(constructor);
-        let pieces = std::iter::once(RecordUpdatePiece::Record(record))
-            .chain(arguments.iter().map(RecordUpdatePiece::Argument))
+        let pieces = std::iter::once(UntypedRecordUpdatePiece::Record(record))
+            .chain(arguments.iter().map(UntypedRecordUpdatePiece::Argument))
             .collect_vec();
 
         self.append_inlinable_wrapped_arguments(
@@ -1442,17 +1484,66 @@ impl<'comments> Formatter<'comments> {
             &pieces,
             location,
             |arg| match arg {
-                RecordUpdatePiece::Argument(arg) => &arg.value,
-                RecordUpdatePiece::Record(record) => record.base.as_ref(),
+                UntypedRecordUpdatePiece::Argument(arg) => &arg.value,
+                UntypedRecordUpdatePiece::Record(record) => record.base.as_ref(),
             },
             |this, arg| match arg {
-                RecordUpdatePiece::Argument(arg) => this.record_update_arg(arg),
-                RecordUpdatePiece::Record(record) => {
-                    let comments = this.pop_comments(record.base.location().start);
+                UntypedRecordUpdatePiece::Argument(arg) => this.record_update_arg(arg),
+                UntypedRecordUpdatePiece::Record(record) => {
+                    let comments = this.pop_comments(record.location.start);
                     commented("..".to_doc().append(this.expr(&record.base)), comments)
                 }
             },
         )
+    }
+
+    pub fn const_record_update<'a, A, B>(
+        &mut self,
+        module: &Option<(EcoString, SrcSpan)>,
+        name: &'a EcoString,
+        record: &'a RecordBeingUpdated<Constant<A, B>>,
+        arguments: &'a [RecordUpdateArg<Constant<A, B>>],
+        location: &SrcSpan,
+    ) -> Document<'a> {
+        let constructor_doc = match module {
+            Some((m, _)) => m.to_doc().append(".").append(name.as_str()),
+            None => name.to_doc(),
+        };
+
+        let pieces = std::iter::once(RecordUpdatePiece::Record(record))
+            .chain(arguments.iter().map(RecordUpdatePiece::Argument))
+            .collect_vec();
+
+        let docs = pieces
+            .iter()
+            .map(|piece| match piece {
+                RecordUpdatePiece::Argument(arg) => {
+                    let comments = self.pop_comments(arg.location.start);
+                    let doc = match arg {
+                        _ if arg.uses_label_shorthand() => arg.label.as_str().to_doc().append(":"),
+                        _ => arg
+                            .label
+                            .as_str()
+                            .to_doc()
+                            .append(": ")
+                            .append(self.const_expr(&arg.value))
+                            .group(),
+                    };
+                    commented(doc, comments)
+                }
+                RecordUpdatePiece::Record(record) => {
+                    let comments = self.pop_comments(record.location.start);
+                    commented(
+                        "..".to_doc().append(self.const_expr(&record.base)),
+                        comments,
+                    )
+                }
+            })
+            .collect_vec();
+
+        constructor_doc
+            .append(self.wrap_arguments(docs, location.end))
+            .group()
     }
 
     pub fn bin_op<'a>(
@@ -1490,7 +1581,25 @@ impl<'comments> Formatter<'comments> {
             UntypedExpr::BinOp {
                 name, left, right, ..
             } => self.bin_op(name, left, right, nest_steps),
-            _ => self.expr(side),
+            UntypedExpr::Int { .. }
+            | UntypedExpr::Float { .. }
+            | UntypedExpr::Block { .. }
+            | UntypedExpr::Var { .. }
+            | UntypedExpr::Fn { .. }
+            | UntypedExpr::List { .. }
+            | UntypedExpr::Call { .. }
+            | UntypedExpr::PipeLine { .. }
+            | UntypedExpr::Case { .. }
+            | UntypedExpr::FieldAccess { .. }
+            | UntypedExpr::Tuple { .. }
+            | UntypedExpr::TupleIndex { .. }
+            | UntypedExpr::Todo { .. }
+            | UntypedExpr::Panic { .. }
+            | UntypedExpr::Echo { .. }
+            | UntypedExpr::BitArray { .. }
+            | UntypedExpr::RecordUpdate { .. }
+            | UntypedExpr::NegateBool { .. }
+            | UntypedExpr::NegateInt { .. } => self.expr(side),
         };
         match side.bin_op_name() {
             // In case the other side is a binary operation as well and it can
@@ -1570,11 +1679,12 @@ impl<'comments> Formatter<'comments> {
 
         for expr in expressions.iter().skip(1) {
             let comments = self.pop_comments(expr.location().start);
-            let doc = match expr {
-                UntypedExpr::Fn { kind, body, .. } if kind.is_capture() => {
-                    self.fn_capture(body, FnCapturePosition::RightHandSideOfPipe)
-                }
-                _ => self.expr(expr),
+            let doc = if let UntypedExpr::Fn { kind, body, .. } = expr
+                && kind.is_capture()
+            {
+                self.fn_capture(body, FnCapturePosition::RightHandSideOfPipe)
+            } else {
+                self.expr(expr)
             };
             let doc = if nest_pipe { doc.nest(INDENT) } else { doc };
             let space = if try_to_keep_on_one_line {
@@ -1730,34 +1840,58 @@ impl<'comments> Formatter<'comments> {
         commented(doc_comments.append(doc).group(), comments)
     }
 
-    pub fn custom_type<'a, A>(&mut self, ct: &'a CustomType<A>) -> Document<'a> {
-        let _ = self.pop_empty_lines(ct.location.end);
+    pub fn custom_type<'a, A>(&mut self, type_: &'a CustomType<A>) -> Document<'a> {
+        let CustomType {
+            location,
+            end_position,
+            name,
+            name_location: _,
+            publicity,
+            constructors,
+            documentation: _,
+            deprecation,
+            opaque,
+            parameters,
+            typed_parameters: _,
+            external_erlang,
+            external_javascript,
+            external_webassembly: _,
+        } = type_;
+
+        let _ = self.pop_empty_lines(location.end);
 
         let attributes = AttributesPrinter::new()
-            .set_deprecation(&ct.deprecation)
-            .set_internal(ct.publicity)
+            .set_deprecation(deprecation)
+            .set_internal(*publicity)
+            .set_external_erlang(external_erlang)
+            .set_external_javascript(external_javascript)
             .to_doc();
 
         let doc = attributes
-            .append(pub_(ct.publicity))
-            .append(if ct.opaque { "opaque type " } else { "type " })
-            .append(if ct.parameters.is_empty() {
-                ct.name.clone().to_doc()
+            .append(pub_(*publicity))
+            .append(if *opaque { "opaque type " } else { "type " })
+            .append(if parameters.is_empty() {
+                name.clone().to_doc()
             } else {
-                let arguments = ct.parameters.iter().map(|(_, e)| e.to_doc()).collect_vec();
-                ct.name
+                let arguments = type_
+                    .parameters
+                    .iter()
+                    .map(|(_, e)| e.to_doc())
+                    .collect_vec();
+                type_
+                    .name
                     .clone()
                     .to_doc()
-                    .append(self.wrap_arguments(arguments, ct.location.end))
+                    .append(self.wrap_arguments(arguments, location.end))
                     .group()
             });
 
-        if ct.constructors.is_empty() {
+        if constructors.is_empty() {
             return doc;
         }
         let doc = doc.append(" {");
 
-        let inner = concat(ct.constructors.iter().map(|c| {
+        let inner = concat(constructors.iter().map(|c| {
             if self.pop_empty_lines(c.location.start) {
                 lines(2)
             } else {
@@ -1767,7 +1901,7 @@ impl<'comments> Formatter<'comments> {
         }));
 
         // Add any trailing comments
-        let inner = match printed_comments(self.pop_comments(ct.end_position), false) {
+        let inner = match printed_comments(self.pop_comments(*end_position), false) {
             Some(comments) => inner.append(line()).append(comments),
             None => inner,
         }
@@ -1836,14 +1970,14 @@ impl<'comments> Formatter<'comments> {
     }
 
     fn tuple_index<'a>(&mut self, tuple: &'a UntypedExpr, index: u64) -> Document<'a> {
-        match tuple {
-            // In case we have a block with a single variable tuple access we
-            // remove that redundat wrapper:
-            //
-            //     {tuple.1}.0 becomes
-            //     tuple.1.0
-            //
-            UntypedExpr::Block { statements, .. } => match statements.as_slice() {
+        // In case we have a block with a single variable tuple access we
+        // remove that redundant wrapper:
+        //
+        //     {tuple.1}.0 becomes
+        //     tuple.1.0
+        //
+        if let UntypedExpr::Block { statements, .. } = tuple {
+            match statements.as_slice() {
                 [Statement::Expression(tuple @ UntypedExpr::TupleIndex { tuple: inner, .. })]
                     // We can't apply this change if the inner thing is a
                     // literal tuple because the compiler cannot currently parse
@@ -1853,8 +1987,9 @@ impl<'comments> Formatter<'comments> {
                     self.expr(tuple)
                 }
                 _ => self.expr(tuple),
-            },
-            _ => self.expr(tuple),
+            }
+        } else {
+            self.expr(tuple)
         }
         .append(".")
         .append(index)
@@ -1882,7 +2017,23 @@ impl<'comments> Formatter<'comments> {
                 ..
             } => " ".to_doc().append(self.block(location, statements, true)),
 
-            _ => break_("", " ").append(self.expr(expr).group()).nest(INDENT),
+            UntypedExpr::Int { .. }
+            | UntypedExpr::Float { .. }
+            | UntypedExpr::String { .. }
+            | UntypedExpr::Var { .. }
+            | UntypedExpr::Call { .. }
+            | UntypedExpr::BinOp { .. }
+            | UntypedExpr::PipeLine { .. }
+            | UntypedExpr::FieldAccess { .. }
+            | UntypedExpr::TupleIndex { .. }
+            | UntypedExpr::Todo { .. }
+            | UntypedExpr::Panic { .. }
+            | UntypedExpr::Echo { .. }
+            | UntypedExpr::RecordUpdate { .. }
+            | UntypedExpr::NegateBool { .. }
+            | UntypedExpr::NegateInt { .. } => {
+                break_("", " ").append(self.expr(expr).group()).nest(INDENT)
+            }
         }
         .next_break_fits(NextBreakFitsMode::Disabled)
         .group()
@@ -1891,7 +2042,26 @@ impl<'comments> Formatter<'comments> {
     fn assigned_value<'a>(&mut self, expr: &'a UntypedExpr) -> Document<'a> {
         match expr {
             UntypedExpr::Case { .. } => " ".to_doc().append(self.expr(expr)).group(),
-            _ => self.case_clause_value(expr),
+            UntypedExpr::Int { .. }
+            | UntypedExpr::Float { .. }
+            | UntypedExpr::String { .. }
+            | UntypedExpr::Block { .. }
+            | UntypedExpr::Var { .. }
+            | UntypedExpr::Fn { .. }
+            | UntypedExpr::List { .. }
+            | UntypedExpr::Call { .. }
+            | UntypedExpr::BinOp { .. }
+            | UntypedExpr::PipeLine { .. }
+            | UntypedExpr::FieldAccess { .. }
+            | UntypedExpr::Tuple { .. }
+            | UntypedExpr::TupleIndex { .. }
+            | UntypedExpr::Todo { .. }
+            | UntypedExpr::Panic { .. }
+            | UntypedExpr::Echo { .. }
+            | UntypedExpr::BitArray { .. }
+            | UntypedExpr::RecordUpdate { .. }
+            | UntypedExpr::NegateBool { .. }
+            | UntypedExpr::NegateInt { .. } => self.case_clause_value(expr),
         }
     }
 
@@ -2249,7 +2419,27 @@ impl<'comments> Formatter<'comments> {
                 let doc = self.pipeline(expressions, true).group();
                 commented(doc, comments)
             }
-            _ => self.expr(expression).group(),
+            UntypedExpr::Int { .. }
+            | UntypedExpr::Float { .. }
+            | UntypedExpr::String { .. }
+            | UntypedExpr::Block { .. }
+            | UntypedExpr::Var { .. }
+            | UntypedExpr::Fn { .. }
+            | UntypedExpr::List { .. }
+            | UntypedExpr::Call { .. }
+            | UntypedExpr::BinOp { .. }
+            | UntypedExpr::PipeLine { .. }
+            | UntypedExpr::Case { .. }
+            | UntypedExpr::FieldAccess { .. }
+            | UntypedExpr::Tuple { .. }
+            | UntypedExpr::TupleIndex { .. }
+            | UntypedExpr::Todo { .. }
+            | UntypedExpr::Panic { .. }
+            | UntypedExpr::Echo { .. }
+            | UntypedExpr::BitArray { .. }
+            | UntypedExpr::RecordUpdate { .. }
+            | UntypedExpr::NegateBool { .. }
+            | UntypedExpr::NegateInt { .. } => self.expr(expression).group(),
         }
     }
 
@@ -2447,69 +2637,12 @@ impl<'comments> Formatter<'comments> {
 
     fn clause_guard<'a>(&mut self, clause_guard: &'a UntypedClauseGuard) -> Document<'a> {
         match clause_guard {
-            ClauseGuard::And { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::And, left, right)
-            }
-            ClauseGuard::Or { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::Or, left, right)
-            }
-            ClauseGuard::Equals { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::Eq, left, right)
-            }
-            ClauseGuard::NotEquals { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::NotEq, left, right)
-            }
-            ClauseGuard::GtInt { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::GtInt, left, right)
-            }
-            ClauseGuard::GtEqInt { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::GtEqInt, left, right)
-            }
-            ClauseGuard::LtInt { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::LtInt, left, right)
-            }
-            ClauseGuard::LtEqInt { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::LtEqInt, left, right)
-            }
-            ClauseGuard::GtFloat { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::GtFloat, left, right)
-            }
-            ClauseGuard::GtEqFloat { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::GtEqFloat, left, right)
-            }
-            ClauseGuard::LtFloat { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::LtFloat, left, right)
-            }
-            ClauseGuard::LtEqFloat { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::LtEqFloat, left, right)
-            }
-            ClauseGuard::AddInt { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::AddInt, left, right)
-            }
-            ClauseGuard::AddFloat { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::AddFloat, left, right)
-            }
-            ClauseGuard::SubInt { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::SubInt, left, right)
-            }
-            ClauseGuard::SubFloat { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::SubFloat, left, right)
-            }
-            ClauseGuard::MultInt { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::MultInt, left, right)
-            }
-            ClauseGuard::MultFloat { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::MultFloat, left, right)
-            }
-            ClauseGuard::DivInt { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::DivInt, left, right)
-            }
-            ClauseGuard::DivFloat { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::DivFloat, left, right)
-            }
-            ClauseGuard::RemainderInt { left, right, .. } => {
-                self.clause_guard_bin_op(&BinOp::RemainderInt, left, right)
-            }
+            ClauseGuard::BinaryOperator {
+                operator,
+                left,
+                right,
+                ..
+            } => self.clause_guard_bin_op(operator, left, right),
 
             ClauseGuard::Var { name, .. } => name.to_doc(),
 
@@ -2547,7 +2680,25 @@ impl<'comments> Formatter<'comments> {
         match expr {
             UntypedExpr::NegateBool { value, .. } => self.expr(value),
             UntypedExpr::BinOp { .. } => "!".to_doc().append(wrap_block(self.expr(expr))),
-            _ => docvec!["!", self.expr(expr)],
+            UntypedExpr::Int { .. }
+            | UntypedExpr::Float { .. }
+            | UntypedExpr::String { .. }
+            | UntypedExpr::Block { .. }
+            | UntypedExpr::Var { .. }
+            | UntypedExpr::Fn { .. }
+            | UntypedExpr::List { .. }
+            | UntypedExpr::Call { .. }
+            | UntypedExpr::PipeLine { .. }
+            | UntypedExpr::Case { .. }
+            | UntypedExpr::FieldAccess { .. }
+            | UntypedExpr::Tuple { .. }
+            | UntypedExpr::TupleIndex { .. }
+            | UntypedExpr::Todo { .. }
+            | UntypedExpr::Panic { .. }
+            | UntypedExpr::Echo { .. }
+            | UntypedExpr::BitArray { .. }
+            | UntypedExpr::RecordUpdate { .. }
+            | UntypedExpr::NegateInt { .. } => docvec!["!", self.expr(expr)],
         }
     }
 
@@ -2557,7 +2708,25 @@ impl<'comments> Formatter<'comments> {
             UntypedExpr::Int { value, .. } if value.starts_with('-') => self.int(&value[1..]),
             UntypedExpr::BinOp { .. } => "- ".to_doc().append(self.expr(expr)),
 
-            _ => docvec!["-", self.expr(expr)],
+            UntypedExpr::Int { .. }
+            | UntypedExpr::Float { .. }
+            | UntypedExpr::String { .. }
+            | UntypedExpr::Block { .. }
+            | UntypedExpr::Var { .. }
+            | UntypedExpr::Fn { .. }
+            | UntypedExpr::List { .. }
+            | UntypedExpr::Call { .. }
+            | UntypedExpr::PipeLine { .. }
+            | UntypedExpr::Case { .. }
+            | UntypedExpr::FieldAccess { .. }
+            | UntypedExpr::Tuple { .. }
+            | UntypedExpr::TupleIndex { .. }
+            | UntypedExpr::Todo { .. }
+            | UntypedExpr::Panic { .. }
+            | UntypedExpr::Echo { .. }
+            | UntypedExpr::BitArray { .. }
+            | UntypedExpr::RecordUpdate { .. }
+            | UntypedExpr::NegateBool { .. } => docvec!["-", self.expr(expr)],
         }
     }
 
@@ -3100,6 +3269,7 @@ impl<'a> Documentable<'a> for &'a BinOp {
 }
 
 #[allow(clippy::enum_variant_names)]
+#[derive(Debug)]
 /// This is used to determine how to fit the items of a list, or the segments of
 /// a bit array in a line.
 ///
@@ -3343,7 +3513,21 @@ fn is_breakable_argument(expr: &UntypedExpr, arity: usize) -> bool {
         | UntypedExpr::List { .. }
         | UntypedExpr::Tuple { .. }
         | UntypedExpr::BitArray { .. } => true,
-        _ => false,
+
+        UntypedExpr::Int { .. }
+        | UntypedExpr::Float { .. }
+        | UntypedExpr::String { .. }
+        | UntypedExpr::Var { .. }
+        | UntypedExpr::BinOp { .. }
+        | UntypedExpr::PipeLine { .. }
+        | UntypedExpr::FieldAccess { .. }
+        | UntypedExpr::TupleIndex { .. }
+        | UntypedExpr::Todo { .. }
+        | UntypedExpr::Panic { .. }
+        | UntypedExpr::Echo { .. }
+        | UntypedExpr::RecordUpdate { .. }
+        | UntypedExpr::NegateBool { .. }
+        | UntypedExpr::NegateInt { .. } => false,
     }
 }
 

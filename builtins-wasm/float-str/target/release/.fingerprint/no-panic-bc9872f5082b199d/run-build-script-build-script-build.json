@@ -1,0 +1,1 @@
+{"rustc":18276270781310494267,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[3976439716901394587,"build_script_build",false,11387991113715791317]],"local":[{"RerunIfChanged":{"output":"release/build/no-panic-bc9872f5082b199d/output","paths":["build.rs"]}}],"rustflags":[],"config":0,"compile_kind":0}

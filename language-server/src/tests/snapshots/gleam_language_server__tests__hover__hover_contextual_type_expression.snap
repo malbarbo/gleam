@@ -1,0 +1,18 @@
+---
+source: language-server/src/tests/hover.rs
+expression: "\nimport wibble/wobble\n\npub fn main() {\n  let wibble = wobble.Wibble\n}\n"
+---
+import wibble/wobble
+
+pub fn main() {
+  let wibble = wobble.Wibble
+               ▔▔▔▔▔▔▔▔▔▔▔↑▔
+}
+
+
+----- Hover content (markdown) -----
+```gleam
+wobble.Wibble
+```
+
+View on [HexDocs](https://hexdocs.pm/hex/wibble/wobble.html#Wibble)

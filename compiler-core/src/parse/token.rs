@@ -57,7 +57,7 @@ pub enum Token {
     LessEqualDot,    // '<=.'
     GreaterEqualDot, // '>=.'
     // String Operators
-    LtGt, // '<>'
+    Concatenate, // '<>'
     // Other Punctuation
     Colon,
     Comma,
@@ -125,11 +125,65 @@ impl Token {
             | Self::GreaterEqualDot
             | Self::GreaterDot => Some(4),
 
-            Self::Plus | Self::PlusDot | Self::Minus | Self::MinusDot => Some(5),
+            Self::Concatenate => Some(5),
 
-            Self::Star | Self::StarDot | Self::Slash | Self::SlashDot | Self::Percent => Some(6),
+            Self::Plus | Self::PlusDot | Self::Minus | Self::MinusDot => Some(6),
 
-            _ => None,
+            Self::Star | Self::StarDot | Self::Slash | Self::SlashDot | Self::Percent => Some(7),
+
+            Self::Name { .. }
+            | Self::UpName { .. }
+            | Self::DiscardName { .. }
+            | Self::Int { .. }
+            | Self::Float { .. }
+            | Self::String { .. }
+            | Self::CommentDoc { .. }
+            | Self::LeftParen
+            | Self::RightParen
+            | Self::LeftSquare
+            | Self::RightSquare
+            | Self::LeftBrace
+            | Self::RightBrace
+            | Self::Colon
+            | Self::Comma
+            | Self::Hash
+            | Self::Bang
+            | Self::Equal
+            | Self::Vbar
+            | Self::LtLt
+            | Self::GtGt
+            | Self::Pipe
+            | Self::Dot
+            | Self::RArrow
+            | Self::LArrow
+            | Self::DotDot
+            | Self::At
+            | Self::EndOfFile
+            | Self::CommentNormal
+            | Self::CommentModule
+            | Self::NewLine
+            | Self::As
+            | Self::Assert
+            | Self::Auto
+            | Self::Case
+            | Self::Const
+            | Self::Delegate
+            | Self::Derive
+            | Self::Echo
+            | Self::Else
+            | Self::Fn
+            | Self::If
+            | Self::Implement
+            | Self::Import
+            | Self::Let
+            | Self::Macro
+            | Self::Opaque
+            | Self::Panic
+            | Self::Pub
+            | Self::Test
+            | Self::Todo
+            | Self::Type
+            | Self::Use => None,
         }
     }
 
@@ -188,7 +242,7 @@ impl Token {
             | Token::GreaterDot
             | Token::LessEqualDot
             | Token::GreaterEqualDot
-            | Token::LtGt
+            | Token::Concatenate
             | Token::Colon
             | Token::Comma
             | Token::Hash
@@ -272,7 +326,7 @@ impl fmt::Display for Token {
             Token::LessEqual => "<=",
             Token::LessEqualDot => "<=.",
             Token::Let => "let",
-            Token::LtGt => "<>",
+            Token::Concatenate => "<>",
             Token::LtLt => "<<",
             Token::Macro => "macro",
             Token::Minus => "-",

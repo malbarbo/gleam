@@ -1,0 +1,17 @@
+[package]
+name = "builtins-float-parse"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fast-float2 = { path = "../../../fast-float-rust", default-features = false, features = ["no-panic"] }
+no-panic = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[workspace]

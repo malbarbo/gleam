@@ -762,14 +762,25 @@ fn const_string_concatenate_argument<'a>(
                 literal: Constant::StringConcatenation { left, right, .. },
                 ..
             } => const_string_concatenate_inner(left, right, env),
-            _ => const_inline(value, env),
+            ValueConstructorVariant::LocalVariable { .. }
+            | ValueConstructorVariant::ModuleConstant { .. }
+            | ValueConstructorVariant::ModuleFn { .. }
+            | ValueConstructorVariant::Record { .. } => const_inline(value, env),
         },
 
         Constant::StringConcatenation { left, right, .. } => {
             const_string_concatenate_inner(left, right, env)
         }
 
-        _ => const_inline(value, env),
+        Constant::Int { .. }
+        | Constant::Float { .. }
+        | Constant::Tuple { .. }
+        | Constant::List { .. }
+        | Constant::Record { .. }
+        | Constant::RecordUpdate { .. }
+        | Constant::BitArray { .. }
+        | Constant::Var { .. }
+        | Constant::Invalid { .. } => const_inline(value, env),
     }
 }
 
@@ -814,7 +825,29 @@ fn string_concatenate_argument<'a>(value: &'a TypedExpr, env: &mut Env<'a>) -> D
             ..
         } => docvec![expr(value, env), "/binary"],
 
-        _ => docvec!["(", maybe_block_expr(value, env), ")/binary"],
+        TypedExpr::Int { .. }
+        | TypedExpr::Float { .. }
+        | TypedExpr::Block { .. }
+        | TypedExpr::Pipeline { .. }
+        | TypedExpr::Var { .. }
+        | TypedExpr::Fn { .. }
+        | TypedExpr::List { .. }
+        | TypedExpr::Call { .. }
+        | TypedExpr::BinOp { .. }
+        | TypedExpr::Case { .. }
+        | TypedExpr::RecordAccess { .. }
+        | TypedExpr::PositionalAccess { .. }
+        | TypedExpr::ModuleSelect { .. }
+        | TypedExpr::Tuple { .. }
+        | TypedExpr::TupleIndex { .. }
+        | TypedExpr::Todo { .. }
+        | TypedExpr::Panic { .. }
+        | TypedExpr::Echo { .. }
+        | TypedExpr::BitArray { .. }
+        | TypedExpr::RecordUpdate { .. }
+        | TypedExpr::NegateBool { .. }
+        | TypedExpr::NegateInt { .. }
+        | TypedExpr::Invalid { .. } => docvec!["(", maybe_block_expr(value, env), ")/binary"],
     }
 }
 
@@ -843,16 +876,25 @@ fn const_segment<'a>(
             }
 
             // Wrap anything else in parentheses
-            value => const_inline(value, env).surround("(", ")"),
+            Constant::Tuple { .. }
+            | Constant::List { .. }
+            | Constant::Record { .. }
+            | Constant::RecordUpdate { .. }
+            | Constant::Var { .. }
+            | Constant::StringConcatenation { .. }
+            | Constant::Invalid { .. } => const_inline(value, env).surround("(", ")"),
         }
     };
 
-    let size = |value: &'a TypedConstant, env: &mut Env<'a>| match value {
-        Constant::Int { .. } => Some(":".to_doc().append(const_inline(value, env))),
-        _ => Some(
-            ":".to_doc()
-                .append(const_inline(value, env).surround("(", ")")),
-        ),
+    let size = |value: &'a TypedConstant, env: &mut Env<'a>| {
+        if let Constant::Int { .. } = value {
+            Some(":".to_doc().append(const_inline(value, env)))
+        } else {
+            Some(
+                ":".to_doc()
+                    .append(const_inline(value, env).surround("(", ")")),
+            )
+        }
     };
 
     let unit = |value: &'a u8| Some(eco_format!("unit:{value}").to_doc());
@@ -905,18 +947,34 @@ fn expr_segment<'a>(
             | TypedExpr::BitArray { .. } => expr(value, env),
 
             // Wrap anything else in parentheses
-            value => expr(value, env).surround("(", ")"),
+            TypedExpr::Block { .. }
+            | TypedExpr::Pipeline { .. }
+            | TypedExpr::Fn { .. }
+            | TypedExpr::List { .. }
+            | TypedExpr::Call { .. }
+            | TypedExpr::BinOp { .. }
+            | TypedExpr::Case { .. }
+            | TypedExpr::RecordAccess { .. }
+            | TypedExpr::PositionalAccess { .. }
+            | TypedExpr::ModuleSelect { .. }
+            | TypedExpr::Tuple { .. }
+            | TypedExpr::TupleIndex { .. }
+            | TypedExpr::Todo { .. }
+            | TypedExpr::Panic { .. }
+            | TypedExpr::Echo { .. }
+            | TypedExpr::RecordUpdate { .. }
+            | TypedExpr::NegateBool { .. }
+            | TypedExpr::NegateInt { .. }
+            | TypedExpr::Invalid { .. } => expr(value, env).surround("(", ")"),
         }
     };
 
-    let size = |expression: &'a TypedExpr, env: &mut Env<'a>| match expression {
-        TypedExpr::Int { value, .. } => {
+    let size = |expression: &'a TypedExpr, env: &mut Env<'a>| {
+        if let TypedExpr::Int { value, .. } = expression {
             let v = value.replace("_", "");
             let v = u64::from_str(&v).unwrap_or(0);
             Some(eco_format!(":{v}").to_doc())
-        }
-
-        _ => {
+        } else {
             let inner_expr = maybe_block_expr(expression, env).surround("(", ")");
             // The value of size must be a non-negative integer, we use lists:max here to ensure
             // it is at least 0;
@@ -1055,8 +1113,10 @@ fn statement_sequence<'a>(statements: &'a [TypedStatement], env: &mut Env<'a>) -
 }
 
 fn float_div<'a>(left: &'a TypedExpr, right: &'a TypedExpr, env: &mut Env<'a>) -> Document<'a> {
-    if right.non_zero_compile_time_number() {
+    if right.is_non_zero_compile_time_number() {
         return binop_exprs(left, "/", right, env);
+    } else if right.is_zero_compile_time_number() {
+        return "+0.0".to_doc();
     }
 
     let left = expr(left, env);
@@ -1081,13 +1141,13 @@ fn int_div<'a>(
     op: &'static str,
     env: &mut Env<'a>,
 ) -> Document<'a> {
-    if right.non_zero_compile_time_number() {
+    if right.is_non_zero_compile_time_number() {
         return binop_exprs(left, op, right, env);
     }
 
     // If we have a constant value divided by zero then it's safe to replace it
     // directly with 0.
-    if left.is_literal() && right.zero_compile_time_number() {
+    if left.is_literal() && right.is_zero_compile_time_number() {
         return "0".to_doc();
     }
 
@@ -1141,13 +1201,15 @@ fn binop_exprs<'a>(
     right: &'a TypedExpr,
     env: &mut Env<'a>,
 ) -> Document<'a> {
-    let left = match left {
-        TypedExpr::BinOp { .. } => expr(left, env).surround("(", ")"),
-        _ => maybe_block_expr(left, env),
+    let left = if let TypedExpr::BinOp { .. } = left {
+        expr(left, env).surround("(", ")")
+    } else {
+        maybe_block_expr(left, env)
     };
-    let right = match right {
-        TypedExpr::BinOp { .. } => expr(right, env).surround("(", ")"),
-        _ => maybe_block_expr(right, env),
+    let right = if let TypedExpr::BinOp { .. } = right {
+        expr(right, env).surround("(", ")")
+    } else {
+        maybe_block_expr(right, env)
     };
     binop_documents(left, op, right)
 }
@@ -1416,13 +1478,14 @@ fn var<'a>(name: &'a str, constructor: &'a ValueConstructor, env: &mut Env<'a>) 
                     .append(chars)
                     .append("} end")
             }
-            _ => atom_string(to_snake_case(record_name)),
+            Type::Named { .. } | Type::Var { .. } | Type::Tuple { .. } => {
+                atom_string(to_snake_case(record_name))
+            }
         },
 
         ValueConstructorVariant::LocalVariable { .. } => env.local_var_name(name),
 
-        ValueConstructorVariant::ModuleConstant { literal, .. }
-        | ValueConstructorVariant::LocalConstant { literal } => const_inline(literal, env),
+        ValueConstructorVariant::ModuleConstant { literal, .. } => const_inline(literal, env),
 
         ValueConstructorVariant::ModuleFn {
             arity,
@@ -1502,15 +1565,18 @@ fn const_inline<'a>(literal: &'a TypedConstant, env: &mut Env<'a>) -> Document<'
             ..
         } if arguments.is_empty() => match type_.deref() {
             Type::Fn { arguments, .. } => record_constructor_function(tag, arguments.len()),
-            _ => atom_string(to_snake_case(tag)),
+            Type::Named { .. } | Type::Var { .. } | Type::Tuple { .. } => {
+                atom_string(to_snake_case(tag))
+            }
         },
 
         Constant::Record { tag, arguments, .. } => {
-            let arguments = arguments
+            // Record updates are fully expanded during type checking, so we just handle arguments
+            let arguments_doc = arguments
                 .iter()
                 .map(|argument| const_inline(&argument.value, env));
             let tag = atom_string(to_snake_case(tag));
-            tuple(std::iter::once(tag).chain(arguments))
+            tuple(std::iter::once(tag).chain(arguments_doc))
         }
 
         Constant::Var {
@@ -1527,6 +1593,7 @@ fn const_inline<'a>(literal: &'a TypedConstant, env: &mut Env<'a>) -> Document<'
             const_string_concatenate(left, right, env)
         }
 
+        Constant::RecordUpdate { .. } => panic!("record updates should not reach code generation"),
         Constant::Invalid { .. } => panic!("invalid constants should not reach code generation"),
     }
 }
@@ -1623,9 +1690,10 @@ fn clause_consequence<'a>(
         .append(separator)
     };
 
-    let consequence = match consequence {
-        TypedExpr::Block { statements, .. } => statement_sequence(statements, env),
-        _ => expr(consequence, env),
+    let consequence = if let TypedExpr::Block { statements, .. } = consequence {
+        statement_sequence(statements, env)
+    } else {
+        expr(consequence, env)
     };
     assignment_doc.append(consequence)
 }
@@ -1668,89 +1736,37 @@ fn bare_clause_guard<'a>(
             docvec!["not ", bare_clause_guard(expression, env, assignments)]
         }
 
-        ClauseGuard::Or { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" orelse ")
-            .append(clause_guard(right, env, assignments)),
+        ClauseGuard::BinaryOperator {
+            operator,
+            left,
+            right,
+            ..
+        } => {
+            let left_document = clause_guard(left, env, assignments);
+            let right_document = clause_guard(right, env, assignments);
 
-        ClauseGuard::And { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" andalso ")
-            .append(clause_guard(right, env, assignments)),
+            let operator = match operator {
+                BinOp::Or => "orelse",
+                BinOp::And => "andalso",
+                BinOp::Eq => "=:=",
+                BinOp::NotEq => "=/=",
+                BinOp::GtInt | BinOp::GtFloat => ">",
+                BinOp::GtEqInt | BinOp::GtEqFloat => ">=",
+                BinOp::LtInt | BinOp::LtFloat => "<",
+                BinOp::LtEqInt | BinOp::LtEqFloat => "=<",
+                BinOp::AddInt | BinOp::AddFloat => "+",
+                BinOp::SubInt | BinOp::SubFloat => "-",
+                BinOp::MultInt | BinOp::MultFloat => "*",
+                BinOp::DivFloat => "/",
+                BinOp::DivInt => "div",
+                BinOp::RemainderInt => "rem",
+                BinOp::Concatenate => {
+                    return clause_guard_string_concatenate(left, right, env, assignments);
+                }
+            };
 
-        ClauseGuard::Equals { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" =:= ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::NotEquals { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" =/= ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::GtInt { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" > ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::GtEqInt { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" >= ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::LtInt { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" < ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::LtEqInt { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" =< ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::GtFloat { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" > ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::GtEqFloat { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" >= ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::LtFloat { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" < ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::LtEqFloat { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" =< ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::AddInt { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" + ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::AddFloat { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" + ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::SubInt { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" - ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::SubFloat { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" - ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::MultInt { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" * ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::MultFloat { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" * ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::DivInt { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" div ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::DivFloat { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" / ")
-            .append(clause_guard(right, env, assignments)),
-
-        ClauseGuard::RemainderInt { left, right, .. } => clause_guard(left, env, assignments)
-            .append(" rem ")
-            .append(clause_guard(right, env, assignments)),
+            docvec![left_document, " ", operator, " ", right_document]
+        }
 
         // Only local variables are supported and the typer ensures that all
         // ClauseGuard::Vars are local variables
@@ -1777,6 +1793,74 @@ fn bare_clause_guard<'a>(
     }
 }
 
+fn clause_guard_string_concatenate<'a>(
+    left: &'a TypedClauseGuard,
+    right: &'a TypedClauseGuard,
+    env: &mut Env<'a>,
+    assignments: &HashMap<EcoString, &StringPatternAssignment<'a>>,
+) -> Document<'a> {
+    let left = clause_guard_string_concatenate_argument(left, env, assignments);
+    let right = clause_guard_string_concatenate_argument(right, env, assignments);
+    bit_array([left, right])
+}
+
+fn clause_guard_string_concatenate_argument<'a>(
+    guard: &'a TypedClauseGuard,
+    env: &mut Env<'a>,
+    assignments: &HashMap<EcoString, &StringPatternAssignment<'a>>,
+) -> Document<'a> {
+    match guard {
+        ClauseGuard::Constant(Constant::String { value, .. }) => {
+            docvec!['"', string_inner(value), "\"/utf8"]
+        }
+
+        ClauseGuard::Constant(Constant::StringConcatenation { left, right, .. }) => {
+            const_string_concatenate_inner(left, right, env)
+        }
+
+        ClauseGuard::ModuleSelect { literal, .. } => match literal {
+            Constant::String { value, .. } => docvec!['"', string_inner(value), "\"/utf8"],
+            Constant::StringConcatenation { left, right, .. } => {
+                const_string_concatenate_inner(left, right, env)
+            }
+            Constant::Int { .. }
+            | Constant::Float { .. }
+            | Constant::Tuple { .. }
+            | Constant::List { .. }
+            | Constant::Record { .. }
+            | Constant::RecordUpdate { .. }
+            | Constant::BitArray { .. }
+            | Constant::Var { .. }
+            | Constant::Invalid { .. } => docvec!["(", const_inline(literal, env), ")/binary"],
+        },
+
+        ClauseGuard::Var { name, .. } => assignments
+            .get(name)
+            .map(|assignment| docvec![assignment.literal_value.clone(), "/binary"])
+            .unwrap_or_else(|| docvec![env.local_var_name(name), "/binary"]),
+
+        ClauseGuard::BinaryOperator {
+            operator: BinOp::Concatenate,
+            left,
+            right,
+            ..
+        } => docvec![
+            clause_guard_string_concatenate(left, right, env, assignments),
+            "/binary"
+        ],
+
+        ClauseGuard::Block { .. }
+        | ClauseGuard::BinaryOperator { .. }
+        | ClauseGuard::Not { .. }
+        | ClauseGuard::TupleIndex { .. }
+        | ClauseGuard::FieldAccess { .. }
+        | ClauseGuard::Constant(_) => docvec![
+            clause_guard(guard, env, assignments).surround("(", ")"),
+            "/binary"
+        ],
+    }
+}
+
 fn tuple_index_inline<'a>(
     tuple: &'a TypedClauseGuard,
     index: u64,
@@ -1796,27 +1880,7 @@ fn clause_guard<'a>(
 ) -> Document<'a> {
     match guard {
         // Binary operators are wrapped in parens
-        ClauseGuard::Or { .. }
-        | ClauseGuard::And { .. }
-        | ClauseGuard::Equals { .. }
-        | ClauseGuard::NotEquals { .. }
-        | ClauseGuard::GtInt { .. }
-        | ClauseGuard::GtEqInt { .. }
-        | ClauseGuard::LtInt { .. }
-        | ClauseGuard::LtEqInt { .. }
-        | ClauseGuard::GtFloat { .. }
-        | ClauseGuard::GtEqFloat { .. }
-        | ClauseGuard::LtFloat { .. }
-        | ClauseGuard::LtEqFloat { .. }
-        | ClauseGuard::AddInt { .. }
-        | ClauseGuard::AddFloat { .. }
-        | ClauseGuard::SubInt { .. }
-        | ClauseGuard::SubFloat { .. }
-        | ClauseGuard::MultInt { .. }
-        | ClauseGuard::MultFloat { .. }
-        | ClauseGuard::DivInt { .. }
-        | ClauseGuard::DivFloat { .. }
-        | ClauseGuard::RemainderInt { .. } => "("
+        ClauseGuard::BinaryOperator { .. } => "("
             .to_doc()
             .append(bare_clause_guard(guard, env, assignments))
             .append(")"),
@@ -1955,7 +2019,9 @@ fn docs_arguments_call<'a>(
             | ValueConstructorVariant::ModuleFn { module, name, .. } => {
                 module_fn_with_arguments(module, name, arguments, env)
             }
-            _ => {
+            ValueConstructorVariant::LocalVariable { .. }
+            | ValueConstructorVariant::ModuleConstant { .. }
+            | ValueConstructorVariant::Record { .. } => {
                 unreachable!("The above clause guard ensures that this is a module fn")
             }
         },
@@ -1994,11 +2060,12 @@ fn docs_arguments_call<'a>(
             {
                 let mut merged_arguments = Vec::with_capacity(inner_arguments.len());
                 for arg in inner_arguments {
-                    match &arg.value {
-                        TypedExpr::Var { name, .. } if name == CAPTURE_VARIABLE => {
-                            merged_arguments.push(arguments.swap_remove(0))
-                        }
-                        e => merged_arguments.push(maybe_block_expr(e, env)),
+                    if let TypedExpr::Var { name, .. } = &arg.value
+                        && name == CAPTURE_VARIABLE
+                    {
+                        merged_arguments.push(arguments.swap_remove(0))
+                    } else {
+                        merged_arguments.push(maybe_block_expr(&arg.value, env))
                     }
                 }
                 docs_arguments_call(fun, merged_arguments, env)
@@ -2017,9 +2084,26 @@ fn docs_arguments_call<'a>(
             expr(fun, env).surround("(", ")").append(arguments)
         }
 
-        other => {
+        TypedExpr::Int { .. }
+        | TypedExpr::Float { .. }
+        | TypedExpr::String { .. }
+        | TypedExpr::Block { .. }
+        | TypedExpr::Pipeline { .. }
+        | TypedExpr::Var { .. }
+        | TypedExpr::List { .. }
+        | TypedExpr::BinOp { .. }
+        | TypedExpr::Case { .. }
+        | TypedExpr::PositionalAccess { .. }
+        | TypedExpr::ModuleSelect { .. }
+        | TypedExpr::Tuple { .. }
+        | TypedExpr::Echo { .. }
+        | TypedExpr::BitArray { .. }
+        | TypedExpr::RecordUpdate { .. }
+        | TypedExpr::NegateBool { .. }
+        | TypedExpr::NegateInt { .. }
+        | TypedExpr::Invalid { .. } => {
             let arguments = wrap_arguments(arguments);
-            maybe_block_expr(other, env).append(arguments)
+            maybe_block_expr(fun, env).append(arguments)
         }
     }
 }
@@ -2080,6 +2164,7 @@ fn needs_begin_end_wrapping(expression: &TypedExpr) -> bool {
         | TypedExpr::BinOp { .. }
         | TypedExpr::Case { .. }
         | TypedExpr::RecordAccess { .. }
+        | TypedExpr::PositionalAccess { .. }
         | TypedExpr::Block { .. }
         | TypedExpr::ModuleSelect { .. }
         | TypedExpr::Tuple { .. }
@@ -2254,6 +2339,7 @@ fn expr<'a>(expression: &'a TypedExpr, env: &mut Env<'a>) -> Document<'a> {
         } => module_select_fn(type_.clone(), module, name),
 
         TypedExpr::RecordAccess { record, index, .. } => tuple_index(record, index + 1, env),
+        TypedExpr::PositionalAccess { record, index, .. } => tuple_index(record, index + 1, env),
 
         TypedExpr::RecordUpdate {
             record_assignment,
@@ -2311,46 +2397,47 @@ fn pipeline<'a>(
 
     let mut prev_local_var_name = None;
     for a in all_assignments {
-        match a.value.as_ref() {
-            // An echo in a pipeline won't result in an assignment, instead it
-            // just prints the previous variable assigned in the pipeline.
-            TypedExpr::Echo {
-                expression: None,
-                message,
-                location,
-                ..
-            } => documents.push(echo_doc(
+        // An echo in a pipeline won't result in an assignment, instead it
+        // just prints the previous variable assigned in the pipeline.
+        if let TypedExpr::Echo {
+            expression: None,
+            message,
+            location,
+            ..
+        } = a.value.as_ref()
+        {
+            documents.push(echo_doc(
                 &prev_local_var_name,
                 message.as_deref(),
                 location,
                 env,
-            )),
-
+            ))
+        } else {
             // Otherwise we assign the intermediate pipe value to a variable.
-            _ => {
-                let body = maybe_block_expr(&a.value, env).group();
-                let name = env.next_local_var_name(&a.name);
-                prev_local_var_name = Some(name.clone());
-                documents.push(docvec![name, " = ", body]);
-            }
+            let body = maybe_block_expr(&a.value, env).group();
+            let name = env.next_local_var_name(&a.name);
+            prev_local_var_name = Some(name.clone());
+            documents.push(docvec![name, " = ", body]);
         };
         documents.push(",".to_doc());
         documents.push(line());
     }
 
-    match finally {
-        TypedExpr::Echo {
-            expression: None,
-            message,
-            location,
-            ..
-        } => documents.push(echo_doc(
+    if let TypedExpr::Echo {
+        expression: None,
+        message,
+        location,
+        ..
+    } = finally
+    {
+        documents.push(echo_doc(
             &prev_local_var_name,
             message.as_deref(),
             location,
             env,
-        )),
-        _ => documents.push(expr(finally, env)),
+        ))
+    } else {
+        documents.push(expr(finally, env))
     }
 
     env.current_scope_vars = vars;
@@ -2455,7 +2542,28 @@ fn assert<'a>(assert: &'a TypedAssert, env: &mut Env<'a>) -> Document<'a> {
             )
         }
 
-        _ => (
+        TypedExpr::Int { .. }
+        | TypedExpr::Float { .. }
+        | TypedExpr::String { .. }
+        | TypedExpr::Block { .. }
+        | TypedExpr::Pipeline { .. }
+        | TypedExpr::Var { .. }
+        | TypedExpr::Fn { .. }
+        | TypedExpr::List { .. }
+        | TypedExpr::Case { .. }
+        | TypedExpr::RecordAccess { .. }
+        | TypedExpr::PositionalAccess { .. }
+        | TypedExpr::ModuleSelect { .. }
+        | TypedExpr::Tuple { .. }
+        | TypedExpr::TupleIndex { .. }
+        | TypedExpr::Todo { .. }
+        | TypedExpr::Panic { .. }
+        | TypedExpr::Echo { .. }
+        | TypedExpr::BitArray { .. }
+        | TypedExpr::RecordUpdate { .. }
+        | TypedExpr::NegateBool { .. }
+        | TypedExpr::NegateInt { .. }
+        | TypedExpr::Invalid { .. } => (
             maybe_block_expr(value, env),
             vec![
                 ("kind", atom("expression")),
@@ -2789,7 +2897,7 @@ fn module_select_fn<'a>(type_: Arc<Type>, module_name: &'a str, label: &'a str) 
     match crate::type_::collapse_links(type_).as_ref() {
         Type::Fn { arguments, .. } => function_reference(Some(module_name), label, arguments.len()),
 
-        _ => module_name_atom(module_name)
+        Type::Named { .. } | Type::Var { .. } | Type::Tuple { .. } => module_name_atom(module_name)
             .append(":")
             .append(atom(label))
             .append("()"),
@@ -3247,6 +3355,9 @@ fn find_referenced_private_functions(
 ) {
     match constant {
         Constant::Invalid { .. } => panic!("invalid constants should not reach code generation"),
+        Constant::RecordUpdate { .. } => {
+            panic!("record updates should not reach code generation")
+        }
 
         Constant::Int { .. }
         | Constant::Float { .. }

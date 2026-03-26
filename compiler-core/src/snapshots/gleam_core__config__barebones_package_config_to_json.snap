@@ -1,8 +1,6 @@
 ---
 source: compiler-core/src/config.rs
-assertion_line: 1187
 expression: output
-snapshot_kind: text
 ---
 --- GLEAM.TOML
 
@@ -22,7 +20,7 @@ version = "1.0.0"
     "pages": []
   },
   "dependencies": {},
-  "dev-dependencies": {},
+  "dev_dependencies": {},
   "repository": null,
   "links": [],
   "erlang": {
@@ -48,5 +46,6 @@ version = "1.0.0"
     }
   },
   "target": "erlang",
-  "internal_modules": null
+  "internal_modules": null,
+  "tools": {}
 }

@@ -1,0 +1,16 @@
+[package]
+name = "builtins-float-str"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dtoa = { version = "1.0.11", features = ["no-panic"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[workspace]

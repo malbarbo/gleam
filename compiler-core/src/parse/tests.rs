@@ -1472,6 +1472,17 @@ case my_string {
 }
 
 #[test]
+fn string_concatenation_in_case_clause_guard() {
+    assert_parse!(
+        r#"
+let my_string = "hello "
+case my_string {
+    _ if my_string <> "world" == "hello world" -> io.debug("ok")
+}"#
+    );
+}
+
+#[test]
 fn invalid_label_shorthand() {
     assert_module_error!(
         "
@@ -2016,6 +2027,66 @@ fn wrong_type_of_comments_with_hash() {
 pub fn main() {
   # a python-style comment
 }
+"#
+    );
+}
+
+#[test]
+fn wrong_function_return_type_declaration_using_colon_instead_of_right_arrow() {
+    assert_module_error!(
+        r#"
+pub fn main(): Nil {}
+        "#
+    );
+}
+
+#[test]
+fn const_record_update_basic() {
+    assert_parse_module!(
+        r#"
+type Person {
+  Person(name: String, age: Int)
+}
+
+const alice = Person("Alice", 30)
+const bob = Person(..alice, name: "Bob")
+"#
+    );
+}
+
+#[test]
+fn const_record_update_all_fields() {
+    assert_parse_module!(
+        r#"
+type Person {
+  Person(name: String, age: Int, city: String)
+}
+
+const base = Person("Alice", 30, "London")
+const updated = Person(..base, name: "Bob", age: 25, city: "Paris")
+"#
+    );
+}
+
+#[test]
+fn const_record_update_only() {
+    assert_parse_module!(
+        r#"
+type Person {
+  Person(name: String, age: Int)
+}
+
+const alice = Person("Alice", 30)
+const bob = Person(..alice)
+"#
+    );
+}
+
+#[test]
+fn const_record_update_with_module() {
+    assert_parse_module!(
+        r#"
+const local_const = other.Record(..other.base, field: value)
 "#
     );
 }

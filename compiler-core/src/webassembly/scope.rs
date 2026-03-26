@@ -213,12 +213,10 @@ impl Locals {
         left: &TypedClauseGuard,
         right: &TypedClauseGuard,
     ) {
-        if !left.is_var() {
+        if !matches!(left, ClauseGuard::Var { .. }) {
             self._insert(generator, left, &left.type_(), "div_left", left.location());
-        } else {
-            // use var name
         }
-        if !right.is_var() {
+        if !matches!(right, ClauseGuard::Var { .. }) {
             self._insert(
                 generator,
                 right,
@@ -226,8 +224,6 @@ impl Locals {
                 "div_right",
                 right.location(),
             );
-        } else {
-            // use var name
         }
     }
 
@@ -237,12 +233,12 @@ impl Locals {
         left: &TypedClauseGuard,
         right: &TypedClauseGuard,
     ) -> (u32, u32) {
-        let left = if let Some(name) = left.var_name() {
+        let left = if let ClauseGuard::Var { name, .. } = left {
             scope.find_expect(name).index
         } else {
             self._get(left)
         };
-        let right = if let Some(name) = right.var_name() {
+        let right = if let ClauseGuard::Var { name, .. } = right {
             scope.find_expect(name).index
         } else {
             self._get(right)
@@ -452,7 +448,12 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
 
     fn visit_typed_clause_guard(&mut self, guard: &'ast TypedClauseGuard) {
         match guard {
-            ClauseGuard::DivInt { left, right, .. } | ClauseGuard::DivFloat { left, right, .. } => {
+            ClauseGuard::BinaryOperator {
+                operator: BinOp::DivInt | BinOp::DivFloat,
+                left,
+                right,
+                ..
+            } => {
                 self.locals.insert_guard_div(self.generator, left, right);
             }
             _ => {}

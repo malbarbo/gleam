@@ -31,15 +31,56 @@ pub fn case<'a>(
     subjects: &'a [TypedExpr],
     expression_generator: &mut Generator<'_, 'a>,
 ) -> Document<'a> {
+    let scope_position = expression_generator.scope_position.clone();
     let mut variables = Variables::new(expression_generator, VariableAssignment::Declare);
     let assignments = variables.assign_case_subjects(compiled_case, subjects);
-    let decision = CasePrinter {
+    let mut printer = CasePrinter {
         variables,
         assignments: &assignments,
         kind: DecisionKind::Case { clauses },
-    }
-    .decision(&compiled_case.tree);
-    docvec![assignments_to_doc(assignments), decision.into_doc()].force_break()
+    };
+
+    let decision = match &compiled_case.tree {
+        // Printing needs extra care if we're dealing with a sort of "degenerate"
+        // tree that immediately starts with a guard node.
+        // Code generation for guard nodes require defining variables outside of
+        // the safe scope of the generated `if` statement. So if we were to just
+        // generate code like usual we run the risk of leaking variables in the
+        // outer scope:
+        //
+        // ```case
+        // case 11 {
+        //   n if n == 10 -> todo
+        //   _ -> todo
+        // }
+        //
+        // let n = 12
+        // ```
+        //
+        // That case would have us generate something like this:
+        //
+        // ```js
+        // let n = 11
+        // if (n === 10) { todo } else { todo }
+        //
+        // // If we don't wrap it in a block that `n = 11` definition that was
+        // // introduced would end up clashing with the `let n = 12` that comes
+        // // later!
+        // ```
+        //
+        // So in this special case we have to wrap everything in a block.
+        tree @ Decision::Guard { .. } if !scope_position.is_tail() => break_block(
+            printer
+                .inside_new_scope(|this| this.decision(tree))
+                .into_doc(),
+        ),
+
+        tree @ (Decision::Run { .. }
+        | Decision::Guard { .. }
+        | Decision::Switch { .. }
+        | Decision::Fail) => printer.decision(tree).into_doc(),
+    };
+    docvec![assignments_to_doc(assignments), decision].force_break()
 }
 
 /// The generated code for a decision tree.
@@ -668,7 +709,6 @@ pub fn let_<'a>(
     expression_generator: &mut Generator<'_, 'a>,
     pattern: &'a TypedPattern,
 ) -> Document<'a> {
-    let _ = pattern;
     let scope_position = expression_generator.scope_position.clone();
     let mut variables = Variables::new(expression_generator, VariableAssignment::Reassign);
 
@@ -1221,7 +1261,9 @@ impl<'generator, 'module, 'a> Variables<'generator, 'module, 'a> {
             }
             ReadType::Float => self.bit_array_slice_to_float(bit_array, start, end, endianness),
             ReadType::BitArray => self.bit_array_slice_with_end(bit_array, from, end),
-            _ => panic!("invalid slice type made it to code generation: {type_:#?}"),
+            ReadType::String | ReadType::UtfCodepoint => {
+                panic!("invalid slice type made it to code generation: {type_:#?}")
+            }
         }
     }
 
@@ -1735,26 +1777,26 @@ fn assign_subject<'a>(
 ) -> SubjectAssignment<'a> {
     static ASSIGNMENT_VAR_ECO_STR: OnceLock<EcoString> = OnceLock::new();
 
-    match subject {
-        // If the value is a variable we don't need to assign it to a new
-        // variable, we can use the value expression safely without worrying about
-        // performing computation or side effects multiple times.
-        TypedExpr::Var {
-            name, constructor, ..
-        } if constructor.is_local_variable() => SubjectAssignment::AlreadyAVariable {
+    // If the value is a variable we don't need to assign it to a new
+    // variable, we can use the value expression safely without worrying about
+    // performing computation or side effects multiple times.
+    if let TypedExpr::Var {
+        name, constructor, ..
+    } = subject
+        && constructor.is_local_variable()
+    {
+        SubjectAssignment::AlreadyAVariable {
             name: expression_generator.local_var(name),
-        },
-
+        }
+    } else {
         // If it's not a variable we need to assign it to a variable
         // to avoid rendering the subject expression multiple times
-        _ => {
-            let name = expression_generator
-                .next_local_var(ASSIGNMENT_VAR_ECO_STR.get_or_init(|| ASSIGNMENT_VAR.into()));
-            let value = expression_generator
-                .not_in_tail_position(Some(ordering), |this| this.wrap_expression(subject));
+        let name = expression_generator
+            .next_local_var(ASSIGNMENT_VAR_ECO_STR.get_or_init(|| ASSIGNMENT_VAR.into()));
+        let value = expression_generator
+            .not_in_tail_position(Some(ordering), |this| this.wrap_expression(subject));
 
-            SubjectAssignment::BindToVariable { value, name }
-        }
+        SubjectAssignment::BindToVariable { value, name }
     }
 }
 

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+
+set -e
+
+for f in $(ls build/dev/webassembly/wasm/*.wasm | sort); do
+  echo Executing $f
+  wasm-tools validate $f
+  # wasmtime -W function-references=y -W gc=y $f
+  iwasm $f
+done
+
+set +e
+
+echo
+echo Must fail
+
+for f in $(ls build/dev/webassembly/wasm/fail/*.wasm | sort); do
+  echo Executing $f
+  wasm-tools validate $f
+  #if wasmtime -W function-references=y -W gc=y $f; then
+  if iwasm $f; then
+    echo " Should fail!"
+  fi
+done

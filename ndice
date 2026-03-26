@@ -1,0 +1,724 @@
+[1mdiff --git a/compiler-core/src/webassembly.rs b/compiler-core/src/webassembly.rs[m
+[1mindex 18acbfcdf..15818ab7f 100644[m
+[1m--- a/compiler-core/src/webassembly.rs[m
+[1m+++ b/compiler-core/src/webassembly.rs[m
+[36m@@ -448,6 +448,90 @@[m [mstruct LocalFunction {[m
+     body: Vec<TypedStatement>,[m
+ }[m
+ [m
+[32m+[m[32m/// Maps Gleam field positions to wasm struct field indices for a union type.[m
+[32m+[m[32m/// Shared fields come first (after the tag), then variant-specific fields.[m
+[32m+[m[32m#[derive(Debug, Clone)][m
+[32m+[m[32mstruct UnionFieldLayout {[m
+[32m+[m[32m    shared_count: usize,[m
+[32m+[m[32m    variant_wasm_indices: Vec<Vec<u32>>,[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mimpl UnionFieldLayout {[m
+[32m+[m[32m    fn compute(custom_type: &TypedCustomType) -> UnionFieldLayout {[m
+[32m+[m[32m        let constructors = &custom_type.constructors;[m
+[32m+[m[32m        // Find shared fields: same position, same label, same type across ALL variants[m
+[32m+[m[32m        let min_fields = constructors[m
+[32m+[m[32m            .iter()[m
+[32m+[m[32m            .map(|c| c.arguments.len())[m
+[32m+[m[32m            .min()[m
+[32m+[m[32m            .unwrap_or(0);[m
+[32m+[m[32m        let first_constructor = constructors.first().expect("union to have constructors");[m
+[32m+[m[32m        let mut shared_positions = vec![];[m
+[32m+[m[32m        for (pos, first_arg) in first_constructor[m
+[32m+[m[32m            .arguments[m
+[32m+[m[32m            .iter()[m
+[32m+[m[32m            .enumerate()[m
+[32m+[m[32m            .take(min_fields)[m
+[32m+[m[32m        {[m
+[32m+[m[32m            let first_label = first_arg.label.as_ref().map(|(_, l)| l);[m
+[32m+[m[32m            let is_shared = constructors.iter().skip(1).all(|c| {[m
+[32m+[m[32m                c.arguments.get(pos).is_some_and(|arg| {[m
+[32m+[m[32m                    let label = arg.label.as_ref().map(|(_, l)| l);[m
+[32m+[m[32m                    label == first_label && arg.type_.same_as(&first_arg.type_)[m
+[32m+[m[32m                })[m
+[32m+[m[32m            });[m
+[32m+[m[32m            if is_shared {[m
+[32m+[m[32m                shared_positions.push(pos);[m
+[32m+[m[32m            }[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m[32m        let shared_count = shared_positions.len();[m
+[32m+[m
+[32m+[m[32m        let variant_wasm_indices = constructors[m
+[32m+[m[32m            .iter()[m
+[32m+[m[32m            .map(|c| {[m
+[32m+[m[32m                let mut indices = vec![0u32; c.arguments.len()];[m
+[32m+[m[32m                let mut next_specific = shared_count as u32 + 1; // after tag + shared[m
+[32m+[m[32m                for (gleam_pos, slot) in indices.iter_mut().enumerate() {[m
+[32m+[m[32m                    if let Some(shared_idx) = shared_positions.iter().position(|&p| p == gleam_pos)[m
+[32m+[m[32m                    {[m
+[32m+[m[32m                        *slot = shared_idx as u32 + 1; // after tag[m
+[32m+[m[32m                    } else {[m
+[32m+[m[32m                        *slot = next_specific;[m
+[32m+[m[32m                        next_specific += 1;[m
+[32m+[m[32m                    }[m
+[32m+[m[32m                }[m
+[32m+[m[32m                indices[m
+[32m+[m[32m            })[m
+[32m+[m[32m            .collect();[m
+[32m+[m
+[32m+[m[32m        UnionFieldLayout {[m
+[32m+[m[32m            shared_count,[m
+[32m+[m[32m            variant_wasm_indices,[m
+[32m+[m[32m        }[m
+[32m+[m[32m    }[m
+[32m+[m
+[32m+[m[32m    fn variant(&self, variant_index: usize) -> &[u32] {[m
+[32m+[m[32m        self.variant_wasm_indices[m
+[32m+[m[32m            .get(variant_index)[m
+[32m+[m[32m            .expect("variant wasm indices")[m
+[32m+[m[32m    }[m
+[32m+[m
+[32m+[m[32m    fn shared(&self, gleam_pos: u64) -> u32 {[m
+[32m+[m[32m        self.variant(0)[m
+[32m+[m[32m            .get(gleam_pos as usize)[m
+[32m+[m[32m            .copied()[m
+[32m+[m[32m            .expect("shared field wasm index")[m
+[32m+[m[32m    }[m
+[32m+[m
+[32m+[m[32m    fn wasm_index(&self, variant_index: usize, gleam_pos: u64) -> u32 {[m
+[32m+[m[32m        self.variant(variant_index)[m
+[32m+[m[32m            .get(gleam_pos as usize)[m
+[32m+[m[32m            .copied()[m
+[32m+[m[32m            .expect("variant field wasm index")[m
+[32m+[m[32m    }[m
+[32m+[m[32m}[m
+[32m+[m
+ struct Generator<'a> {[m
+     global_section: GlobalSection,[m
+     import_section: ImportSection,[m
+[36m@@ -458,6 +542,7 @@[m [mstruct Generator<'a> {[m
+     global_names: NameMap,[m
+     wasm_types: IndexMap<WasmType, u32>,[m
+     types: HashMap<(EcoString, EcoString), CustomType>,[m
+[32m+[m[32m    union_layouts: HashMap<(EcoString, EcoString), UnionFieldLayout>,[m
+     variants: HashMap<(EcoString, EcoString), Variant>,[m
+     functions: BTreeSet<WasmFunction>,[m
+     function_next_id: u32,[m
+[36m@@ -496,6 +581,7 @@[m [mimpl<'a> Generator<'a> {[m
+             global_names: NameMap::new(),[m
+             wasm_types: IndexMap::new(),[m
+             types: HashMap::new(),[m
+[32m+[m[32m            union_layouts: HashMap::new(),[m
+             variants: HashMap::new(),[m
+             functions: BTreeSet::new(),[m
+             function_next_id: 0,[m
+[36m@@ -1252,6 +1338,10 @@[m [mimpl<'a> Generator<'a> {[m
+                 }[m
+             } else {[m
+                 is_union = true;[m
+[32m+[m[32m                let layout = UnionFieldLayout::compute(custom_type);[m
+[32m+[m[32m                let _ = self[m
+[32m+[m[32m                    .union_layouts[m
+[32m+[m[32m                    .insert((module_name.into(), custom_type.name.clone()), layout);[m
+                 CustomType::Union {[m
+                     custom_type: custom_type.clone(),[m
+                 }[m
+[36m@@ -1638,13 +1728,56 @@[m [mimpl<'a> Generator<'a> {[m
+         (self.struct_type_index(name, fields), types)[m
+     }[m
+ [m
+[32m+[m[32m    fn union_layout(&self, type_: &Arc<Type>) -> &UnionFieldLayout {[m
+[32m+[m[32m        let (module, name, _) = type_[m
+[32m+[m[32m            .named_type_information()[m
+[32m+[m[32m            .expect("named type information");[m
+[32m+[m[32m        self.union_layouts[m
+[32m+[m[32m            .get(&(module, name))[m
+[32m+[m[32m            .expect("union layout")[m
+[32m+[m[32m    }[m
+[32m+[m
+     fn mono_union_supertype_index([m
+         &mut self,[m
+         type_: &Arc<Type>,[m
+         custom_type: &TypedCustomType,[m
+     ) -> u32 {[m
+[31m-        self.mono_union_type_index(type_, custom_type, None, None, &[])[m
+[31m-            .0[m
+[32m+[m[32m        // Use the first constructor to determine shared field types.[m
+[32m+[m[32m        // All constructors have the same types for shared fields.[m
+[32m+[m[32m        let first = custom_type[m
+[32m+[m[32m            .constructors[m
+[32m+[m[32m            .first()[m
+[32m+[m[32m            .expect("union to have constructors");[m
+[32m+[m[32m        let args = type_[m
+[32m+[m[32m            .named_type_information()[m
+[32m+[m[32m            .map(|(_, _, a)| a)[m
+[32m+[m[32m            .unwrap_or_default();[m
+[32m+[m[32m        let types = Monomorphizer::variant_constructor(custom_type, first, &args);[m
+[32m+[m[32m        let layout = self.union_layout(type_).clone();[m
+[32m+[m
+[32m+[m[32m        // Build shared fields (those with wasm index <= shared_count, i.e. in supertype)[m
+[32m+[m[32m        let shared_fields: Vec<(EcoString, ValType)> = itertools::izip!([m
+[32m+[m[32m            layout.variant(0).iter(),[m
+[32m+[m[32m            first.arguments.iter().enumerate(),[m
+[32m+[m[32m            types.iter(),[m
+[32m+[m[32m        )[m
+[32m+[m[32m        .filter(|&(&wasm_idx, _, _)| wasm_idx <= layout.shared_count as u32)[m
+[32m+[m[32m        .map(|(_, (gleam_pos, arg), type_)| {[m
+[32m+[m[32m            let label = if let Some((_, label)) = &arg.label {[m
+[32m+[m[32m                label.clone()[m
+[32m+[m[32m            } else {[m
+[32m+[m[32m                gleam_pos.to_string().into()[m
+[32m+[m[32m            };[m
+[32m+[m[32m            (label, self.val_type(type_))[m
+[32m+[m[32m        })[m
+[32m+[m[32m        .collect();[m
+[32m+[m
+[32m+[m[32m        let name = custom_type.name.clone();[m
+[32m+[m[32m        let index = self.wasm_types.len() as u32;[m
+[32m+[m[32m        *self[m
+[32m+[m[32m            .wasm_types[m
+[32m+[m[32m            .entry(WasmType::union(name, shared_fields, None))[m
+[32m+[m[32m            .or_insert(index)[m
+     }[m
+ [m
+     fn mono_union_subtype_index([m
+[36m@@ -1655,44 +1788,46 @@[m [mimpl<'a> Generator<'a> {[m
+         args: &[Arc<Type>],[m
+     ) -> (u32, u32, Vec<Arc<Type>>) {[m
+         let supertype_index = self.mono_union_supertype_index(type_, custom_type);[m
+[31m-        let (type_index, types) = self.mono_union_type_index([m
+[31m-            type_,[m
+[31m-            custom_type,[m
+[31m-            Some(constructor),[m
+[31m-            Some(supertype_index),[m
+[31m-            args,[m
+[31m-        );[m
+[31m-        (supertype_index, type_index, types)[m
+[31m-    }[m
+[32m+[m[32m        let types = Monomorphizer::variant_constructor(custom_type, constructor, args);[m
+[32m+[m[32m        let layout = self.union_layout(type_).clone();[m
+[32m+[m[32m        let variant_index = custom_type[m
+[32m+[m[32m            .constructors[m
+[32m+[m[32m            .iter()[m
+[32m+[m[32m            .position(|c| c.name == constructor.name)[m
+[32m+[m[32m            .expect("constructor in union");[m
+ [m
+[31m-    fn mono_union_type_index([m
+[31m-        &mut self,[m
+[31m-        type_: &Arc<Type>,[m
+[31m-        custom_type: &TypedCustomType,[m
+[31m-        constructor: Option<&TypedRecordConstructor>,[m
+[31m-        supertype_index: Option<u32>,[m
+[31m-        args: &[Arc<Type>],[m
+[31m-    ) -> (u32, Vec<Arc<Type>>) {[m
+[31m-        let (name, fields, types) = if let Some(constructor) = constructor {[m
+[31m-            let mut name = self.type_pretty_name(type_);[m
+[31m-            name += ".";[m
+[31m-            name += constructor.name.clone();[m
+[31m-            let types = Monomorphizer::variant_constructor(custom_type, constructor, args);[m
+[31m-            (name, self.fields(constructor, &types), types)[m
+[31m-        } else {[m
+[31m-            // Supertype only has the discriminant (tag) — shared across[m
+[31m-            // all monomorphizations of this generic union type.[m
+[31m-            (custom_type.name.clone(), vec![], vec![])[m
+[31m-        };[m
+[32m+[m[32m        let mapping = layout.variant(variant_index);[m
+[32m+[m[32m        let val_types = self.val_types(types.iter().cloned());[m
+[32m+[m[32m        let mut fields_by_wasm_idx: Vec<(u32, EcoString, ValType)> = itertools::izip!([m
+[32m+[m[32m            mapping.iter(),[m
+[32m+[m[32m            constructor.arguments.iter().enumerate(),[m
+[32m+[m[32m            val_types.iter()[m
+[32m+[m[32m        )[m
+[32m+[m[32m        .map(|(&wasm_idx, (gleam_pos, arg), &val_type)| {[m
+[32m+[m[32m            let label = if let Some((_, label)) = &arg.label {[m
+[32m+[m[32m                label.clone()[m
+[32m+[m[32m            } else {[m
+[32m+[m[32m                gleam_pos.to_string().into()[m
+[32m+[m[32m            };[m
+[32m+[m[32m            (wasm_idx, label, val_type)[m
+[32m+[m[32m        })[m
+[32m+[m[32m        .collect();[m
+[32m+[m[32m        fields_by_wasm_idx.sort_by_key(|(idx, _, _)| *idx);[m
+[32m+[m[32m        let fields: Vec<(EcoString, ValType)> = fields_by_wasm_idx[m
+[32m+[m[32m            .into_iter()[m
+[32m+[m[32m            .map(|(_, label, val_type)| (label, val_type))[m
+[32m+[m[32m            .collect();[m
+[32m+[m
+[32m+[m[32m        let mut name = self.type_pretty_name(type_);[m
+[32m+[m[32m        name += ".";[m
+[32m+[m[32m        name += constructor.name.clone();[m
+ [m
+         let index = self.wasm_types.len() as u32;[m
+[31m-        ([m
+[31m-            *self[m
+[31m-                .wasm_types[m
+[31m-                .entry(WasmType::union(name, fields, supertype_index))[m
+[31m-                .or_insert(index),[m
+[31m-            types,[m
+[31m-        )[m
+[32m+[m[32m        let type_index = *self[m
+[32m+[m[32m            .wasm_types[m
+[32m+[m[32m            .entry(WasmType::union(name, fields, Some(supertype_index)))[m
+[32m+[m[32m            .or_insert(index);[m
+[32m+[m[32m        (supertype_index, type_index, types)[m
+     }[m
+ [m
+     fn composite_val_type(&self, type_index: u32) -> ValType {[m
+[36m@@ -2538,25 +2673,32 @@[m [mimpl<'a> Generator<'a> {[m
+                             .struct_get(type_index, *index as u32);[m
+                     }[m
+                     CustomType::Union { custom_type } => {[m
+[31m-                        // FIXME: handle missing inferred variant (same name, position and type)[m
+[31m-                        let variant = record[m
+[31m-                            .type_()[m
+[31m-                            .custom_type_inferred_variant()[m
+[31m-                            .expect("inferred variant index");[m
+[31m-                        let constructor = custom_type[m
+[31m-                            .constructors[m
+[31m-                            .get(variant as usize)[m
+[31m-                            .expect("constructor at index");[m
+[31m-                        let (_, type_index, _) = self.mono_union_subtype_index([m
+[31m-                            &record.type_(),[m
+[31m-                            &custom_type,[m
+[31m-                            constructor,[m
+[31m-                            &args,[m
+[31m-                        );[m
+[31m-                        let _ = instructions[m
+[31m-                            .expression(self, locals, scope, record)[m
+[31m-                            .ref_cast_non_null(HeapType::Concrete(type_index))[m
+[31m-                            .struct_get(type_index, *index as u32 + 1);[m
+[32m+[m[32m                        let layout = self.union_layout(&record.type_()).clone();[m
+[32m+[m[32m                        if let Some(variant) = record.type_().custom_type_inferred_variant() {[m
+[32m+[m[32m                            let constructor = custom_type[m
+[32m+[m[32m                                .constructors[m
+[32m+[m[32m                                .get(variant as usize)[m
+[32m+[m[32m                                .expect("constructor at index");[m
+[32m+[m[32m                            let (_, type_index, _) = self.mono_union_subtype_index([m
+[32m+[m[32m                                &record.type_(),[m
+[32m+[m[32m                                &custom_type,[m
+[32m+[m[32m                                constructor,[m
+[32m+[m[32m                                &args,[m
+[32m+[m[32m                            );[m
+[32m+[m[32m                            let wasm_idx = layout.wasm_index(variant as usize, *index);[m
+[32m+[m[32m                            let _ = instructions[m
+[32m+[m[32m                                .expression(self, locals, scope, record)[m
+[32m+[m[32m                                .ref_cast_non_null(HeapType::Concrete(type_index))[m
+[32m+[m[32m                                .struct_get(type_index, wasm_idx);[m
+[32m+[m[32m                        } else {[m
+[32m+[m[32m                            // Shared field — access via supertype[m
+[32m+[m[32m                            let supertype_index =[m
+[32m+[m[32m                                self.mono_union_supertype_index(&record.type_(), &custom_type);[m
+[32m+[m[32m                            let wasm_idx = layout.shared(*index);[m
+[32m+[m[32m                            let _ = instructions[m
+[32m+[m[32m                                .expression(self, locals, scope, record)[m
+[32m+[m[32m                                .struct_get(supertype_index, wasm_idx);[m
+[32m+[m[32m                        }[m
+                     }[m
+                     CustomType::External { .. } | CustomType::Enum { .. } => {[m
+                         panic!("external/enum types should not reach code generation")[m
+[36m@@ -3123,6 +3265,7 @@[m [mimpl<'a> Generator<'a> {[m
+                     locals,[m
+                     &mut scope,[m
+                     (type_index, None),[m
+[32m+[m[32m                    None,[m
+                     pattern,[m
+                     elements.iter(),[m
+                     fail_depth,[m
+[36m@@ -3157,6 +3300,7 @@[m [mimpl<'a> Generator<'a> {[m
+                             locals,[m
+                             &mut scope,[m
+                             (type_index, None),[m
+[32m+[m[32m                            None,[m
+                             pattern,[m
+                             arguments.iter().map(|arg| &arg.value),[m
+                             fail_depth,[m
+[36m@@ -3202,11 +3346,14 @@[m [mimpl<'a> Generator<'a> {[m
+                                     .i32_ne()[m
+                                     .br_if(fail_depth);[m
+                             }[m
+[32m+[m[32m                            let layout = self.union_layout(type_).clone();[m
+[32m+[m[32m                            let field_mapping = layout.variant(tag);[m
+                             let _ = instructions.local_get(right).patterns([m
+                                 self,[m
+                                 locals,[m
+                                 &mut scope,[m
+                                 (supertype_index, Some(type_index)),[m
+[32m+[m[32m                                Some(field_mapping),[m
+                                 pattern,[m
+                                 arguments.iter().map(|arg| &arg.value),[m
+                                 fail_depth,[m
+[36m@@ -3299,6 +3446,7 @@[m [mimpl<'a> Generator<'a> {[m
+         scope: &mut Scope,[m
+         instructions: &mut ExtendedInstructionSink<'_>,[m
+         (type_index, subtype_index): (u32, Option<u32>),[m
+[32m+[m[32m        field_mapping: Option<&[u32]>,[m
+         pattern: &Pattern<Arc<Type>>,[m
+         elements: impl IntoIterator<Item = &'b Pattern<Arc<Type>>> + Clone,[m
+         fail_depth: u32,[m
+[36m@@ -3308,10 +3456,12 @@[m [mimpl<'a> Generator<'a> {[m
+         for (field_index, element) in elements.into_iter().enumerate() {[m
+             let _ = instructions.local_get(right);[m
+             if let Some(subtype_index) = subtype_index {[m
+[31m-                // cast and skip tag[m
+[32m+[m[32m                let wasm_idx = field_mapping[m
+[32m+[m[32m                    .and_then(|m| m.get(field_index).copied())[m
+[32m+[m[32m                    .unwrap_or(field_index as u32 + 1);[m
+                 let _ = instructions[m
+                     .ref_cast_non_null(HeapType::Concrete(subtype_index))[m
+[31m-                    .struct_get(subtype_index, field_index as u32 + 1);[m
+[32m+[m[32m                    .struct_get(subtype_index, wasm_idx);[m
+             } else {[m
+                 let _ = instructions.struct_get(type_index, field_index as u32);[m
+             }[m
+[36m@@ -3492,14 +3642,21 @@[m [mimpl<'a> Generator<'a> {[m
+                             .struct_get(type_index, index);[m
+                     }[m
+                     CustomType::Union { custom_type } => {[m
+[32m+[m[32m                        let layout = self.union_layout(&type_).clone();[m
+                         let constructor = custom_type_inferred_constructor(&custom_type, &type_)[m
+                             .expect("inferred constructor");[m
+[32m+[m[32m                        let variant = custom_type[m
+[32m+[m[32m                            .constructors[m
+[32m+[m[32m                            .iter()[m
+[32m+[m[32m                            .position(|c| c.name == constructor.name)[m
+[32m+[m[32m                            .expect("constructor in union");[m
+                         let (_, type_index, _) =[m
+                             self.mono_union_subtype_index(&type_, &custom_type, constructor, &args);[m
+[32m+[m[32m                        let wasm_idx = layout.wasm_index(variant, index as u64);[m
+                         let _ = instructions[m
+                             .clause_guard(self, locals, scope, container)[m
+                             .ref_cast_non_null(HeapType::Concrete(type_index))[m
+[31m-                            .struct_get(type_index, index + 1);[m
+[32m+[m[32m                            .struct_get(type_index, wasm_idx);[m
+                     }[m
+                 }[m
+             }[m
+[1mdiff --git a/compiler-core/src/webassembly/builtins.rs b/compiler-core/src/webassembly/builtins.rs[m
+[1mindex 5013fbcfe..1cb3d0978 100644[m
+[1m--- a/compiler-core/src/webassembly/builtins.rs[m
+[1m+++ b/compiler-core/src/webassembly/builtins.rs[m
+[36m@@ -430,10 +430,17 @@[m [mimpl<'a> Generator<'a> {[m
+     ) -> (u32, u32) {[m
+         let (_, type_index, types) =[m
+             self.mono_union_subtype_index(type_, custom_type, constructor, args);[m
+[32m+[m[32m        let layout = self.union_layout(type_).clone();[m
+[32m+[m[32m        let vi = custom_type[m
+[32m+[m[32m            .constructors[m
+[32m+[m[32m            .iter()[m
+[32m+[m[32m            .position(|c| c.name == constructor.name)[m
+[32m+[m[32m            .expect("constructor in union");[m
+[32m+[m[32m        let mapping = layout.variant(vi).to_vec();[m
+         let name = self.type_pretty_name(type_) + "." + constructor.name.clone();[m
+         let builtin = BuiltinFunction::Equal(self.val_type_ref(type_index), name);[m
+         let eq_index = self.get_function_builtin(builtin, |s| {[m
+[31m-            s.code_composite_or_union_eq(type_index, true, types)[m
+[32m+[m[32m            s.code_composite_or_union_eq(type_index, Some(&mapping), types)[m
+         });[m
+         (type_index, eq_index)[m
+     }[m
+[36m@@ -607,13 +614,13 @@[m [mimpl<'a> Generator<'a> {[m
+         type_index: u32,[m
+         types: impl IntoIterator<Item = Arc<Type>>,[m
+     ) -> Function {[m
+[31m-        self.code_composite_or_union_eq(type_index, false, types)[m
+[32m+[m[32m        self.code_composite_or_union_eq(type_index, None, types)[m
+     }[m
+ [m
+     fn code_composite_or_union_eq([m
+         &mut self,[m
+         type_index: u32,[m
+[31m-        union_: bool,[m
+[32m+[m[32m        field_mapping: Option<&[u32]>,[m
+         types: impl IntoIterator<Item = Arc<Type>>,[m
+     ) -> Function {[m
+         let mut function = Function::new(vec![]);[m
+[36m@@ -631,8 +638,10 @@[m [mimpl<'a> Generator<'a> {[m
+               .bool_const(true)[m
+               .return_()[m
+             .end();[m
+[31m-        for (field_index, type_) in types.into_iter().enumerate() {[m
+[31m-            let field_index = field_index as u32 + union_ as u32;[m
+[32m+[m[32m        for (gleam_index, type_) in types.into_iter().enumerate() {[m
+[32m+[m[32m            let field_index = field_mapping[m
+[32m+[m[32m                .and_then(|m| m.get(gleam_index).copied())[m
+[32m+[m[32m                .unwrap_or(gleam_index as u32);[m
+             #[rustfmt::skip][m
+             let _ = instructions[m
+                 .local_get(a)[m
+[36m@@ -778,7 +787,24 @@[m [mimpl<'a> Generator<'a> {[m
+         } else {[m
+             None[m
+         };[m
+[31m-        self.code_variant_constructor(type_index, num_fields, tag, null_supertype)[m
+[32m+[m[32m        let field_mapping = if let CustomType::Union { custom_type } = &variant.custom_type {[m
+[32m+[m[32m            let layout = self.union_layout(&return_).clone();[m
+[32m+[m[32m            let vi = custom_type[m
+[32m+[m[32m                .constructors[m
+[32m+[m[32m                .iter()[m
+[32m+[m[32m                .position(|c| c.name == variant.constructor.name)[m
+[32m+[m[32m                .expect("constructor in union");[m
+[32m+[m[32m            Some(layout.variant(vi).to_vec())[m
+[32m+[m[32m        } else {[m
+[32m+[m[32m            None[m
+[32m+[m[32m        };[m
+[32m+[m[32m        self.code_variant_constructor([m
+[32m+[m[32m            type_index,[m
+[32m+[m[32m            num_fields,[m
+[32m+[m[32m            tag,[m
+[32m+[m[32m            null_supertype,[m
+[32m+[m[32m            field_mapping.as_deref(),[m
+[32m+[m[32m        )[m
+     }[m
+ [m
+     fn code_variant_constructor([m
+[36m@@ -787,6 +813,7 @@[m [mimpl<'a> Generator<'a> {[m
+         num_fields: u32,[m
+         tag: Option<i32>,[m
+         null_supertype: Option<u32>,[m
+[32m+[m[32m        field_mapping: Option<&[u32]>,[m
+     ) -> Function {[m
+         let mut function = Function::new(vec![]);[m
+         let mut instructions = function.extend_instructions(self);[m
+[36m@@ -799,8 +826,21 @@[m [mimpl<'a> Generator<'a> {[m
+         if let Some(tag) = tag {[m
+             let _ = instructions.i32_const(tag);[m
+         }[m
+[31m-        for index in 0..num_fields {[m
+[31m-            let _ = instructions.local_get(index);[m
+[32m+[m[32m        if let Some(mapping) = field_mapping {[m
+[32m+[m[32m            // Emit local_get in wasm struct field order (shared first, then specific)[m
+[32m+[m[32m            let mut wasm_to_gleam: Vec<(u32, u32)> = mapping[m
+[32m+[m[32m                .iter()[m
+[32m+[m[32m                .enumerate()[m
+[32m+[m[32m                .map(|(gleam_pos, &wasm_idx)| (wasm_idx, gleam_pos as u32))[m
+[32m+[m[32m                .collect();[m
+[32m+[m[32m            wasm_to_gleam.sort_by_key(|(wasm_idx, _)| *wasm_idx);[m
+[32m+[m[32m            for (_, gleam_pos) in wasm_to_gleam {[m
+[32m+[m[32m                let _ = instructions.local_get(gleam_pos);[m
+[32m+[m[32m            }[m
+[32m+[m[32m        } else {[m
+[32m+[m[32m            for index in 0..num_fields {[m
+[32m+[m[32m                let _ = instructions.local_get(index);[m
+[32m+[m[32m            }[m
+         }[m
+         let _ = instructions.struct_new(struct_index).end();[m
+         function[m
+[36m@@ -1013,30 +1053,26 @@[m [mimpl<'a> Generator<'a> {[m
+         type_: &Arc<Type>,[m
+         custom_type: &TypedCustomType,[m
+         constructor: &TypedRecordConstructor,[m
+[31m-        supertype_index: u32,[m
+         args: &[Arc<Type>],[m
+     ) -> (u32, u32) {[m
+         let name = self.type_pretty_name(type_);[m
+[31m-        let (type_index, types) = self.mono_union_type_index([m
+[31m-            type_,[m
+[31m-            custom_type,[m
+[31m-            Some(constructor),[m
+[31m-            Some(supertype_index),[m
+[31m-            args,[m
+[31m-        );[m
+[32m+[m[32m        let (_, type_index, types) =[m
+[32m+[m[32m            self.mono_union_subtype_index(type_, custom_type, constructor, args);[m
+         let constructor_name = constructor.name.clone();[m
+         let builtin = BuiltinFunction::CustomTypeRepr([m
+             self.val_type_ref(type_index),[m
+             name + "." + constructor_name.clone(),[m
+             Some(constructor_name.clone()),[m
+         );[m
+[32m+[m[32m        let layout = self.union_layout(type_).clone();[m
+[32m+[m[32m        let vi = custom_type[m
+[32m+[m[32m            .constructors[m
+[32m+[m[32m            .iter()[m
+[32m+[m[32m            .position(|c| c.name == constructor.name)[m
+[32m+[m[32m            .expect("constructor in union");[m
+[32m+[m[32m        let mapping = layout.variant(vi).to_vec();[m
+         let repr_index = self.get_function_builtin(builtin, |s| {[m
+[31m-            s.code_composite_repr([m
+[31m-                &constructor_name,[m
+[31m-                true,[m
+[31m-                type_index,[m
+[31m-                &iter::once(type_::int()).chain(types).collect_vec(),[m
+[31m-            )[m
+[32m+[m[32m            s.code_composite_repr(&constructor_name, Some(&mapping), type_index, &types)[m
+         });[m
+         (type_index, repr_index)[m
+     }[m
+[36m@@ -1262,13 +1298,13 @@[m [mimpl<'a> Generator<'a> {[m
+ [m
+     fn code_tuple_repr(&mut self, types: &[Arc<Type>]) -> Function {[m
+         let type_index = self.tuple_type_index(types.iter().cloned());[m
+[31m-        self.code_composite_repr(&"#".into(), false, type_index, types)[m
+[32m+[m[32m        self.code_composite_repr(&"#".into(), None, type_index, types)[m
+     }[m
+ [m
+     fn code_composite_repr([m
+         &mut self,[m
+         name: &EcoString,[m
+[31m-        is_union: bool,[m
+[32m+[m[32m        field_mapping: Option<&[u32]>,[m
+         type_index: u32,[m
+         types: &[Arc<Type>],[m
+     ) -> Function {[m
+[36m@@ -1292,24 +1328,28 @@[m [mimpl<'a> Generator<'a> {[m
+             .i32_add()[m
+             .local_set(dest);[m
+ [m
+[31m-        let first_field = if is_union { 1u32 } else { 0u32 };[m
+[31m-        if let Some((first, rest)) = types[m
+[31m-            .get(first_field as usize..)[m
+[31m-            .and_then(|t| t.split_first())[m
+[31m-        {[m
+[32m+[m[32m        let wasm_indices: Vec<u32> = (0..types.len())[m
+[32m+[m[32m            .map(|i| {[m
+[32m+[m[32m                field_mapping[m
+[32m+[m[32m                    .and_then(|m| m.get(i).copied())[m
+[32m+[m[32m                    .unwrap_or(i as u32)[m
+[32m+[m[32m            })[m
+[32m+[m[32m            .collect();[m
+[32m+[m[32m        let mut fields_iter = types.iter().zip(wasm_indices.iter());[m
+[32m+[m[32m        if let Some((first_type, &first_idx)) = fields_iter.next() {[m
+             let _ = instructions[m
+                 .local_get(dest)[m
+                 .byte_store(b'(')[m
+                 .i32_inc(dest)[m
+                 .local_get(value)[m
+[31m-                .struct_get(type_index, first_field)[m
+[32m+[m[32m                .struct_get(type_index, first_idx)[m
+                 .local_get(dest)[m
+[31m-                .call(self.function_repr(first))[m
+[32m+[m[32m                .call(self.function_repr(first_type))[m
+                 .local_get(dest)[m
+                 .i32_add()[m
+                 .local_set(dest);[m
+ [m
+[31m-            for (type_, field_index) in rest.iter().zip(first_field + 1..) {[m
+[32m+[m[32m            for (type_, &wasm_idx) in fields_iter {[m
+                 let _ = instructions[m
+                     .local_get(dest)[m
+                     .byte_store(b',')[m
+[36m@@ -1318,7 +1358,7 @@[m [mimpl<'a> Generator<'a> {[m
+                     .byte_store(b' ')[m
+                     .i32_inc(dest)[m
+                     .local_get(value)[m
+[31m-                    .struct_get(type_index, field_index)[m
+[32m+[m[32m                    .struct_get(type_index, wasm_idx)[m
+                     .local_get(dest)[m
+                     .call(self.function_repr(type_))[m
+                     .local_get(dest)[m
+[36m@@ -1419,7 +1459,7 @@[m [mimpl<'a> Generator<'a> {[m
+             } => {[m
+                 let (type_index, types) =[m
+                     self.mono_struct_type_index(type_, custom_type, constructor, args);[m
+[31m-                return self.code_composite_repr(&constructor.name, false, type_index, &types);[m
+[32m+[m[32m                return self.code_composite_repr(&constructor.name, None, type_index, &types);[m
+             }[m
+             CustomType::Union { custom_type } => {[m
+                 let _ = instructions.block(BlockType::Result(ValType::I32));[m
+[36m@@ -1461,13 +1501,8 @@[m [mimpl<'a> Generator<'a> {[m
+                     if null_tag == Some(i) {[m
+                         let _ = instructions.unreachable();[m
+                     } else {[m
+[31m-                        let (type_index, repr_index) = self.function_variant_repr([m
+[31m-                            type_,[m
+[31m-                            custom_type,[m
+[31m-                            constructor,[m
+[31m-                            supertype_index,[m
+[31m-                            args,[m
+[31m-                        );[m
+[32m+[m[32m                        let (type_index, repr_index) =[m
+[32m+[m[32m                            self.function_variant_repr(type_, custom_type, constructor, args);[m
+                         #[rustfmt::skip][m
+                         let _ = instructions[m
+                             .local_get(value)[m
+[1mdiff --git a/compiler-core/src/webassembly/instructions.rs b/compiler-core/src/webassembly/instructions.rs[m
+[1mindex 743d09215..1a0366fab 100644[m
+[1m--- a/compiler-core/src/webassembly/instructions.rs[m
+[1m+++ b/compiler-core/src/webassembly/instructions.rs[m
+[36m@@ -195,6 +195,7 @@[m [mimpl<'a> ExtendedInstructionSink<'a> {[m
+         locals: &Locals,[m
+         scope: &mut Scope,[m
+         (type_index, subtype_index): (u32, Option<u32>),[m
+[32m+[m[32m        field_mapping: Option<&[u32]>,[m
+         pattern: &Pattern<Arc<Type>>,[m
+         elements: impl IntoIterator<Item = &'b Pattern<Arc<Type>>> + Clone,[m
+         fail_depth: u32,[m
+[36m@@ -204,6 +205,7 @@[m [mimpl<'a> ExtendedInstructionSink<'a> {[m
+             scope,[m
+             self,[m
+             (type_index, subtype_index),[m
+[32m+[m[32m            field_mapping,[m
+             pattern,[m
+             elements,[m
+             fail_depth,[m
+[1mdiff --git a/compiler-core/src/webassembly/tests/custom_types.rs b/compiler-core/src/webassembly/tests/custom_types.rs[m
+[1mindex 224b646f2..b9906a5af 100644[m
+[1m--- a/compiler-core/src/webassembly/tests/custom_types.rs[m
+[1m+++ b/compiler-core/src/webassembly/tests/custom_types.rs[m
+[36m@@ -1,5 +1,69 @@[m
+ use super::{compile_wasm, run_ok, wasm_type_names};[m
+ [m
+[32m+[m[32m#[test][m
+[32m+[m[32mfn record_access_shared_generic_field() {[m
+[32m+[m[32m    run_ok([m
+[32m+[m[32m        r#"[m
+[32m+[m[32mpub type Pair(a) {[m
+[32m+[m[32m    Left(value: a, extra: Int)[m
+[32m+[m[32m    Right(value: a, name: String)[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mpub fn value(pair: Pair(a)) -> a {[m
+[32m+[m[32m    pair.value[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mpub fn main() {[m
+[32m+[m[32m    let assert 1 = value(Left(1, 99))[m
+[32m+[m[32m    let assert 2 = value(Right(2, "x"))[m
+[32m+[m[32m}[m
+[32m+[m[32m"#,[m
+[32m+[m[32m    );[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m#[test][m
+[32m+[m[32mfn record_access_shared_field_with_gap() {[m
+[32m+[m[32m    run_ok([m
+[32m+[m[32m        r#"[m
+[32m+[m[32mpub type T {[m
+[32m+[m[32m    A(x: Int, y: String, z: Int)[m
+[32m+[m[32m    B(x: Int, w: Int, z: Int)[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mpub fn get_x(t: T) -> Int { t.x }[m
+[32m+[m[32mpub fn get_z(t: T) -> Int { t.z }[m
+[32m+[m
+[32m+[m[32mpub fn main() {[m
+[32m+[m[32m    let assert 1 = get_x(A(1, "s", 3))[m
+[32m+[m[32m    let assert 2 = get_x(B(2, 4, 5))[m
+[32m+[m[32m    let assert 3 = get_z(A(1, "s", 3))[m
+[32m+[m[32m    let assert 5 = get_z(B(2, 4, 5))[m
+[32m+[m[32m}[m
+[32m+[m[32m"#,[m
+[32m+[m[32m    );[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m#[test][m
+[32m+[m[32mfn record_access_shared_field() {[m
+[32m+[m[32m    run_ok([m
+[32m+[m[32m        r#"[m
+[32m+[m[32mpub type Shape {[m
+[32m+[m[32m    Circle(label: String, radius: Int)[m
+[32m+[m[32m    Square(label: String, side: Int, color: String)[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mpub fn label(shape: Shape) -> String {[m
+[32m+[m[32m    shape.label[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mpub fn main() {[m
+[32m+[m[32m    let assert "c" = label(Circle("c", 1))[m
+[32m+[m[32m    let assert "s" = label(Square("s", 2, "red"))[m
+[32m+[m[32m}[m
+[32m+[m[32m"#,[m
+[32m+[m[32m    );[m
+[32m+[m[32m}[m
+[32m+[m
+ #[test][m
+ fn enum_constants() {[m
+     run_ok([m

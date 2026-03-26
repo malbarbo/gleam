@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+set -e
+
+rm -rf build/
+
+../target/debug/gleam clean
+
+RUST_BACKTRACE=1 ../target/debug/gleam build --target webassembly;
+
+for f in $(ls build/dev/webassembly/wasm/*.wasm | sort); do
+  echo Validating $f
+  wasm-tools validate $f
+  echo Executing $f
+  wasmtime -W function-references=y -W gc=y $f
+done
+
+set +e
+
+echo
+echo Must fail
+
+for f in $(ls build/dev/webassembly/wasm/fail/*.wasm | sort); do
+  echo Executing $f
+  wasm-tools validate $f
+  if wasmtime -W function-references=y -W gc=y $f; then
+    echo " Should fail!"
+  fi
+done

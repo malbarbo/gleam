@@ -1,11 +1,11 @@
 mod imports;
-pub(crate) mod name;
+pub mod name;
 
 #[cfg(test)]
 mod tests;
 
 use crate::{
-    GLEAM_CORE_PACKAGE_NAME,
+    GLEAM_CORE_PACKAGE_NAME, STDLIB_PACKAGE_NAME,
     ast::{
         self, Arg, BitArrayOption, CustomType, DefinitionLocation, Function, GroupedDefinitions,
         Import, ModuleConstant, Publicity, RecordConstructor, RecordConstructorArg, SrcSpan,
@@ -636,17 +636,65 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
                 Some(prereg_return_type.clone()),
             )?;
             let arguments_types = arguments.iter().map(|a| a.type_.clone()).collect();
-            let type_ = fn_(
-                arguments_types,
-                body.last()
-                    .map_or(prereg_return_type.clone(), |last| last.type_()),
-            );
+            let return_type = body
+                .last()
+                .map_or(prereg_return_type.clone(), |last| last.type_());
+
+            // `dict.do_fold` is a bit special: since it belongs to the stdlib
+            // it is considered pure by default.
+            // However, since it ends up calling its function argument its
+            // purity should actually be `Impure`. We need to special case it
+            // and set the value ourselves.
+            //
+            // You might wonder why `do_fold` needs this but other similar
+            // functions like `list.each` don't need this special handling.
+            // The key difference is `list.each` calls the higher order function
+            // in its gleam body:
+            //
+            // ```gleam
+            // fn each(list, fun) {
+            //   case list {
+            //     [] -> Nil
+            //     [first, ..rest] -> {
+            //       fun(first)
+            //       // ^^^ Here we're calling `fun`. It's happening in Gleam so
+            //       //     the compiler can see this and understand that `each`
+            //       //     is impure.
+            //       //     You might argue the purity actually depends on the
+            //       //     purity of `fun` itself. That's true! But it's a
+            //       //     separate known problem. For the time being we always
+            //       //     assume a function argument is impure.
+            //       each(rest, fun)
+            //     }
+            //   }
+            // }
+            // ```
+            //
+            // But since `do_fold` is an external the compiler can't know what
+            // is going on with its function argument and keeps thinking it must
+            // be pure
+            //
+            // ```gleam
+            // @external(erlang, "", "")
+            // fn do_fold(dict: Dict(k, v), fun: fn(k, v) -> a) -> Nil
+            // ```
+            //
+            let purity = if expr_typer.environment.current_package == STDLIB_PACKAGE_NAME
+                && expr_typer.environment.current_module == "gleam/dict"
+                && name == "do_fold"
+            {
+                Purity::Impure
+            } else {
+                expr_typer.purity
+            };
+
+            let type_ = fn_(arguments_types, return_type);
             Ok((
                 type_,
                 body,
                 expr_typer.implementations,
                 expr_typer.minimum_required_version,
-                expr_typer.purity,
+                purity,
             ))
         });
 
@@ -881,6 +929,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
         let Import {
             documentation,
             location,
+            module_location,
             module,
             as_name,
             unqualified_values,
@@ -912,6 +961,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
         Some(Import {
             documentation,
             location,
+            module_location,
             module,
             as_name,
             unqualified_values,
@@ -1270,6 +1320,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
         let Accessors {
             shared_accessors,
             variant_specific_accessors,
+            positional_accessors,
         } = custom_type_accessors(&constructors_data)?;
 
         let map = AccessorsMap {
@@ -1283,6 +1334,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             // `return_type_constructor` below rather than looking it up twice.
             type_: type_.clone(),
             variant_specific_accessors,
+            variant_positional_accessors: positional_accessors,
         };
         environment.insert_accessors(name.clone(), map);
 
@@ -1985,6 +2037,7 @@ fn assert_unique_name(
 struct Accessors {
     shared_accessors: HashMap<EcoString, RecordAccessor>,
     variant_specific_accessors: Vec<HashMap<EcoString, RecordAccessor>>,
+    positional_accessors: Vec<Vec<Arc<Type>>>,
 }
 
 fn custom_type_accessors(constructors: &[TypeValueConstructor]) -> Result<Accessors, Error> {
@@ -1996,33 +2049,36 @@ fn custom_type_accessors(constructors: &[TypeValueConstructor]) -> Result<Access
         let _ = shared_accessors.insert(accessor.label.clone(), accessor);
     }
 
-    let mut variant_specific_accessors: Vec<HashMap<EcoString, RecordAccessor>> =
-        Vec::with_capacity(constructors.len());
+    let mut variant_specific_accessors = Vec::with_capacity(constructors.len());
+    let mut positional_accessors = Vec::with_capacity(constructors.len());
 
     for constructor in constructors {
         let mut fields = HashMap::with_capacity(constructor.parameters.len());
+        let mut positional_fields = Vec::new();
 
         for (index, parameter) in constructor.parameters.iter().enumerate() {
-            let Some(label) = &parameter.label else {
-                continue;
-            };
-
-            let _ = fields.insert(
-                label.clone(),
-                RecordAccessor {
-                    index: index as u64,
-                    label: label.clone(),
-                    type_: parameter.type_.clone(),
-                    documentation: parameter.documentation.clone(),
-                },
-            );
+            if let Some(label) = &parameter.label {
+                _ = fields.insert(
+                    label.clone(),
+                    RecordAccessor {
+                        index: index as u64,
+                        label: label.clone(),
+                        type_: parameter.type_.clone(),
+                        documentation: parameter.documentation.clone(),
+                    },
+                );
+            } else {
+                positional_fields.push(parameter.type_.clone());
+            }
         }
         variant_specific_accessors.push(fields);
+        positional_accessors.push(positional_fields);
     }
 
     Ok(Accessors {
         shared_accessors,
         variant_specific_accessors,
+        positional_accessors,
     })
 }
 

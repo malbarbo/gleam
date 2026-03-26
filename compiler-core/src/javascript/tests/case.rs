@@ -843,22 +843,6 @@ pub fn go(x, y) {
 }
 
 #[test]
-fn interfering_string_pattern_fails_if_succeeding() {
-    assert_js!(
-        r#"
-pub fn wibble(bits) {
-  case bits {
-    <<"aaa", 0, _:bits>> -> 1
-    // If the first one fails, we know this one won't match, so it won't appear
-    // in the final else branch!
-    <<_, "aa", 1, _:bits>> -> 2
-    _ -> 3
-  }
-}"#
-    );
-}
-
-#[test]
 fn interfering_string_pattern_succeeds_if_succeeding() {
     assert_js!(
         r#"
@@ -875,17 +859,66 @@ pub fn wibble(bits) {
 }
 
 #[test]
-fn interfering_string_pattern_fails_if_failing() {
+fn string_concatenation_in_clause_guards() {
     assert_js!(
         r#"
-pub fn wibble(bits) {
-  case bits {
-    <<"aaaa", 0, _:bits>> -> 1
-    // If the first one fails we know this one will fail as well, so it won't
-    // appear in the final else branch.
-    <<_, "aaabbb", 1, _:bits>> -> 2
-    _ -> 3
+pub fn main() {
+  let wibble = "wob"
+  case wibble {
+    x if x <> "ble" == "wobble" -> 1
+    _ -> 0
   }
 }"#
     );
+}
+
+#[test]
+fn var_true() {
+    assert_js!(
+        r#"
+fn true() { True }
+pub fn main() {
+    let true_ = true()
+    assert 0 == case Nil {
+        _ if true_ -> 0
+        _ -> 1
+    }
+}
+"#
+    )
+}
+
+#[test]
+// https://github.com/gleam-lang/gleam/issues/5283
+fn duplicate_name_for_variables_used_in_guards() {
+    assert_js!(
+        r#"
+pub fn wibble() {
+  let a = case 1337 {
+    n if n == 1347 -> Nil
+    _ -> Nil
+  }
+  let b = case 1337 {
+    n -> Nil
+  }
+}"#
+    )
+}
+
+#[test]
+// https://github.com/gleam-lang/gleam/issues/5283
+fn duplicate_name_for_variables_used_in_guards_shadowing_outer_name() {
+    assert_js!(
+        r#"
+pub fn wibble() {
+  let n = 1
+  let a = case 1337 {
+    n if n == 1347 -> n
+    _ -> n
+  }
+  let b = case 1337 {
+    n -> Nil
+  }
+}"#
+    )
 }

@@ -328,8 +328,11 @@ where
             self.io
                 .write_bytes(&cache_files.meta_path, &info.to_binary())?;
 
-            let cache_inline = bincode::serialize(&module.ast.type_info.inline_functions)
-                .expect("Failed to serialise inline functions");
+            let cache_inline = bincode::serde::encode_to_vec(
+                &module.ast.type_info.inline_functions,
+                bincode::config::legacy(),
+            )
+            .expect("Failed to serialise inline functions");
             self.io.write_bytes(&cache_files.inline_path, &cache_inline);
 
             // Write warnings.
@@ -338,7 +341,8 @@ where
             // cannot fix directly.
             if self.cached_warnings.should_use() {
                 let warnings = &module.ast.type_info.warnings;
-                let data = bincode::serialize(warnings).expect("Serialise warnings");
+                let data = bincode::serde::encode_to_vec(warnings, bincode::config::legacy())
+                    .expect("Serialise warnings");
                 self.io.write_bytes(&cache_files.warnings_path, &data)?;
             }
         }
@@ -609,7 +613,7 @@ fn analyse(
                 let _ = incomplete_modules.insert(name.clone());
                 // Register the partially type checked module data so that it can be
                 // used in the language server.
-                modules.push(Module {
+                let mut module = Module {
                     dependencies,
                     origin,
                     extra,
@@ -618,7 +622,12 @@ fn analyse(
                     code,
                     ast,
                     input_path: path,
-                });
+                };
+                module.attach_doc_and_module_comments();
+
+                let _ = module_types.insert(module.ast.name.clone(), module.ast.type_info.clone());
+
+                modules.push(module);
                 // WARNING: This cannot be used for code generation as the code has errors.
                 return Outcome::PartialFailure(modules, error);
             }
@@ -702,11 +711,15 @@ pub(crate) struct CacheMetadata {
 
 impl CacheMetadata {
     pub fn to_binary(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("Serializing cache info")
+        bincode::serde::encode_to_vec(self, bincode::config::legacy())
+            .expect("Serializing cache info")
     }
 
     pub fn from_binary(bytes: &[u8]) -> Result<Self, String> {
-        bincode::deserialize(bytes).map_err(|e| e.to_string())
+        match bincode::serde::decode_from_slice(bytes, bincode::config::legacy()) {
+            Ok((data, _)) => Ok(data),
+            Err(e) => Err(e.to_string()),
+        }
     }
 }
 

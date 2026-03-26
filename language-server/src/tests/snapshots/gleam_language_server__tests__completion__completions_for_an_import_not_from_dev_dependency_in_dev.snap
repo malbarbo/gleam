@@ -1,0 +1,24 @@
+---
+source: language-server/src/tests/completion.rs
+expression: "import gleam\n\npub fn main() {\n  0\n}\n"
+---
+import gle|am
+
+pub fn main() {
+  0
+}
+
+
+----- Completion content -----
+app
+  kind:   Module
+  edits:
+    [0:7-0:12]: "app"
+example_module
+  kind:   Module
+  edits:
+    [0:7-0:12]: "example_module"
+indirect_module
+  kind:   Module
+  edits:
+    [0:7-0:12]: "indirect_module"

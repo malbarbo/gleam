@@ -1,0 +1,485 @@
+Generating tree.wasm
+old Var { type_: RefCell { value: Generic { id: 167 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 167 } } }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 167 } } }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }], inferred_variant: None }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 169 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 169 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: Some(0) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(0) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: Some(0) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(0) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: Some(0) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(0) }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Fn { arguments: [Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }, Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }], return_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Fn { arguments: [Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }, Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }], return_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Fn { arguments: [Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: None }], return_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Fn { arguments: [Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }], return_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 169 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 169 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Fn { arguments: [Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: None }], return_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Fn { arguments: [Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }], return_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 169 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 169 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 167 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 167 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 167 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 167 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 169 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 169 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: Some(0) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(0) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: Some(0) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(0) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: Some(0) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(0) }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Fn { arguments: [Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }, Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }], return_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Fn { arguments: [Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }, Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }], return_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Fn { arguments: [Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: None }], return_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Fn { arguments: [Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }], return_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 169 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 169 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+old Fn { arguments: [Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: None }], return_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None }
+new Fn { arguments: [Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }], return_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 169 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 169 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 169 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 169 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 167 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 167 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 167 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 167 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 167 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "String", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 171 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 171 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }], inferred_variant: Some(0) }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(0) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 171 } } }], inferred_variant: Some(0) }
+old Var { type_: RefCell { value: Generic { id: 171 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(0) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Fn { arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }, Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }], inferred_variant: None }, Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }], inferred_variant: None }], return_: Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }], inferred_variant: Some(1) } }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+new Fn { arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }, Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }, Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }], return_: Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) } }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 171 } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 171 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }], inferred_variant: Some(0) }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(0) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 171 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 171 } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 171 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 171 } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 171 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 171 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 171 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 171 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 171 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 171 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 167 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 174 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 174 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }], inferred_variant: Some(0) }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(0) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 174 } } }], inferred_variant: Some(0) }
+old Var { type_: RefCell { value: Generic { id: 174 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(0) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Fn { arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }, Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }], inferred_variant: None }, Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }], inferred_variant: None }], return_: Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }], inferred_variant: Some(1) } }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+new Fn { arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }, Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }, Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }], return_: Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) } }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 174 } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 174 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 174 } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 174 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 174 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 174 } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 174 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 174 } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 174 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: Some(1) }
+old Var { type_: RefCell { value: Generic { id: 174 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 174 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 174 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Generic { id: 174 } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 174 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Generic { id: 167 } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }
+old Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }], inferred_variant: None }
+old Var { type_: RefCell { value: Link { type_: Var { type_: RefCell { value: Generic { id: 167 } } } } } }
+new Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }
+new Named { publicity: Private, package: "wasm", module: "tree", name: "Tree", arguments: [Var { type_: RefCell { value: Link { type_: Named { publicity: Public, package: "", module: "gleam", name: "Int", arguments: [], inferred_variant: None } } } }], inferred_variant: None }

@@ -1,0 +1,17 @@
+---
+source: language-server/src/tests/hover.rs
+expression: "\nimport wibble\n"
+---
+import wibble
+▔▔▔▔▔▔▔↑▔▔▔▔▔
+
+
+----- Hover content (markdown) -----
+```gleam
+wibble
+```
+ This is the wibble module.
+ Here is some documentation about it.
+ This module does stuff
+
+View on [HexDocs](https://hexdocs.pm/hex/wibble.html)

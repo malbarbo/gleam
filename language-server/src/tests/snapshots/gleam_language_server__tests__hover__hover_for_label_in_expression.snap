@@ -1,0 +1,18 @@
+---
+source: language-server/src/tests/hover.rs
+expression: "\nfn add(wibble a, wobble b) {\n  a + b\n}\n\npub fn main() {\n  add(wibble: 1, wobble: 2)\n}\n"
+---
+fn add(wibble a, wobble b) {
+  a + b
+}
+
+pub fn main() {
+  add(wibble: 1, wobble: 2)
+      ▔↑▔▔▔▔▔▔▔            
+}
+
+
+----- Hover content (markdown) -----
+```gleam
+Int
+```

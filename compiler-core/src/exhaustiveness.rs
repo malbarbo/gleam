@@ -314,7 +314,11 @@ impl Branch {
 
                             // Otherwise there's no unconditional test to pop, we
                             // keep the pattern without changing it.
-                            _ => return true,
+                            BitArrayTest::Size(_)
+                            | BitArrayTest::Match(_)
+                            | BitArrayTest::CatchAllIsBytes { .. }
+                            | BitArrayTest::ReadSizeIsNotNegative { .. }
+                            | BitArrayTest::SegmentIsFiniteFloat { .. } => return true,
                         },
 
                         // If a bit array pattern has no tests then it's always
@@ -323,7 +327,13 @@ impl Branch {
                     },
 
                     // All other patterns are not unconditional, so we just keep them.
-                    _ => return true,
+                    Pattern::Int { .. }
+                    | Pattern::Float { .. }
+                    | Pattern::String { .. }
+                    | Pattern::Tuple { .. }
+                    | Pattern::Variant { .. }
+                    | Pattern::NonEmptyList { .. }
+                    | Pattern::EmptyList => return true,
                 }
             }
         });
@@ -556,7 +566,17 @@ impl Pattern {
                     Some(impossible_segments)
                 }
             }
-            _ => None,
+            Self::Discard
+            | Self::Int { .. }
+            | Self::Float { .. }
+            | Self::String { .. }
+            | Self::StringPrefix { .. }
+            | Self::Assign { .. }
+            | Self::Variable { .. }
+            | Self::Tuple { .. }
+            | Self::Variant { .. }
+            | Self::NonEmptyList { .. }
+            | Self::EmptyList => None,
         }
     }
 }
@@ -660,7 +680,15 @@ impl RuntimeCheck {
                 match_: VariantMatch::NeverExplicitlyMatchedOn { .. },
                 ..
             } => true,
-            _ => false,
+            RuntimeCheck::Int { .. }
+            | RuntimeCheck::Float { .. }
+            | RuntimeCheck::String { .. }
+            | RuntimeCheck::StringPrefix { .. }
+            | RuntimeCheck::Tuple { .. }
+            | RuntimeCheck::BitArray { .. }
+            | RuntimeCheck::NonEmptyList { .. }
+            | RuntimeCheck::Variant { .. }
+            | RuntimeCheck::EmptyList => false,
         }
     }
 
@@ -940,7 +968,11 @@ impl BitArrayTest {
                 value: BitArrayMatchedValue::Discard(_),
                 ..
             }) => true,
-            _ => false,
+            BitArrayTest::Match(_)
+            | BitArrayTest::Size(_)
+            | BitArrayTest::CatchAllIsBytes { .. }
+            | BitArrayTest::ReadSizeIsNotNegative { .. }
+            | BitArrayTest::SegmentIsFiniteFloat { .. } => false,
         }
     }
 
@@ -1042,6 +1074,7 @@ pub struct MatchTest {
     pub read_action: ReadAction,
 }
 
+#[derive(Debug)]
 struct Interference {
     interfering_bits_are_equal: bool,
     first_encloses_second: bool,
@@ -1191,13 +1224,25 @@ impl MatchTest {
         let bits_one = self.value.constant_bits()?;
         let bits_other = other.value.constant_bits()?;
         let end = (offset_other + size_other).min(offset_one + size_one);
+
+        let range_one = offset_one..=(offset_one + size_one);
+        let range_other = offset_other..=(offset_other + size_other);
+
         Some(Interference {
             interfering_bits_are_equal: bits_one[offset_other - offset_one..end - offset_one]
                 == bits_other[0..end - offset_other],
-            first_encloses_second: size_one + offset_one >= size_other + offset_other,
-            second_encloses_first: size_other + offset_other >= size_one + offset_one,
+            first_encloses_second: range_contains(&range_one, &range_other),
+            second_encloses_first: range_contains(&range_other, &range_one),
         })
     }
+}
+
+/// Returns true if the first range fully contains the other one.
+fn range_contains(
+    one: &std::ops::RangeInclusive<usize>,
+    other: &std::ops::RangeInclusive<usize>,
+) -> bool {
+    one.contains(other.start()) && one.contains(other.end())
 }
 
 /// A value that can be matched in a bit array pattern's segment. We do not use
@@ -1686,7 +1731,10 @@ impl Offset {
                 operator,
             } => match operator {
                 IntOperator::Add => self.add_size(left).add_size(right),
-                _ => {
+                IntOperator::Subtract
+                | IntOperator::Multiply
+                | IntOperator::Divide
+                | IntOperator::Remainder => {
                     self.calculations.push_back(OffsetCalculation {
                         left: Self::from_size(left),
                         right: Self::from_size(right),
@@ -2069,6 +2117,7 @@ struct Compiler<'a> {
 
 /// The result of compiling a pattern match expression.
 ///
+#[derive(Debug)]
 pub struct CompileCaseResult {
     pub compiled_case: CompiledCase,
     pub diagnostics: Diagnostics,
@@ -3076,6 +3125,7 @@ fn ancestors_values(trie: &Trie<String, usize>, key: &str) -> impl Iterator<Item
         .flat_map(|ancestor| ancestor.values().copied())
 }
 
+#[derive(Debug)]
 pub struct ConstructorSpecialiser {
     specialised_types: HashMap<u64, Arc<Type>>,
 }
@@ -3197,6 +3247,7 @@ impl ConstructorSpecialiser {
 /// the pattern matching compiler and get a case expression ready to be compiled,
 /// while hiding the intricacies of handling an arena to record different patterns.
 ///
+#[derive(Debug)]
 pub struct CaseToCompile {
     patterns: Arena<Pattern>,
     branches: Vec<Branch>,
@@ -3453,8 +3504,10 @@ impl CaseToCompile {
                 ReadSize::RemainingBytes => tests.push_back(BitArrayTest::CatchAllIsBytes {
                     size_so_far: previous_end.clone(),
                 }),
-                segment_size => {
-                    let size = previous_end.clone().add_size(segment_size);
+                ReadSize::ConstantBits(_)
+                | ReadSize::VariableBits { .. }
+                | ReadSize::BinaryOperator { .. } => {
+                    let size = previous_end.clone().add_size(&segment_size);
                     let operator = if is_last_segment {
                         SizeOperator::Equal
                     } else {
@@ -3572,7 +3625,13 @@ fn segment_matched_value(
             name: name.clone(),
             value: Box::new(segment_matched_value(segment, Some(pattern), read_action)),
         },
-        x => panic!("unexpected segment value pattern {x:?}"),
+        ast::Pattern::BitArraySize(_)
+        | ast::Pattern::List { .. }
+        | ast::Pattern::Constructor { .. }
+        | ast::Pattern::Tuple { .. }
+        | ast::Pattern::BitArray { .. }
+        | ast::Pattern::StringPrefix { .. }
+        | ast::Pattern::Invalid { .. } => panic!("unexpected segment value pattern {pattern:?}"),
     }
 }
 
@@ -3709,8 +3768,18 @@ fn segment_size(
             ast::Pattern::String { value, .. } => {
                 ReadSize::ConstantBits(convert_string_escape_chars(value).len() * BigInt::from(8))
             }
-            // In all other cases the segment is considered to be 64 bits.
-            _ => ReadSize::ConstantBits(64.into()),
+            // In all other cases the segment is considered to be 64 bits
+            ast::Pattern::Int { .. }
+            | ast::Pattern::Float { .. }
+            | ast::Pattern::Variable { .. }
+            | ast::Pattern::BitArraySize(_)
+            | ast::Pattern::Discard { .. }
+            | ast::Pattern::List { .. }
+            | ast::Pattern::Constructor { .. }
+            | ast::Pattern::Tuple { .. }
+            | ast::Pattern::BitArray { .. }
+            | ast::Pattern::StringPrefix { .. }
+            | ast::Pattern::Invalid { .. } => ReadSize::ConstantBits(64.into()),
         },
     }
 }

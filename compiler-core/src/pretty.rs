@@ -56,8 +56,26 @@ macro_rules! docvec {
         Document::Vec(Vec::new())
     };
 
-    ($($x:expr),+ $(,)?) => {
-        Document::Vec(vec![$($x.to_doc()),+])
+    // A docvec![] with a single element
+    ($first:expr $(,)?) => {
+        Document::Vec(vec![$first.to_doc()])
+    };
+
+    // A docvec![] with multiple elements.
+    ($first:expr, $($rest:expr),+ $(,)?) => {
+        // A document that looks like this: `Vec[Vec[..rest], ..other_rest]`
+        // is exactly the same as a flat: `Vec[..rest, ..other_rest]`.
+        // So in case a `docvec!` starts with a `Vec` we flatten it out to avoid
+        // having deeply nested documents.
+        match $first.to_doc() {
+            Document::Vec(mut vec) => {
+                $(
+                    vec.push($rest.to_doc());
+                )*
+                Document::Vec(vec)
+            },
+            first => Document::Vec(vec![first, $($rest.to_doc()),+])
+        }
     };
 }
 
@@ -363,7 +381,7 @@ fn fits(
                 // this break [ref:forced-broken], so we go check the inner
                 // document ignoring the effects of this one.
                 Mode::ForcedBroken => docs.push_front((indent, mode, doc)),
-                _ => return false,
+                Mode::Broken | Mode::Unbroken | Mode::ForcedUnbroken => return false,
             },
 
             // [tag:newline-fit] When we run into a line we know that the
@@ -396,7 +414,9 @@ fn fits(
                 // Any other mode is preserved as-is: if the mode is forced it
                 // has to be left unchanged, and if the mode is already unbroken
                 // there's no need to change it.
-                _ => docs.push_front((indent, mode, doc)),
+                Mode::Unbroken | Mode::ForcedBroken | Mode::ForcedUnbroken => {
+                    docs.push_front((indent, mode, doc))
+                }
             },
 
             // When we run into a string we increase the current_width; looping
@@ -442,7 +462,9 @@ fn fits(
                     // response to the question "Does the document fit?" will be
                     // yes [ref:break-fit].
                     // This is why this is called `NextBreakFit` I think.
-                    _ => docs.push_front((indent, Mode::ForcedBroken, doc)),
+                    Mode::Broken | Mode::Unbroken | Mode::ForcedBroken => {
+                        docs.push_front((indent, Mode::ForcedBroken, doc))
+                    }
                 },
             },
 
@@ -796,7 +818,15 @@ impl<'a> Document<'a> {
                 vec.push(second.to_doc());
                 Self::Vec(vec)
             }
-            first => Self::Vec(vec![first, second.to_doc()]),
+            Self::Line(..)
+            | Self::ForceBroken(..)
+            | Self::NextBreakFits(..)
+            | Self::Break { .. }
+            | Self::Nest(..)
+            | Self::Group(..)
+            | Self::Str { .. }
+            | Self::EcoString { .. }
+            | Self::ZeroWidthString { .. } => Self::Vec(vec![self, second.to_doc()]),
         }
     }
 

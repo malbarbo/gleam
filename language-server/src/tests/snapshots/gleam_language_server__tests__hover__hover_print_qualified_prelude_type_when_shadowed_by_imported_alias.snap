@@ -1,0 +1,13 @@
+---
+source: language-server/src/tests/hover.rs
+expression: "\nimport alias.{type Bool}\nconst value = True\n"
+---
+import alias.{type Bool}
+const value = True
+▔▔▔▔▔▔↑▔▔▔▔       
+
+
+----- Hover content (markdown) -----
+```gleam
+gleam.Bool
+```

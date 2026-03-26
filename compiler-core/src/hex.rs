@@ -30,6 +30,7 @@ fn key_name(hostname: &str) -> String {
 pub async fn publish_package<Http: HttpClient>(
     release_tarball: Vec<u8>,
     version: String,
+    name: &str,
     api_key: &str,
     config: &hexpm::Config,
     replace: bool,
@@ -40,7 +41,24 @@ pub async fn publish_package<Http: HttpClient>(
     let response = http.send(request).await?;
     hexpm::api_publish_package_response(response).map_err(|e| match e {
         ApiError::NotReplacing => Error::HexPublishReplaceRequired { version },
-        err => Error::hex(err),
+        ApiError::Forbidden => Error::HexPublishAccessDenied {
+            name: name.into(),
+            version,
+        },
+        ApiError::Json(_)
+        | ApiError::Io(_)
+        | ApiError::RateLimited
+        | ApiError::InvalidCredentials
+        | ApiError::UnexpectedResponse(..)
+        | ApiError::InvalidPackageNameFormat(_)
+        | ApiError::IncorrectPayloadSignature
+        | ApiError::InvalidProtobuf(_)
+        | ApiError::InvalidVersionFormat(_)
+        | ApiError::NotFound
+        | ApiError::InvalidVersionRequirementFormat(_)
+        | ApiError::IncorrectChecksum
+        | ApiError::InvalidApiKey
+        | ApiError::LateModification => Error::hex(e),
     })
 }
 
@@ -183,15 +201,12 @@ impl Downloader {
     ) -> Result<bool, Error> {
         let outer_checksum = match &package.source {
             ManifestPackageSource::Hex { outer_checksum } => outer_checksum,
-            _ => {
+            ManifestPackageSource::Git { .. } | ManifestPackageSource::Local { .. } => {
                 panic!("Attempt to download non-hex package from hex")
             }
         };
 
-        let tarball_path = paths::global_package_cache_package_tarball(
-            &package.name,
-            &package.version.to_string(),
-        );
+        let tarball_path = paths::global_package_cache_package_tarball(outer_checksum);
         if self.fs_reader.is_file(&tarball_path) {
             tracing::info!(
                 package = package.name.as_str(),
@@ -229,22 +244,32 @@ impl Downloader {
         package: &ManifestPackage,
     ) -> Result<bool> {
         let _ = self.ensure_package_downloaded(package).await?;
-        self.extract_package_from_cache(&package.name, &package.version)
+        self.extract_package_from_cache(package)
     }
 
     // It would be really nice if this was async but the library is sync
-    pub fn extract_package_from_cache(&self, name: &str, version: &Version) -> Result<bool> {
+    pub fn extract_package_from_cache(&self, package: &ManifestPackage) -> Result<bool> {
         let contents_path = Utf8Path::new("contents.tar.gz");
-        let destination = self.paths.build_packages_package(name);
+        let destination = self.paths.build_packages_package(&package.name);
+
+        let outer_checksum = match &package.source {
+            ManifestPackageSource::Hex { outer_checksum } => outer_checksum,
+            ManifestPackageSource::Git { .. } | ManifestPackageSource::Local { .. } => {
+                panic!("Attempt to download non-hex package from hex")
+            }
+        };
 
         // If the directory already exists then there's nothing for us to do
         if self.fs_reader.is_directory(&destination) {
-            tracing::info!(package = name, "Package already in build directory");
+            tracing::info!(
+                package = package.name.as_str(),
+                "Package already in build directory"
+            );
             return Ok(false);
         }
 
-        tracing::info!(package = name, "writing_package_to_target");
-        let tarball = paths::global_package_cache_package_tarball(name, &version.to_string());
+        tracing::info!(package = package.name.as_str(), "writing_package_to_target");
+        let tarball = paths::global_package_cache_package_tarball(outer_checksum);
         let reader = self.fs_reader.reader(&tarball)?;
         let mut archive = Archive::new(reader);
 

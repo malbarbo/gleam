@@ -1,0 +1,4 @@
+#!/bin/bash
+script -q -c "wasm-tools print $1" /dev/null > x
+less -R x
+rm x

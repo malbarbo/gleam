@@ -1,0 +1,27 @@
+/// Determina se a sequência *a*, *b*, *c* está em ordem "crescente",
+/// "decrescente" ou "sem ordem".
+pub fn ordem(a: Int, b: Int, c: Int) -> String {
+  case a < b && b < c {
+    True -> "crescente"
+    False ->
+      case a > b && b > c {
+        True -> "decrescente"
+        False -> "sem ordem"
+      }
+  }
+}
+
+pub fn ordem_examples() {
+  eq(ordem(3, 8, 12), "crescente")
+  eq(ordem(3, 1, 4), "sem ordem")
+  eq(ordem(3, 1, 0), "decrescente")
+}
+
+fn eq(a, b) {
+  assert a == b
+  0
+}
+
+pub fn main() {
+  ordem_examples()
+}

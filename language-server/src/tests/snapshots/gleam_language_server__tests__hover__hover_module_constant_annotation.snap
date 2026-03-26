@@ -1,0 +1,14 @@
+---
+source: language-server/src/tests/hover.rs
+expression: "\n/// Exciting documentation\n/// Maybe even multiple lines\nconst one: Int = 1\n"
+---
+/// Exciting documentation
+/// Maybe even multiple lines
+const one: Int = 1
+           ▔▔↑    
+
+
+----- Hover content (markdown) -----
+```gleam
+gleam.Int
+```
