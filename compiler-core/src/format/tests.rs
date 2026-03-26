@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use pretty_assertions::assert_eq;
 
 mod asignments;
@@ -6774,6 +6775,64 @@ fn remove_redundant_negation_from_literal_int_3() {
         "pub fn main() {
   1
 }
+"
+    );
+}
+
+#[test]
+fn call_with_single_call_argument_and_trailing_comment() {
+    assert_format!(
+        "pub fn main() {
+  call(
+    wibble(wobble),
+    // ...
+  )
+}
+"
+    );
+}
+
+#[test]
+fn call_with_single_call_argument_and_trailing_comment_2() {
+    assert_format_rewrite!(
+        "pub fn main() {
+  call(wibble(wobble) // ...
+  )
+}
+",
+        "pub fn main() {
+  call(
+    wibble(wobble),
+    // ...
+  )
+}
+"
+    );
+}
+
+#[test]
+fn can_format_big_list_without_stack_overflowing() {
+    let items = std::iter::repeat_n("    1,", 10_000).join("\n");
+
+    assert_format!(format!(
+        "pub fn main() {{
+  [
+{items}
+  ]
+}}
+"
+    ));
+}
+
+// https://github.com/gleam-lang/gleam/issues/5323
+#[test]
+fn internal_const_list_is_kept_on_multiple_lines() {
+    assert_format!(
+        "@internal
+pub const list = [
+  LeftToRight,
+  RightToLeft,
+]
 "
     );
 }

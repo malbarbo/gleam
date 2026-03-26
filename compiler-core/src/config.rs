@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::{self};
 use std::marker::PhantomData;
+use toml::Table;
 
 #[cfg(test)]
 use crate::manifest::ManifestPackage;
@@ -144,6 +145,7 @@ impl GleamVersion {
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct PackageConfig {
     #[serde(deserialize_with = "package_name::deserialize")]
     pub name: EcoString,
@@ -165,7 +167,7 @@ pub struct PackageConfig {
     pub documentation: Docs,
     #[serde(default, serialize_with = "ordered_map")]
     pub dependencies: Dependencies,
-    #[serde(default, rename = "dev-dependencies", serialize_with = "ordered_map")]
+    #[serde(default, alias = "dev-dependencies", serialize_with = "ordered_map")]
     pub dev_dependencies: Dependencies,
     #[serde(default)]
     pub repository: Option<Repository>,
@@ -179,6 +181,11 @@ pub struct PackageConfig {
     pub target: Target,
     #[serde(default)]
     pub internal_modules: Option<Vec<Glob>>,
+    /// This entry contains values from [tools] table, which is the only way
+    /// for tools to store configuration inside package config, other unknown
+    /// values are denied. It isn't used anywhere in the compiler and build tool.
+    #[serde(default)]
+    pub tools: Table,
 }
 
 pub fn serialise_gleam_version<S>(
@@ -216,7 +223,7 @@ impl PackageConfig {
     }
 
     // Return all the dependencies listed in the configuration, that is, all the
-    // direct dependencies, both in the `dependencies` and `dev-dependencies`.
+    // direct dependencies, both in the `dependencies` and `dev_dependencies`.
     pub fn all_direct_dependencies(&self) -> Result<Dependencies> {
         let mut deps =
             HashMap::with_capacity(self.dependencies.len() + self.dev_dependencies.len());
@@ -702,11 +709,13 @@ impl Default for PackageConfig {
             links: Default::default(),
             internal_modules: Default::default(),
             target: Target::Erlang,
+            tools: Default::default(),
         }
     }
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ErlangConfig {
     /// An module that can be set in the `.app` file as the entrypoint for a stateful application
     /// that defines a singleton supervision tree.
@@ -723,6 +732,7 @@ pub struct ErlangConfig {
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct JavaScriptConfig {
     #[serde(default)]
     pub typescript_declarations: bool,
@@ -802,6 +812,7 @@ where
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct DenoConfig {
     #[serde(default, deserialize_with = "bool_or_seq_string_to_deno_flag")]
     pub allow_env: DenoFlag,
@@ -832,14 +843,14 @@ pub struct DenoConfig {
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum Repository {
     #[serde(rename = "github")]
     GitHub {
         user: String,
         repo: String,
         path: Option<String>,
-        #[serde(rename = "tag-prefix")]
+        #[serde(alias = "tag-prefix")]
         tag_prefix: Option<String>,
     },
     #[serde(rename = "gitlab")]
@@ -847,7 +858,7 @@ pub enum Repository {
         user: String,
         repo: String,
         path: Option<String>,
-        #[serde(rename = "tag-prefix")]
+        #[serde(alias = "tag-prefix")]
         tag_prefix: Option<String>,
     },
     #[serde(rename = "bitbucket")]
@@ -855,7 +866,7 @@ pub enum Repository {
         user: String,
         repo: String,
         path: Option<String>,
-        #[serde(rename = "tag-prefix")]
+        #[serde(alias = "tag-prefix")]
         tag_prefix: Option<String>,
     },
     #[serde(rename = "codeberg")]
@@ -863,7 +874,7 @@ pub enum Repository {
         user: String,
         repo: String,
         path: Option<String>,
-        #[serde(rename = "tag-prefix")]
+        #[serde(alias = "tag-prefix")]
         tag_prefix: Option<String>,
     },
     #[serde(rename = "gitea")]
@@ -871,7 +882,7 @@ pub enum Repository {
         user: String,
         repo: String,
         path: Option<String>,
-        #[serde(rename = "tag-prefix")]
+        #[serde(alias = "tag-prefix")]
         tag_prefix: Option<String>,
         #[serde(
             serialize_with = "uri_serde::serialize",
@@ -884,7 +895,7 @@ pub enum Repository {
         user: String,
         repo: String,
         path: Option<String>,
-        #[serde(rename = "tag-prefix")]
+        #[serde(alias = "tag-prefix")]
         tag_prefix: Option<String>,
         #[serde(
             serialize_with = "uri_serde::serialize",
@@ -897,7 +908,7 @@ pub enum Repository {
         user: String,
         repo: String,
         path: Option<String>,
-        #[serde(rename = "tag-prefix")]
+        #[serde(alias = "tag-prefix")]
         tag_prefix: Option<String>,
     },
     #[serde(rename = "tangled")]
@@ -905,13 +916,13 @@ pub enum Repository {
         user: String,
         repo: String,
         path: Option<String>,
-        #[serde(rename = "tag-prefix")]
+        #[serde(alias = "tag-prefix")]
         tag_prefix: Option<String>,
     },
     #[serde(rename = "custom")]
     Custom {
         url: String,
-        #[serde(rename = "tag-prefix")]
+        #[serde(alias = "tag-prefix")]
         tag_prefix: Option<String>,
     },
 }
@@ -968,12 +979,14 @@ impl Repository {
 }
 
 #[derive(Deserialize, Serialize, Default, Debug, PartialEq, Eq, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Docs {
     #[serde(default)]
     pub pages: Vec<DocsPage>,
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct DocsPage {
     pub title: String,
     pub path: String,
@@ -981,6 +994,7 @@ pub struct DocsPage {
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Link {
     pub title: String,
     #[serde(with = "uri_serde")]
@@ -1149,7 +1163,7 @@ gleam = ">= 0.30.0"
 gleam_stdlib = ">= 0.18.0 and < 2.0.0"
 my_other_project = { path = "../my_other_project" }
 
-[dev-dependencies]
+[dev_dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"
 
 [documentation]
@@ -1169,9 +1183,12 @@ allow_ffi = true
 allow_env = ["DATABASE_URL"]
 allow_net = ["example.com:443"]
 allow_read = ["./database.sqlite"]
+
+[tools.my-tool]
+enable = true
 "#;
 
-    let config = toml::from_str::<PackageConfig>(&input).unwrap();
+    let config = toml::from_str::<PackageConfig>(input).unwrap();
     let json = serde_json::to_string_pretty(&config).unwrap();
     let output = format!("--- GLEAM.TOML\n{input}\n\n--- EXPORTED JSON\n\n{json}");
     insta::assert_snapshot!(output);
@@ -1187,8 +1204,46 @@ name = "my_project"
 version = "1.0.0"
 "#;
 
-    let config = toml::from_str::<PackageConfig>(&input).unwrap();
+    let config = toml::from_str::<PackageConfig>(input).unwrap();
     let json = serde_json::to_string_pretty(&config).unwrap();
     let output = format!("--- GLEAM.TOML\n{input}\n\n--- EXPORTED JSON\n\n{json}");
     insta::assert_snapshot!(output);
+}
+
+#[test]
+fn dev_deps_field_name() {
+    let toml = r#"
+name = "wibble"
+version = "1.0.0"
+
+[dev_dependencies]
+wibble = ">= 1.0.0 and < 2.0.0"
+"#;
+    let hyphen_alternative = deserialise_config("gleam.toml", toml.into()).expect("valid config");
+    let toml = r#"
+name = "wibble"
+version = "1.0.0"
+
+[dev_dependencies]
+wibble = ">= 1.0.0 and < 2.0.0"
+"#;
+    let canonical = deserialise_config("gleam.toml", toml.into()).expect("valid config");
+    assert_eq!(canonical, hyphen_alternative)
+}
+
+#[test]
+fn unknown_field_root() {
+    let input = r#"
+name = "wibble"
+version = "1.0.0"
+
+unknown = true
+"#;
+
+    insta::assert_snapshot!(
+        insta::internals::AutoName,
+        toml::from_str::<PackageConfig>(input)
+            .unwrap_err()
+            .to_string(),
+    )
 }

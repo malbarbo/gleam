@@ -2038,6 +2038,7 @@ impl<'a> Generator<'a> {
                 id
             }
             Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
+            Constant::RecordUpdate { .. } => todo!("RecordUpdate constants are not yet supported"),
             Constant::StringConcatenation { .. } => {
                 let id = self.add_const(
                     const_name,
@@ -2076,6 +2077,7 @@ impl<'a> Generator<'a> {
             }
             Constant::Var { .. } => {}
             Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
+            Constant::RecordUpdate { .. } => todo!("RecordUpdate constants are not yet supported"),
             Constant::StringConcatenation { left, right, .. } => {
                 self.register_string_const(left);
                 self.register_string_const(right);
@@ -2154,6 +2156,7 @@ impl<'a> Generator<'a> {
                 self.expression_var(&scope, instructions, name, type_);
             }
             Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
+            Constant::RecordUpdate { .. } => todo!("RecordUpdate constants are not yet supported"),
             Constant::StringConcatenation { left, right, .. } => {
                 let concat =
                     self.get_function_builtin_external(BuiltinFunctionExternal::StringConcat);
@@ -2541,6 +2544,56 @@ impl<'a> Generator<'a> {
                 let _ = instructions
                     .expression(self, locals, scope.clone(), tuple)
                     .struct_get(type_index, *index as u32);
+            }
+            TypedExpr::PositionalAccess { index, record, .. } => {
+                // Same as RecordAccess but by position
+                let (custom_type, args) = self.custom_type_expect(&record.type_());
+                match custom_type {
+                    CustomType::Struct {
+                        custom_type,
+                        constructor,
+                    } => {
+                        let (type_index, _) = self.mono_struct_type_index(
+                            &record.type_(),
+                            &custom_type,
+                            &constructor,
+                            &args,
+                        );
+                        let _ = instructions
+                            .expression(self, locals, scope, record)
+                            .struct_get(type_index, *index as u32);
+                    }
+                    CustomType::Union { custom_type, .. } => {
+                        let layout = self.union_layout(&record.type_()).clone();
+                        if let Some(variant) = record.type_().custom_type_inferred_variant() {
+                            let constructor = custom_type
+                                .constructors
+                                .get(variant as usize)
+                                .expect("constructor at index");
+                            let (_, type_index, _) = self.mono_union_subtype_index(
+                                &record.type_(),
+                                &custom_type,
+                                constructor,
+                                &args,
+                            );
+                            let field_index = layout.field(variant as usize, *index);
+                            let _ = instructions
+                                .expression(self, locals, scope, record)
+                                .ref_cast_non_null(HeapType::Concrete(type_index))
+                                .struct_get(type_index, field_index);
+                        } else {
+                            let supertype_index =
+                                self.mono_union_supertype_index(&record.type_(), &custom_type);
+                            let field_index = layout.shared_field(*index);
+                            let _ = instructions
+                                .expression(self, locals, scope, record)
+                                .struct_get(supertype_index, field_index);
+                        }
+                    }
+                    CustomType::External { .. } | CustomType::Enum { .. } => {
+                        panic!("external/enum types should not reach code generation")
+                    }
+                }
             }
             TypedExpr::BinOp {
                 name, left, right, ..
@@ -3472,132 +3525,143 @@ impl<'a> Generator<'a> {
         guard: &TypedClauseGuard,
     ) {
         match guard {
-            // Bool
-            ClauseGuard::Or { left, right, .. } => {
-                #[rustfmt::skip]
-                let _ = instructions
-                    .clause_guard(self, locals, scope, left)
-                    .if_(BlockType::Result(BOOL_VALTYPE))
-                      .bool_const(true)
-                    .else_()
-                      .clause_guard(self, locals, scope, right)
-                    .end();
-            }
-            ClauseGuard::And { left, right, .. } => {
-                #[rustfmt::skip]
-                let _ = instructions
-                    .clause_guard(self, locals, scope, left)
-                    .if_(BlockType::Result(BOOL_VALTYPE))
-                      .clause_guard(self, locals, scope, right)
-                    .else_()
-                      .bool_const(false)
-                    .end();
-            }
+            ClauseGuard::BinaryOperator {
+                operator,
+                left,
+                right,
+                ..
+            } => match operator {
+                BinOp::Or => {
+                    #[rustfmt::skip]
+                    let _ = instructions
+                        .clause_guard(self, locals, scope, left)
+                        .if_(BlockType::Result(BOOL_VALTYPE))
+                          .bool_const(true)
+                        .else_()
+                          .clause_guard(self, locals, scope, right)
+                        .end();
+                }
+                BinOp::And => {
+                    #[rustfmt::skip]
+                    let _ = instructions
+                        .clause_guard(self, locals, scope, left)
+                        .if_(BlockType::Result(BOOL_VALTYPE))
+                          .clause_guard(self, locals, scope, right)
+                        .else_()
+                          .bool_const(false)
+                        .end();
+                }
+                BinOp::AddInt => {
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .int_add();
+                }
+                BinOp::SubInt => {
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .int_sub();
+                }
+                BinOp::MultInt => {
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .int_mul();
+                }
+                BinOp::RemainderInt => {
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .int_rem();
+                }
+                BinOp::DivInt => {
+                    let (a, b) = locals.for_guard_div(scope, left, right);
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .int_div(a, b);
+                }
+                BinOp::GtInt => {
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .int_gt();
+                }
+                BinOp::GtEqInt => {
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .int_ge();
+                }
+                BinOp::LtInt => {
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .int_lt();
+                }
+                BinOp::LtEqInt => {
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .int_le();
+                }
+                BinOp::AddFloat => {
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .float_add();
+                }
+                BinOp::SubFloat => {
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .float_sub();
+                }
+                BinOp::MultFloat => {
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .float_mul();
+                }
+                BinOp::DivFloat => {
+                    let (a, b) = locals.for_guard_div(scope, left, right);
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .float_div(a, b);
+                }
+                BinOp::GtFloat => {
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .float_gt();
+                }
+                BinOp::GtEqFloat => {
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .float_ge();
+                }
+                BinOp::LtFloat => {
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .float_lt();
+                }
+                BinOp::LtEqFloat => {
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .float_le();
+                }
+                BinOp::Eq => {
+                    let eq = self.function_eq(&left.type_());
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .eq(eq);
+                }
+                BinOp::NotEq => {
+                    let eq = self.function_eq(&left.type_());
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .eq(eq)
+                        .bool_not();
+                }
+                BinOp::Concatenate => {
+                    let concat =
+                        self.get_function_builtin_external(BuiltinFunctionExternal::StringConcat);
+                    let _ = instructions
+                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
+                        .call(concat);
+                }
+            },
             ClauseGuard::Not { expression, .. } => {
                 let _ = instructions
                     .clause_guard(self, locals, scope, expression)
-                    .bool_not();
-            }
-            // Int
-            ClauseGuard::AddInt { left, right, .. } => {
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .int_add();
-            }
-            ClauseGuard::SubInt { left, right, .. } => {
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .int_sub();
-            }
-            ClauseGuard::MultInt { left, right, .. } => {
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .int_mul();
-            }
-            ClauseGuard::RemainderInt { left, right, .. } => {
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .int_rem();
-            }
-            ClauseGuard::DivInt { left, right, .. } => {
-                let (a, b) = locals.for_guard_div(scope, left, right);
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .int_div(a, b);
-            }
-            ClauseGuard::GtInt { left, right, .. } => {
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .int_gt();
-            }
-            ClauseGuard::GtEqInt { left, right, .. } => {
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .int_ge();
-            }
-            ClauseGuard::LtInt { left, right, .. } => {
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .int_lt();
-            }
-            ClauseGuard::LtEqInt { left, right, .. } => {
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .int_le();
-            }
-            // Float
-            ClauseGuard::AddFloat { left, right, .. } => {
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .float_add();
-            }
-            ClauseGuard::SubFloat { left, right, .. } => {
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .float_sub();
-            }
-            ClauseGuard::MultFloat { left, right, .. } => {
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .float_mul();
-            }
-            ClauseGuard::DivFloat { left, right, .. } => {
-                let (a, b) = locals.for_guard_div(scope, left, right);
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .float_div(a, b);
-            }
-            ClauseGuard::GtFloat { left, right, .. } => {
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .float_gt();
-            }
-            ClauseGuard::GtEqFloat { left, right, .. } => {
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .float_ge();
-            }
-            ClauseGuard::LtFloat { left, right, .. } => {
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .float_lt();
-            }
-            ClauseGuard::LtEqFloat { left, right, .. } => {
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .float_le();
-            }
-            ClauseGuard::Equals { left, right, .. } => {
-                let eq = self.function_eq(&left.type_());
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .eq(eq);
-            }
-            ClauseGuard::NotEquals { left, right, .. } => {
-                let eq = self.function_eq(&left.type_());
-                let _ = instructions
-                    .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                    .eq(eq)
                     .bool_not();
             }
             ClauseGuard::Constant(constant) => {

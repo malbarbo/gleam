@@ -202,6 +202,16 @@ fn bit_array_bits_option_in_value() {
 }
 
 #[test]
+fn bit_array_utf8_and_size() {
+    assert_error!(r#"let x = <<"test":size(1)>> x"#);
+}
+
+#[test]
+fn bit_array_utf8_and_unit() {
+    assert_error!(r#"let x = <<"test":unit(5)>> x"#);
+}
+
+#[test]
 fn add_int_float() {
     assert_error!("1 + 1.0");
 }
@@ -528,6 +538,16 @@ fn case16() {
 #[test]
 fn case17() {
     assert_error!("case 2.22, 1, \"three\" { x, _, y if x <=. y -> 1 }");
+}
+
+#[test]
+fn int_operator_on_floats_in_case_guard() {
+    assert_error!("case 3.0 { x if x > 2.0 -> \"a\" _ -> \"b\" }");
+}
+
+#[test]
+fn float_operator_on_ints_in_case_guard() {
+    assert_error!("case 3 { x if x +. 2 == 5.0 -> \"a\" _ -> \"b\" }");
 }
 
 #[test]
@@ -871,6 +891,11 @@ pub type LeakType { Variant(PrivateType) }"#
 #[test]
 fn unexpected_labelled_arg() {
     assert_module_error!(r#"fn id(x) { x } fn y() { id(x: 4) }"#);
+}
+
+#[test]
+fn unexpected_labelled_arg_record_constructor() {
+    assert_module_error!(r#"type X { X(Int) } fn y() { X(a: 0) }"#);
 }
 
 #[test]
@@ -3381,5 +3406,21 @@ pub type Dict(key, value) {
   Dict(pairs: List(#(key, value)))
 }
 "#
+    );
+}
+
+#[test]
+fn generic_unlabelled_field_in_updated_record_wrong_type() {
+    assert_module_error!(
+        "
+pub type Wibble(a) {
+  Wibble(a, b: Int, c: a)
+}
+
+pub fn main() {
+  let w = Wibble(1, 2, 3)
+  Wibble(..w, c: False)
+}
+"
     );
 }

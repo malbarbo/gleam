@@ -1,0 +1,13 @@
+---
+source: language-server/src/tests/hover.rs
+expression: "\nconst name = \"Bob\"\nconst message = \"Hello \" <> name\n"
+---
+const name = "Bob"
+const message = "Hello " <> name
+                            ↑▔▔▔
+
+
+----- Hover content (markdown) -----
+```gleam
+String
+```

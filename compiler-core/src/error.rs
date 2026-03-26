@@ -10,7 +10,8 @@ use crate::strings::{to_snake_case, to_upper_camel_case};
 use crate::type_::collapse_links;
 use crate::type_::error::{
     IncorrectArityContext, InvalidImportKind, MissingAnnotation, ModuleValueUsageContext, Named,
-    UnknownField, UnknownTypeHint, UnsafeRecordUpdateReason,
+    RecordField, UnexpectedLabelledArgKind, UnknownField, UnknownTypeHint,
+    UnsafeRecordUpdateReason,
 };
 use crate::type_::printer::{Names, Printer};
 use crate::type_::{FieldAccessUsage, error::PatternMatchKind};
@@ -212,6 +213,9 @@ file_names.iter().map(|x| x.as_str()).join(", "))]
     #[error("Packages not exist: {}", packages.iter().join(", "))]
     RemovedPackagesNotExist { packages: Vec<String> },
 
+    #[error("Packages to update not exist: {}", packages.iter().join(", "))]
+    PackagesToUpdateNotExist { packages: Vec<EcoString> },
+
     #[error("unable to find project root")]
     UnableToFindProjectRoot { path: String },
 
@@ -224,7 +228,7 @@ file_names.iter().map(|x| x.as_str()).join(", "))]
     #[error("warnings are not permitted")]
     ForbiddenWarnings { count: usize },
 
-    #[error("Invalid runtime for {target} target: {invalid_runtime}")]
+    #[error("Invalid runtime for target {target:?}: {invalid_runtime:?}")]
     InvalidRuntime {
         target: Target,
         invalid_runtime: Runtime,
@@ -253,7 +257,7 @@ file_names.iter().map(|x| x.as_str()).join(", "))]
     #[error("Dependency resolution failed: {0}")]
     DependencyResolutionError(String),
 
-    #[error("The package {0} is listed in dependencies and dev-dependencies")]
+    #[error("The package {0} is listed in dependencies and dev_dependencies")]
     DuplicateDependency(EcoString),
 
     #[error("Expected package {expected} at path {path} but found {found} instead")]
@@ -329,6 +333,9 @@ file_names.iter().map(|x| x.as_str()).join(", "))]
 
     #[error("Version already published")]
     HexPublishReplaceRequired { version: String },
+
+    #[error("Insufficient permissions to publish {name} {version}")]
+    HexPublishAccessDenied { name: String, version: String },
 
     #[error("The gleam version constraint is wrong and so cannot be published")]
     CannotPublishWrongVersion {
@@ -817,6 +824,17 @@ fn did_you_mean(name: &str, options: &[EcoString]) -> Option<String> {
         .map(|(option, _)| format!("Did you mean `{option}`?"))
 }
 
+fn to_ordinal(value: u32) -> String {
+    match value % 10 {
+        // All numbers starting with 1 end in `th` (11th, 12th, 13th, etc.)
+        _ if value / 10 == 1 => format!("{value}th"),
+        1 => format!("{value}st"),
+        2 => format!("{value}nd"),
+        3 => format!("{value}rd"),
+        _ => format!("{value}th"),
+    }
+}
+
 impl Error {
     pub fn pretty_string(&self) -> String {
         let mut nocolor = Buffer::no_color();
@@ -953,7 +971,8 @@ forward slash and must not end with a slash."
                 title: "Target not supported".into(),
                 text: wrap_format!(
                     "`{module}` has a main function, but it does not support the {target} \
-target, so it cannot be run."
+target, so it cannot be run.",
+                    target = target.as_presentable_str(),
                 ),
                 level: Level::Error,
                 location: None,
@@ -1007,6 +1026,24 @@ If you want to overwrite these files, delete them and run the command again.
                 text: format!(
                     "These packages are not dependencies of your package so they could not
 be removed.
+
+{}
+",
+                    packages
+                        .iter()
+                        .map(|p| format!("  - {}", p.as_str()))
+                        .join("\n")
+                ),
+                level: Level::Error,
+                hint: None,
+                location: None,
+            }],
+
+            Error::PackagesToUpdateNotExist { packages } => vec![Diagnostic {
+                title: "Packages to update not found".into(),
+                text: format!(
+                    "These packages are not dependencies of your package so they could not
+be updated.
 
 {}
 ",
@@ -1178,7 +1215,7 @@ your app.src file \"{app_ver}\"."
                             Distro::Other => (),
                         }
                     }
-                    _ => (),
+                    OS::Windows | OS::Other => (),
                 }
 
                 text.push('\n');
@@ -1741,9 +1778,19 @@ constructor accepts."
                         }
                     }
 
-                    TypeError::UnexpectedLabelledArg { location, label } => {
+                    TypeError::UnexpectedLabelledArg {
+                        location,
+                        label,
+                        kind,
+                    } => {
+                        let kind = match kind {
+                            UnexpectedLabelledArgKind::FunctionParameter => "function",
+                            UnexpectedLabelledArgKind::RecordConstructorArgument => {
+                                "record constructor"
+                            }
+                        };
                         let text = format!(
-                            "This argument has been given a label but the constructor does
+                            "This argument has been given a label but the {kind} does
 not expect any. Please remove the label `{label}`."
                         );
                         Diagnostic {
@@ -2410,21 +2457,32 @@ specify all fields explicitly instead of using the record update syntax."
                             expected_field_type,
                             record_field_type,
                             record_variant,
-                            field_name,
+                            field,
                             ..
                         } => {
                             let mut printer = Printer::new(names);
                             let expected_field_type = printer.print_type(expected_field_type);
                             let record_field_type = printer.print_type(record_field_type);
                             let record_variant = printer.print_type(record_variant);
-                            let text = wrap_format!(
-                                "The `{field_name}` field \
+                            let text = match field {
+                                RecordField::Labelled(label) => wrap_format!(
+                                    "The `{label}` field \
 of this value is a `{record_field_type}`, but the arguments given to the record \
 update indicate that it should be a `{expected_field_type}`.
 
 Note: If the same type variable is used for multiple fields, all those fields \
 need to be updated at the same time if their type changes."
-                            );
+                                ),
+                                RecordField::Unlabelled(index) => wrap_format!(
+                                    "The {} field \
+of this value is a `{record_field_type}`, but the arguments given to the record \
+update indicate that it should be a `{expected_field_type}`.
+
+Note: Unlabelled fields cannot be updated in a record update, so either add \
+a label or use a record constructor.",
+                                    to_ordinal(*index + 1),
+                                ),
+                            };
 
                             Diagnostic {
                                 title: "Incomplete record update".into(),
@@ -3071,7 +3129,8 @@ a size are only allowed at the end of a bin pattern.",
                                 "Unsupported endianness",
                                 vec![wrap_format!(
                                     "The {target} target does not support the `native` \
-endianness option."
+endianness option.",
+                                    target = target.as_presentable_str(),
                                 )],
                             ),
                             bit_array::ErrorType::OptionNotSupportedForTarget {
@@ -3081,7 +3140,8 @@ endianness option."
                                 "UTF-codepoint pattern matching is not supported",
                                 vec![wrap_format!(
                                     "The {target} target does not support \
-UTF-codepoint pattern matching."
+UTF-codepoint pattern matching.",
+                                    target = target.as_presentable_str(),
                                 )],
                             ),
                         };
@@ -4469,7 +4529,7 @@ manifest.toml and a version range specified in gleam.toml:
             Error::DuplicateDependency(name) => {
                 let text = format!(
                     "The package `{name}` is specified in both the dependencies and
-dev-dependencies sections of the gleam.toml file."
+dev_dependencies sections of the gleam.toml file."
                 );
                 vec![Diagnostic {
                     title: "Dependency duplicated".into(),
@@ -4583,7 +4643,11 @@ satisfying {required_version} but you are using v{gleam_version}.",
                 target,
                 invalid_runtime,
             } => {
-                let text = format!("Invalid runtime for {target} target: {invalid_runtime}");
+                let text = format!(
+                    "Invalid runtime for {target} target: {invalid_runtime}",
+                    target = target.as_presentable_str(),
+                    invalid_runtime = invalid_runtime.as_presentable_str(),
+                );
 
                 let hint = match target {
                     Target::JavaScript => {
@@ -4600,7 +4664,10 @@ satisfying {required_version} but you are using v{gleam_version}.",
                 };
 
                 vec![Diagnostic {
-                    title: format!("Invalid runtime for {target}"),
+                    title: format!(
+                        "Invalid runtime for {target}",
+                        target = target.as_presentable_str(),
+                    ),
                     text,
                     hint,
                     location: None,
@@ -4655,6 +4722,20 @@ or you can publish it using a different version number"
                     "Please add the --replace flag if you want to replace the release.".into(),
                 ),
             }],
+            Error::HexPublishAccessDenied { name, version } => vec![Diagnostic {
+                title: "Access denied".to_string(),
+                text: wrap_format!(
+                    "You are not one of the maintainers of the {name} package, so \
+you cannot publish a new {version} version. Are you logged into the correct account?
+
+If you are trying to publish a new package then you will need to pick another, \
+as this one is already in use.
+"
+                ),
+                level: Level::Error,
+                location: None,
+                hint: None,
+            }],
 
             Error::CannotAddSelfAsDependency { name } => vec![Diagnostic {
                 title: "Dependency cycle".into(),
@@ -4692,7 +4773,29 @@ fn std_io_error_kind_text(kind: &std::io::ErrorKind) -> String {
         }
         ErrorKind::Interrupted => "The operation was interrupted".into(),
         ErrorKind::UnexpectedEof => "The end of file was reached before it was expected".into(),
-        _ => "An unknown error occurred".into(),
+        ErrorKind::HostUnreachable
+        | ErrorKind::NetworkUnreachable
+        | ErrorKind::NetworkDown
+        | ErrorKind::NotADirectory
+        | ErrorKind::IsADirectory
+        | ErrorKind::DirectoryNotEmpty
+        | ErrorKind::ReadOnlyFilesystem
+        | ErrorKind::StaleNetworkFileHandle
+        | ErrorKind::StorageFull
+        | ErrorKind::NotSeekable
+        | ErrorKind::QuotaExceeded
+        | ErrorKind::FileTooLarge
+        | ErrorKind::ResourceBusy
+        | ErrorKind::ExecutableFileBusy
+        | ErrorKind::Deadlock
+        | ErrorKind::CrossesDevices
+        | ErrorKind::TooManyLinks
+        | ErrorKind::InvalidFilename
+        | ErrorKind::ArgumentListTooLong
+        | ErrorKind::Unsupported
+        | ErrorKind::OutOfMemory
+        | ErrorKind::Other
+        | _ => "An unknown error occurred".into(),
     }
 }
 
@@ -4735,7 +4838,28 @@ fn hint_alternative_operator(op: &BinOp, given: &Type) -> Option<String> {
         BinOp::AddInt if given.is_string() => Some(hint_string_message()),
         BinOp::AddFloat if given.is_string() => Some(hint_string_message()),
 
-        _ => None,
+        BinOp::And
+        | BinOp::Or
+        | BinOp::Eq
+        | BinOp::NotEq
+        | BinOp::LtInt
+        | BinOp::LtEqInt
+        | BinOp::LtFloat
+        | BinOp::LtEqFloat
+        | BinOp::GtEqInt
+        | BinOp::GtInt
+        | BinOp::GtEqFloat
+        | BinOp::GtFloat
+        | BinOp::AddInt
+        | BinOp::AddFloat
+        | BinOp::SubInt
+        | BinOp::SubFloat
+        | BinOp::MultInt
+        | BinOp::MultFloat
+        | BinOp::DivInt
+        | BinOp::DivFloat
+        | BinOp::RemainderInt
+        | BinOp::Concatenate => None,
     }
 }
 

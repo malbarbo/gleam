@@ -1,0 +1,48 @@
+# TODO - WebAssembly backend
+
+## Infrastructure
+
+- [ ] Add Config struct for Generator (int/float type selection via gleam.toml)
+      module_with_config() já aceita int/float como strings, e os testes
+      podem usar run_ok_i64(). Falta integrar com gleam.toml e codegen.rs
+      (como os backends JS/Erlang fazem com seus Config structs).
+
+## FIXME (issues in existing code)
+
+- [x] builtins.rs:900 — check int to i32 conversion in code_int_to_utf_codepoint
+      Verificado com testes I32 e I64: is_codepoint valida antes da conversão,
+      truncação é segura. FIXME removido.
+
+- [x] scope.rs:268 — do not create a local if the subject is already a var
+      Resolvido: insert_subjects pula local vars, expression_case reutiliza
+      o local existente via is_local_var().
+
+- [x] webassembly.rs:588 — generate all sections and names in function module?
+      Resolvido: montagem movida para Generator::compile(), seguindo o padrão do JS backend.
+
+- [x] webassembly.rs:1435 — show message explaining why some function was not compiled
+      Não é bug: funções privadas, genéricas e external são compiladas em outro lugar.
+      FIXME substituído por comentário explicativo.
+
+- [ ] webassembly.rs:2518 — handle missing inferred variant (same name, position and type)
+      No acesso a campos de union, se inferred_variant retorna None, o código
+      pode falhar. Precisa tratar o caso quando variantes têm mesmo nome,
+      posição e tipo.
+
+## Not yet supported (todo!())
+
+- [ ] BitArray — tipo não implementado no backend wasm
+      - Tipo val_type (webassembly.rs:1466): não há representação wasm definida
+      - Expressões (webassembly.rs:2578, monomorphize.rs:407): criação de bit arrays
+      - Constantes (webassembly.rs:1887, 1925, 2003): bit arrays como constantes
+      - Patterns (webassembly.rs:3244): pattern matching em bit arrays
+      - Repr/inspect (builtins.rs:988, 1185): conversão para string
+
+- [ ] Function equality (builtins.rs:404)
+      Comparação de igualdade entre funções (fn == fn). Gleam permite mas
+      a semântica é complexa — requer comparar identidade ou equivalência.
+
+- [ ] Closures (webassembly.rs:2048)
+      Funções que capturam variáveis do escopo. Quando uma variável referencia
+      uma função que não é encontrada como definição do módulo, provavelmente
+      é uma closure. Requer representação de ambiente capturado no wasm.

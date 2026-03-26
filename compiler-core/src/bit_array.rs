@@ -268,27 +268,27 @@ where
     match categories {
         SegmentOptionCategories {
             type_: Some(type_),
-            unit: Some(_),
+            unit: Some(unit),
             ..
         } if is_unicode(type_) => {
             return err(
                 ErrorType::TypeDoesNotAllowUnit {
                     type_: type_.label(),
                 },
-                type_.location(),
+                unit.location(),
             );
         }
 
         SegmentOptionCategories {
             type_: Some(type_),
-            size: Some(_),
+            size: Some(size),
             ..
         } if is_unicode(type_) => {
             return err(
                 ErrorType::TypeDoesNotAllowSize {
                     type_: type_.label(),
                 },
-                type_.location(),
+                size.location(),
             );
         }
 
@@ -347,7 +347,18 @@ impl GetLiteralValue for ast::TypedPattern {
             | ast::Pattern::BitArraySize(ast::BitArraySize::Int { int_value, .. }) => {
                 Some(int_value.clone())
             }
-            _ => None,
+            ast::Pattern::Float { .. }
+            | ast::Pattern::String { .. }
+            | ast::Pattern::Variable { .. }
+            | ast::Pattern::BitArraySize(_)
+            | ast::Pattern::Assign { .. }
+            | ast::Pattern::Discard { .. }
+            | ast::Pattern::List { .. }
+            | ast::Pattern::Constructor { .. }
+            | ast::Pattern::Tuple { .. }
+            | ast::Pattern::BitArray { .. }
+            | ast::Pattern::StringPrefix { .. }
+            | ast::Pattern::Invalid { .. } => None,
         }
     }
 }

@@ -1,9 +1,9 @@
 [package]
 name = "gleam-core"
-version = "1.13.0"
+version = "1.14.0"
 authors = ["Louis Pilfold <louis@lpil.uk>"]
 edition = "2024"
-license-file = "LICENCE"
+license = "Apache-2.0"
 
 [dependencies]
 # Error message and warning formatting
@@ -18,14 +18,12 @@ askama = "0"
 pulldown-cmark = { version = "0", default-features = false, features = [
   "html",
 ] }
-# Non-empty vectors
-vec1 = "1"
 # XDG directory locations
 dirs-next = "2"
 # SPDX license parsing
 spdx = "0"
 # Binary format de-serialization
-bincode = "1"
+bincode = { version = "2", features = ["alloc", "serde"] }
 # cross platform single glob and glob set matching
 globset = { version = "0", features = ["serde1"] }
 # Checksums
@@ -45,7 +43,7 @@ num-bigint = { version = "0.4.6", features = ["serde"] }
 num-traits = "0.2.19"
 # Encryption
 age = { version = "0.11", features = ["armor"] }
-radix_trie = "0.2.1"
+radix_trie = "0.3"
 # Ensuring recursive type-checking doesn't stack overflow
 stacker = "0.1.21"
 # Manipulating bit arrays
@@ -64,7 +62,7 @@ debug-ignore.workspace = true
 ecow = { workspace = true, features = ["serde"] }
 flate2.workspace = true
 futures.workspace = true
-hexpm.workspace = true
+hexpm = { path = "../hexpm" }
 http.workspace = true
 im.workspace = true
 itertools.workspace = true
@@ -79,6 +77,7 @@ termcolor.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
+vec1.workspace = true
 
 [build-dependencies]
 # Data (de)serialisation

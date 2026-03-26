@@ -148,7 +148,10 @@ impl UntypedModule {
                 Definition::Import(Import {
                     module, location, ..
                 }) => Some((module.clone(), *location)),
-                _ => None,
+                Definition::Function(_)
+                | Definition::TypeAlias(_)
+                | Definition::CustomType(_)
+                | Definition::ModuleConstant(_) => None,
             })
             .collect()
     }
@@ -223,7 +226,10 @@ impl<A> Arg<A> {
     pub fn is_capture_hole(&self) -> bool {
         match &self.names {
             ArgNames::Named { name, .. } if name == CAPTURE_VARIABLE => true,
-            _ => false,
+            ArgNames::Discard { .. }
+            | ArgNames::LabelledDiscard { .. }
+            | ArgNames::Named { .. }
+            | ArgNames::NamedLabelled { .. } => false,
         }
     }
 }
@@ -402,7 +408,7 @@ impl TypeAst {
                             .zip(o_arguments)
                             .all(|a| a.0.is_logically_equal(a.1))
                 }
-                _ => false,
+                TypeAst::Fn(_) | TypeAst::Var(_) | TypeAst::Tuple(_) | TypeAst::Hole(_) => false,
             },
             TypeAst::Fn(TypeAstFn {
                 arguments,
@@ -421,14 +427,19 @@ impl TypeAst {
                             .all(|a| a.0.is_logically_equal(a.1))
                         && return_.is_logically_equal(o_return_)
                 }
-                _ => false,
+                TypeAst::Constructor(_)
+                | TypeAst::Var(_)
+                | TypeAst::Tuple(_)
+                | TypeAst::Hole(_) => false,
             },
             TypeAst::Var(TypeAstVar { name, location: _ }) => match other {
                 TypeAst::Var(TypeAstVar {
                     name: o_name,
                     location: _,
                 }) => name == o_name,
-                _ => false,
+                TypeAst::Constructor(_) | TypeAst::Fn(_) | TypeAst::Tuple(_) | TypeAst::Hole(_) => {
+                    false
+                }
             },
             TypeAst::Tuple(TypeAstTuple {
                 elements,
@@ -444,14 +455,18 @@ impl TypeAst {
                             .zip(other_elements)
                             .all(|a| a.0.is_logically_equal(a.1))
                 }
-                _ => false,
+                TypeAst::Constructor(_) | TypeAst::Fn(_) | TypeAst::Var(_) | TypeAst::Hole(_) => {
+                    false
+                }
             },
             TypeAst::Hole(TypeAstHole { name, location: _ }) => match other {
                 TypeAst::Hole(TypeAstHole {
                     name: o_name,
                     location: _,
                 }) => name == o_name,
-                _ => false,
+                TypeAst::Constructor(_) | TypeAst::Fn(_) | TypeAst::Var(_) | TypeAst::Tuple(_) => {
+                    false
+                }
             },
         }
     }
@@ -484,8 +499,8 @@ impl TypeAst {
             TypeAst::Constructor(TypeAstConstructor {
                 arguments, module, ..
             }) => type_
-                .constructor_types()
-                .and_then(|arg_types| {
+                .named_type_information()
+                .and_then(|(module_name, _, arg_types)| {
                     if let Some(arg) = arguments
                         .iter()
                         .zip(arg_types)
@@ -494,19 +509,19 @@ impl TypeAst {
                         return Some(arg);
                     }
 
+                    if let Some((module_alias, location)) = module
+                        && location.contains(byte_index)
+                    {
+                        return Some(Located::ModuleName {
+                            location: *location,
+                            module_name,
+                            module_alias: module_alias.clone(),
+                            layer: Layer::Type,
+                        });
+                    }
+
                     None
                 })
-                .or(module.as_ref().and_then(|(name, location)| {
-                    if location.contains(byte_index) {
-                        Some(Located::ModuleName {
-                            location: *location,
-                            name,
-                            layer: Layer::Type,
-                        })
-                    } else {
-                        None
-                    }
-                }))
                 .or(Some(Located::Annotation { ast: self, type_ })),
             TypeAst::Tuple(TypeAstTuple { elements, .. }) => type_
                 .tuple_types()
@@ -842,6 +857,7 @@ pub type TypedImport = Import<EcoString>;
 pub struct Import<PackageName> {
     pub documentation: Option<EcoString>,
     pub location: SrcSpan,
+    pub module_location: SrcSpan,
     pub module: EcoString,
     pub as_name: Option<(AssignName, SrcSpan)>,
     pub unqualified_values: Vec<UnqualifiedImport>,
@@ -850,7 +866,7 @@ pub struct Import<PackageName> {
 }
 
 impl<T> Import<T> {
-    pub(crate) fn used_name(&self) -> Option<EcoString> {
+    pub fn used_name(&self) -> Option<EcoString> {
         match self.as_name.as_ref() {
             Some((AssignName::Variable(name), _)) => Some(name.clone()),
             Some((AssignName::Discard(_), _)) => None,
@@ -1305,7 +1321,7 @@ impl BinOp {
         self.operator_kind() == other.operator_kind()
     }
 
-    pub(crate) fn is_float_operator(&self) -> bool {
+    pub fn is_float_operator(&self) -> bool {
         match self {
             BinOp::LtFloat
             | BinOp::LtEqFloat
@@ -1336,11 +1352,30 @@ impl BinOp {
     fn is_bool_operator(&self) -> bool {
         match self {
             BinOp::And | BinOp::Or => true,
-            _ => false,
+            BinOp::Eq
+            | BinOp::NotEq
+            | BinOp::LtInt
+            | BinOp::LtEqInt
+            | BinOp::LtFloat
+            | BinOp::LtEqFloat
+            | BinOp::GtEqInt
+            | BinOp::GtInt
+            | BinOp::GtEqFloat
+            | BinOp::GtFloat
+            | BinOp::AddInt
+            | BinOp::AddFloat
+            | BinOp::SubInt
+            | BinOp::SubFloat
+            | BinOp::MultInt
+            | BinOp::MultFloat
+            | BinOp::DivInt
+            | BinOp::DivFloat
+            | BinOp::RemainderInt
+            | BinOp::Concatenate => false,
         }
     }
 
-    pub(crate) fn is_int_operator(&self) -> bool {
+    pub fn is_int_operator(&self) -> bool {
         match self {
             BinOp::LtInt
             | BinOp::LtEqInt
@@ -1378,7 +1413,20 @@ impl BinOp {
             BinOp::SubInt => Some(BinOp::SubFloat),
             BinOp::MultInt => Some(BinOp::MultFloat),
             BinOp::DivInt => Some(BinOp::DivFloat),
-            _ => None,
+            BinOp::And
+            | BinOp::Or
+            | BinOp::Eq
+            | BinOp::NotEq
+            | BinOp::LtFloat
+            | BinOp::LtEqFloat
+            | BinOp::GtEqFloat
+            | BinOp::GtFloat
+            | BinOp::AddFloat
+            | BinOp::SubFloat
+            | BinOp::MultFloat
+            | BinOp::DivFloat
+            | BinOp::RemainderInt
+            | BinOp::Concatenate => None,
         }
     }
 
@@ -1392,7 +1440,20 @@ impl BinOp {
             BinOp::SubFloat => Some(BinOp::SubInt),
             BinOp::MultFloat => Some(BinOp::MultInt),
             BinOp::DivFloat => Some(BinOp::DivInt),
-            _ => None,
+            BinOp::And
+            | BinOp::Or
+            | BinOp::Eq
+            | BinOp::NotEq
+            | BinOp::LtInt
+            | BinOp::LtEqInt
+            | BinOp::GtEqInt
+            | BinOp::GtInt
+            | BinOp::AddInt
+            | BinOp::SubInt
+            | BinOp::MultInt
+            | BinOp::DivInt
+            | BinOp::RemainderInt
+            | BinOp::Concatenate => None,
         }
     }
 }
@@ -1517,7 +1578,29 @@ impl CallArg<TypedExpr> {
     pub fn is_capture_hole(&self) -> bool {
         match &self.value {
             TypedExpr::Var { name, .. } => name == CAPTURE_VARIABLE,
-            _ => false,
+            TypedExpr::Int { .. }
+            | TypedExpr::Float { .. }
+            | TypedExpr::String { .. }
+            | TypedExpr::Block { .. }
+            | TypedExpr::Pipeline { .. }
+            | TypedExpr::Fn { .. }
+            | TypedExpr::List { .. }
+            | TypedExpr::Call { .. }
+            | TypedExpr::BinOp { .. }
+            | TypedExpr::Case { .. }
+            | TypedExpr::RecordAccess { .. }
+            | TypedExpr::PositionalAccess { .. }
+            | TypedExpr::ModuleSelect { .. }
+            | TypedExpr::Tuple { .. }
+            | TypedExpr::TupleIndex { .. }
+            | TypedExpr::Todo { .. }
+            | TypedExpr::Panic { .. }
+            | TypedExpr::Echo { .. }
+            | TypedExpr::BitArray { .. }
+            | TypedExpr::RecordUpdate { .. }
+            | TypedExpr::NegateBool { .. }
+            | TypedExpr::NegateInt { .. }
+            | TypedExpr::Invalid { .. } => false,
         }
     }
 }
@@ -1556,7 +1639,26 @@ impl CallArg<UntypedExpr> {
     pub fn is_capture_hole(&self) -> bool {
         match &self.value {
             UntypedExpr::Var { name, .. } => name == CAPTURE_VARIABLE,
-            _ => false,
+            UntypedExpr::Int { .. }
+            | UntypedExpr::Float { .. }
+            | UntypedExpr::String { .. }
+            | UntypedExpr::Block { .. }
+            | UntypedExpr::Fn { .. }
+            | UntypedExpr::List { .. }
+            | UntypedExpr::Call { .. }
+            | UntypedExpr::BinOp { .. }
+            | UntypedExpr::PipeLine { .. }
+            | UntypedExpr::Case { .. }
+            | UntypedExpr::FieldAccess { .. }
+            | UntypedExpr::Tuple { .. }
+            | UntypedExpr::TupleIndex { .. }
+            | UntypedExpr::Todo { .. }
+            | UntypedExpr::Panic { .. }
+            | UntypedExpr::Echo { .. }
+            | UntypedExpr::BitArray { .. }
+            | UntypedExpr::RecordUpdate { .. }
+            | UntypedExpr::NegateBool { .. }
+            | UntypedExpr::NegateInt { .. } => false,
         }
     }
 }
@@ -1589,28 +1691,30 @@ impl<T> HasLocation for CallArg<T> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordBeingUpdated {
-    pub base: Box<UntypedExpr>,
+pub struct RecordBeingUpdated<A> {
+    pub base: Box<A>,
     pub location: SrcSpan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UntypedRecordUpdateArg {
+pub struct RecordUpdateArg<A> {
     pub label: EcoString,
     pub location: SrcSpan,
-    pub value: UntypedExpr,
+    pub value: A,
 }
 
-impl UntypedRecordUpdateArg {
-    #[must_use]
-    pub fn uses_label_shorthand(&self) -> bool {
-        self.value.location() == self.location
+pub type UntypedRecordUpdateArg = RecordUpdateArg<UntypedExpr>;
+
+impl<A> HasLocation for RecordUpdateArg<A> {
+    fn location(&self) -> SrcSpan {
+        self.location
     }
 }
 
-impl HasLocation for UntypedRecordUpdateArg {
-    fn location(&self) -> SrcSpan {
-        self.location
+impl<A: HasLocation> RecordUpdateArg<A> {
+    #[must_use]
+    pub fn uses_label_shorthand(&self) -> bool {
+        self.value.location() == self.location
     }
 }
 
@@ -1659,6 +1763,11 @@ impl TypedClause {
                     .iter()
                     .flat_map(|p| p.iter())
                     .find_map(|p| p.find_node(byte_index))
+            })
+            .or_else(|| {
+                self.guard
+                    .as_ref()
+                    .and_then(|guard| guard.find_node(byte_index))
             })
             .or_else(|| self.then.find_node(byte_index))
     }
@@ -1943,7 +2052,30 @@ fn pattern_and_expression_are_the_same(pattern: &TypedPattern, expression: &Type
                         })
             }
 
-            _ => false,
+            TypedExpr::Int { .. }
+            | TypedExpr::Float { .. }
+            | TypedExpr::String { .. }
+            | TypedExpr::Block { .. }
+            | TypedExpr::Pipeline { .. }
+            | TypedExpr::Var { .. }
+            | TypedExpr::Fn { .. }
+            | TypedExpr::List { .. }
+            | TypedExpr::Call { .. }
+            | TypedExpr::BinOp { .. }
+            | TypedExpr::Case { .. }
+            | TypedExpr::RecordAccess { .. }
+            | TypedExpr::PositionalAccess { .. }
+            | TypedExpr::ModuleSelect { .. }
+            | TypedExpr::Tuple { .. }
+            | TypedExpr::TupleIndex { .. }
+            | TypedExpr::Todo { .. }
+            | TypedExpr::Panic { .. }
+            | TypedExpr::Echo { .. }
+            | TypedExpr::BitArray { .. }
+            | TypedExpr::RecordUpdate { .. }
+            | TypedExpr::NegateBool { .. }
+            | TypedExpr::NegateInt { .. }
+            | TypedExpr::Invalid { .. } => false,
         },
 
         // A pattern for a constructor with no arguments:
@@ -2014,128 +2146,9 @@ pub enum ClauseGuard<Type, RecordTag> {
         value: Box<ClauseGuard<Type, RecordTag>>,
     },
 
-    Equals {
+    BinaryOperator {
         location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    NotEquals {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    GtInt {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    GtEqInt {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    LtInt {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    LtEqInt {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    GtFloat {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    GtEqFloat {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    LtFloat {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    LtEqFloat {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    AddInt {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    AddFloat {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    SubInt {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    SubFloat {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    MultInt {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    MultFloat {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    DivInt {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    DivFloat {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    RemainderInt {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    Or {
-        location: SrcSpan,
-        left: Box<Self>,
-        right: Box<Self>,
-    },
-
-    And {
-        location: SrcSpan,
+        operator: BinOp,
         left: Box<Self>,
         right: Box<Self>,
     },
@@ -2183,30 +2196,10 @@ impl<A, B> ClauseGuard<A, B> {
     pub fn location(&self) -> SrcSpan {
         match self {
             ClauseGuard::Constant(constant) => constant.location(),
-            ClauseGuard::Or { location, .. }
-            | ClauseGuard::And { location, .. }
+            ClauseGuard::BinaryOperator { location, .. }
             | ClauseGuard::Not { location, .. }
             | ClauseGuard::Var { location, .. }
             | ClauseGuard::TupleIndex { location, .. }
-            | ClauseGuard::Equals { location, .. }
-            | ClauseGuard::NotEquals { location, .. }
-            | ClauseGuard::GtInt { location, .. }
-            | ClauseGuard::GtEqInt { location, .. }
-            | ClauseGuard::LtInt { location, .. }
-            | ClauseGuard::LtEqInt { location, .. }
-            | ClauseGuard::GtFloat { location, .. }
-            | ClauseGuard::GtEqFloat { location, .. }
-            | ClauseGuard::LtFloat { location, .. }
-            | ClauseGuard::AddInt { location, .. }
-            | ClauseGuard::AddFloat { location, .. }
-            | ClauseGuard::SubInt { location, .. }
-            | ClauseGuard::SubFloat { location, .. }
-            | ClauseGuard::MultInt { location, .. }
-            | ClauseGuard::MultFloat { location, .. }
-            | ClauseGuard::DivInt { location, .. }
-            | ClauseGuard::DivFloat { location, .. }
-            | ClauseGuard::RemainderInt { location, .. }
-            | ClauseGuard::LtEqFloat { location, .. }
             | ClauseGuard::ModuleSelect { location, .. }
             | ClauseGuard::Block { location, .. } => *location,
             ClauseGuard::FieldAccess {
@@ -2227,27 +2220,7 @@ impl<A, B> ClauseGuard<A, B> {
 
     pub fn bin_op_name(&self) -> Option<BinOp> {
         match self {
-            ClauseGuard::Or { .. } => Some(BinOp::Or),
-            ClauseGuard::And { .. } => Some(BinOp::And),
-            ClauseGuard::Equals { .. } => Some(BinOp::Eq),
-            ClauseGuard::NotEquals { .. } => Some(BinOp::NotEq),
-            ClauseGuard::GtInt { .. } => Some(BinOp::GtInt),
-            ClauseGuard::GtEqInt { .. } => Some(BinOp::GtEqInt),
-            ClauseGuard::LtInt { .. } => Some(BinOp::LtInt),
-            ClauseGuard::LtEqInt { .. } => Some(BinOp::LtEqInt),
-            ClauseGuard::GtFloat { .. } => Some(BinOp::GtFloat),
-            ClauseGuard::GtEqFloat { .. } => Some(BinOp::GtEqFloat),
-            ClauseGuard::LtFloat { .. } => Some(BinOp::LtFloat),
-            ClauseGuard::LtEqFloat { .. } => Some(BinOp::LtEqFloat),
-            ClauseGuard::AddInt { .. } => Some(BinOp::AddInt),
-            ClauseGuard::AddFloat { .. } => Some(BinOp::AddFloat),
-            ClauseGuard::SubInt { .. } => Some(BinOp::SubInt),
-            ClauseGuard::SubFloat { .. } => Some(BinOp::SubFloat),
-            ClauseGuard::MultInt { .. } => Some(BinOp::MultInt),
-            ClauseGuard::MultFloat { .. } => Some(BinOp::MultFloat),
-            ClauseGuard::DivInt { .. } => Some(BinOp::DivInt),
-            ClauseGuard::DivFloat { .. } => Some(BinOp::DivFloat),
-            ClauseGuard::RemainderInt { .. } => Some(BinOp::RemainderInt),
+            ClauseGuard::BinaryOperator { operator, .. } => Some(*operator),
 
             ClauseGuard::Constant(_)
             | ClauseGuard::Var { .. }
@@ -2256,20 +2229,6 @@ impl<A, B> ClauseGuard<A, B> {
             | ClauseGuard::FieldAccess { .. }
             | ClauseGuard::ModuleSelect { .. }
             | ClauseGuard::Block { .. } => None,
-        }
-    }
-
-    pub fn is_var(&self) -> bool {
-        match self {
-            ClauseGuard::Var { .. } => true,
-            _ => false,
-        }
-    }
-
-    pub fn var_name(&self) -> Option<&EcoString> {
-        match self {
-            ClauseGuard::Var { name, .. } => Some(name),
-            _ => None,
         }
     }
 }
@@ -2284,30 +2243,75 @@ impl TypedClauseGuard {
             ClauseGuard::Constant(constant) => constant.type_(),
             ClauseGuard::Block { value, .. } => value.type_(),
 
-            ClauseGuard::AddInt { .. }
-            | ClauseGuard::SubInt { .. }
-            | ClauseGuard::MultInt { .. }
-            | ClauseGuard::DivInt { .. }
-            | ClauseGuard::RemainderInt { .. } => type_::int(),
+            ClauseGuard::Not { .. } => type_::bool(),
 
-            ClauseGuard::AddFloat { .. }
-            | ClauseGuard::SubFloat { .. }
-            | ClauseGuard::MultFloat { .. }
-            | ClauseGuard::DivFloat { .. } => type_::float(),
+            ClauseGuard::BinaryOperator { operator, .. } => match operator {
+                BinOp::AddInt
+                | BinOp::SubInt
+                | BinOp::MultInt
+                | BinOp::DivInt
+                | BinOp::RemainderInt => type_::int(),
+                BinOp::AddFloat | BinOp::SubFloat | BinOp::MultFloat | BinOp::DivFloat => {
+                    type_::float()
+                }
+                BinOp::Concatenate => type_::string(),
+                BinOp::Or
+                | BinOp::And
+                | BinOp::Eq
+                | BinOp::NotEq
+                | BinOp::GtInt
+                | BinOp::GtEqInt
+                | BinOp::LtInt
+                | BinOp::LtEqInt
+                | BinOp::GtFloat
+                | BinOp::GtEqFloat
+                | BinOp::LtFloat
+                | BinOp::LtEqFloat => type_::bool(),
+            },
+        }
+    }
 
-            ClauseGuard::Or { .. }
-            | ClauseGuard::Not { .. }
-            | ClauseGuard::And { .. }
-            | ClauseGuard::Equals { .. }
-            | ClauseGuard::NotEquals { .. }
-            | ClauseGuard::GtInt { .. }
-            | ClauseGuard::GtEqInt { .. }
-            | ClauseGuard::LtInt { .. }
-            | ClauseGuard::LtEqInt { .. }
-            | ClauseGuard::GtFloat { .. }
-            | ClauseGuard::GtEqFloat { .. }
-            | ClauseGuard::LtFloat { .. }
-            | ClauseGuard::LtEqFloat { .. } => type_::bool(),
+    pub fn find_node(&self, byte_index: u32) -> Option<Located<'_>> {
+        if !self.location().contains(byte_index) {
+            return None;
+        }
+
+        match self {
+            ClauseGuard::ModuleSelect {
+                location,
+                module_name,
+                module_alias,
+                ..
+            } => {
+                let module_span =
+                    SrcSpan::new(location.start, location.start + (module_alias.len() as u32));
+
+                if module_span.contains(byte_index) {
+                    Some(Located::ModuleName {
+                        location: module_span,
+                        module_name: module_name.clone(),
+                        module_alias: module_alias.clone(),
+                        layer: Layer::Value,
+                    })
+                } else {
+                    None
+                }
+            }
+
+            ClauseGuard::BinaryOperator { left, right, .. } => left
+                .find_node(byte_index)
+                .or_else(|| right.find_node(byte_index)),
+
+            ClauseGuard::Not {
+                expression: value, ..
+            }
+            | ClauseGuard::TupleIndex { tuple: value, .. }
+            | ClauseGuard::FieldAccess {
+                container: value, ..
+            }
+            | ClauseGuard::Block { value, .. } => value.find_node(byte_index),
+            ClauseGuard::Constant(constant) => constant.find_node(byte_index),
+            ClauseGuard::Var { .. } => None,
         }
     }
 
@@ -2322,27 +2326,7 @@ impl TypedClauseGuard {
             ClauseGuard::Constant(constant) => constant.referenced_variables(),
             ClauseGuard::ModuleSelect { .. } => im::HashSet::new(),
 
-            ClauseGuard::Equals { left, right, .. }
-            | ClauseGuard::NotEquals { left, right, .. }
-            | ClauseGuard::GtInt { left, right, .. }
-            | ClauseGuard::GtEqInt { left, right, .. }
-            | ClauseGuard::LtInt { left, right, .. }
-            | ClauseGuard::LtEqInt { left, right, .. }
-            | ClauseGuard::GtFloat { left, right, .. }
-            | ClauseGuard::GtEqFloat { left, right, .. }
-            | ClauseGuard::LtFloat { left, right, .. }
-            | ClauseGuard::LtEqFloat { left, right, .. }
-            | ClauseGuard::AddInt { left, right, .. }
-            | ClauseGuard::AddFloat { left, right, .. }
-            | ClauseGuard::SubInt { left, right, .. }
-            | ClauseGuard::SubFloat { left, right, .. }
-            | ClauseGuard::MultInt { left, right, .. }
-            | ClauseGuard::MultFloat { left, right, .. }
-            | ClauseGuard::DivInt { left, right, .. }
-            | ClauseGuard::DivFloat { left, right, .. }
-            | ClauseGuard::RemainderInt { left, right, .. }
-            | ClauseGuard::And { left, right, .. }
-            | ClauseGuard::Or { left, right, .. } => left
+            ClauseGuard::BinaryOperator { left, right, .. } => left
                 .referenced_variables()
                 .union(right.referenced_variables()),
         }
@@ -2359,214 +2343,14 @@ impl TypedClauseGuard {
             (ClauseGuard::Block { .. }, _) => false,
 
             (
-                ClauseGuard::Equals { left, right, .. },
-                ClauseGuard::Equals {
+                ClauseGuard::BinaryOperator { left, right, .. },
+                ClauseGuard::BinaryOperator {
                     left: other_left,
                     right: other_right,
                     ..
                 },
             ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::Equals { .. }, _) => false,
-
-            (
-                ClauseGuard::NotEquals { left, right, .. },
-                ClauseGuard::NotEquals {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::NotEquals { .. }, _) => false,
-
-            (
-                ClauseGuard::GtInt { left, right, .. },
-                ClauseGuard::GtInt {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::GtInt { .. }, _) => false,
-
-            (
-                ClauseGuard::GtEqInt { left, right, .. },
-                ClauseGuard::GtEqInt {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::GtEqInt { .. }, _) => false,
-
-            (
-                ClauseGuard::LtInt { left, right, .. },
-                ClauseGuard::LtInt {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::LtInt { .. }, _) => false,
-
-            (
-                ClauseGuard::LtEqInt { left, right, .. },
-                ClauseGuard::LtEqInt {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::LtEqInt { .. }, _) => false,
-
-            (
-                ClauseGuard::GtFloat { left, right, .. },
-                ClauseGuard::GtFloat {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::GtFloat { .. }, _) => false,
-
-            (
-                ClauseGuard::GtEqFloat { left, right, .. },
-                ClauseGuard::GtEqFloat {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::GtEqFloat { .. }, _) => false,
-
-            (
-                ClauseGuard::LtFloat { left, right, .. },
-                ClauseGuard::LtFloat {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::LtFloat { .. }, _) => false,
-
-            (
-                ClauseGuard::LtEqFloat { left, right, .. },
-                ClauseGuard::LtEqFloat {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::LtEqFloat { .. }, _) => false,
-
-            (
-                ClauseGuard::AddInt { left, right, .. },
-                ClauseGuard::AddInt {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::AddInt { .. }, _) => false,
-
-            (
-                ClauseGuard::AddFloat { left, right, .. },
-                ClauseGuard::AddFloat {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::AddFloat { .. }, _) => false,
-
-            (
-                ClauseGuard::SubInt { left, right, .. },
-                ClauseGuard::SubInt {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::SubInt { .. }, _) => false,
-
-            (
-                ClauseGuard::SubFloat { left, right, .. },
-                ClauseGuard::SubFloat {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::SubFloat { .. }, _) => false,
-
-            (
-                ClauseGuard::MultInt { left, right, .. },
-                ClauseGuard::MultInt {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::MultInt { .. }, _) => false,
-
-            (
-                ClauseGuard::MultFloat { left, right, .. },
-                ClauseGuard::MultFloat {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::MultFloat { .. }, _) => false,
-
-            (
-                ClauseGuard::DivInt { left, right, .. },
-                ClauseGuard::DivInt {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::DivInt { .. }, _) => false,
-
-            (
-                ClauseGuard::DivFloat { left, right, .. },
-                ClauseGuard::DivFloat {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::DivFloat { .. }, _) => false,
-
-            (
-                ClauseGuard::RemainderInt { left, right, .. },
-                ClauseGuard::RemainderInt {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::RemainderInt { .. }, _) => false,
-
-            (
-                ClauseGuard::Or { left, right, .. },
-                ClauseGuard::Or {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::Or { .. }, _) => false,
-
-            (
-                ClauseGuard::And { left, right, .. },
-                ClauseGuard::And {
-                    left: other_left,
-                    right: other_right,
-                    ..
-                },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (ClauseGuard::And { .. }, _) => false,
+            (ClauseGuard::BinaryOperator { .. }, _) => false,
 
             (
                 ClauseGuard::Not { expression, .. },
@@ -2676,6 +2460,14 @@ impl SrcSpan {
             start: self.start.min(with.start),
             end: self.end.max(with.end),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn len(&self) -> usize {
+        (self.end - self.start) as usize
     }
 }
 
@@ -2997,10 +2789,7 @@ impl<A> Pattern<A> {
 
     #[must_use]
     pub fn is_variable(&self) -> bool {
-        match self {
-            Pattern::Variable { .. } => true,
-            _ => false,
-        }
+        matches!(self, Pattern::Variable { .. })
     }
 
     #[must_use]
@@ -3168,26 +2957,31 @@ impl TypedPattern {
 
 /// A variable bound inside a pattern.
 #[derive(Debug, Clone)]
-pub enum BoundVariable {
+pub struct BoundVariable {
+    pub name: BoundVariableName,
+    pub location: SrcSpan,
+    pub type_: Arc<Type>,
+}
+
+#[derive(Debug, Clone)]
+pub enum BoundVariableName {
     /// A record's labelled field introduced with the shorthand syntax.
-    ShorthandLabel { name: EcoString, location: SrcSpan },
-    /// Any other variable.
-    Regular { name: EcoString, location: SrcSpan },
+    ShorthandLabel { name: EcoString },
+    ListTail {
+        name: EcoString,
+        /// The location of the whole tail, from the `..` prefix until the end of the variable.
+        tail_location: SrcSpan,
+    },
+    /// Any other variable name.
+    Regular { name: EcoString },
 }
 
 impl BoundVariable {
     pub fn name(&self) -> EcoString {
-        match self {
-            BoundVariable::ShorthandLabel { name, .. } | BoundVariable::Regular { name, .. } => {
-                name.clone()
-            }
-        }
-    }
-
-    pub fn location(&self) -> SrcSpan {
-        match self {
-            BoundVariable::ShorthandLabel { location, .. }
-            | BoundVariable::Regular { location, .. } => *location,
+        match &self.name {
+            BoundVariableName::ShorthandLabel { name }
+            | BoundVariableName::ListTail { name, .. }
+            | BoundVariableName::Regular { name } => name.clone(),
         }
     }
 }
@@ -3275,13 +3069,58 @@ impl TypedPattern {
             | Pattern::String { .. }
             | Pattern::Variable { .. }
             | Pattern::BitArraySize { .. }
-            | Pattern::Assign { .. }
             | Pattern::Discard { .. }
-            | Pattern::StringPrefix { .. }
             | Pattern::Invalid { .. } => Some(Located::Pattern(self)),
+            Pattern::StringPrefix {
+                left_side_assignment,
+                right_side_assignment,
+                right_location,
+                ..
+            } => {
+                // Handle the prefix alias: "prefix" as name
+                if let Some((name, left_side_assignment_location)) = left_side_assignment
+                    && left_side_assignment_location.contains(byte_index)
+                {
+                    return Some(Located::StringPrefixPatternVariable {
+                        location: *left_side_assignment_location,
+                        name,
+                    });
+                }
+
+                // Handle the suffix: <> name
+                if let AssignName::Variable(name) = right_side_assignment
+                    && right_location.contains(byte_index)
+                {
+                    return Some(Located::StringPrefixPatternVariable {
+                        location: *right_location,
+                        name,
+                    });
+                }
+
+                Some(Located::Pattern(self))
+            }
+            Pattern::Assign { pattern, .. } => pattern
+                .find_node(byte_index)
+                .or_else(|| Some(Located::Pattern(self))),
 
             Pattern::Constructor {
-                arguments, spread, ..
+                module: Some((module_alias, module_location)),
+                constructor: Inferred::Known(constructor),
+                ..
+            } => {
+                if !module_location.contains(byte_index) {
+                    return None;
+                }
+
+                Some(Located::ModuleName {
+                    location: *module_location,
+                    module_name: constructor.module.clone(),
+                    module_alias: module_alias.clone(),
+                    layer: Layer::Value,
+                })
+            }
+            Pattern::Constructor {
+                spread, arguments, ..
             } => match spread {
                 Some(spread_location) if spread_location.contains(byte_index) => {
                     Some(Located::PatternSpread {
@@ -3294,6 +3133,7 @@ impl TypedPattern {
                     .iter()
                     .find_map(|argument| argument.find_node(byte_index)),
             },
+
             Pattern::List { elements, tail, .. } => elements
                 .iter()
                 .find_map(|element| element.find_node(byte_index))
@@ -3317,7 +3157,7 @@ impl TypedPattern {
     /// If the pattern is a `Constructor` with a spread, it returns a tuple with
     /// all the ignored fields. Split in unlabelled and labelled ones.
     ///
-    pub(crate) fn unused_arguments(&self) -> Option<PatternUnusedArguments> {
+    pub fn unused_arguments(&self) -> Option<PatternUnusedArguments> {
         let TypedPattern::Constructor {
             arguments,
             spread: Some(_),
@@ -3385,9 +3225,15 @@ impl TypedPattern {
             | Pattern::Discard { .. }
             | Pattern::Invalid { .. } => {}
 
-            Pattern::Variable { name, location, .. } => variables.push(BoundVariable::Regular {
-                name: name.clone(),
+            Pattern::Variable {
+                name,
+                location,
+                type_,
+                ..
+            } => variables.push(BoundVariable {
+                name: BoundVariableName::Regular { name: name.clone() },
                 location: *location,
+                type_: type_.clone(),
             }),
             Pattern::BitArraySize { .. } => {}
             Pattern::Assign {
@@ -3395,26 +3241,42 @@ impl TypedPattern {
                 pattern,
                 location,
             } => {
-                variables.push(BoundVariable::Regular {
-                    name: name.clone(),
+                variables.push(BoundVariable {
+                    name: BoundVariableName::Regular { name: name.clone() },
                     location: *location,
+                    type_: pattern.type_(),
                 });
                 pattern.collect_bound_variables(variables);
             }
-            Pattern::List { elements, tail, .. } => {
+            Pattern::List {
+                elements,
+                tail,
+                type_,
+                ..
+            } => {
                 for element in elements {
                     element.collect_bound_variables(variables);
                 }
-                if let Some(tail) = tail {
-                    tail.pattern.collect_bound_variables(variables);
-                }
+                if let Some(tail) = tail
+                    && let Pattern::Variable { name, location, .. } = tail.pattern.to_owned()
+                {
+                    variables.push(BoundVariable {
+                        name: BoundVariableName::ListTail {
+                            name,
+                            tail_location: tail.location,
+                        },
+                        location,
+                        type_: type_.clone(),
+                    })
+                };
             }
             Pattern::Constructor { arguments, .. } => {
                 for argument in arguments {
                     if let Some(name) = argument.label_shorthand_name() {
-                        variables.push(BoundVariable::ShorthandLabel {
-                            name: name.clone(),
+                        variables.push(BoundVariable {
+                            name: BoundVariableName::ShorthandLabel { name: name.clone() },
                             location: argument.location,
+                            type_: argument.value.type_(),
                         })
                     } else {
                         argument.value.collect_bound_variables(variables);
@@ -3438,15 +3300,17 @@ impl TypedPattern {
                 ..
             } => {
                 if let Some((name, location)) = left_side_assignment {
-                    variables.push(BoundVariable::Regular {
-                        name: name.clone(),
+                    variables.push(BoundVariable {
+                        name: BoundVariableName::Regular { name: name.clone() },
                         location: *location,
+                        type_: type_::string(),
                     });
                 }
                 match right_side_assignment {
-                    AssignName::Variable(name) => variables.push(BoundVariable::Regular {
-                        name: name.clone(),
+                    AssignName::Variable(name) => variables.push(BoundVariable {
+                        name: BoundVariableName::Regular { name: name.clone() },
                         location: *right_location,
+                        type_: type_::string(),
                     }),
                     AssignName::Discard(_) => {}
                 }
@@ -3633,7 +3497,22 @@ impl<Value, Type> BitArraySegment<Value, Type> {
     pub fn size(&self) -> Option<&Value> {
         self.options.iter().find_map(|x| match x {
             BitArrayOption::Size { value, .. } => Some(value.as_ref()),
-            _ => None,
+            BitArrayOption::Bytes { .. }
+            | BitArrayOption::Int { .. }
+            | BitArrayOption::Float { .. }
+            | BitArrayOption::Bits { .. }
+            | BitArrayOption::Utf8 { .. }
+            | BitArrayOption::Utf16 { .. }
+            | BitArrayOption::Utf32 { .. }
+            | BitArrayOption::Utf8Codepoint { .. }
+            | BitArrayOption::Utf16Codepoint { .. }
+            | BitArrayOption::Utf32Codepoint { .. }
+            | BitArrayOption::Signed { .. }
+            | BitArrayOption::Unsigned { .. }
+            | BitArrayOption::Big { .. }
+            | BitArrayOption::Little { .. }
+            | BitArrayOption::Native { .. }
+            | BitArrayOption::Unit { .. } => None,
         })
     }
 
@@ -3643,23 +3522,35 @@ impl<Value, Type> BitArraySegment<Value, Type> {
             .find_map(|option| match option {
                 BitArrayOption::Unit { value, .. } => Some(*value),
                 BitArrayOption::Bytes { .. } => Some(8),
-                _ => None,
+                BitArrayOption::Int { .. }
+                | BitArrayOption::Float { .. }
+                | BitArrayOption::Bits { .. }
+                | BitArrayOption::Utf8 { .. }
+                | BitArrayOption::Utf16 { .. }
+                | BitArrayOption::Utf32 { .. }
+                | BitArrayOption::Utf8Codepoint { .. }
+                | BitArrayOption::Utf16Codepoint { .. }
+                | BitArrayOption::Utf32Codepoint { .. }
+                | BitArrayOption::Signed { .. }
+                | BitArrayOption::Unsigned { .. }
+                | BitArrayOption::Big { .. }
+                | BitArrayOption::Little { .. }
+                | BitArrayOption::Native { .. }
+                | BitArrayOption::Size { .. } => None,
             })
             .unwrap_or(1)
     }
 
     pub(crate) fn has_bits_option(&self) -> bool {
-        self.options.iter().any(|option| match option {
-            BitArrayOption::Bits { .. } => true,
-            _ => false,
-        })
+        self.options
+            .iter()
+            .any(|option| matches!(option, BitArrayOption::Bits { .. }))
     }
 
     pub(crate) fn has_bytes_option(&self) -> bool {
-        self.options.iter().any(|option| match option {
-            BitArrayOption::Bytes { .. } => true,
-            _ => false,
-        })
+        self.options
+            .iter()
+            .any(|option| matches!(option, BitArrayOption::Bytes { .. }))
     }
 }
 
@@ -3689,7 +3580,7 @@ impl<TypedValue> BitArraySegment<TypedValue, Arc<Type>>
 where
     TypedValue: HasType + HasLocation + Clone + bit_array::GetLiteralValue,
 {
-    pub(crate) fn check_for_truncated_value(&self) -> Option<BitArraySegmentTruncation> {
+    pub fn check_for_truncated_value(&self) -> Option<BitArraySegmentTruncation> {
         // Both the size and the value must be two compile-time known constants.
         let segment_bits = self.bits_size()?.to_i64()?;
         let literal_value = self.value.as_int_literal()?;
@@ -3878,7 +3769,22 @@ impl<A> BitArrayOption<A> {
     pub fn value(&self) -> Option<&A> {
         match self {
             BitArrayOption::Size { value, .. } => Some(value),
-            _ => None,
+            BitArrayOption::Bytes { .. }
+            | BitArrayOption::Int { .. }
+            | BitArrayOption::Float { .. }
+            | BitArrayOption::Bits { .. }
+            | BitArrayOption::Utf8 { .. }
+            | BitArrayOption::Utf16 { .. }
+            | BitArrayOption::Utf32 { .. }
+            | BitArrayOption::Utf8Codepoint { .. }
+            | BitArrayOption::Utf16Codepoint { .. }
+            | BitArrayOption::Utf32Codepoint { .. }
+            | BitArrayOption::Signed { .. }
+            | BitArrayOption::Unsigned { .. }
+            | BitArrayOption::Big { .. }
+            | BitArrayOption::Little { .. }
+            | BitArrayOption::Native { .. }
+            | BitArrayOption::Unit { .. } => None,
         }
     }
 
@@ -4120,10 +4026,6 @@ impl GroupedDefinitions {
         this
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     pub fn len(&self) -> usize {
         let Self {
             custom_types,
@@ -4264,11 +4166,8 @@ impl<T, E> Statement<T, E> {
     }
 
     #[must_use]
-    pub(crate) fn is_use(&self) -> bool {
-        match self {
-            Self::Use(_) => true,
-            _ => false,
-        }
+    pub fn is_use(&self) -> bool {
+        matches!(self, Self::Use(_))
     }
 }
 

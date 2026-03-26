@@ -1,0 +1,12 @@
+---
+source: language-server/src/tests/hover.rs
+expression: type Wibble = Int
+---
+type Wibble = Int
+              ▔↑▔
+
+
+----- Hover content (markdown) -----
+```gleam
+gleam.Int
+```

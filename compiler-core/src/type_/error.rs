@@ -289,6 +289,7 @@ pub enum Error {
     UnexpectedLabelledArg {
         location: SrcSpan,
         label: EcoString,
+        kind: UnexpectedLabelledArgKind,
     },
 
     PositionalArgumentAfterLabelled {
@@ -679,6 +680,12 @@ pub enum Error {
     LowercaseBoolPattern {
         location: SrcSpan,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnexpectedLabelledArgKind {
+    FunctionParameter,
+    RecordConstructorArgument,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1156,6 +1163,7 @@ pub enum FeatureKind {
     LabelShorthandSyntax,
     ConstantStringConcatenation,
     ArithmeticInGuards,
+    ConcatenateInGuards,
     UnannotatedUtf8StringSegment,
     UnannotatedFloatSegment,
     NestedTupleAccess,
@@ -1168,6 +1176,8 @@ pub enum FeatureKind {
     JavaScriptUnalignedBitArray,
     BoolAssert,
     ExternalCustomType,
+    ConstantRecordUpdate,
+    ExpressionInSegmentSize,
 }
 
 impl FeatureKind {
@@ -1180,6 +1190,8 @@ impl FeatureKind {
             FeatureKind::AtInJavascriptModules => Version::new(1, 2, 0),
 
             FeatureKind::ArithmeticInGuards => Version::new(1, 3, 0),
+
+            FeatureKind::ConcatenateInGuards => Version::new(1, 15, 0),
 
             FeatureKind::LabelShorthandSyntax | FeatureKind::ConstantStringConcatenation => {
                 Version::new(1, 4, 0)
@@ -1199,7 +1211,11 @@ impl FeatureKind {
 
             FeatureKind::BoolAssert => Version::new(1, 11, 0),
 
-            FeatureKind::ExternalCustomType => Version::new(1, 14, 0),
+            FeatureKind::ExpressionInSegmentSize => Version::new(1, 12, 0),
+
+            FeatureKind::ExternalCustomType | FeatureKind::ConstantRecordUpdate => {
+                Version::new(1, 14, 0)
+            }
         }
     }
 }
@@ -1328,14 +1344,14 @@ impl Error {
     }
 
     pub fn with_unify_error_situation(mut self, new_situation: UnifyErrorSituation) -> Self {
-        match self {
-            Error::CouldNotUnify {
-                ref mut situation, ..
-            } => {
-                *situation = Some(new_situation);
-                self
-            }
-            _ => self,
+        if let Error::CouldNotUnify {
+            ref mut situation, ..
+        } = self
+        {
+            *situation = Some(new_situation);
+            self
+        } else {
+            self
         }
     }
 }
@@ -1395,10 +1411,7 @@ impl Warning {
     }
 
     pub(crate) fn is_todo(&self) -> bool {
-        match self {
-            Self::Todo { .. } => true,
-            _ => false,
-        }
+        matches!(self, Self::Todo { .. })
     }
 }
 
@@ -1477,8 +1490,14 @@ pub enum UnsafeRecordUpdateReason {
         record_variant: Arc<Type>,
         expected_field_type: Arc<Type>,
         record_field_type: Arc<Type>,
-        field_name: EcoString,
+        field: RecordField,
     },
+}
+
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub enum RecordField {
+    Labelled(EcoString),
+    Unlabelled(u32),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1609,7 +1628,10 @@ pub fn flip_unify_error(e: UnifyError) -> UnifyError {
             given: expected,
             situation: note,
         },
-        other => other,
+        UnifyError::ExtraVarInAlternativePattern { .. }
+        | UnifyError::MissingVarInAlternativePattern { .. }
+        | UnifyError::DuplicateVarInPattern { .. }
+        | UnifyError::RecursiveType => e,
     }
 }
 
@@ -1841,7 +1863,10 @@ impl UnifyError {
                 given,
                 situation: Some(situation),
             },
-            other => other,
+            Self::ExtraVarInAlternativePattern { .. }
+            | Self::MissingVarInAlternativePattern { .. }
+            | Self::DuplicateVarInPattern { .. }
+            | Self::RecursiveType => self,
         }
     }
 
@@ -1945,7 +1970,11 @@ impl UnifyError {
             },
 
             // In all other cases we fallback to the generic cannot unify error.
-            _ => self.into_error(body_location),
+            Self::CouldNotUnify { .. }
+            | Self::ExtraVarInAlternativePattern { .. }
+            | Self::MissingVarInAlternativePattern { .. }
+            | Self::DuplicateVarInPattern { .. }
+            | Self::RecursiveType => self.into_error(body_location),
         }
     }
 }

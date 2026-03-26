@@ -1,0 +1,19 @@
+---
+source: language-server/src/tests/completion.rs
+expression: "import dep\nimport dep2\n\npub fn wibble(\n  _: dep.Zoo,\n) -> Nil {\n  Nil\n}\n"
+---
+import dep
+import dep2
+
+pub fn wibble(
+  _: dep.Zoo|,
+) -> Nil {
+  Nil
+}
+
+
+----- Completion content -----
+dep.Zoo
+  kind:   Class
+  detail: Type
+  sort:   3_dep.Zoo

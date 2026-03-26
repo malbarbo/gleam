@@ -1,0 +1,18 @@
+---
+source: language-server/src/tests/hover.rs
+expression: "\nimport a/example_module as _\nimport b/example_module\nfn main() {\n    example_module.my_const\n}\n"
+---
+import a/example_module as _
+import b/example_module
+fn main() {
+    example_module.my_const
+    ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔↑▔▔▔▔
+}
+
+
+----- Hover content (markdown) -----
+```gleam
+Int
+```
+
+View on [HexDocs](https://hexdocs.pm/hex/b/example_module.html#my_const)

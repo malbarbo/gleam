@@ -1,0 +1,12 @@
+---
+source: language-server/src/tests/hover.rs
+expression: "\nconst pi = 3.14\n"
+---
+const pi = 3.14
+           ↑▔▔▔
+
+
+----- Hover content (markdown) -----
+```gleam
+Float
+```

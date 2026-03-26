@@ -330,7 +330,12 @@ impl Monomorphizer {
                 *type_ = self.type_(type_);
                 self.expressions(elements);
             }
-            TypedExpr::TupleIndex { type_, tuple, .. } => {
+            TypedExpr::TupleIndex { type_, tuple, .. }
+            | TypedExpr::PositionalAccess {
+                type_,
+                record: tuple,
+                ..
+            } => {
                 *type_ = self.type_(type_);
                 self.expression(tuple);
             }
@@ -466,27 +471,7 @@ impl Monomorphizer {
         match guard {
             ClauseGuard::Constant(_) => {}
             ClauseGuard::Block { value, .. } => self.guard(value),
-            ClauseGuard::Equals { left, right, .. }
-            | ClauseGuard::NotEquals { left, right, .. }
-            | ClauseGuard::GtInt { left, right, .. }
-            | ClauseGuard::GtEqInt { left, right, .. }
-            | ClauseGuard::LtInt { left, right, .. }
-            | ClauseGuard::LtEqInt { left, right, .. }
-            | ClauseGuard::GtFloat { left, right, .. }
-            | ClauseGuard::GtEqFloat { left, right, .. }
-            | ClauseGuard::LtFloat { left, right, .. }
-            | ClauseGuard::LtEqFloat { left, right, .. }
-            | ClauseGuard::AddInt { left, right, .. }
-            | ClauseGuard::AddFloat { left, right, .. }
-            | ClauseGuard::SubInt { left, right, .. }
-            | ClauseGuard::SubFloat { left, right, .. }
-            | ClauseGuard::MultInt { left, right, .. }
-            | ClauseGuard::MultFloat { left, right, .. }
-            | ClauseGuard::DivInt { left, right, .. }
-            | ClauseGuard::DivFloat { left, right, .. }
-            | ClauseGuard::RemainderInt { left, right, .. }
-            | ClauseGuard::Or { left, right, .. }
-            | ClauseGuard::And { left, right, .. } => {
+            ClauseGuard::BinaryOperator { left, right, .. } => {
                 self.guard(left);
                 self.guard(right);
             }

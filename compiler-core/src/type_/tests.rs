@@ -524,7 +524,7 @@ pub fn compile_module_with_opts(
     ast.name = module_name.into();
     let mut config = PackageConfig::default();
     config.name = "thepackage".into();
-    config.gleam_version = gleam_version.map(|v| GleamVersion::from_pubgrub(v));
+    config.gleam_version = gleam_version.map(GleamVersion::from_pubgrub);
 
     let warnings = TypeWarningEmitter::new("/src/warning/wrn.gleam".into(), src.into(), emitter);
     crate::analyse::ModuleAnalyzerConstructor::<()> {
@@ -818,6 +818,14 @@ fn infer_module_type_retention_test() {
                                 documentation: None,
                             }
                         ],
+                        opaque: Opaque::NotOpaque,
+                    }
+                ),
+                (
+                    "UtfCodepoint".into(),
+                    TypeVariantConstructors {
+                        type_parameters_ids: vec![],
+                        variants: vec![],
                         opaque: Opaque::NotOpaque,
                     }
                 ),
@@ -2307,6 +2315,193 @@ fn custom_type_module_constants() {
 }
 
 #[test]
+fn const_record_update() {
+    assert_module_infer!(
+        "pub type Person { Person(name: String, age: Int) }
+
+        pub const alice = Person(\"Alice\", 30)
+        pub const bob = Person(..alice, name: \"Bob\")",
+        vec![
+            ("Person", "fn(String, Int) -> Person"),
+            ("alice", "Person"),
+            ("bob", "Person")
+        ],
+    );
+}
+
+#[test]
+fn const_record_update_all_fields() {
+    assert_warning!(
+        "pub type Person { Person(name: String, age: Int, city: String) }
+
+        pub const base = Person(\"Alice\", 30, \"London\")
+        pub const updated = Person(..base, name: \"Bob\", age: 25, city: \"Paris\")"
+    );
+}
+
+#[test]
+fn const_record_update_chain() {
+    assert_module_infer!(
+        "pub type Person { Person(name: String, age: Int, city: String) }
+
+        pub const alice = Person(\"Alice\", 30, \"London\")
+        pub const bob = Person(..alice, name: \"Bob\")
+        pub const charlie = Person(..bob, age: 25)",
+        vec![
+            ("Person", "fn(String, Int, String) -> Person"),
+            ("alice", "Person"),
+            ("bob", "Person"),
+            ("charlie", "Person")
+        ],
+    );
+}
+
+#[test]
+fn const_record_update_with_labeled_args() {
+    assert_module_infer!(
+        "pub type Person { Person(name: String, age: Int, city: String) }
+        pub const alice = Person(name: \"Alice\", age: 30, city: \"London\")
+        pub const bob = Person(..alice, name: \"Bob\")",
+        vec![
+            ("Person", "fn(String, Int, String) -> Person"),
+            ("alice", "Person"),
+            ("bob", "Person")
+        ],
+    );
+}
+
+#[test]
+fn const_record_update_type_mismatch_error() {
+    assert_module_error!(
+        "pub type Person { Person(name: String, age: Int) }
+        pub type Animal { Animal(species: String) }
+
+        pub const alice = Person(\"Alice\", 30)
+        pub const dog = Animal(..alice)"
+    );
+}
+
+#[test]
+fn const_record_update_variant_mismatch_error() {
+    assert_module_error!(
+        "pub type Subject {
+            Person(name: String, age: Int)
+            Animal(species: String)
+        }
+
+        pub const alice = Person(\"Alice\", 30)
+        pub const dog = Animal(..alice)"
+    );
+}
+
+#[test]
+fn const_record_update_field_type_mismatch_error() {
+    assert_module_error!(
+        "pub type Person { Person(name: String, age: Int) }
+
+        pub const alice = Person(\"Alice\", 30)
+        pub const bob = Person(..alice, age: \"not a number\")"
+    );
+}
+
+#[test]
+fn const_record_update_nonexistent_field() {
+    assert_module_error!(
+        "pub type Person { Person(name: String, age: Int) }
+
+        pub const alice = Person(\"Alice\", 30)
+        pub const bob = Person(..alice, nonexistent: \"value\")"
+    );
+}
+
+#[test]
+fn const_record_update_non_record() {
+    assert_module_error!(
+        "pub type Person { Person(name: String, age: Int) }
+
+        pub const number = 42
+        pub const bob = Person(..number, name: \"Bob\")"
+    );
+}
+
+#[test]
+fn const_record_update_fieldless_warning() {
+    assert_warning!(
+        "pub type Animal { Animal(species: String) }
+
+        pub const alice = Animal(\"Cat\")
+        pub const dog = Animal(..alice)"
+    );
+}
+
+#[test]
+fn const_record_update_multi_variant() {
+    assert_module_infer!(
+        "pub type Pet {
+          Dog(name: String, age: Int)
+          Cat(name: String, breed: String)
+        }
+
+        pub const my_dog = Dog(\"Rex\", 5)
+        pub const another_dog = Dog(..my_dog, name: \"Max\")",
+        vec![
+            ("Cat", "fn(String, String) -> Pet"),
+            ("Dog", "fn(String, Int) -> Pet"),
+            ("another_dog", "Pet"),
+            ("my_dog", "Pet"),
+        ]
+    );
+}
+
+#[test]
+fn const_record_update_variant_without_args() {
+    assert_module_error!(
+        "pub type Status { Active Inactive }
+        pub const status1 = Active
+        pub const status2 = Active(..status1)"
+    );
+}
+
+#[test]
+fn const_record_update_unlabelled_fields() {
+    assert_module_error!(
+        "pub type Point { Point(Int, Int) }
+
+        pub const origin = Point(0, 0)
+        pub const point = Point(..origin)"
+    );
+}
+
+#[test]
+fn const_record_update_generic_respecialization() {
+    assert_module_infer!(
+        "pub type Box(a) {
+            Box(name: String, value: a)
+        }
+
+        pub const base = Box(\"score\", 50)
+        pub const updated = Box(..base, value: \"Hello\")",
+        vec![
+            ("Box", "fn(String, a) -> Box(a)"),
+            ("base", "Box(Int)"),
+            ("updated", "Box(String)")
+        ],
+    );
+}
+
+#[test]
+fn generic_unlabelled_field_in_updated_const_record_wrong_type() {
+    assert_module_error!(
+        "pub type Wibble(a) {
+            Wibble(a, b: Int, c: a)
+        }
+
+        const w = Wibble(1, 2, 3)
+        const w2 = Wibble(..w, c: False)"
+    );
+}
+
+#[test]
 fn module_constant_functions() {
     assert_module_infer!(
         "pub fn int_identity(i: Int) -> Int { i }
@@ -3286,5 +3481,40 @@ pub fn get_int(w: Wibble) {
             ("Wobble", "fn(String, Int) -> Wibble"),
             ("get_int", "fn(Wibble) -> Int"),
         ]
+    );
+}
+
+#[test]
+fn correct_type_check_for_multiple_mutually_recursive_functions() {
+    assert_module_error!(
+        r#"
+pub fn wibble(id) {
+  wobble(id, True)
+}
+
+pub fn wobble(id, bool) {
+  case bool {
+    True -> wibble(id)
+    False -> wubble(id, bool)
+  }
+}
+
+pub fn wubble(id, bool) {
+  case bool {
+    True -> final(id)
+    False -> wobble(id, bool)
+  }
+}
+
+pub fn final(id) {
+  let #(a, b) = id
+  echo #(a, b)
+}
+
+pub fn main() {
+  wibble(#("a", "b"))
+  wibble(2)
+}
+"#
     );
 }

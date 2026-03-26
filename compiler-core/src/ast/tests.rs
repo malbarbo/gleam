@@ -150,6 +150,7 @@ fn compile_expression(src: &str) -> TypedStatement {
             type_: cat_type,
             shared_accessors: accessors.clone().into(),
             variant_specific_accessors: vec![accessors.into()],
+            variant_positional_accessors: vec![vec![]],
         },
     );
     let mut problems = Problems::new();
@@ -665,8 +666,9 @@ fn find_node_module_select() {
     assert_eq!(
         expr.find_node(1),
         Some(Located::ModuleName {
-            location: SrcSpan::new(1, 1),
-            name: &"name".into(),
+            location: SrcSpan::new(1, 6),
+            module_name: "name".into(),
+            module_alias: "alias".into(),
             layer: super::Layer::Value
         })
     );

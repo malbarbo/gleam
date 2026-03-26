@@ -1,0 +1,17 @@
+---
+source: language-server/src/tests/hover.rs
+expression: "\nimport example_module.{my_num}\nfn main() {\n  my_num\n}\n"
+---
+import example_module.{my_num}
+                       ▔▔▔↑▔▔ 
+fn main() {
+  my_num
+}
+
+
+----- Hover content (markdown) -----
+```gleam
+Int
+```
+ Exciting documentation
+ Maybe even multiple lines

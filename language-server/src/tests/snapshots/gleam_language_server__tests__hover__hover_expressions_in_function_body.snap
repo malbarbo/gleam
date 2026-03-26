@@ -1,0 +1,15 @@
+---
+source: language-server/src/tests/hover.rs
+expression: "\nfn append(x, y) {\n  x <> y\n}\n"
+---
+fn append(x, y) {
+  x <> y
+  ↑     
+}
+
+
+----- Hover content (markdown) -----
+```gleam
+String
+```
+A locally defined variable.

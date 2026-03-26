@@ -17,9 +17,9 @@ pub use self::project_compiler::{Built, Options, ProjectCompiler};
 pub use self::telemetry::{NullTelemetry, Telemetry};
 
 use crate::ast::{
-    self, CallArg, CustomType, DefinitionLocation, TypeAst, TypedArg, TypedConstant,
-    TypedCustomType, TypedDefinitions, TypedExpr, TypedFunction, TypedImport, TypedModuleConstant,
-    TypedPattern, TypedRecordConstructor, TypedStatement, TypedTypeAlias,
+    self, CallArg, CustomType, DefinitionLocation, TypeAst, TypedArg, TypedClauseGuard,
+    TypedConstant, TypedCustomType, TypedDefinitions, TypedExpr, TypedFunction, TypedImport,
+    TypedModuleConstant, TypedPattern, TypedRecordConstructor, TypedStatement, TypedTypeAlias,
 };
 use crate::type_::{Type, TypedCallArg};
 use crate::{
@@ -46,7 +46,6 @@ use vec1::Vec1;
     Debug,
     Serialize,
     Deserialize,
-    Display,
     EnumString,
     EnumVariantNames,
     EnumIter,
@@ -69,6 +68,14 @@ pub enum Target {
 }
 
 impl Target {
+    pub fn as_presentable_str(&self) -> &str {
+        match self {
+            Target::Erlang => "Erlang",
+            Target::JavaScript => "JavaScript",
+            Target::WebAssembly => "WebAssembly",
+        }
+    }
+
     pub fn variant_strings() -> Vec<EcoString> {
         Self::VARIANTS.iter().map(|s| (*s).into()).collect()
     }
@@ -122,7 +129,7 @@ impl Codegen {
 }
 
 #[derive(
-    Debug, Serialize, Deserialize, Display, EnumString, EnumVariantNames, Clone, Copy, PartialEq, Eq,
+    Debug, Serialize, Deserialize, EnumString, EnumVariantNames, Clone, Copy, PartialEq, Eq,
 )]
 pub enum Runtime {
     #[strum(serialize = "nodejs", serialize = "node")]
@@ -134,6 +141,16 @@ pub enum Runtime {
     #[strum(serialize = "bun")]
     #[serde(rename = "bun")]
     Bun,
+}
+
+impl Runtime {
+    pub fn as_presentable_str(&self) -> &str {
+        match self {
+            Runtime::NodeJs => "NodeJS",
+            Runtime::Deno => "Deno",
+            Runtime::Bun => "Bun",
+        }
+    }
 }
 
 impl Default for Runtime {
@@ -415,6 +432,12 @@ pub enum Located<'a> {
         spread_location: SrcSpan,
         pattern: &'a TypedPattern,
     },
+    // A prefix alias or a suffix variable defined in a string prefix pattern:
+    // "prefix" as alias <> suffix
+    StringPrefixPatternVariable {
+        location: SrcSpan,
+        name: &'a EcoString,
+    },
     Statement(&'a TypedStatement),
     Expression {
         expression: &'a TypedExpr,
@@ -431,7 +454,8 @@ pub enum Located<'a> {
     Label(SrcSpan, std::sync::Arc<Type>),
     ModuleName {
         location: SrcSpan,
-        name: &'a EcoString,
+        module_name: EcoString,
+        module_alias: EcoString,
         layer: ast::Layer,
     },
     Constant(&'a TypedConstant),
@@ -464,6 +488,10 @@ impl<'a> Located<'a> {
         match self {
             Self::PatternSpread { .. } => None,
             Self::Pattern(pattern) => pattern.definition_location(),
+            Self::StringPrefixPatternVariable { location, .. } => Some(DefinitionLocation {
+                module: None,
+                span: *location,
+            }),
             Self::Statement(statement) => statement.definition_location(),
             Self::FunctionBody(statement) => None,
             Self::Expression { expression, .. } => expression.definition_location(),
@@ -514,8 +542,8 @@ impl<'a> Located<'a> {
             Self::Arg(_) => None,
             Self::Annotation { type_, .. } => self.type_location(importable_modules, type_.clone()),
             Self::Label(_, _) => None,
-            Self::ModuleName { name, .. } => Some(DefinitionLocation {
-                module: Some((*name).clone()),
+            Self::ModuleName { module_name, .. } => Some(DefinitionLocation {
+                module: Some(module_name.clone()),
                 span: SrcSpan::new(0, 0),
             }),
             Self::Constant(constant) => constant.definition_location(),
@@ -525,6 +553,7 @@ impl<'a> Located<'a> {
     pub(crate) fn type_(&self) -> Option<Arc<Type>> {
         match self {
             Located::Pattern(pattern) => Some(pattern.type_()),
+            Located::StringPrefixPatternVariable { .. } => Some(type_::string()),
             Located::Statement(statement) => Some(statement.type_()),
             Located::Expression { expression, .. } => Some(expression.type_()),
             Located::Arg(arg) => Some(arg.type_.clone()),
@@ -544,7 +573,7 @@ impl<'a> Located<'a> {
         }
     }
 
-    pub(crate) fn type_definition_locations(
+    pub fn type_definition_locations(
         &self,
         importable_modules: &im::HashMap<EcoString, type_::ModuleInterface>,
     ) -> Option<Vec<DefinitionLocation>> {
@@ -721,10 +750,10 @@ fn doc_comments_before<'a>(
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub(crate) struct SourceFingerprint(u64);
+pub struct SourceFingerprint(u64);
 
 impl SourceFingerprint {
-    pub(crate) fn new(source: &str) -> Self {
+    pub fn new(source: &str) -> Self {
         SourceFingerprint(xxhash_rust::xxh3::xxh3_64(source.as_bytes()))
     }
 }

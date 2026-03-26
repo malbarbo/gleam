@@ -3623,6 +3623,115 @@ pub fn main() {
 }
 
 #[test]
+fn stdlib_list_each_is_not_marked_as_pure() {
+    assert_no_warnings!(
+        (
+            "gleam",
+            "gleam/list",
+            r#"
+pub fn each(list, f) {
+  case list {
+    [] -> Nil
+    [first, ..rest] -> {
+      f(first)
+      each(rest, f)
+    }
+  }
+}
+"#
+        ),
+        "
+import gleam/list
+pub fn main() {
+  list.each([1, 2, 3, 4], fn(x) { echo x })
+  Nil
+}
+"
+    );
+}
+
+#[test]
+fn dict_each_function_is_not_marked_as_pure() {
+    assert_no_warnings!(
+        (
+            "gleam_stdlib",
+            "gleam/dict",
+            r#"
+pub type Dict(key, value)
+
+@external(erlang, "maps", "new")
+@external(javascript, "../dict.mjs", "make")
+pub fn new() -> Dict(k, v)
+
+pub fn each(dict: Dict(k, v), fun: fn(k, v) -> a) -> Nil {
+  fold(dict, Nil, fn(nil, k, v) {
+    fun(k, v)
+    nil
+  })
+}
+
+@external(javascript, "../dict.mjs", "fold")
+pub fn fold(
+  over dict: Dict(k, v),
+  from initial: acc,
+  with fun: fn(acc, k, v) -> acc,
+) -> acc {
+  let fun = fn(key, value, acc) { fun(acc, key, value) }
+  do_fold(fun, initial, dict)
+}
+
+@external(erlang, "maps", "fold")
+fn do_fold(fun: fn(k, v, acc) -> acc, initial: acc, dict: Dict(k, v)) -> acc
+"#
+        ),
+        "
+import gleam/dict
+pub fn main() {
+  dict.each(dict.new(), fn(_, _) { echo 1 })
+  Nil
+}
+"
+    );
+}
+
+#[test]
+fn dict_fold_function_is_not_marked_as_pure() {
+    assert_no_warnings!(
+        (
+            "gleam_stdlib",
+            "gleam/dict",
+            r#"
+pub type Dict(key, value)
+
+@external(erlang, "maps", "new")
+@external(javascript, "../dict.mjs", "make")
+pub fn new() -> Dict(k, v)
+
+@external(javascript, "../dict.mjs", "fold")
+pub fn fold(
+  over dict: Dict(k, v),
+  from initial: acc,
+  with fun: fn(acc, k, v) -> acc,
+) -> acc {
+  let fun = fn(key, value, acc) { fun(acc, key, value) }
+  do_fold(fun, initial, dict)
+}
+
+@external(erlang, "maps", "fold")
+fn do_fold(fun: fn(k, v, acc) -> acc, initial: acc, dict: Dict(k, v)) -> acc
+"#
+        ),
+        "
+import gleam/dict
+pub fn main() {
+  dict.fold(dict.new(), Nil, fn(_, _, _) { Nil })
+  Nil
+}
+"
+    );
+}
+
+#[test]
 fn calling_local_variable_not_marked_as_pure() {
     assert_no_warnings!(
         "
@@ -4265,6 +4374,21 @@ fn variables_not_redundant_comparison() {
 }
 
 #[test]
+fn constructor_functions_not_redundant_comparison() {
+    assert_no_warnings!(
+        "
+type Comparison {
+  Wobble(String)
+}
+
+pub fn main() {
+  Wobble == Wobble
+}
+"
+    );
+}
+
+#[test]
 fn record_select_redundant_comparison() {
     assert_warning!(
         "
@@ -4666,5 +4790,43 @@ fn detached_doc_comment() {
 /// This is actual documentation
 pub const pi = 3.14
 "
+    );
+}
+
+#[test]
+fn const_record_update_requires_v1_14_warning() {
+    assert_warnings_with_gleam_version!(
+        Range::higher_than(Version::new(1, 0, 0)),
+        "
+pub type Wibble { Wibble(a: Int, b: Int) }
+const base = Wibble(1, 2)
+pub const wobble = Wibble(..base, b: 3)
+",
+    );
+}
+
+#[test]
+fn expression_in_expression_segment_size_requires_v1_12_warning() {
+    assert_warnings_with_gleam_version!(
+        Range::higher_than(Version::new(1, 0, 0)),
+        "
+pub fn main() {
+  <<1:size(3 * 8)>>
+}
+",
+    );
+}
+
+#[test]
+fn expression_in_pattern_segment_size_requires_v1_12_warning() {
+    assert_warnings_with_gleam_version!(
+        Range::higher_than(Version::new(1, 0, 0)),
+        "
+pub fn main(x) {
+  case x {
+    <<_:size(3*8)>> -> 1
+    _ -> 2
+  }
+}",
     );
 }

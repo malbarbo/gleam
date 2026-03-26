@@ -4,6 +4,7 @@ use type_::{AccessorsMap, FieldMap, RecordAccessor};
 
 use super::*;
 use crate::{
+    analyse::Inferred,
     ast::{
         BitArrayOption, BitArraySegment, CallArg, Constant, Publicity, SrcSpan, TypedConstant,
         TypedConstantBitArraySegmentOption,
@@ -955,6 +956,7 @@ fn accessors() {
                     type_: type_::int(),
                     shared_accessors: accessors1.clone().into(),
                     variant_specific_accessors: vec![accessors1.into()],
+                    variant_positional_accessors: vec![vec![type_::int(), type_::float()]],
                 },
             ),
             (
@@ -964,6 +966,7 @@ fn accessors() {
                     type_: type_::int(),
                     shared_accessors: accessors2.clone().into(),
                     variant_specific_accessors: vec![accessors2.into()],
+                    variant_positional_accessors: vec![vec![]],
                 },
             ),
         ]
@@ -1033,6 +1036,7 @@ fn private_accessors() {
                     type_: type_::int(),
                     shared_accessors: accessors1.clone().into(),
                     variant_specific_accessors: vec![accessors1.into()],
+                    variant_positional_accessors: vec![vec![type_::int(), type_::float()]],
                 },
             ),
             (
@@ -1042,6 +1046,7 @@ fn private_accessors() {
                     type_: type_::int(),
                     shared_accessors: accessors2.clone().into(),
                     variant_specific_accessors: vec![accessors2.into()],
+                    variant_positional_accessors: vec![vec![]],
                 },
             ),
         ]
@@ -1092,8 +1097,14 @@ fn constant_string() {
 
 #[test]
 fn constant_tuple() {
+    let int_float_tuple_type = type_::tuple(vec![type_::int(), type_::float()]);
     let module = constant_module(Constant::Tuple {
         location: Default::default(),
+        type_: type_::tuple(vec![
+            type_::int(),
+            type_::float(),
+            int_float_tuple_type.clone(),
+        ]),
         elements: vec![
             Constant::Int {
                 location: Default::default(),
@@ -1107,6 +1118,7 @@ fn constant_tuple() {
             },
             Constant::Tuple {
                 location: Default::default(),
+                type_: int_float_tuple_type,
                 elements: vec![
                     Constant::Int {
                         location: Default::default(),
@@ -1183,7 +1195,7 @@ fn constant_record() {
         ],
         tag: "thetag".into(),
         type_: type_::int(),
-        field_map: None,
+        field_map: Inferred::Unknown,
         record_constructor: None,
     });
 

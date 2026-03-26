@@ -1,5 +1,5 @@
 pub(crate) mod environment;
-pub(crate) mod error;
+pub mod error;
 pub(crate) mod expression;
 pub(crate) mod fields;
 pub(crate) mod hydrator;
@@ -7,7 +7,7 @@ pub(crate) mod pattern;
 pub(crate) mod pipe;
 pub(crate) mod prelude;
 pub mod pretty;
-pub(crate) mod printer;
+pub mod printer;
 #[cfg(test)]
 pub mod tests;
 
@@ -118,8 +118,8 @@ impl Type {
     pub fn is_result_constructor(&self) -> bool {
         match self {
             Type::Fn { return_, .. } => return_.is_result(),
-            Type::Var { type_ } => type_.borrow().is_result(),
-            _ => false,
+            Type::Var { type_ } => type_.borrow().is_result_constructor(),
+            Type::Named { .. } | Type::Tuple { .. } => false,
         }
     }
 
@@ -127,15 +127,12 @@ impl Type {
         match self {
             Self::Named { name, module, .. } => "Result" == name && is_prelude_module(module),
             Self::Var { type_ } => type_.borrow().is_result(),
-            _ => false,
+            Self::Fn { .. } | Self::Tuple { .. } => false,
         }
     }
 
     pub fn is_named(&self) -> bool {
-        match self {
-            Self::Named { .. } => true,
-            _ => false,
-        }
+        matches!(self, Self::Named { .. })
     }
 
     pub fn result_ok_type(&self) -> Option<Arc<Type>> {
@@ -169,14 +166,14 @@ impl Type {
     pub fn is_unbound(&self) -> bool {
         match self {
             Self::Var { type_ } => type_.borrow().is_unbound(),
-            _ => false,
+            Self::Named { .. } | Self::Fn { .. } | Self::Tuple { .. } => false,
         }
     }
 
     pub fn is_variable(&self) -> bool {
         match self {
             Self::Var { type_ } => type_.borrow().is_variable(),
-            _ => false,
+            Self::Named { .. } | Self::Fn { .. } | Self::Tuple { .. } => false,
         }
     }
 
@@ -184,7 +181,7 @@ impl Type {
         match self {
             Self::Fn { return_, .. } => Some(return_.clone()),
             Self::Var { type_ } => type_.borrow().return_type(),
-            _ => None,
+            Self::Named { .. } | Self::Tuple { .. } => None,
         }
     }
 
@@ -194,7 +191,7 @@ impl Type {
                 arguments, return_, ..
             } => Some((arguments.clone(), return_.clone())),
             Self::Var { type_ } => type_.borrow().fn_types(),
-            _ => None,
+            Self::Named { .. } | Self::Tuple { .. } => None,
         }
     }
 
@@ -203,7 +200,7 @@ impl Type {
         match self {
             Self::Tuple { elements } => Some(elements.clone()),
             Self::Var { type_, .. } => type_.borrow().tuple_types(),
-            _ => None,
+            Self::Named { .. } | Self::Fn { .. } => None,
         }
     }
 
@@ -213,7 +210,7 @@ impl Type {
         match self {
             Self::Named { arguments, .. } => Some(arguments.clone()),
             Self::Var { type_, .. } => type_.borrow().constructor_types(),
-            _ => None,
+            Self::Fn { .. } | Self::Tuple { .. } => None,
         }
     }
 
@@ -257,8 +254,8 @@ impl Type {
     fn is_fun(&self) -> bool {
         match self {
             Self::Fn { .. } => true,
-            Type::Var { type_ } => type_.borrow().is_fun(),
-            _ => false,
+            Self::Var { type_ } => type_.borrow().is_fun(),
+            Self::Named { .. } | Self::Tuple { .. } => false,
         }
     }
 
@@ -266,7 +263,7 @@ impl Type {
         match self {
             Self::Named { module, name, .. } if "Nil" == name && is_prelude_module(module) => true,
             Self::Var { type_ } => type_.borrow().is_nil(),
-            _ => false,
+            Self::Named { .. } | Self::Fn { .. } | Self::Tuple { .. } => false,
         }
     }
 
@@ -275,8 +272,8 @@ impl Type {
             Self::Named { module, name, .. } if "BitArray" == name && is_prelude_module(module) => {
                 true
             }
-            Self::Var { type_ } => type_.borrow().is_nil(),
-            _ => false,
+            Self::Var { type_ } => type_.borrow().is_bit_array(),
+            Self::Named { .. } | Self::Fn { .. } | Self::Tuple { .. } => false,
         }
     }
 
@@ -296,7 +293,7 @@ impl Type {
         match self {
             Self::Named { module, name, .. } if "Bool" == name && is_prelude_module(module) => true,
             Self::Var { type_ } => type_.borrow().is_bool(),
-            _ => false,
+            Self::Named { .. } | Self::Fn { .. } | Self::Tuple { .. } => false,
         }
     }
 
@@ -304,7 +301,7 @@ impl Type {
         match self {
             Self::Named { module, name, .. } if "Int" == name && is_prelude_module(module) => true,
             Self::Var { type_ } => type_.borrow().is_int(),
-            _ => false,
+            Self::Named { .. } | Self::Fn { .. } | Self::Tuple { .. } => false,
         }
     }
 
@@ -314,7 +311,7 @@ impl Type {
                 true
             }
             Self::Var { type_ } => type_.borrow().is_float(),
-            _ => false,
+            Self::Named { .. } | Self::Fn { .. } | Self::Tuple { .. } => false,
         }
     }
 
@@ -324,7 +321,7 @@ impl Type {
                 true
             }
             Self::Var { type_ } => type_.borrow().is_string(),
-            _ => false,
+            Self::Named { .. } | Self::Fn { .. } | Self::Tuple { .. } => false,
         }
     }
 
@@ -332,7 +329,7 @@ impl Type {
         match self {
             Self::Named { module, name, .. } if "List" == name && is_prelude_module(module) => true,
             Self::Var { type_ } => type_.borrow().is_list(),
-            _ => false,
+            Self::Named { .. } | Self::Fn { .. } | Self::Tuple { .. } => false,
         }
     }
 
@@ -348,7 +345,7 @@ impl Type {
         match self {
             Self::Named { module, name, .. } => Some((module.clone(), name.clone())),
             Self::Var { type_ } => type_.borrow().named_type_name(),
-            _ => None,
+            Self::Fn { .. } | Self::Tuple { .. } => None,
         }
     }
 
@@ -361,7 +358,7 @@ impl Type {
                 ..
             } => Some((module.clone(), name.clone(), arguments.clone())),
             Self::Var { type_ } => type_.borrow().named_type_information(),
-            _ => None,
+            Self::Fn { .. } | Self::Tuple { .. } => None,
         }
     }
 
@@ -405,13 +402,13 @@ impl Type {
         }
     }
 
-    /// Get the args for the type if the type is a specific `Type::App`.
-    /// Returns None if the type is not a `Type::App` or is an incorrect `Type:App`
+    /// Get the args for the type if the type is a specific `Type::Named`.
+    /// Returns None if the type is not a `Type::Named` or is an incorrect `Type:Named`
     ///
     /// This function is currently only used for finding the `List` type.
     ///
     // TODO: specialise this to just List.
-    pub fn get_app_arguments(
+    pub fn named_type_arguments(
         &self,
         publicity: Publicity,
         package: &str,
@@ -437,7 +434,7 @@ impl Type {
             Self::Var { type_ } => {
                 let arguments: Vec<_> = match type_.borrow().deref() {
                     TypeVar::Link { type_ } => {
-                        return type_.get_app_arguments(
+                        return type_.named_type_arguments(
                             publicity,
                             package,
                             module,
@@ -469,7 +466,7 @@ impl Type {
                 Some(arguments)
             }
 
-            _ => None,
+            Self::Fn { .. } | Self::Tuple { .. } => None,
         }
     }
 
@@ -534,7 +531,7 @@ impl Type {
     pub fn fn_arity(&self) -> Option<usize> {
         match self {
             Self::Fn { arguments, .. } => Some(arguments.len()),
-            _ => None,
+            Self::Named { .. } | Self::Var { .. } | Self::Tuple { .. } => None,
         }
     }
 
@@ -574,10 +571,11 @@ impl Type {
                     && package == other_package
                     && module == other_module
                     && name == other_name
+                    && arguments.len() == other_arguments.len()
                     && arguments
                         .iter()
                         .zip(other_arguments)
-                        .all(|(a, b)| a.same_as(b))
+                        .all(|(one, other)| one.same_as(other))
             }
 
             (Type::Fn { .. }, Type::Named { .. } | Type::Tuple { .. }) => false,
@@ -672,6 +670,7 @@ pub struct AccessorsMap {
     pub type_: Arc<Type>,
     pub shared_accessors: HashMap<EcoString, RecordAccessor>,
     pub variant_specific_accessors: Vec<HashMap<EcoString, RecordAccessor>>,
+    pub variant_positional_accessors: Vec<Vec<Arc<Type>>>,
 }
 
 impl AccessorsMap {
@@ -682,6 +681,11 @@ impl AccessorsMap {
         inferred_variant
             .and_then(|index| self.variant_specific_accessors.get(index as usize))
             .unwrap_or(&self.shared_accessors)
+    }
+
+    pub fn positional_accessors(&self, inferred_variant: u16) -> Option<&Vec<Arc<Type>>> {
+        self.variant_positional_accessors
+            .get(inferred_variant as usize)
     }
 }
 
@@ -710,11 +714,6 @@ pub enum ValueConstructorVariant {
         name: EcoString,
         literal: Constant<Arc<Type>, EcoString>,
         implementations: Implementations,
-    },
-
-    /// A constant defined locally, for example when pattern matching on string literals
-    LocalConstant {
-        literal: Constant<Arc<Type>, EcoString>,
     },
 
     /// A function belonging to the module
@@ -783,12 +782,6 @@ impl ValueConstructorVariant {
                 documentation: documentation.clone(),
             },
 
-            Self::LocalConstant { literal } => ModuleValueConstructor::Constant {
-                literal: literal.clone(),
-                location: literal.location(),
-                documentation: None,
-            },
-
             Self::LocalVariable { location, .. } => ModuleValueConstructor::Fn {
                 name: function_name.clone(),
                 module: module_name.clone(),
@@ -829,7 +822,6 @@ impl ValueConstructorVariant {
             | ValueConstructorVariant::ModuleConstant { location, .. }
             | ValueConstructorVariant::ModuleFn { location, .. }
             | ValueConstructorVariant::Record { location, .. } => *location,
-            ValueConstructorVariant::LocalConstant { literal } => literal.location(),
         }
     }
 
@@ -846,7 +838,6 @@ impl ValueConstructorVariant {
                 matches!(origin.syntax, VariableSyntax::Generated)
             }
             ValueConstructorVariant::ModuleConstant { .. }
-            | ValueConstructorVariant::LocalConstant { .. }
             | ValueConstructorVariant::ModuleFn { .. }
             | ValueConstructorVariant::Record { .. } => false,
         }
@@ -861,16 +852,12 @@ impl ValueConstructorVariant {
     }
 
     pub fn is_record(&self) -> bool {
-        match self {
-            Self::Record { .. } => true,
-            _ => false,
-        }
+        matches!(self, Self::Record { .. })
     }
 
     pub fn implementations(&self) -> Implementations {
         match self {
             ValueConstructorVariant::Record { .. }
-            | ValueConstructorVariant::LocalConstant { .. }
             | ValueConstructorVariant::LocalVariable { .. } => Implementations {
                 gleam: true,
                 can_run_on_erlang: true,
@@ -894,7 +881,6 @@ impl ValueConstructorVariant {
         match self {
             ValueConstructorVariant::LocalVariable { .. }
             | ValueConstructorVariant::ModuleConstant { .. }
-            | ValueConstructorVariant::LocalConstant { .. }
             | ValueConstructorVariant::ModuleFn { .. } => None,
             ValueConstructorVariant::Record { field_map, .. } => field_map.as_ref(),
         }
@@ -1088,9 +1074,11 @@ impl TypeVariantConstructors {
                 match t.type_.as_ref() {
                     Type::Var { type_ } => match type_.borrow().deref() {
                         TypeVar::Generic { id } => *id,
-                        _ => panic!("{}", error),
+                        TypeVar::Unbound { .. } | TypeVar::Link { .. } => panic!("{}", error),
                     },
-                    _ => panic!("{}", error),
+                    Type::Named { .. } | Type::Fn { .. } | Type::Tuple { .. } => {
+                        panic!("{}", error)
+                    }
                 }
             })
             .collect_vec();
@@ -1225,7 +1213,8 @@ impl TypeVar {
     pub fn is_unbound(&self) -> bool {
         match self {
             Self::Unbound { .. } => true,
-            Self::Link { .. } | Self::Generic { .. } => false,
+            Self::Link { type_ } => type_.is_unbound(),
+            Self::Generic { .. } => false,
         }
     }
 
@@ -1274,6 +1263,13 @@ impl TypeVar {
     pub fn is_result(&self) -> bool {
         match self {
             Self::Link { type_ } => type_.is_result(),
+            Self::Unbound { .. } | Self::Generic { .. } => false,
+        }
+    }
+
+    pub fn is_result_constructor(&self) -> bool {
+        match self {
+            Self::Link { type_ } => type_.is_result_constructor(),
             Self::Unbound { .. } | Self::Generic { .. } => false,
         }
     }
@@ -1328,13 +1324,6 @@ impl TypeVar {
         }
     }
 
-    pub fn is_utf_codepoint(&self) -> bool {
-        match self {
-            Self::Link { type_ } => type_.is_utf_codepoint(),
-            Self::Unbound { .. } | Self::Generic { .. } => false,
-        }
-    }
-
     pub fn is_bool(&self) -> bool {
         match self {
             Self::Link { type_ } => type_.is_bool(),
@@ -1359,6 +1348,20 @@ impl TypeVar {
     pub fn is_string(&self) -> bool {
         match self {
             Self::Link { type_ } => type_.is_string(),
+            Self::Unbound { .. } | Self::Generic { .. } => false,
+        }
+    }
+
+    pub fn is_bit_array(&self) -> bool {
+        match self {
+            Self::Link { type_ } => type_.is_bit_array(),
+            Self::Unbound { .. } | Self::Generic { .. } => false,
+        }
+    }
+
+    pub fn is_utf_codepoint(&self) -> bool {
+        match self {
+            Self::Link { type_ } => type_.is_utf_codepoint(),
             Self::Unbound { .. } | Self::Generic { .. } => false,
         }
     }
@@ -1466,11 +1469,6 @@ impl ValueConstructor {
                 span: *location,
             },
 
-            ValueConstructorVariant::LocalConstant { literal } => DefinitionLocation {
-                module: None,
-                span: literal.location(),
-            },
-
             ValueConstructorVariant::LocalVariable { location, .. } => DefinitionLocation {
                 module: None,
                 span: *location,
@@ -1478,10 +1476,9 @@ impl ValueConstructor {
         }
     }
 
-    pub(crate) fn get_documentation(&self) -> Option<&str> {
+    pub fn get_documentation(&self) -> Option<&str> {
         match &self.variant {
-            ValueConstructorVariant::LocalConstant { .. }
-            | ValueConstructorVariant::LocalVariable { .. } => Some("A locally defined variable."),
+            ValueConstructorVariant::LocalVariable { .. } => Some("A locally defined variable."),
 
             ValueConstructorVariant::ModuleFn { documentation, .. }
             | ValueConstructorVariant::Record { documentation, .. }
@@ -1515,8 +1512,7 @@ impl ValueConstructor {
             // `Purity::Unknown`. See the documentation for the `Purity` type
             // for more information on why this is the case.
             ValueConstructorVariant::LocalVariable { .. }
-            | ValueConstructorVariant::ModuleConstant { .. }
-            | ValueConstructorVariant::LocalConstant { .. } => Purity::Unknown,
+            | ValueConstructorVariant::ModuleConstant { .. } => Purity::Unknown,
 
             // Constructing records is always pure
             ValueConstructorVariant::Record { .. } => Purity::Pure,
@@ -1543,19 +1539,24 @@ impl ValueConstructor {
         match &self.variant {
             ValueConstructorVariant::ModuleFn { field_map, .. }
             | ValueConstructorVariant::Record { field_map, .. } => field_map.as_ref(),
-            _ => None,
+            ValueConstructorVariant::LocalVariable { .. }
+            | ValueConstructorVariant::ModuleConstant { .. } => None,
         }
     }
 }
 
 pub type TypedCallArg = CallArg<TypedExpr>;
 
-fn assert_no_labelled_arguments<A>(arguments: &[CallArg<A>]) -> Result<(), Error> {
+fn assert_no_labelled_arguments<A>(
+    arguments: &[CallArg<A>],
+    kind: UnexpectedLabelledArgKind,
+) -> Result<(), Error> {
     for argument in arguments {
         if let Some(label) = &argument.label {
             return Err(Error::UnexpectedLabelledArg {
                 location: argument.location,
                 label: label.clone(),
+                kind,
             });
         }
     }

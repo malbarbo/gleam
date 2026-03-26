@@ -115,14 +115,21 @@ impl<'a> ModuleEncoder<'a> {
             self.build_record_accessor(property.init_value(), accessor)
         }
 
-        let mut builder = builder
+        let mut variant_accessors = builder
+            .reborrow()
             .init_variant_specific_accessors(accessors.variant_specific_accessors.len() as u32);
         for (i, map) in accessors.variant_specific_accessors.iter().enumerate() {
-            self.build_constructor_accessors(builder.reborrow().get(i as u32), map);
+            self.build_variant_accessors(variant_accessors.reborrow().get(i as u32), map);
+        }
+
+        let mut positional_accessors =
+            builder.init_positional_accessors(accessors.variant_positional_accessors.len() as u32);
+        for (i, fields) in accessors.variant_positional_accessors.iter().enumerate() {
+            self.build_positional_accessors(positional_accessors.reborrow().get(i as u32), fields);
         }
     }
 
-    fn build_constructor_accessors(
+    fn build_variant_accessors(
         &mut self,
         builder: variant_specific_accessors::Builder<'_>,
         accessors: &HashMap<EcoString, RecordAccessor>,
@@ -132,6 +139,17 @@ impl<'a> ModuleEncoder<'a> {
             let mut property = builder.reborrow().get(i as u32);
             property.set_key(name);
             self.build_record_accessor(property.init_value(), accessor)
+        }
+    }
+
+    fn build_positional_accessors(
+        &mut self,
+        builder: positional_accessors::Builder<'_>,
+        accessors: &[Arc<Type>],
+    ) {
+        let mut builder = builder.init_accessors(accessors.len() as u32);
+        for (i, type_) in accessors.iter().enumerate() {
+            self.build_type(builder.reborrow().get(i as u32), type_);
         }
     }
 
@@ -395,10 +413,6 @@ impl<'a> ModuleEncoder<'a> {
                 panic!("Unexpected local variable value constructor in module interface",)
             }
 
-            ValueConstructorVariant::LocalConstant { .. } => {
-                panic!("Unexpected local constant value constructor in module interface",)
-            }
-
             ValueConstructorVariant::ModuleConstant {
                 literal,
                 location,
@@ -507,8 +521,15 @@ impl<'a> ModuleEncoder<'a> {
             Constant::Float { value, .. } => builder.set_float(value),
             Constant::String { value, .. } => builder.set_string(value),
 
-            Constant::Tuple { elements, .. } => {
-                self.build_constants(builder.init_tuple(elements.len() as u32), elements)
+            Constant::Tuple {
+                elements, type_, ..
+            } => {
+                let mut builder = builder.init_tuple();
+                self.build_constants(
+                    builder.reborrow().init_elements(elements.len() as u32),
+                    elements,
+                );
+                self.build_type(builder.init_type(), type_);
             }
 
             Constant::List {
@@ -545,7 +566,6 @@ impl<'a> ModuleEncoder<'a> {
                 builder.reborrow().set_tag(tag);
                 self.build_type(builder.reborrow().init_type(), type_);
             }
-
             Constant::Var {
                 module,
                 name,
@@ -572,6 +592,10 @@ impl<'a> ModuleEncoder<'a> {
                 let mut builder = builder.init_string_concatenation();
                 self.build_constant(builder.reborrow().init_right(), right);
                 self.build_constant(builder.reborrow().init_left(), left);
+            }
+
+            Constant::RecordUpdate { .. } => {
+                panic!("record updates should not reach code generation")
             }
 
             Constant::Invalid { .. } => {

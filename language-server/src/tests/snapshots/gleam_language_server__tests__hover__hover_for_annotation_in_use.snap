@@ -1,0 +1,15 @@
+---
+source: language-server/src/tests/hover.rs
+expression: "\npub fn main() {\n  use something: Int <- todo\n  todo\n}\n"
+---
+pub fn main() {
+  use something: Int <- todo
+                 ▔↑▔        
+  todo
+}
+
+
+----- Hover content (markdown) -----
+```gleam
+gleam.Int
+```

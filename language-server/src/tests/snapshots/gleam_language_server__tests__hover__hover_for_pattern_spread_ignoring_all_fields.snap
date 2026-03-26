@@ -1,0 +1,29 @@
+---
+source: language-server/src/tests/hover.rs
+expression: "\npub type Model {\n  Model(\n    Int,\n    Float,\n    label1: Int,\n    label2: String,\n  )\n}\n\npub fn main() {\n  case todo {\n    Model(..) -> todo\n  }\n}\n"
+---
+pub type Model {
+  Model(
+    Int,
+    Float,
+    label1: Int,
+    label2: String,
+  )
+}
+
+pub fn main() {
+  case todo {
+    Model(..) -> todo
+          ↑▔         
+  }
+}
+
+
+----- Hover content (markdown) -----
+Unused positional fields:
+- `Int`
+- `Float`
+
+Unused labelled fields:
+- `label1: Int`
+- `label2: String`

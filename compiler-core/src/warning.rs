@@ -1257,6 +1257,7 @@ See: https://tour.gleam.run/functions/pipelines/",
                             "Constant strings concatenation was"
                         }
                         FeatureKind::ArithmeticInGuards => "Arithmetic operations in guards were",
+                        FeatureKind::ConcatenateInGuards => "String concatenation in guards was",
                         FeatureKind::UnannotatedUtf8StringSegment => {
                             "The ability to omit the `utf8` annotation for string segments was"
                         }
@@ -1286,8 +1287,12 @@ See: https://tour.gleam.run/functions/pipelines/",
                             "Use of unaligned bit arrays on the JavaScript target was"
                         }
                         FeatureKind::BoolAssert => "The bool `assert` statement was",
+                        FeatureKind::ExpressionInSegmentSize => "Expressions in segment sizes were",
                         FeatureKind::ExternalCustomType => {
                             "The `@external` annotation on custom types was"
+                        }
+                        FeatureKind::ConstantRecordUpdate => {
+                            "The record update syntax for constants was"
                         }
                     };
 

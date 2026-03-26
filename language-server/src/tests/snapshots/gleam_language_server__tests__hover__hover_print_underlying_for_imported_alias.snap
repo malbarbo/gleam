@@ -1,0 +1,16 @@
+---
+source: language-server/src/tests/hover.rs
+expression: "\nimport alias.{type A}\n\nfn wibble() -> Result(Int, String) {\n  todo\n}\n"
+---
+import alias.{type A}
+
+fn wibble() -> Result(Int, String) {
+▔▔▔▔▔▔▔↑▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔  
+  todo
+}
+
+
+----- Hover content (markdown) -----
+```gleam
+fn() -> Result(Int, String)
+```
