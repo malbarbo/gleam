@@ -1459,9 +1459,8 @@ impl<'a> Generator<'a> {
                 if is_main_funtion(function) {
                     self.main = Some(id.index)
                 }
-            } else {
-                // FIXME: show message explaning why somo function was not compiled?
             }
+            // Private, generic, and external functions are compiled elsewhere.
         }
     }
 
