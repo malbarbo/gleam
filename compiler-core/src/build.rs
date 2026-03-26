@@ -168,7 +168,11 @@ pub enum TargetCodegenConfiguration {
     Erlang {
         app_file: Option<ErlangAppCodegenConfiguration>,
     },
-    WebAssembly,
+    WebAssembly {
+        int: crate::config::WasmInt,
+        float: crate::config::WasmFloat,
+        opt_level: crate::config::WasmOptLevel,
+    },
 }
 
 impl TargetCodegenConfiguration {
@@ -176,7 +180,7 @@ impl TargetCodegenConfiguration {
         match self {
             Self::JavaScript { .. } => Target::JavaScript,
             Self::Erlang { .. } => Target::Erlang,
-            Self::WebAssembly => Target::WebAssembly,
+            Self::WebAssembly { .. } => Target::WebAssembly,
         }
     }
 }

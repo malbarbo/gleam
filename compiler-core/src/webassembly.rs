@@ -124,21 +124,19 @@ pub enum Error {
 pub(crate) fn validate_module(
     module: &TypedModule,
     all_modules: &HashMap<EcoString, &TypedModule>,
-    int: &str,
-    float: &str,
+    int: crate::config::WasmInt,
+    float: crate::config::WasmFloat,
 ) -> Result<(), Error> {
     let line_numbers = LineNumbers::new("");
     let all_line_numbers = HashMap::new();
     let mut generator = Generator::new(module, &line_numbers, all_modules, &all_line_numbers);
     generator.int = match int {
-        "I32" => IntType::I32,
-        "I64" => IntType::I64,
-        _ => panic!("unknown int type"),
+        crate::config::WasmInt::I32 => IntType::I32,
+        crate::config::WasmInt::I64 => IntType::I64,
     };
     generator.float = match float {
-        "F32" => FloatType::F32,
-        "F64" => FloatType::F64,
-        _ => panic!("unknown float type"),
+        crate::config::WasmFloat::F32 => FloatType::F32,
+        crate::config::WasmFloat::F64 => FloatType::F64,
     };
     generator.validate_numeric_literals()
 }
@@ -148,35 +146,17 @@ pub fn module(
     line_numbers: &LineNumbers,
     all_modules: &HashMap<EcoString, &TypedModule>,
     all_line_numbers: &HashMap<EcoString, LineNumbers>,
-) -> Result<Vec<u8>, Error> {
-    module_with_config(
-        module,
-        line_numbers,
-        all_modules,
-        all_line_numbers,
-        "I32",
-        "F64",
-    )
-}
-
-pub(crate) fn module_with_config(
-    module: &TypedModule,
-    line_numbers: &LineNumbers,
-    all_modules: &HashMap<EcoString, &TypedModule>,
-    all_line_numbers: &HashMap<EcoString, LineNumbers>,
-    int: &str,
-    float: &str,
+    int: crate::config::WasmInt,
+    float: crate::config::WasmFloat,
 ) -> Result<Vec<u8>, Error> {
     let mut generator = Generator::new(module, line_numbers, all_modules, all_line_numbers);
     generator.int = match int {
-        "I32" => IntType::I32,
-        "I64" => IntType::I64,
-        _ => panic!("unknown int type: {int}"),
+        crate::config::WasmInt::I32 => IntType::I32,
+        crate::config::WasmInt::I64 => IntType::I64,
     };
     generator.float = match float {
-        "F32" => FloatType::F32,
-        "F64" => FloatType::F64,
-        _ => panic!("unknown float type: {float}"),
+        crate::config::WasmFloat::F32 => FloatType::F32,
+        crate::config::WasmFloat::F64 => FloatType::F64,
     };
     generator.compile()
 }

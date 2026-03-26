@@ -8,7 +8,9 @@ use hexpm::version::Identifier;
 use crate::{
     analyse::TargetSupport,
     build::{Module, Origin, Package, Target},
-    config::{Docs, ErlangConfig, GleamVersion, JavaScriptConfig, PackageConfig},
+    config::{
+        Docs, ErlangConfig, GleamVersion, JavaScriptConfig, PackageConfig, WebAssemblyConfig,
+    },
     line_numbers::LineNumbers,
     type_::PRELUDE_MODULE_NAME,
     uid::UniqueIdGenerator,
@@ -168,6 +170,7 @@ fn package_from_module(module: Module) -> Package {
             links: vec![],
             erlang: ErlangConfig::default(),
             javascript: JavaScriptConfig::default(),
+            webassembly: WebAssemblyConfig::default(),
             target: Target::Erlang,
             internal_modules: Some(vec![
                 GlobBuilder::new("internals/*")

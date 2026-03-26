@@ -279,11 +279,24 @@ impl<'a> JavaScript<'a> {
 #[derive(Debug)]
 pub struct WebAssembly<'a> {
     output_directory: &'a Utf8Path,
+    int: crate::config::WasmInt,
+    float: crate::config::WasmFloat,
+    opt_level: crate::config::WasmOptLevel,
 }
 
 impl<'a> WebAssembly<'a> {
-    pub fn new(output_directory: &'a Utf8Path) -> Self {
-        Self { output_directory }
+    pub fn new(
+        output_directory: &'a Utf8Path,
+        int: crate::config::WasmInt,
+        float: crate::config::WasmFloat,
+        opt_level: crate::config::WasmOptLevel,
+    ) -> Self {
+        Self {
+            output_directory,
+            int,
+            float,
+            opt_level,
+        }
     }
 
     pub fn render(&self, writer: &impl FileSystemWriter, modules: &[Module]) -> Result<()> {
@@ -311,13 +324,53 @@ impl<'a> WebAssembly<'a> {
         println!("Generating {name}");
         let path = self.output_directory.join(&name);
         let line_numbers = LineNumbers::new(&module.code);
-        let output = webassembly::module(&module.ast, &line_numbers, all_modules, all_line_numbers)
-            .map_err(|error| crate::Error::WebAssembly {
-                path: module.input_path.clone(),
-                src: module.code.clone(),
-                error,
-            })?;
+        let output = webassembly::module(
+            &module.ast,
+            &line_numbers,
+            all_modules,
+            all_line_numbers,
+            self.int,
+            self.float,
+        )
+        .map_err(|error| crate::Error::WebAssembly {
+            path: module.input_path.clone(),
+            src: module.code.clone(),
+            error,
+        })?;
         tracing::debug!(name = ?name, "Generated WebAssembly module");
-        writer.write_bytes(&path, &output)
+        writer.write_bytes(&path, &output)?;
+
+        if self.opt_level.is_enabled() {
+            self.run_wasm_opt(&path)?;
+        }
+
+        Ok(())
+    }
+
+    fn run_wasm_opt(&self, path: &Utf8Path) -> Result<()> {
+        let flag = self.opt_level.as_flag();
+        let result = std::process::Command::new("wasm-opt")
+            .args([flag, "--enable-gc", "--enable-reference-types", "-o"])
+            .arg(path.as_str())
+            .arg(path.as_str())
+            .status();
+
+        match result {
+            Ok(status) if status.success() => Ok(()),
+            Ok(_) => Err(crate::Error::ShellCommand {
+                program: "wasm-opt".into(),
+                reason: crate::error::ShellCommandFailureReason::Unknown,
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(crate::Error::ShellProgramNotFound {
+                    program: "wasm-opt".into(),
+                    os: crate::error::OS::Other,
+                })
+            }
+            Err(error) => Err(crate::Error::ShellCommand {
+                program: "wasm-opt".into(),
+                reason: crate::error::ShellCommandFailureReason::IoError(error.kind()),
+            }),
+        }
     }
 }
