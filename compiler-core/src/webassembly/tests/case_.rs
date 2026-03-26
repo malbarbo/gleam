@@ -1,5 +1,119 @@
 use super::run_ok;
 
+/// Count the number of locals (not params) in a wasm function.
+fn wasm_func_local_count(wasm_bytes: &[u8], func_name: &str) -> u32 {
+    let mut func_index = None;
+    let mut func_indices_order = vec![];
+    let mut local_counts: Vec<u32> = vec![];
+    let mut import_count = 0u32;
+    for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
+        match payload.unwrap() {
+            wasmparser::Payload::ImportSection(section) => {
+                import_count = section.count();
+            }
+            wasmparser::Payload::CodeSectionEntry(body) => {
+                let count: u32 = body
+                    .get_locals_reader()
+                    .unwrap()
+                    .into_iter()
+                    .map(|l| l.unwrap().0)
+                    .sum();
+                local_counts.push(count);
+            }
+            wasmparser::Payload::CustomSection(section) => {
+                if let wasmparser::KnownCustom::Name(name_section) = section.as_known() {
+                    for subsection in name_section {
+                        if let wasmparser::Name::Function(names) = subsection.unwrap() {
+                            for n in names {
+                                let n = n.unwrap();
+                                func_indices_order.push((n.index, n.name.to_string()));
+                                if n.name == func_name {
+                                    func_index = Some(n.index);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let idx = func_index.expect("function not found") - import_count;
+    local_counts[idx as usize]
+}
+
+#[test]
+fn case_var_subject_no_extra_local() {
+    // With var subject: should have 1 local (x), no extra subject local
+    let wasm_var = super::compile_wasm(
+        r#"
+pub fn f(x) {
+    case x {
+        1 -> x
+        _ -> 0
+    }
+}
+
+pub fn main() {
+    echo f(1)
+}
+"#,
+        vec![],
+    );
+    // With expression subject: needs a subject local
+    let wasm_expr = super::compile_wasm(
+        r#"
+pub fn f(x) {
+    case x + 0 {
+        1 -> x
+        _ -> 0
+    }
+}
+
+pub fn main() {
+    echo f(1)
+}
+"#,
+        vec![],
+    );
+    let var_locals = wasm_func_local_count(&wasm_var, "f");
+    let expr_locals = wasm_func_local_count(&wasm_expr, "f");
+    // f(x) with "case x" should have 0 extra locals (x is a param)
+    // f(x) with "case x + 0" needs 1 extra local for the subject
+    assert_eq!(
+        var_locals, 0,
+        "case with param subject should need no extra locals"
+    );
+    assert_eq!(
+        expr_locals, 1,
+        "case with expression subject should need 1 extra local"
+    );
+
+    // Also test with let binding (local var, not param)
+    let wasm_let = super::compile_wasm(
+        r#"
+pub fn f(x) {
+    let y = x + 1
+    case y {
+        1 -> y
+        _ -> 0
+    }
+}
+
+pub fn main() {
+    echo f(1)
+}
+"#,
+        vec![],
+    );
+    let let_locals = wasm_func_local_count(&wasm_let, "f");
+    // f(x) needs 1 local for y, but no extra for subject
+    assert_eq!(
+        let_locals, 1,
+        "case with let-binding subject should need only 1 local (for y)"
+    );
+}
+
 #[test]
 fn case_float() {
     run_ok(

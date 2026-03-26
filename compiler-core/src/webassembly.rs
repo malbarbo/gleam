@@ -2778,12 +2778,22 @@ impl<'a> Generator<'a> {
         subjects: &[TypedExpr],
         clauses: &[TypedClause],
     ) {
-        let subjects_locals = locals.for_subjects(subjects);
-        for (subject, index) in subjects.iter().zip(&subjects_locals) {
-            // evaluate and save each subject
-            let _ = instructions
-                .expression(self, locals, scope.clone(), subject)
-                .local_set(*index);
+        let mut subjects_locals = vec![];
+        for subject in subjects {
+            if let Some(name) = subject.var_name()
+                && subject.is_local_var()
+            {
+                // Subject is a local variable — reuse its existing local
+                let id = self.var_id(&scope, name, &subject.type_());
+                subjects_locals.push(id.index);
+            } else {
+                let index = locals.for_subject(subject);
+                // evaluate and save subject into a new local
+                let _ = instructions
+                    .expression(self, locals, scope.clone(), subject)
+                    .local_set(index);
+                subjects_locals.push(index);
+            }
         }
         // block case
         let _ = instructions.block(BlockType::Result(self.val_type(type_)));
