@@ -102,6 +102,27 @@ pub fn main() {
 }
 
 #[test]
+fn const_record_update() {
+    run_ok(
+        r#"
+pub type Person {
+    Person(name: String, age: Int)
+}
+
+const alice = Person("Alice", 30)
+const bob = Person(..alice, name: "Bob")
+
+pub fn main() {
+    assert alice.name == "Alice"
+    assert alice.age == 30
+    assert bob.name == "Bob"
+    assert bob.age == 30
+}
+"#,
+    );
+}
+
+#[test]
 fn const_string_concatenation() {
     run_ok(
         r#"

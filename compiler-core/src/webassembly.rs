@@ -2038,7 +2038,9 @@ impl<'a> Generator<'a> {
                 id
             }
             Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
-            Constant::RecordUpdate { .. } => todo!("RecordUpdate constants are not yet supported"),
+            Constant::RecordUpdate { .. } => {
+                panic!("record update constants should not reach code generation")
+            }
             Constant::StringConcatenation { .. } => {
                 let id = self.add_const(
                     const_name,
@@ -2077,7 +2079,9 @@ impl<'a> Generator<'a> {
             }
             Constant::Var { .. } => {}
             Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
-            Constant::RecordUpdate { .. } => todo!("RecordUpdate constants are not yet supported"),
+            Constant::RecordUpdate { .. } => {
+                panic!("record update constants should not reach code generation")
+            }
             Constant::StringConcatenation { left, right, .. } => {
                 self.register_string_const(left);
                 self.register_string_const(right);
@@ -2156,7 +2160,9 @@ impl<'a> Generator<'a> {
                 self.expression_var(&scope, instructions, name, type_);
             }
             Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
-            Constant::RecordUpdate { .. } => todo!("RecordUpdate constants are not yet supported"),
+            Constant::RecordUpdate { .. } => {
+                panic!("record update constants should not reach code generation")
+            }
             Constant::StringConcatenation { left, right, .. } => {
                 let concat =
                     self.get_function_builtin_external(BuiltinFunctionExternal::StringConcat);
