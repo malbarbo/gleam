@@ -178,171 +178,7 @@ pub(crate) fn module_with_config(
         "F64" => FloatType::F64,
         _ => panic!("unknown float type: {float}"),
     };
-    let start = generator.generate()?;
-
-    let mut module = Module::default();
-
-    // type section
-    let mut type_section = TypeSection::new();
-    for (type_, _index) in &generator.wasm_types {
-        match &type_.kind {
-            WasmTypeKind::Array(storage_type) => type_section.ty().array(storage_type, true),
-            WasmTypeKind::Function(params, results) => {
-                type_section.ty().function(params.clone(), results.clone())
-            }
-            WasmTypeKind::Struct(val_types) => {
-                type_section
-                    .ty()
-                    .struct_(val_types.iter().map(|val_type| FieldType {
-                        element_type: StorageType::Val(val_type.1),
-                        mutable: false,
-                    }));
-            }
-            WasmTypeKind::Union(val_types, supertype_idx) => {
-                type_section.ty().subtype(&SubType {
-                    is_final: false,
-                    supertype_idx: *supertype_idx,
-                    composite_type: CompositeType {
-                        inner: CompositeInnerType::Struct(StructType {
-                            fields: iter::once(&("tag".into(), ValType::I32))
-                                .chain(val_types)
-                                .map(|val_type| FieldType {
-                                    element_type: StorageType::Val(val_type.1),
-                                    mutable: false,
-                                })
-                                .collect_vec()
-                                .into(),
-                        }),
-                        shared: false,
-                    },
-                });
-            }
-        }
-    }
-    let _ = module.section(&type_section);
-
-    // import section
-    let _ = module.section(&generator.import_section);
-
-    // function section
-    let mut function_section = FunctionSection::new();
-    for function in &generator.functions {
-        let _ = function_section.function(function.type_index);
-    }
-    let _ = module.section(&function_section);
-
-    // memory section (only needed when builtins use linear memory)
-    if !generator.import_section.is_empty() {
-        let mut memory_section = MemorySection::new();
-        let _ = memory_section.memory(MemoryType {
-            minimum: 17,
-            maximum: None,
-            memory64: false,
-            shared: false,
-            page_size_log2: None,
-        });
-        let _ = module.section(&memory_section);
-    }
-
-    // global section
-    let _ = module.section(&generator.global_section);
-
-    // export section
-    for function in generator.functions.iter().filter(|f| f.export) {
-        let _ = generator
-            .export_section
-            .export(&function.name, ExportKind::Func, function.index);
-    }
-    let _ = module.section(&generator.export_section);
-
-    // start section
-    let _ = module.section(&StartSection {
-        function_index: start,
-    });
-
-    // element section
-    let mut element_section = ElementSection::new();
-    let _ = element_section.declared(Elements::Functions(
-        generator.functions.iter().map(|f| f.index).collect(),
-    ));
-    let _ = module.section(&element_section);
-
-    // data count section
-    let _ = module.section(&DataCountSection {
-        count: generator.data_section.len(),
-    });
-
-    // code section
-    let mut codes_section = CodeSection::new();
-    for function in &generator.functions {
-        let _ = codes_section.raw(&function.code);
-    }
-    let _ = module.section(&codes_section);
-
-    // data section
-    let _ = module.section(&generator.data_section);
-
-    // name section
-    let mut names = NameSection::new();
-    names.module(&generator.module.name);
-
-    // name section / function names
-    let mut function_names = NameMap::new();
-    for function in &generator.functions {
-        function_names.append(function.index, &function.name);
-    }
-    names.functions(&function_names);
-
-    // name section / type names
-    let mut type_names = NameMap::new();
-    for (wasm_type, index) in &generator.wasm_types {
-        if let Some(name) = &wasm_type.name {
-            type_names.append(*index, name);
-        }
-    }
-    names.types(&type_names);
-
-    // name section / global names
-    names.globals(&generator.global_names);
-
-    // name section / local names
-    let mut locals = IndirectNameMap::new();
-    for function in &generator.functions {
-        let mut name_map = NameMap::new();
-        for (index, name) in &function.locals {
-            name_map.append(*index, name);
-        }
-        locals.append(function.index, &name_map);
-    }
-    names.locals(&locals);
-
-    // name section / local names
-    let mut fields = IndirectNameMap::new();
-    for (type_, index) in &generator.wasm_types {
-        let mut name_map = NameMap::new();
-        match &type_.kind {
-            WasmTypeKind::Struct(items) => {
-                for (index, (name, _)) in items.iter().enumerate() {
-                    name_map.append(index as u32, name);
-                }
-            }
-            WasmTypeKind::Union(items, _) => {
-                name_map.append(0, "tag");
-                for (index, (name, _)) in items.iter().enumerate() {
-                    name_map.append(index as u32 + 1, name);
-                }
-            }
-            _ => {}
-        }
-        fields.append(*index, &name_map);
-    }
-    names.fields(&fields);
-
-    let _ = module.section(&names);
-
-    // finalize
-    let wasm = module.finish();
-    Ok(eliminate_dead_code(wasm, &generator.builtin_data_names))
+    generator.compile()
 }
 
 fn eliminate_dead_code(wasm: Vec<u8>, builtin_data_names: &[Option<String>]) -> Vec<u8> {
@@ -613,7 +449,6 @@ struct LocalFunction {
 }
 
 struct Generator<'a> {
-    // FIXME: generate all sections and names in function module?
     global_section: GlobalSection,
     import_section: ImportSection,
     export_section: ExportSection,
@@ -776,6 +611,174 @@ impl<'a> Generator<'a> {
             Some(e) => Err(e),
             None => Ok(()),
         }
+    }
+
+    fn compile(mut self) -> Result<Vec<u8>, Error> {
+        let start = self.generate()?;
+
+        let mut module = Module::default();
+
+        // type section
+        let mut type_section = TypeSection::new();
+        for (type_, _index) in &self.wasm_types {
+            match &type_.kind {
+                WasmTypeKind::Array(storage_type) => type_section.ty().array(storage_type, true),
+                WasmTypeKind::Function(params, results) => {
+                    type_section.ty().function(params.clone(), results.clone())
+                }
+                WasmTypeKind::Struct(val_types) => {
+                    type_section
+                        .ty()
+                        .struct_(val_types.iter().map(|val_type| FieldType {
+                            element_type: StorageType::Val(val_type.1),
+                            mutable: false,
+                        }));
+                }
+                WasmTypeKind::Union(val_types, supertype_idx) => {
+                    type_section.ty().subtype(&SubType {
+                        is_final: false,
+                        supertype_idx: *supertype_idx,
+                        composite_type: CompositeType {
+                            inner: CompositeInnerType::Struct(StructType {
+                                fields: iter::once(&("tag".into(), ValType::I32))
+                                    .chain(val_types)
+                                    .map(|val_type| FieldType {
+                                        element_type: StorageType::Val(val_type.1),
+                                        mutable: false,
+                                    })
+                                    .collect_vec()
+                                    .into(),
+                            }),
+                            shared: false,
+                        },
+                    });
+                }
+            }
+        }
+        let _ = module.section(&type_section);
+
+        // import section
+        let _ = module.section(&self.import_section);
+
+        // function section
+        let mut function_section = FunctionSection::new();
+        for function in &self.functions {
+            let _ = function_section.function(function.type_index);
+        }
+        let _ = module.section(&function_section);
+
+        // memory section (only needed when builtins use linear memory)
+        if !self.import_section.is_empty() {
+            let mut memory_section = MemorySection::new();
+            let _ = memory_section.memory(MemoryType {
+                minimum: 17,
+                maximum: None,
+                memory64: false,
+                shared: false,
+                page_size_log2: None,
+            });
+            let _ = module.section(&memory_section);
+        }
+
+        // global section
+        let _ = module.section(&self.global_section);
+
+        // export section
+        for function in self.functions.iter().filter(|f| f.export) {
+            let _ = self
+                .export_section
+                .export(&function.name, ExportKind::Func, function.index);
+        }
+        let _ = module.section(&self.export_section);
+
+        // start section
+        let _ = module.section(&StartSection {
+            function_index: start,
+        });
+
+        // element section
+        let mut element_section = ElementSection::new();
+        let _ = element_section.declared(Elements::Functions(
+            self.functions.iter().map(|f| f.index).collect(),
+        ));
+        let _ = module.section(&element_section);
+
+        // data count section
+        let _ = module.section(&DataCountSection {
+            count: self.data_section.len(),
+        });
+
+        // code section
+        let mut codes_section = CodeSection::new();
+        for function in &self.functions {
+            let _ = codes_section.raw(&function.code);
+        }
+        let _ = module.section(&codes_section);
+
+        // data section
+        let _ = module.section(&self.data_section);
+
+        // name section
+        let mut names = NameSection::new();
+        names.module(&self.module.name);
+
+        // name section / function names
+        let mut function_names = NameMap::new();
+        for function in &self.functions {
+            function_names.append(function.index, &function.name);
+        }
+        names.functions(&function_names);
+
+        // name section / type names
+        let mut type_names = NameMap::new();
+        for (wasm_type, index) in &self.wasm_types {
+            if let Some(name) = &wasm_type.name {
+                type_names.append(*index, name);
+            }
+        }
+        names.types(&type_names);
+
+        // name section / global names
+        names.globals(&self.global_names);
+
+        // name section / local names
+        let mut locals = IndirectNameMap::new();
+        for function in &self.functions {
+            let mut name_map = NameMap::new();
+            for (index, name) in &function.locals {
+                name_map.append(*index, name);
+            }
+            locals.append(function.index, &name_map);
+        }
+        names.locals(&locals);
+
+        // name section / field names
+        let mut fields = IndirectNameMap::new();
+        for (type_, index) in &self.wasm_types {
+            let mut name_map = NameMap::new();
+            match &type_.kind {
+                WasmTypeKind::Struct(items) => {
+                    for (index, (name, _)) in items.iter().enumerate() {
+                        name_map.append(index as u32, name);
+                    }
+                }
+                WasmTypeKind::Union(items, _) => {
+                    name_map.append(0, "tag");
+                    for (index, (name, _)) in items.iter().enumerate() {
+                        name_map.append(index as u32 + 1, name);
+                    }
+                }
+                _ => {}
+            }
+            fields.append(*index, &name_map);
+        }
+        names.fields(&fields);
+
+        let _ = module.section(&names);
+
+        // finalize
+        let wasm = module.finish();
+        Ok(eliminate_dead_code(wasm, &self.builtin_data_names))
     }
 
     fn generate(&mut self) -> Result<u32, Error> {
