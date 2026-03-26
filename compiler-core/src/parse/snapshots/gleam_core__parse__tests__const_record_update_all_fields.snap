@@ -1,6 +1,8 @@
 ---
 source: compiler-core/src/parse/tests.rs
+assertion_line: 2059
 expression: "\ntype Person {\n  Person(name: String, age: Int, city: String)\n}\n\nconst base = Person(\"Alice\", 30, \"London\")\nconst updated = Person(..base, name: \"Bob\", age: 25, city: \"Paris\")\n"
+snapshot_kind: text
 ---
 Parsed {
     module: Module {
@@ -145,6 +147,7 @@ Parsed {
                         typed_parameters: [],
                         external_erlang: None,
                         external_javascript: None,
+                        external_webassembly: None,
                     },
                 ),
                 target: None,
@@ -230,8 +233,10 @@ Parsed {
                             gleam: true,
                             can_run_on_erlang: true,
                             can_run_on_javascript: true,
+                            can_run_on_webassembly: true,
                             uses_erlang_externals: false,
                             uses_javascript_externals: false,
+                            uses_webassembly_externals: false,
                         },
                     },
                 ),
@@ -334,8 +339,10 @@ Parsed {
                             gleam: true,
                             can_run_on_erlang: true,
                             can_run_on_javascript: true,
+                            can_run_on_webassembly: true,
                             uses_erlang_externals: false,
                             uses_javascript_externals: false,
+                            uses_webassembly_externals: false,
                         },
                     },
                 ),
