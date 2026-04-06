@@ -13,7 +13,7 @@ pub(super) enum Eq {
     I32,
     Int,
     Float,
-    Call(u32),
+    Call(FunctionIndex),
 }
 
 pub(super) trait NewExtendedInstructionSink {
@@ -117,7 +117,7 @@ impl<'a> ExtendedInstructionSink<'a> {
         })
     }
 
-    pub(super) fn global_as_non_null(&mut self, index: u32) -> &mut Self {
+    pub(super) fn global_as_non_null(&mut self, index: impl Into<u32>) -> &mut Self {
         self.global_get(index).ref_as_non_null()
     }
 
@@ -194,7 +194,7 @@ impl<'a> ExtendedInstructionSink<'a> {
         generator: &mut Generator<'_>,
         locals: &Locals,
         scope: &mut Scope,
-        (type_index, subtype_index): (u32, Option<u32>),
+        (type_index, subtype_index): (TypeIndex, Option<TypeIndex>),
         field_mapping: Option<&[u32]>,
         pattern: &Pattern<Arc<Type>>,
         elements: impl IntoIterator<Item = &'b Pattern<Arc<Type>>> + Clone,
@@ -239,12 +239,15 @@ impl<'a> ExtendedInstructionSink<'a> {
 
     pub(super) fn show_error_message(
         &mut self,
-        prefix: u32,
-        location: u32,
-        string_to_memory: u32,
-        heap_base: u32,
-        print: u32,
+        prefix: impl Into<u32>,
+        location: impl Into<u32>,
+        string_to_memory: impl Into<u32>,
+        heap_base: impl Into<u32> + Copy,
+        print: impl Into<u32> + Copy,
     ) -> &mut Self {
+        let prefix = prefix.into();
+        let location = location.into();
+        let string_to_memory = string_to_memory.into();
         for string_index in [prefix, location] {
             let _ = self
                 .i32_const(STDERR)
@@ -271,24 +274,13 @@ impl<'a> ExtendedInstructionSink<'a> {
         local_set(index: u32),
         local_get(index: u32),
         local_tee(index: u32),
-        global_set(index: u32),
-        global_get(index: u32),
-        struct_new(struct_type_index: u32),
-        struct_get(struct_type_index: u32, field_index: u32),
-        ref_func(index: u32),
         ref_null(ht: HeapType),
         ref_is_null(),
         ref_as_non_null(),
         ref_eq(),
         ref_cast_non_null(ht: HeapType),
         call_ref(index: u32),
-        call(index: u32),
-        array_new_default(type_index: u32),
-        array_new_data(type_index: u32, data_segment: u32),
         array_len(),
-        array_get_u(type_index: u32),
-        array_set(type_index: u32),
-        array_copy(array_type_index_dst: u32, array_type_index_src: u32),
         return_(),
         i32_const(x: i32),
         i32_eq(),
@@ -309,6 +301,79 @@ impl<'a> ExtendedInstructionSink<'a> {
         i32_gt_s(),
         memory_size(mem: u32),
         memory_grow(mem: u32),
+    }
+
+    pub(super) fn global_get(&mut self, index: impl Into<u32>) -> &mut Self {
+        let _ = self.instructions.global_get(index.into());
+        self
+    }
+
+    pub(super) fn global_set(&mut self, index: impl Into<u32>) -> &mut Self {
+        let _ = self.instructions.global_set(index.into());
+        self
+    }
+
+    pub(super) fn struct_new(&mut self, struct_type_index: impl Into<u32>) -> &mut Self {
+        let _ = self.instructions.struct_new(struct_type_index.into());
+        self
+    }
+
+    pub(super) fn struct_get(
+        &mut self,
+        struct_type_index: impl Into<u32>,
+        field_index: u32,
+    ) -> &mut Self {
+        let _ = self
+            .instructions
+            .struct_get(struct_type_index.into(), field_index);
+        self
+    }
+
+    pub(super) fn ref_func(&mut self, index: impl Into<u32>) -> &mut Self {
+        let _ = self.instructions.ref_func(index.into());
+        self
+    }
+
+    pub(super) fn call(&mut self, index: impl Into<u32>) -> &mut Self {
+        let _ = self.instructions.call(index.into());
+        self
+    }
+
+    pub(super) fn array_new_default(&mut self, type_index: impl Into<u32>) -> &mut Self {
+        let _ = self.instructions.array_new_default(type_index.into());
+        self
+    }
+
+    pub(super) fn array_new_data(
+        &mut self,
+        type_index: impl Into<u32>,
+        data_segment: u32,
+    ) -> &mut Self {
+        let _ = self
+            .instructions
+            .array_new_data(type_index.into(), data_segment);
+        self
+    }
+
+    pub(super) fn array_get_u(&mut self, type_index: impl Into<u32>) -> &mut Self {
+        let _ = self.instructions.array_get_u(type_index.into());
+        self
+    }
+
+    pub(super) fn array_set(&mut self, type_index: impl Into<u32>) -> &mut Self {
+        let _ = self.instructions.array_set(type_index.into());
+        self
+    }
+
+    pub(super) fn array_copy(
+        &mut self,
+        array_type_index_dst: impl Into<u32>,
+        array_type_index_src: impl Into<u32>,
+    ) -> &mut Self {
+        let _ = self
+            .instructions
+            .array_copy(array_type_index_dst.into(), array_type_index_src.into());
+        self
     }
 }
 
@@ -592,7 +657,7 @@ impl<'a> ExtendedInstructionSink<'a> {
 
 #[derive(Clone, Copy)]
 pub(super) struct StringType {
-    pub(super) type_index: u32,
+    pub(super) type_index: TypeIndex,
 }
 
 impl StringType {
@@ -615,6 +680,6 @@ impl StringType {
     }
 
     pub(super) fn heap_type(&self) -> HeapType {
-        HeapType::Concrete(self.type_index)
+        HeapType::Concrete(self.type_index.0)
     }
 }

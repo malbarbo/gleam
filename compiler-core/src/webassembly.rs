@@ -80,6 +80,39 @@ const STDERR: i32 = 2;
 
 const BOOL_VALTYPE: ValType = ValType::I32;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct FunctionIndex(u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct TypeIndex(u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct GlobalIndex(u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct LocalIndex(u32);
+
+impl From<FunctionIndex> for u32 {
+    fn from(i: FunctionIndex) -> u32 {
+        i.0
+    }
+}
+impl From<TypeIndex> for u32 {
+    fn from(i: TypeIndex) -> u32 {
+        i.0
+    }
+}
+impl From<GlobalIndex> for u32 {
+    fn from(i: GlobalIndex) -> u32 {
+        i.0
+    }
+}
+impl From<LocalIndex> for u32 {
+    fn from(i: LocalIndex) -> u32 {
+        i.0
+    }
+}
+
 const OK_GENERIC_ID: u64 = u64::MAX;
 const ERROR_GENERIC_ID: u64 = u64::MAX - 1;
 const LIST_ITEM_GENERIC_ID: u64 = u64::MAX - 2;
@@ -311,7 +344,7 @@ impl WasmType {
     fn union(
         name: EcoString,
         fields: Vec<(EcoString, ValType)>,
-        supertype: Option<u32>,
+        supertype: Option<TypeIndex>,
     ) -> WasmType {
         WasmType {
             name: Some(name),
@@ -325,31 +358,31 @@ enum WasmTypeKind {
     Array(StorageType),
     Function(Vec<ValType>, Vec<ValType>),
     Struct(Vec<(EcoString, ValType)>),
-    Union(Vec<(EcoString, ValType)>, Option<u32>),
+    Union(Vec<(EcoString, ValType)>, Option<TypeIndex>),
 }
 
 #[derive(Clone)]
 enum WasmConst {
     String {
-        dest: u32,
-        src: u32,
+        dest: GlobalIndex,
+        src: GlobalIndex,
     },
     Constant {
-        global_index: u32,
+        global_index: GlobalIndex,
         value: Box<TypedConstant>,
     },
     Struct {
-        global_index: u32,
-        type_index: u32,
+        global_index: GlobalIndex,
+        type_index: TypeIndex,
         tag: Option<i32>,
         elements: Vec<TypedConstant>,
     },
     Function {
-        dest: u32,
-        src: u32,
+        dest: GlobalIndex,
+        src: FunctionIndex,
     },
     Var {
-        global_index: u32,
+        global_index: GlobalIndex,
         name: EcoString,
     },
 }
@@ -358,10 +391,10 @@ enum WasmConst {
 struct WasmFunction {
     name: EcoString,
     export: bool,
-    index: u32,
-    type_index: u32,
+    index: FunctionIndex,
+    type_index: TypeIndex,
     code: Rc<Vec<u8>>,
-    locals: Vec<(u32, EcoString)>,
+    locals: Vec<(LocalIndex, EcoString)>,
 }
 
 impl std::cmp::Eq for WasmFunction {}
@@ -425,7 +458,7 @@ struct Variant {
 #[derive(Clone)]
 struct LocalFunction {
     location: SrcSpan,
-    parent_id: u32,
+    parent_id: FunctionIndex,
     type_: Arc<Type>,
     arguments: Vec<TypedArg>,
     body: Vec<TypedStatement>,
@@ -522,17 +555,17 @@ struct Generator<'a> {
     /// Names of builtin data segments, indexed by segment index.
     builtin_data_names: Vec<String>,
     global_names: NameMap,
-    wasm_types: IndexMap<WasmType, u32>,
+    wasm_types: IndexMap<WasmType, TypeIndex>,
     types: HashMap<(EcoString, EcoString), CustomType>,
     variants: HashMap<(EcoString, EcoString), Variant>,
     functions: BTreeSet<WasmFunction>,
-    function_next_id: u32,
+    function_next_id: FunctionIndex,
     local_functions: HashMap<EcoString, LocalFunction>,
-    builtins: HashMap<BuiltinFunction, u32>,
-    builtins_external: HashMap<BuiltinFunctionExternal, u32>,
-    main: Option<u32>,
+    builtins: HashMap<BuiltinFunction, FunctionIndex>,
+    builtins_external: HashMap<BuiltinFunctionExternal, FunctionIndex>,
+    main: Option<FunctionIndex>,
     // String literals and its index in the global section
-    strings: HashMap<EcoString, u32>,
+    strings: HashMap<EcoString, GlobalIndex>,
     consts: Vec<WasmConst>,
     globals: Rc<RefCell<Vec<Id>>>,
     int: IntType,
@@ -564,7 +597,7 @@ impl<'a> Generator<'a> {
             types: HashMap::new(),
             variants: HashMap::new(),
             functions: BTreeSet::new(),
-            function_next_id: 0,
+            function_next_id: FunctionIndex(0),
             local_functions: HashMap::new(),
             builtins: HashMap::new(),
             builtins_external: HashMap::new(),
@@ -574,7 +607,9 @@ impl<'a> Generator<'a> {
             globals: Rc::default(),
             int: IntType::I32,
             float: FloatType::F64,
-            string: StringType { type_index: 0 },
+            string: StringType {
+                type_index: TypeIndex(0),
+            },
             module,
             line_numbers,
             all_modules,
@@ -703,7 +738,7 @@ impl<'a> Generator<'a> {
                 WasmTypeKind::Union(val_types, supertype_idx) => {
                     type_section.ty().subtype(&SubType {
                         is_final: false,
-                        supertype_idx: *supertype_idx,
+                        supertype_idx: supertype_idx.map(|i| i.0),
                         composite_type: CompositeType {
                             inner: CompositeInnerType::Struct(StructType {
                                 fields: iter::once(&("tag".into(), ValType::I32))
@@ -729,7 +764,7 @@ impl<'a> Generator<'a> {
         // function section
         let mut function_section = FunctionSection::new();
         for function in &self.functions {
-            let _ = function_section.function(function.type_index);
+            let _ = function_section.function(function.type_index.0);
         }
         let _ = module.section(&function_section);
 
@@ -753,7 +788,7 @@ impl<'a> Generator<'a> {
         for function in self.functions.iter().filter(|f| f.export) {
             let _ = self
                 .export_section
-                .export(&function.name, ExportKind::Func, function.index);
+                .export(&function.name, ExportKind::Func, function.index.0);
         }
         let _ = module.section(&self.export_section);
 
@@ -765,7 +800,7 @@ impl<'a> Generator<'a> {
         // element section
         let mut element_section = ElementSection::new();
         let _ = element_section.declared(Elements::Functions(
-            self.functions.iter().map(|f| f.index).collect(),
+            self.functions.iter().map(|f| f.index.0).collect(),
         ));
         let _ = module.section(&element_section);
 
@@ -791,7 +826,7 @@ impl<'a> Generator<'a> {
         // name section / function names
         let mut function_names = NameMap::new();
         for function in &self.functions {
-            function_names.append(function.index, &function.name);
+            function_names.append(function.index.0, &function.name);
         }
         names.functions(&function_names);
 
@@ -799,7 +834,7 @@ impl<'a> Generator<'a> {
         let mut type_names = NameMap::new();
         for (wasm_type, index) in &self.wasm_types {
             if let Some(name) = &wasm_type.name {
-                type_names.append(*index, name);
+                type_names.append(index.0, name);
             }
         }
         names.types(&type_names);
@@ -812,9 +847,9 @@ impl<'a> Generator<'a> {
         for function in &self.functions {
             let mut name_map = NameMap::new();
             for (index, name) in &function.locals {
-                name_map.append(*index, name);
+                name_map.append(index.0, name);
             }
-            locals.append(function.index, &name_map);
+            locals.append(function.index.0, &name_map);
         }
         names.locals(&locals);
 
@@ -836,7 +871,7 @@ impl<'a> Generator<'a> {
                 }
                 _ => {}
             }
-            fields.append(*index, &name_map);
+            fields.append(index.0, &name_map);
         }
         names.fields(&fields);
 
@@ -861,7 +896,7 @@ impl<'a> Generator<'a> {
         self.types_imported();
         self.constants();
         self.functions();
-        Ok(self.function_start())
+        Ok(self.function_start().0)
     }
 
     fn functions_builtins(
@@ -882,7 +917,7 @@ impl<'a> Generator<'a> {
         }
         for (builtin, name, _) in builtins {
             let index = self.get_function_builtin_external(builtin);
-            let _ = self.add_function_to_globals(name, index);
+            let _ = self.add_function_to_globals(name, index.0);
         }
     }
 
@@ -1082,8 +1117,8 @@ impl<'a> Generator<'a> {
             let type_index = self.function_type_index_with_val_types(params, results);
             let _ = self
                 .import_section
-                .import(module, name, EntityType::Function(type_index));
-            self.function_next_id += 1;
+                .import(module, name, EntityType::Function(type_index.0));
+            self.function_next_id = FunctionIndex(self.function_next_id.0 + 1);
         }
 
         // Add globals
@@ -1275,7 +1310,7 @@ impl<'a> Generator<'a> {
                 .map(|c| (c, PRELUDE_MODULE_NAME)),
         );
         // Add String
-        let index = self.wasm_types.len() as u32;
+        let index = TypeIndex(self.wasm_types.len() as u32);
         self.string.type_index = *self
             .wasm_types
             .entry(StringType::wasm_type())
@@ -1520,7 +1555,7 @@ impl<'a> Generator<'a> {
             {
                 let id = self.function(function, true, function_name(function).into());
                 if is_main_funtion(function) {
-                    self.main = Some(id.index)
+                    self.main = Some(FunctionIndex(id.index))
                 }
             }
             // Private, generic, and external functions are compiled elsewhere.
@@ -1566,23 +1601,23 @@ impl<'a> Generator<'a> {
             .collect()
     }
 
-    fn val_type_ref(&self, type_index: u32) -> ValType {
+    fn val_type_ref(&self, type_index: TypeIndex) -> ValType {
         RefType {
-            heap_type: HeapType::Concrete(type_index),
+            heap_type: HeapType::Concrete(type_index.0),
             nullable: false,
         }
         .into()
     }
 
-    fn val_type_ref_nullable(&self, type_index: u32) -> ValType {
+    fn val_type_ref_nullable(&self, type_index: TypeIndex) -> ValType {
         RefType {
-            heap_type: HeapType::Concrete(type_index),
+            heap_type: HeapType::Concrete(type_index.0),
             nullable: true,
         }
         .into()
     }
 
-    fn type_index(&mut self, type_: &Arc<Type>) -> u32 {
+    fn type_index(&mut self, type_: &Arc<Type>) -> TypeIndex {
         if type_.is_string() {
             self.string.type_index
         } else if let Some(types) = type_.tuple_types() {
@@ -1622,7 +1657,7 @@ impl<'a> Generator<'a> {
         &mut self,
         arguments: impl IntoIterator<Item = Arc<Type>>,
         return_: Option<Arc<Type>>,
-    ) -> u32 {
+    ) -> TypeIndex {
         let params = self.val_types(arguments);
         let results = self.val_types(return_);
         self.function_type_index_with_val_types(params, results)
@@ -1632,22 +1667,22 @@ impl<'a> Generator<'a> {
         &mut self,
         params: Vec<ValType>,
         result: Vec<ValType>,
-    ) -> u32 {
-        let index = self.wasm_types.len() as u32;
+    ) -> TypeIndex {
+        let index = TypeIndex(self.wasm_types.len() as u32);
         *self
             .wasm_types
             .entry(WasmType::function(params, result))
             .or_insert(index)
     }
 
-    fn function_val_type(&self, type_index: u32) -> ValType {
+    fn function_val_type(&self, type_index: TypeIndex) -> ValType {
         self.val_type_ref(type_index)
     }
 
-    fn tuple_type_index(&mut self, types: impl IntoIterator<Item = Arc<Type>>) -> u32 {
+    fn tuple_type_index(&mut self, types: impl IntoIterator<Item = Arc<Type>>) -> TypeIndex {
         let types = types.into_iter().collect_vec();
         let val_types = self.val_types(types.iter().cloned());
-        let index = self.wasm_types.len() as u32;
+        let index = TypeIndex(self.wasm_types.len() as u32);
         let name = self
             .type_pretty_name(&type_::tuple(types))
             .replace("#", "Tuple");
@@ -1664,8 +1699,12 @@ impl<'a> Generator<'a> {
             .or_insert(index)
     }
 
-    fn struct_type_index(&mut self, name: EcoString, fields: Vec<(EcoString, ValType)>) -> u32 {
-        let index = self.wasm_types.len() as u32;
+    fn struct_type_index(
+        &mut self,
+        name: EcoString,
+        fields: Vec<(EcoString, ValType)>,
+    ) -> TypeIndex {
+        let index = TypeIndex(self.wasm_types.len() as u32);
         *self
             .wasm_types
             .entry(WasmType::struct_(name, fields))
@@ -1698,7 +1737,7 @@ impl<'a> Generator<'a> {
         custom_type: &TypedCustomType,
         constructor: &TypedRecordConstructor,
         args: &[Arc<Type>],
-    ) -> (u32, Vec<Arc<Type>>) {
+    ) -> (TypeIndex, Vec<Arc<Type>>) {
         let types = Monomorphizer::variant_constructor(custom_type, constructor, args);
         let fields = self.fields(constructor, &types);
         let name = self.type_pretty_name(type_);
@@ -1719,7 +1758,7 @@ impl<'a> Generator<'a> {
         &mut self,
         type_: &Arc<Type>,
         custom_type: &TypedCustomType,
-    ) -> u32 {
+    ) -> TypeIndex {
         let layout = self.union_layout(type_);
         let first = custom_type
             .constructors
@@ -1747,7 +1786,7 @@ impl<'a> Generator<'a> {
         }
 
         let name = custom_type.name.clone();
-        let index = self.wasm_types.len() as u32;
+        let index = TypeIndex(self.wasm_types.len() as u32);
         *self
             .wasm_types
             .entry(WasmType::union(name, shared_fields, None))
@@ -1760,7 +1799,7 @@ impl<'a> Generator<'a> {
         custom_type: &TypedCustomType,
         constructor: &TypedRecordConstructor,
         args: &[Arc<Type>],
-    ) -> (u32, u32, Vec<Arc<Type>>) {
+    ) -> (TypeIndex, TypeIndex, Vec<Arc<Type>>) {
         let layout = self.union_layout(type_);
         let supertype_index = self.mono_union_supertype_index(type_, custom_type);
         let types = Monomorphizer::variant_constructor(custom_type, constructor, args);
@@ -1797,7 +1836,7 @@ impl<'a> Generator<'a> {
         name += ".";
         name += constructor.name.clone();
 
-        let index = self.wasm_types.len() as u32;
+        let index = TypeIndex(self.wasm_types.len() as u32);
         let type_index = *self
             .wasm_types
             .entry(WasmType::union(name, fields, Some(supertype_index)))
@@ -1805,7 +1844,7 @@ impl<'a> Generator<'a> {
         (supertype_index, type_index, types)
     }
 
-    fn composite_val_type(&self, type_index: u32) -> ValType {
+    fn composite_val_type(&self, type_index: TypeIndex) -> ValType {
         self.val_type_ref(type_index)
     }
 
@@ -1869,7 +1908,7 @@ impl<'a> Generator<'a> {
                 );
                 let src = self.string_index(value);
                 self.consts.push(WasmConst::String {
-                    dest: id.index,
+                    dest: GlobalIndex(id.index),
                     src,
                 });
                 id
@@ -1885,7 +1924,7 @@ impl<'a> Generator<'a> {
                     true,
                 );
                 self.consts.push(WasmConst::Struct {
-                    global_index: id.index,
+                    global_index: GlobalIndex(id.index),
                     type_index,
                     tag: None,
                     elements: elements.clone(),
@@ -1907,7 +1946,7 @@ impl<'a> Generator<'a> {
                     true,
                 );
                 self.consts.push(WasmConst::Constant {
-                    global_index: id.index,
+                    global_index: GlobalIndex(id.index),
                     value: Box::new(module_constant.value.as_ref().clone()),
                 });
                 id
@@ -1946,7 +1985,7 @@ impl<'a> Generator<'a> {
                             true,
                         );
                         self.consts.push(WasmConst::Struct {
-                            global_index: id.index,
+                            global_index: GlobalIndex(id.index),
                             type_index,
                             tag: None,
                             elements: arguments.iter().map(|e| &e.value).cloned().collect(),
@@ -1972,7 +2011,7 @@ impl<'a> Generator<'a> {
                             true,
                         );
                         self.consts.push(WasmConst::Struct {
-                            global_index: id.index,
+                            global_index: GlobalIndex(id.index),
                             type_index,
                             tag: Some(index.into()),
                             elements: arguments.iter().map(|e| &e.value).cloned().collect(),
@@ -2006,12 +2045,12 @@ impl<'a> Generator<'a> {
                 let var_id = self.var_id(&Scope::Global(self.globals.clone()), name, type_);
                 if let IdKind::Func = var_id.kind {
                     self.consts.push(WasmConst::Function {
-                        dest: id.index,
-                        src: var_id.index,
+                        dest: GlobalIndex(id.index),
+                        src: FunctionIndex(var_id.index),
                     });
                 } else {
                     self.consts.push(WasmConst::Var {
-                        global_index: id.index,
+                        global_index: GlobalIndex(id.index),
                         name: name.clone(),
                     });
                 }
@@ -2030,7 +2069,7 @@ impl<'a> Generator<'a> {
                     true,
                 );
                 self.consts.push(WasmConst::Constant {
-                    global_index: id.index,
+                    global_index: GlobalIndex(id.index),
                     value: Box::new(module_constant.value.as_ref().clone()),
                 });
                 id
@@ -2100,7 +2139,7 @@ impl<'a> Generator<'a> {
                     type_.clone(),
                     cons_variant,
                 );
-                let _ = instructions.ref_null(HeapType::Concrete(supertype_index));
+                let _ = instructions.ref_null(HeapType::Concrete(supertype_index.0));
                 for element in elements.iter().rev() {
                     let _ = instructions.constant(self, element).call(cons_fn);
                 }
@@ -2207,15 +2246,15 @@ impl<'a> Generator<'a> {
             } else {
                 self.variant_constructor(vec![], type_.clone(), variant)
             };
-            Id::func(name.clone(), id)
+            Id::func(name.clone(), id.0)
         } else {
             self.var(name, type_)
         }
     }
 
-    fn function_next_id(&mut self) -> u32 {
+    fn function_next_id(&mut self) -> FunctionIndex {
         let id = self.function_next_id;
-        self.function_next_id += 1;
+        self.function_next_id = FunctionIndex(self.function_next_id.0 + 1);
         id
     }
 
@@ -2227,7 +2266,7 @@ impl<'a> Generator<'a> {
         original_local_functions: HashMap<EcoString, LocalFunction>,
     ) -> Id {
         let index = self.function_next_id();
-        let id = self.add_function_to_globals(name.clone(), index);
+        let id = self.add_function_to_globals(name.clone(), index.0);
         let locals = Locals::new(self, &function.arguments, &function.body);
         let mut code = Function::new(locals.val_types());
         let mut instructions = code.extend_instructions(self);
@@ -2252,7 +2291,11 @@ impl<'a> Generator<'a> {
             type_index,
             code: code.into_raw_body().into(),
             export,
-            locals: locals.names(),
+            locals: locals
+                .names()
+                .into_iter()
+                .map(|(i, n)| (LocalIndex(i), n))
+                .collect(),
         });
 
         id
@@ -2296,7 +2339,7 @@ impl<'a> Generator<'a> {
         body: &[TypedStatement],
     ) -> Id {
         let index = self.function_next_id();
-        let id = self.add_function_to_globals(name.clone(), index);
+        let id = self.add_function_to_globals(name.clone(), index.0);
         let locals = Locals::new(self, arguments, body);
         let mut code = Function::new(locals.val_types());
         let mut instructions = code.extend_instructions(self);
@@ -2318,7 +2361,11 @@ impl<'a> Generator<'a> {
             type_index,
             code: code.into_raw_body().into(),
             export: false,
-            locals: locals.names(),
+            locals: locals
+                .names()
+                .into_iter()
+                .map(|(i, n)| (LocalIndex(i), n))
+                .collect(),
         });
 
         id
@@ -2341,7 +2388,7 @@ impl<'a> Generator<'a> {
         let type_name = self.type_pretty_name(required_type).replace(" ", "");
         let name: EcoString = format!(
             "anonymous@{}-{}#{}:{type_name}",
-            info.location.start, info.location.end, info.parent_id
+            info.location.start, info.location.end, info.parent_id.0
         )
         .into();
 
@@ -2501,7 +2548,7 @@ impl<'a> Generator<'a> {
                 if let Some(rest) = tail {
                     let _ = instructions.expression(self, locals, scope.clone(), rest);
                 } else {
-                    let _ = instructions.ref_null(HeapType::Concrete(supertype_index));
+                    let _ = instructions.ref_null(HeapType::Concrete(supertype_index.0));
                 }
                 let cons_variant =
                     self.variant_expect(PRELUDE_MODULE_NAME.into(), cons.name.clone());
@@ -2565,7 +2612,7 @@ impl<'a> Generator<'a> {
                             let field_index = layout.field(variant as usize, *index);
                             let _ = instructions
                                 .expression(self, locals, scope, record)
-                                .ref_cast_non_null(HeapType::Concrete(type_index))
+                                .ref_cast_non_null(HeapType::Concrete(type_index.0))
                                 .struct_get(type_index, field_index);
                         } else {
                             let supertype_index =
@@ -2650,7 +2697,7 @@ impl<'a> Generator<'a> {
                     let _ = instructions
                         .expressions(self, locals, scope.clone(), args)
                         .expression(self, locals, scope, fun)
-                        .call_ref(self.function_type_index(args_types, Some(type_.clone())));
+                        .call_ref(self.function_type_index(args_types, Some(type_.clone())).0);
                 } else {
                     let index = locals.for_call(fun);
                     let _ = instructions
@@ -2658,7 +2705,7 @@ impl<'a> Generator<'a> {
                         .local_set(index)
                         .expressions(self, locals, scope, args)
                         .local_get(index)
-                        .call_ref(self.function_type_index(args_types, Some(type_.clone())));
+                        .call_ref(self.function_type_index(args_types, Some(type_.clone())).0);
                 }
             }
             TypedExpr::Fn {
@@ -2722,7 +2769,7 @@ impl<'a> Generator<'a> {
                             let field_index = layout.field(variant as usize, *index);
                             let _ = instructions
                                 .expression(self, locals, scope, record)
-                                .ref_cast_non_null(HeapType::Concrete(type_index))
+                                .ref_cast_non_null(HeapType::Concrete(type_index.0))
                                 .struct_get(type_index, field_index);
                         } else {
                             // Shared field — access via supertype
@@ -2767,7 +2814,7 @@ impl<'a> Generator<'a> {
                                 arguments.iter().map(|arg| &arg.value),
                             )
                             .expression(self, locals, scope, constructor)
-                            .call_ref(index);
+                            .call_ref(index.0);
                     }
                     CustomType::External { .. } | CustomType::Enum { .. } => {
                         panic!("external/enum types should not reach code generation")
@@ -3272,12 +3319,12 @@ impl<'a> Generator<'a> {
                     // Cons struct: {tag: 0, rest: 1, first: 2}
                     let _ = instructions
                         .local_get(right)
-                        .ref_cast_non_null(HeapType::Concrete(cons_index))
+                        .ref_cast_non_null(HeapType::Concrete(cons_index.0))
                         .struct_get(cons_index, 2); // first
                     scope = self._pattern(locals, scope, instructions, element, fail_depth);
                     let _ = instructions
                         .local_get(right)
-                        .ref_cast_non_null(HeapType::Concrete(cons_index))
+                        .ref_cast_non_null(HeapType::Concrete(cons_index.0))
                         .struct_get(cons_index, 1) // rest
                         .local_set(right);
                 }
@@ -3479,7 +3526,7 @@ impl<'a> Generator<'a> {
         locals: &Locals,
         scope: &mut Scope,
         instructions: &mut ExtendedInstructionSink<'_>,
-        (type_index, subtype_index): (u32, Option<u32>),
+        (type_index, subtype_index): (TypeIndex, Option<TypeIndex>),
         field_mapping: Option<&[u32]>,
         pattern: &Pattern<Arc<Type>>,
         elements: impl IntoIterator<Item = &'b Pattern<Arc<Type>>> + Clone,
@@ -3494,7 +3541,7 @@ impl<'a> Generator<'a> {
                     .and_then(|m| m.get(field_index).copied())
                     .unwrap_or(field_index as u32 + 1);
                 let _ = instructions
-                    .ref_cast_non_null(HeapType::Concrete(subtype_index))
+                    .ref_cast_non_null(HeapType::Concrete(subtype_index.0))
                     .struct_get(subtype_index, field_index);
             } else {
                 let _ = instructions.struct_get(type_index, field_index as u32);
@@ -3700,7 +3747,7 @@ impl<'a> Generator<'a> {
                         let field_index = layout.field(variant, index as u64);
                         let _ = instructions
                             .clause_guard(self, locals, scope, container)
-                            .ref_cast_non_null(HeapType::Concrete(type_index))
+                            .ref_cast_non_null(HeapType::Concrete(type_index.0))
                             .struct_get(type_index, field_index);
                     }
                 }
@@ -3737,7 +3784,7 @@ impl<'a> Generator<'a> {
         id
     }
 
-    fn get_function_builtin_external(&mut self, builtin: BuiltinFunctionExternal) -> u32 {
+    fn get_function_builtin_external(&mut self, builtin: BuiltinFunctionExternal) -> FunctionIndex {
         if let Some(id) = self.builtins_external.get(&builtin) {
             return *id;
         }
@@ -3808,8 +3855,8 @@ impl<'a> Generator<'a> {
     }
 }
 
-fn const_expr_ref_null(type_index: u32) -> ConstExpr {
-    ConstExpr::ref_null(HeapType::Concrete(type_index))
+fn const_expr_ref_null(type_index: TypeIndex) -> ConstExpr {
+    ConstExpr::ref_null(HeapType::Concrete(type_index.0))
 }
 
 fn is_main_funtion(function: &TypedFunction) -> bool {
