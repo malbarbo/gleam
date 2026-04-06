@@ -180,7 +180,7 @@ impl BuiltinFunctionExternal {
 }
 
 impl<'a> Generator<'a> {
-    pub(super) fn function_start(&mut self) -> u32 {
+    pub(super) fn function_start(&mut self) -> FunctionIndex {
         let function = self.code_start();
         self.add_function(
             "$start".into(),
@@ -244,7 +244,7 @@ impl<'a> Generator<'a> {
         }
         // main
         if let Some(main) = &self.main {
-            let _ = function.instructions().call(*main).drop();
+            let _ = function.instructions().call(main.0).drop();
         }
         let _ = function.instructions().end();
         function
@@ -255,7 +255,7 @@ impl<'a> Generator<'a> {
         params: Vec<Arc<Type>>,
         return_: Arc<Type>,
         variant: Variant,
-    ) -> u32 {
+    ) -> FunctionIndex {
         let mut constructor_name = self.type_pretty_name(&return_);
         if let CustomType::Union { .. } = &variant.custom_type {
             constructor_name += ".";
@@ -274,7 +274,7 @@ impl<'a> Generator<'a> {
         })
     }
 
-    fn ok_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> u32 {
+    fn ok_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> FunctionIndex {
         self.variant_constructor(
             vec![ok.clone()],
             type_::result(ok, error),
@@ -282,7 +282,7 @@ impl<'a> Generator<'a> {
         )
     }
 
-    fn error_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> u32 {
+    fn error_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> FunctionIndex {
         self.variant_constructor(
             vec![error.clone()],
             type_::result(ok, error),
@@ -290,9 +290,9 @@ impl<'a> Generator<'a> {
         )
     }
 
-    pub(super) fn string_index(&mut self, string: &EcoString) -> u32 {
+    pub(super) fn string_index(&mut self, string: &EcoString) -> GlobalIndex {
         let string = unescape(string);
-        let index = self.global_section.len();
+        let index = GlobalIndex(self.global_section.len());
         *self.strings.entry(string.into()).or_insert_with(|| {
             let _ = self.global_section.global(
                 GlobalType {
@@ -427,7 +427,7 @@ impl<'a> Generator<'a> {
         custom_type: &TypedCustomType,
         constructor: &TypedRecordConstructor,
         args: &[Arc<Type>],
-    ) -> (u32, u32) {
+    ) -> (TypeIndex, FunctionIndex) {
         let (_, type_index, types) =
             self.mono_union_subtype_index(type_, custom_type, constructor, args);
         let layout = self.union_layout(type_).clone();
@@ -545,7 +545,7 @@ impl<'a> Generator<'a> {
         function
     }
 
-    pub(super) fn function_string_starts_with(&mut self) -> u32 {
+    pub(super) fn function_string_starts_with(&mut self) -> FunctionIndex {
         self.get_function_builtin(BuiltinFunction::StringStartsWith, |s| {
             s.code_string_starts_with()
         })
@@ -611,7 +611,7 @@ impl<'a> Generator<'a> {
 
     fn code_composite_eq(
         &mut self,
-        type_index: u32,
+        type_index: TypeIndex,
         types: impl IntoIterator<Item = Arc<Type>>,
     ) -> Function {
         self.code_composite_or_union_eq(type_index, None, types)
@@ -619,7 +619,7 @@ impl<'a> Generator<'a> {
 
     fn code_composite_or_union_eq(
         &mut self,
-        type_index: u32,
+        type_index: TypeIndex,
         field_mapping: Option<&[u32]>,
         types: impl IntoIterator<Item = Arc<Type>>,
     ) -> Function {
@@ -662,7 +662,7 @@ impl<'a> Generator<'a> {
     fn code_union_eq(
         &mut self,
         type_: &Arc<Type>,
-        supertype_index: u32,
+        supertype_index: TypeIndex,
         custom_type: &TypedCustomType,
         args: &[Arc<Type>],
     ) -> Function {
@@ -731,9 +731,9 @@ impl<'a> Generator<'a> {
                 #[rustfmt::skip]
                 let _ = instructions
                     .local_get(a)
-                    .ref_cast_non_null(HeapType::Concrete(type_index))
+                    .ref_cast_non_null(HeapType::Concrete(type_index.0))
                     .local_get(b)
-                    .ref_cast_non_null(HeapType::Concrete(type_index))
+                    .ref_cast_non_null(HeapType::Concrete(type_index.0))
                     .call(eq_index)
                     .return_();
             }
@@ -809,17 +809,17 @@ impl<'a> Generator<'a> {
 
     fn code_variant_constructor(
         &mut self,
-        struct_index: u32,
+        struct_index: TypeIndex,
         num_fields: u32,
         tag: Option<i32>,
-        null_supertype: Option<u32>,
+        null_supertype: Option<TypeIndex>,
         field_mapping: Option<&[u32]>,
     ) -> Function {
         let mut function = Function::new(vec![]);
         let mut instructions = function.extend_instructions(self);
         if let Some(supertype_index) = null_supertype {
             let _ = instructions
-                .ref_null(HeapType::Concrete(supertype_index))
+                .ref_null(HeapType::Concrete(supertype_index.0))
                 .end();
             return function;
         }
@@ -965,8 +965,8 @@ impl<'a> Generator<'a> {
             BuiltinFunction::Inspect(self.val_type(&arg_type), self.type_pretty_name(&arg_type));
         let name = builtin.name();
         let index = self.get_function_builtin(builtin, |s| s.code_inspect(&arg_type));
-        let _ = self.add_function_to_globals(name.clone(), index);
-        Id::func(name, index)
+        let _ = self.add_function_to_globals(name.clone(), index.0);
+        Id::func(name, index.0)
     }
 
     fn code_inspect(&mut self, arg_type: &Arc<Type>) -> Function {
@@ -994,7 +994,7 @@ impl<'a> Generator<'a> {
         function
     }
 
-    pub(super) fn function_repr(&mut self, type_: &Arc<Type>) -> u32 {
+    pub(super) fn function_repr(&mut self, type_: &Arc<Type>) -> FunctionIndex {
         if type_.is_int() {
             return self.get_function_builtin_external(BuiltinFunctionExternal::IntRepr);
         }
@@ -1054,7 +1054,7 @@ impl<'a> Generator<'a> {
         custom_type: &TypedCustomType,
         constructor: &TypedRecordConstructor,
         args: &[Arc<Type>],
-    ) -> (u32, u32) {
+    ) -> (TypeIndex, FunctionIndex) {
         let name = self.type_pretty_name(type_);
         let (_, type_index, types) =
             self.mono_union_subtype_index(type_, custom_type, constructor, args);
@@ -1250,7 +1250,7 @@ impl<'a> Generator<'a> {
               .return_()
             .else_()
               .local_get(lst)
-              .ref_cast_non_null(HeapType::Concrete(struct_index))
+              .ref_cast_non_null(HeapType::Concrete(struct_index.0))
               .struct_get(struct_index, 2) // first
               .local_get(dest)
               .call(self.function_repr(item_type))
@@ -1261,7 +1261,7 @@ impl<'a> Generator<'a> {
             .end()
             .loop_(BlockType::Empty)
               .local_get(lst)
-              .ref_cast_non_null(HeapType::Concrete(struct_index))
+              .ref_cast_non_null(HeapType::Concrete(struct_index.0))
               .struct_get(struct_index, 1) // rest
               .local_tee(lst)
               .ref_is_null()
@@ -1277,7 +1277,7 @@ impl<'a> Generator<'a> {
                 .byte_store(b' ')
                 .i32_inc(dest)
                 .local_get(lst)
-                .ref_cast_non_null(HeapType::Concrete(struct_index))
+                .ref_cast_non_null(HeapType::Concrete(struct_index.0))
                 .struct_get(struct_index, 2) // first
                 .local_get(dest)
                 .call(self.function_repr(item_type))
@@ -1305,7 +1305,7 @@ impl<'a> Generator<'a> {
         &mut self,
         name: &EcoString,
         field_mapping: Option<&[u32]>,
-        type_index: u32,
+        type_index: TypeIndex,
         types: &[Arc<Type>],
     ) -> Function {
         let mut function = Function::new(vec![(1, ValType::I32)]);
@@ -1506,7 +1506,7 @@ impl<'a> Generator<'a> {
                         #[rustfmt::skip]
                         let _ = instructions
                             .local_get(value)
-                            .ref_cast_non_null(HeapType::Concrete(type_index))
+                            .ref_cast_non_null(HeapType::Concrete(type_index.0))
                             .local_get(ptr)
                             .call(repr_index)
                             .br(n - 1 - i as u32);
@@ -1686,7 +1686,7 @@ impl<'a> Generator<'a> {
         &mut self,
         builtin: BuiltinFunction,
         code_fn: impl FnOnce(&mut Self) -> Function,
-    ) -> u32 {
+    ) -> FunctionIndex {
         if let Some(index) = self.builtins.get(&builtin) {
             return *index;
         }

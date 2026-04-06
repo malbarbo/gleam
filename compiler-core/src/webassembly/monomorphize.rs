@@ -9,7 +9,7 @@ use crate::{
         visit::{Visit, visit_typed_assignment, visit_typed_expr_call},
     },
     type_::{self, Type, TypeVar, TypedCallArg},
-    webassembly::LocalFunction,
+    webassembly::{FunctionIndex, LocalFunction},
 };
 
 pub(super) struct Monomorphizer {
@@ -498,11 +498,11 @@ impl Monomorphizer {
 /// Preserves Generic type vars for later monomorphization.
 pub(super) fn collect_local_functions(
     body: &[TypedStatement],
-    parent_id: u32,
+    parent_id: FunctionIndex,
 ) -> HashMap<EcoString, LocalFunction> {
     struct LocalFunctionCollector<'a> {
         map: &'a mut HashMap<EcoString, LocalFunction>,
-        parent_id: u32,
+        parent_id: FunctionIndex,
     }
 
     impl<'ast> Visit<'ast> for LocalFunctionCollector<'_> {

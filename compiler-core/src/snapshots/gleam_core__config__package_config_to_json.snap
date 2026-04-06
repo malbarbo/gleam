@@ -120,6 +120,11 @@ enable = true
       "location": null
     }
   },
+  "webassembly": {
+    "int": "I32",
+    "float": "F64",
+    "opt_level": "0"
+  },
   "target": "erlang",
   "internal_modules": [
     "my_app/internal"
