@@ -11,7 +11,7 @@ disable-hide-internal = []
 
 [dependencies]
 # Error message and warning formatting
-codespan-reporting = "0"
+codespan-reporting = "0.12"
 # Graph data structures
 petgraph = "0.8"
 # Template rendering
