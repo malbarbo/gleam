@@ -19,6 +19,44 @@ apenas as mudanças estritamente necessárias para a troca de API.
 que é estritamente necessário para a API walrus. Antes de mudar qualquer linha,
 pergunte: "essa mudança é necessária para walrus funcionar?"
 
+## Estratégia de execução
+
+**A tradução deve ser feita toda de uma vez antes de tentar compilar ou rodar
+testes.** Não tente corrigir erros de compilação incrementalmente enquanto
+traduz — isso já falhou em tentativas anteriores porque os arquivos têm
+dependências cruzadas (scope.rs, webassembly.rs, builtins.rs, instructions.rs)
+e mudanças parciais em um quebram os outros.
+
+Fluxo correto:
+
+1. **Traduzir todos os arquivos** (instructions.rs, scope.rs, webassembly.rs,
+   builtins.rs) seguindo as regras desta documentação, sem rodar `cargo build`
+   no meio.
+2. **Remover `native.rs`** (sua função foi absorvida por
+   `walrus::Module::from_buffer`).
+3. **Rodar `cargo build` apenas no final**, quando todos os arquivos já estão
+   traduzidos.
+4. **Rodar testes apenas depois do build passar.**
+5. **Corrigir erros pontuais** que sobraram (tipicamente assinaturas e
+   typos pequenos), não reestruturações.
+
+Anti-padrão: traduzir scope.rs, rodar cargo build, ver erros em
+webassembly.rs/builtins.rs (que ainda usam a API antiga), entrar em cascata
+de fixes incrementais. Isso não escala — o trabalho de tradução tem que ser
+contínuo.
+
+## Estado das tentativas
+
+- **1ª tentativa** (branch `wasm`, commit `7fb2dccb9`): tradução completa
+  funcional, mas renomeou funções e fez `build_builtin_body` monolítico.
+  Rejeitada por desvio estilístico.
+- **2ª tentativa**: revertida no início.
+- **3ª tentativa** (branch `wasm-walrus-v2-wip`, commit `3cafe07ef`): tradução
+  parcial. Generator/compile/new feitos, mas builtins.rs, _function*,
+  call sites, e tradução de blocos `block/end → block_(closure)` pendentes.
+  ~250 erros de compilação por estado intermediário. Não tentar continuar
+  como incremental — começar de novo aceitando tradução de uma vez.
+
 ## Estratégia em dois passos
 
 ### Passo 1: Newtypes para u32
