@@ -616,3 +616,247 @@ git diff 60a17fe97 --numstat -- \
 ```
 
 Nota: `git diff 60a17fe97` (sem `..HEAD`) compara o baseline com o working tree.
+
+## Aprendizados específicos do walrus 0.26.1 (3ª tentativa)
+
+A 3ª tentativa começou na branch `wasm-walrus-v2-wip` (commit `3cafe07ef`).
+Os aprendizados abaixo vieram de descobrir a API real e devem orientar a
+continuação.
+
+### Dependência: walrus 0.26.1 do crates.io
+
+`walrus = "0.26.1"` é suficiente. O fork `full-gc-ext` foi merged upstream
+em 0.26.0 (PR #304 "Full support for GC extension", 2026-03-25). Remover o
+`git = ...` do `Cargo.toml`:
+
+```toml
+# antes:
+walrus = { git = "https://github.com/wasm-bindgen/walrus.git", branch = "full-gc-ext" }
+# depois:
+walrus = "0.26.1"
+```
+
+### Imports walrus a usar
+
+```rust
+use walrus::{
+    ConstExpr, DataId, FieldType, FunctionBuilder, FunctionId, GlobalId, HeapType,
+    InstrSeqBuilder, LocalId, MemoryId, RefType, StorageType, TypeId, ValType,
+    ir::{BinaryOp, ExtendedLoad, InstrSeqId, InstrSeqType, LoadKind, MemArg, StoreKind, UnaryOp, Value},
+};
+```
+
+`wasm-encoder` deve ser **removido inteiro** do `Cargo.toml` ao final.
+
+### IDs walrus são opacos
+
+`FunctionId`/`TypeId`/`GlobalId`/`LocalId`/`MemoryId`/`DataId`/`InstrSeqId`
+não têm campo `.0` nem `From<u32>` impl. Todo código que fazia
+`function.index.0` para passar `u32` para wasm-encoder some — walrus aceita
+os IDs diretamente.
+
+### Sem atalhos `i32_add()`/`i64_eq()`/etc.
+
+A macro `#[walrus_instr]` de walrus gera um método por variante de `Instr`.
+Como `Binop { op: BinaryOp }` e `Unop { op: UnaryOp }` são variantes únicas,
+walrus só gera **`seq.binop(BinaryOp::I32Add)`** e
+**`seq.unop(UnaryOp::I32WrapI64)`**.
+
+Atalhos `i32_const`/`i64_const`/`f32_const`/`f64_const` são hand-coded e existem.
+
+Para manter o estilo do baseline (`instructions.i32_add()`), nosso wrapper
+precisa fornecer atalhos. A 3ª tentativa fez isso com macros em
+`instructions.rs`:
+
+```rust
+macro_rules! binop_both { /* gera impls para FnInstructions e Seq */ }
+binop_both! {
+    i32_eq => I32Eq;
+    i32_add => I32Add;
+    // ...
+}
+
+macro_rules! int_op_both {
+    /* gera atalhos que despacham por IntType (i32 vs i64) */
+}
+int_op_both! {
+    int_add => (I32Add, I64Add);
+    int_eq  => (I32Eq, I64Eq);
+    // ...
+}
+```
+
+### `gen` é palavra reservada em Rust 2024
+
+O crate `gleam-core` usa `edition = "2024"`. `gen` é palavra reservada
+(prepara o terreno para generators). Não pode ser nome de parâmetro ou
+variável. Use `g` (curto, ergonômico em closures e métodos):
+
+```rust
+pub(super) fn rust<F>(self, g: &mut Generator<'_>, f: F) -> Self
+where F: FnOnce(&mut Generator<'_>, Self) -> Self,
+{
+    f(g, self)
+}
+```
+
+### Design final do FnInstructions: chain owned, sem `Option`
+
+Após explorar várias opções, o design escolhido foi:
+
+- **`FnInstructions`** (top-level): métodos consomem `Self` e retornam `Self`.
+  Chain: `function_builder().local_get(a).i32_to_int().finish(g)`.
+  `.finish(g)` recebe o `&mut Generator` explicitamente e consome `Self`.
+  `.rust(g, |g, fb| -> Self)` para casos que precisam intercalar
+  Generator com instruções.
+
+- **`Seq<'a, 'b>`** (sub-bloco): wrapper de `&'a mut InstrSeqBuilder<'b>`.
+  Métodos são `&mut self -> &mut Self` porque dentro de closures de
+  `if_else`/`block_`/`loop_` walrus passa `&mut InstrSeqBuilder`.
+
+- **Sem `Option<FB>`/`Option<gen>`** — ambos os tipos têm seus campos
+  diretamente. Isso elimina os `expect(...)` espalhados.
+
+- **Macros `delegate_both!`/`binop_both!`/`unop_both!`/`int_op_both!`/
+  `float_op_both!`** geram impls para os dois tipos a partir de uma lista
+  única de métodos.
+
+Sintaxe nos call sites:
+
+```rust
+// código com chain owned (top-level)
+self.function_builder("_i32_to_int", &[param], &[self.int.val_type()])
+    .local_get(param)
+    .i32_to_int()
+    .finish(self)
+
+// loop iterativo (precisa reassign)
+let mut fb = self.function_builder("_start", &[], &[]);
+for const_ in self.consts.clone() {
+    fb = fb.global_get(src).global_set(dest);
+}
+fb.finish(self)
+
+// closures (Seq usa &mut chain)
+fb.if_else(ValType::I32,
+    |then_s| { let _ = then_s.local_get(a).i32_const(1).i32_add(); },
+    |else_s| { let _ = else_s.i32_const(0); },
+)
+```
+
+### Mapeamento `BlockType` → `InstrSeqType`
+
+`wasm-encoder::BlockType` → `walrus::ir::InstrSeqType`:
+- `BlockType::Empty` → `InstrSeqType::Simple(None)` (ou `None`/`()` via Into)
+- `BlockType::Result(vt)` → `InstrSeqType::Simple(Some(vt))` (ou só `vt` via Into)
+- `BlockType::FunctionType(idx)` → `InstrSeqType::MultiValue(TypeId)`
+
+Os métodos walrus aceitam `impl Into<InstrSeqType>`. Para `Empty`,
+passar `InstrSeqType::Simple(None)` explicitamente é o mais claro.
+
+### `MemArg` walrus
+
+`walrus::ir::MemArg` tem apenas:
+```rust
+pub struct MemArg {
+    pub align: u32,
+    pub offset: u64,  // u64, não u32
+}
+```
+
+**Não** tem `memory_index` — o `MemoryId` é passado **separado** para
+`store`/`load`:
+```rust
+seq.store(memory_id, StoreKind::I32 { atomic: false }, MemArg { align: 0, offset: 0 });
+seq.store(memory_id, StoreKind::I32_8 { atomic: false }, mem_arg);
+seq.load(memory_id, LoadKind::I32 { atomic: false }, mem_arg);
+seq.load(memory_id, LoadKind::I32_8 { kind: ExtendedLoad::ZeroExtend }, mem_arg);
+```
+
+`memory_size`/`memory_grow` também recebem `MemoryId`. No nosso
+`FnInstructions`/`Seq`, o campo `memory: Option<MemoryId>` cacheia o ID
+do baseline para que `i32_store`/`memory_size`/etc. não precisem dele
+como argumento.
+
+### `eliminate_dead_code` sem round-trip
+
+Não precisa mais de `from_buffer`/`emit_wasm` round-trip — recebe e
+modifica `&mut walrus::Module` diretamente:
+
+```rust
+fn eliminate_dead_code(module: &mut walrus::Module, builtin_data_names: &[String]) {
+    // corpo idêntico ao original (clear elements, convert active data,
+    // walrus::passes::gc::run(module), restore), mas sem from_buffer/emit_wasm.
+}
+```
+
+### `compile()` reduzido a ~5 linhas
+
+```rust
+fn compile(mut self) -> Result<Vec<u8>, Error> {
+    let start = self.generate()?;
+    self.wasm_module.name = Some(self.module.name.to_string());
+    self.wasm_module.start = Some(start);
+    eliminate_dead_code(&mut self.wasm_module, &self.builtin_data_names);
+    Ok(self.wasm_module.emit_wasm())
+}
+```
+
+### Geração de tipos no `Generator::new`
+
+```rust
+let mut wasm_module = walrus::Module::from_buffer(BUILTINS_WASM)
+    .expect("builtins wasm to be a valid module");
+let memory = wasm_module.memories.iter().next().map(|m| m.id());
+let string_type_id = wasm_module.types.add_array(StringType::field_type());
+wasm_module.types.get_mut(string_type_id).name = Some("String".to_string());
+let mut wasm_types = IndexMap::new();
+let _ = wasm_types.insert(StringType::wasm_type(), string_type_id);
+```
+
+Para tipos struct/union/function, usar `wasm_module.types.add_struct(fields)`,
+`add_array(field)`, `add(params, results)`. Tipos recursivos: `add_rec_group`.
+
+### Strings — naming
+
+Renomeei `StringType::type_index` para `StringType::type_id` (consistente
+com walrus). O `wasm_type()` static method retorna `WasmType::array(StorageType::I8)`
+para uso na chave do `IndexMap<WasmType, TypeId>`.
+
+### Pendente para próxima sessão (a partir de `wasm-walrus-v2-wip`)
+
+Fases não terminadas, em ordem de ataque sugerida:
+
+1. **`add_function`** → vira helper que cria `FunctionBuilder` ou usa
+   `wasm_module.funcs.add_local`. Considerar se faz sentido manter como
+   helper ou se cada `code_*` cria seu próprio `function_builder()`.
+
+2. **`types_external`/`types_imported`/`types_prelude`/`types`** → usar
+   `wasm_module.types.add_*` em vez de `TypeSection`.
+
+3. **`constants`** → usar `wasm_module.globals.add_local(ty, mutable, shared, init)`
+   e `wasm_module.data.add(...)`.
+
+4. **`functions`** / **`functions_builtins`** → cada função cria
+   `FunctionBuilder` via helper `function_builder()`.
+
+5. **`get_function_builtin_external`** dispatch para `code_*` (manter
+   arms explícitos, sem `_ =>`).
+
+6. **~50 `code_*` em `builtins.rs`** → reescrever cada um usando o
+   `FnInstructions` chain. Manter nomes/ordem/comentários/`#[rustfmt::skip]`.
+
+7. **`scope.rs`** → `Id::index` vira enum `IdIndex { Global(GlobalId),
+   Func(FunctionId), Local(LocalId) }`. `Locals` armazena `Vec<LocalId>`
+   (visitor cria LocalId on-demand via `&mut Generator`).
+
+8. **`native.rs`** → deletar arquivo, remover `mod native;` e
+   `use native::*;`.
+
+9. **Call sites em `webassembly.rs`** (`_constant`, `_expression`, `_pattern`,
+   `_patterns`, `_clause_guard`) → mudar assinaturas para receber
+   `&mut Seq<'_, '_>` em vez de `&mut ExtendedInstructionSink<'_>`.
+   Adaptar todos os usos: `if_/else_/end` viram closures, `br(0)` vira
+   `br(seq_id)`.
+
+10. **Verificação** → build/fmt/clippy/test. 101/106 testes esperados.
