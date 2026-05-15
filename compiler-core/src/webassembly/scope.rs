@@ -1,6 +1,6 @@
 use ecow::EcoString;
 use std::{cell::RefCell, collections::HashMap, ptr, rc::Rc, sync::Arc};
-use wasm_encoder::ValType;
+use walrus::{FunctionId, GlobalId, LocalId, ValType};
 
 use crate::{
     ast::{
@@ -25,35 +25,63 @@ pub(super) enum IdKind {
     Local,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum IdIndex {
+    Global(GlobalId),
+    Func(FunctionId),
+    Local(LocalId),
+}
+
 #[derive(Clone)]
 pub(super) struct Id {
     pub kind: IdKind,
     pub name: EcoString,
-    pub index: u32,
+    pub index: IdIndex,
 }
 
 impl Id {
-    pub(super) fn global(name: EcoString, index: u32) -> Id {
+    pub(super) fn global(name: EcoString, index: GlobalId) -> Id {
         Id {
             kind: IdKind::Global,
             name,
-            index,
+            index: IdIndex::Global(index),
         }
     }
 
-    pub(super) fn func(name: EcoString, index: u32) -> Id {
+    pub(super) fn func(name: EcoString, index: FunctionId) -> Id {
         Id {
             kind: IdKind::Func,
             name,
-            index,
+            index: IdIndex::Func(index),
         }
     }
 
-    fn local(name: EcoString, index: u32) -> Id {
+    fn local(name: EcoString, index: LocalId) -> Id {
         Id {
             kind: IdKind::Local,
             name,
-            index,
+            index: IdIndex::Local(index),
+        }
+    }
+
+    pub(super) fn global_id(&self) -> GlobalId {
+        match self.index {
+            IdIndex::Global(id) => id,
+            IdIndex::Func(_) | IdIndex::Local(_) => panic!("expected global id"),
+        }
+    }
+
+    pub(super) fn func_id(&self) -> FunctionId {
+        match self.index {
+            IdIndex::Func(id) => id,
+            IdIndex::Global(_) | IdIndex::Local(_) => panic!("expected function id"),
+        }
+    }
+
+    pub(super) fn local_id(&self) -> LocalId {
+        match self.index {
+            IdIndex::Local(id) => id,
+            IdIndex::Global(_) | IdIndex::Func(_) => panic!("expected local id"),
         }
     }
 }
@@ -69,17 +97,21 @@ pub(super) enum Scope {
 }
 
 impl Scope {
-    pub(super) fn with_params(globals: Rc<RefCell<Vec<Id>>>, args: &[TypedArg]) -> Scope {
+    pub(super) fn with_params(
+        globals: Rc<RefCell<Vec<Id>>>,
+        args: &[TypedArg],
+        param_ids: &[LocalId],
+    ) -> Scope {
         let mut scope = Scope::Global(globals);
-        for (index, arg) in args.iter().enumerate() {
+        for (arg, &index) in args.iter().zip(param_ids) {
             if let Some(name) = arg.get_variable_name() {
-                scope = scope.insert_local(name.clone(), index as u32);
+                scope = scope.insert_local(name.clone(), index);
             }
         }
         scope
     }
 
-    pub(super) fn insert_local(&self, name: EcoString, index: u32) -> Scope {
+    pub(super) fn insert_local(&self, name: EcoString, index: LocalId) -> Scope {
         Scope::Entry(Id::local(name, index), self.clone().into())
     }
 
@@ -99,10 +131,9 @@ impl Scope {
 
 #[derive(Debug)]
 pub(super) struct Locals {
-    params: Vec<(u32, Option<EcoString>)>,
-    locals: HashMap<u64, (u32, Option<EcoString>)>,
+    params: Vec<(LocalId, Option<EcoString>)>,
+    locals: HashMap<u64, (LocalId, Option<EcoString>)>,
     names: HashMap<EcoString, usize>,
-    val_types: Vec<ValType>,
 }
 
 impl Locals {
@@ -111,21 +142,23 @@ impl Locals {
         arguments: &[TypedArg],
         statements: &[TypedStatement],
     ) -> Self {
+        let params: Vec<(LocalId, Option<EcoString>)> = arguments
+            .iter()
+            .map(|arg| {
+                let val_type = generator.val_type(&arg.type_);
+                let id = generator.wasm_module.locals.add(val_type);
+                (id, arg.names.get_variable_name().cloned())
+            })
+            .collect();
+
         let mut locals = Locals {
-            params: (0..)
-                .zip(
-                    arguments
-                        .iter()
-                        .map(|arg| arg.names.get_variable_name().cloned()),
-                )
-                .collect(),
+            params,
             locals: HashMap::new(),
             names: HashMap::from_iter(
                 arguments
                     .iter()
                     .flat_map(|arg| arg.names.get_variable_name().map(|name| (name.clone(), 1))),
             ),
-            val_types: vec![],
         };
 
         let mut visit = LocalsVisit {
@@ -140,16 +173,16 @@ impl Locals {
         locals
     }
 
-    pub(super) fn names(&self) -> Vec<(u32, EcoString)> {
+    pub(super) fn param_ids(&self) -> Vec<LocalId> {
+        self.params.iter().map(|(id, _)| *id).collect()
+    }
+
+    pub(super) fn names(&self) -> Vec<(LocalId, EcoString)> {
         self.params
             .iter()
             .chain(self.locals.values())
             .filter_map(|(index, name)| name.as_ref().map(|n| (*index, n.clone())))
             .collect()
-    }
-
-    pub(super) fn val_types(&self) -> Vec<(u32, ValType)> {
-        self.val_types.iter().map(|e| (1, *e)).collect()
     }
 
     fn insert_assignment(&mut self, generator: &mut Generator<'_>, assignment: &TypedAssignment) {
@@ -166,7 +199,7 @@ impl Locals {
         }
     }
 
-    pub(super) fn for_assigment(&self, assignment: &TypedAssignment) -> u32 {
+    pub(super) fn for_assigment(&self, assignment: &TypedAssignment) -> LocalId {
         if matches!(assignment.kind, AssignmentKind::Let) && assignment.pattern.is_variable() {
             self._get(&assignment.pattern)
         } else {
@@ -193,14 +226,19 @@ impl Locals {
         }
     }
 
-    pub(super) fn for_div(&self, scope: &Scope, left: &TypedExpr, right: &TypedExpr) -> (u32, u32) {
+    pub(super) fn for_div(
+        &self,
+        scope: &Scope,
+        left: &TypedExpr,
+        right: &TypedExpr,
+    ) -> (LocalId, LocalId) {
         let left = if let Some(name) = left.var_name() {
-            scope.find_expect(name).index
+            scope.find_expect(name).local_id()
         } else {
             self._get(left)
         };
         let right = if let Some(name) = right.var_name() {
-            scope.find_expect(name).index
+            scope.find_expect(name).local_id()
         } else {
             self._get(right)
         };
@@ -232,14 +270,14 @@ impl Locals {
         scope: &Scope,
         left: &TypedClauseGuard,
         right: &TypedClauseGuard,
-    ) -> (u32, u32) {
+    ) -> (LocalId, LocalId) {
         let left = if let ClauseGuard::Var { name, .. } = left {
-            scope.find_expect(name).index
+            scope.find_expect(name).local_id()
         } else {
             self._get(left)
         };
         let right = if let ClauseGuard::Var { name, .. } = right {
-            scope.find_expect(name).index
+            scope.find_expect(name).local_id()
         } else {
             self._get(right)
         };
@@ -254,7 +292,7 @@ impl Locals {
         }
     }
 
-    pub(super) fn for_call(&self, fun: &TypedExpr) -> u32 {
+    pub(super) fn for_call(&self, fun: &TypedExpr) -> LocalId {
         assert!(!fun.is_var());
         self._get(fun)
     }
@@ -274,7 +312,7 @@ impl Locals {
         }
     }
 
-    pub(super) fn for_subject(&self, subject: &TypedExpr) -> u32 {
+    pub(super) fn for_subject(&self, subject: &TypedExpr) -> LocalId {
         self._get(subject)
     }
 
@@ -290,7 +328,7 @@ impl Locals {
                 );
             }
             TypedPattern::Discard { .. } => {
-                self._insert_with_val_type(pattern, ValType::I32);
+                self._insert_with_val_type(generator, pattern, ValType::I32);
             }
             _ => {
                 self._insert(
@@ -304,7 +342,7 @@ impl Locals {
         }
     }
 
-    pub(super) fn for_pattern(&self, pattern: &TypedPattern) -> u32 {
+    pub(super) fn for_pattern(&self, pattern: &TypedPattern) -> LocalId {
         self._get(pattern)
     }
 
@@ -322,13 +360,13 @@ impl Locals {
         );
     }
 
-    pub(super) fn for_pipeline_assignment(&self, assignment: &TypedPipelineAssignment) -> u32 {
+    pub(super) fn for_pipeline_assignment(&self, assignment: &TypedPipelineAssignment) -> LocalId {
         self._get(assignment)
     }
 
     fn insert_echo(&mut self, generator: &mut Generator<'_>, echo: &TypedExpr) {
         // the number of written bytes
-        self._insert_with_val_type(echo.location(), ValType::I32);
+        self._insert_with_val_type(generator, echo.location(), ValType::I32);
         if !echo.is_var() {
             self._insert(generator, echo, &echo.type_(), "echo", echo.location());
         }
@@ -337,7 +375,7 @@ impl Locals {
     pub(super) fn for_echo<'echo>(
         &self,
         echo: &'echo TypedExpr,
-    ) -> (u32, Result<u32, &'echo EcoString>) {
+    ) -> (LocalId, Result<LocalId, &'echo EcoString>) {
         (
             self._get(echo.location()),
             if let Some(name) = echo.var_name() {
@@ -356,7 +394,8 @@ impl Locals {
         prefix: &str,
         location: SrcSpan,
     ) {
-        let index = self.locals.len() as u32 + self.params.len() as u32;
+        let val_type = generator.val_type(type_);
+        let index = generator.wasm_module.locals.add(val_type);
         let lc = generator
             .line_numbers
             .line_and_column_number(location.start);
@@ -377,18 +416,21 @@ impl Locals {
         {
             panic!("locals collision should not happen during code generation");
         }
-        self.val_types.push(generator.val_type(type_));
     }
 
-    fn _insert_with_val_type(&mut self, key: impl LocalHash, val_type: ValType) {
-        let index = self.locals.len() as u32 + self.params.len() as u32;
+    fn _insert_with_val_type(
+        &mut self,
+        generator: &mut Generator<'_>,
+        key: impl LocalHash,
+        val_type: ValType,
+    ) {
+        let index = generator.wasm_module.locals.add(val_type);
         if self.locals.insert(key.hash(), (index, None)).is_some() {
             panic!("locals collision should not happen during code generation");
         }
-        self.val_types.push(val_type);
     }
 
-    pub(super) fn _get(&self, key: impl LocalHash) -> u32 {
+    pub(super) fn _get(&self, key: impl LocalHash) -> LocalId {
         let id = key.hash();
         self.locals
             .get(&id)
@@ -478,11 +520,11 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
         let string_val_type = self.generator.string.val_type();
         if let AssignName::Variable(_) = right_side_assignment {
             self.locals
-                ._insert_with_val_type(right_location, string_val_type);
+                ._insert_with_val_type(self.generator, right_location, string_val_type);
         }
         if left_side_assignment.is_some() {
             self.locals
-                ._insert_with_val_type(left_location, string_val_type);
+                ._insert_with_val_type(self.generator, left_location, string_val_type);
         }
     }
 
