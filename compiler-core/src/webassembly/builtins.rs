@@ -180,7 +180,7 @@ impl BuiltinFunctionExternal {
 }
 
 impl<'a> Generator<'a> {
-    pub(super) fn function_start(&mut self) -> FunctionIndex {
+    pub(super) fn function_start(&mut self) -> FunctionId {
         let function = self.code_start();
         self.add_function(
             "$start".into(),
@@ -202,7 +202,7 @@ impl<'a> Generator<'a> {
             let _ = instructions
                 .i32_const(0)
                 .i32_const(string.len() as i32)
-                .array_new_data(self.string.type_index, data_segment)
+                .array_new_data(self.string.type_id, data_segment)
                 .ref_as_non_null()
                 .global_set(*index);
         }
@@ -220,7 +220,7 @@ impl<'a> Generator<'a> {
                 }
                 WasmConst::Struct {
                     global_index,
-                    type_index,
+                    type_id,
                     tag,
                     elements,
                 } => {
@@ -229,7 +229,7 @@ impl<'a> Generator<'a> {
                     }
                     let _ = instructions
                         .constants(self, &elements)
-                        .struct_new(type_index)
+                        .struct_new(type_id)
                         .global_set(global_index);
                 }
                 WasmConst::Function { dest, src } => {
@@ -255,7 +255,7 @@ impl<'a> Generator<'a> {
         params: Vec<Arc<Type>>,
         return_: Arc<Type>,
         variant: Variant,
-    ) -> FunctionIndex {
+    ) -> FunctionId {
         let mut constructor_name = self.type_pretty_name(&return_);
         if let CustomType::Union { .. } = &variant.custom_type {
             constructor_name += ".";
@@ -274,7 +274,7 @@ impl<'a> Generator<'a> {
         })
     }
 
-    fn ok_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> FunctionIndex {
+    fn ok_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> FunctionId {
         self.variant_constructor(
             vec![ok.clone()],
             type_::result(ok, error),
@@ -282,7 +282,7 @@ impl<'a> Generator<'a> {
         )
     }
 
-    fn error_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> FunctionIndex {
+    fn error_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> FunctionId {
         self.variant_constructor(
             vec![error.clone()],
             type_::result(ok, error),
@@ -290,9 +290,9 @@ impl<'a> Generator<'a> {
         )
     }
 
-    pub(super) fn string_index(&mut self, string: &EcoString) -> GlobalIndex {
+    pub(super) fn string_index(&mut self, string: &EcoString) -> GlobalId {
         let string = unescape(string);
-        let index = GlobalIndex(self.global_section.len());
+        let index = GlobalId(self.global_section.len());
         *self.strings.entry(string.into()).or_insert_with(|| {
             let _ = self.global_section.global(
                 GlobalType {
@@ -427,9 +427,9 @@ impl<'a> Generator<'a> {
         custom_type: &TypedCustomType,
         constructor: &TypedRecordConstructor,
         args: &[Arc<Type>],
-    ) -> (TypeIndex, FunctionIndex) {
-        let (_, type_index, types) =
-            self.mono_union_subtype_index(type_, custom_type, constructor, args);
+    ) -> (TypeId, FunctionId) {
+        let (_, type_id, types) =
+            self.mono_union_subtype_id(type_, custom_type, constructor, args);
         let layout = self.union_layout(type_).clone();
         let variant_index = custom_type
             .constructors
@@ -438,32 +438,32 @@ impl<'a> Generator<'a> {
             .expect("constructor in union");
         let mapping = layout.fields(variant_index).to_vec();
         let name = self.type_pretty_name(type_) + "." + constructor.name.clone();
-        let builtin = BuiltinFunction::Equal(self.val_type_ref(type_index), name);
+        let builtin = BuiltinFunction::Equal(self.val_type_ref(type_id), name);
         let eq_index = self.get_function_builtin(builtin, |s| {
-            s.code_composite_or_union_eq(type_index, Some(&mapping), types)
+            s.code_composite_or_union_eq(type_id, Some(&mapping), types)
         });
-        (type_index, eq_index)
+        (type_id, eq_index)
     }
 
     fn code_eq(&mut self, type_: &Arc<Type>) -> Function {
         if type_.is_string() {
             self.code_string_eq()
         } else if let Some(types) = type_.tuple_types() {
-            let type_index = self.tuple_type_index(types.clone());
-            self.code_composite_eq(type_index, types)
+            let type_id = self.tuple_type_id(types.clone());
+            self.code_composite_eq(type_id, types)
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             match custom_type {
                 CustomType::Struct {
                     custom_type,
                     constructor,
                 } => {
-                    let (type_index, types) =
-                        self.mono_struct_type_index(type_, &custom_type, &constructor, &args);
-                    self.code_composite_eq(type_index, types)
+                    let (type_id, types) =
+                        self.mono_struct_type_id(type_, &custom_type, &constructor, &args);
+                    self.code_composite_eq(type_id, types)
                 }
                 CustomType::Union { custom_type, .. } => {
-                    let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
-                    self.code_union_eq(type_, supertype_index, &custom_type, &args)
+                    let supertype_id = self.mono_union_supertype_id(type_, &custom_type);
+                    self.code_union_eq(type_, supertype_id, &custom_type, &args)
                 }
                 CustomType::External { .. } | CustomType::Enum { .. } => {
                     panic!("external/enum types should not reach code generation")
@@ -545,7 +545,7 @@ impl<'a> Generator<'a> {
         function
     }
 
-    pub(super) fn function_string_starts_with(&mut self) -> FunctionIndex {
+    pub(super) fn function_string_starts_with(&mut self) -> FunctionId {
         self.get_function_builtin(BuiltinFunction::StringStartsWith, |s| {
             s.code_string_starts_with()
         })
@@ -611,15 +611,15 @@ impl<'a> Generator<'a> {
 
     fn code_composite_eq(
         &mut self,
-        type_index: TypeIndex,
+        type_id: TypeId,
         types: impl IntoIterator<Item = Arc<Type>>,
     ) -> Function {
-        self.code_composite_or_union_eq(type_index, None, types)
+        self.code_composite_or_union_eq(type_id, None, types)
     }
 
     fn code_composite_or_union_eq(
         &mut self,
-        type_index: TypeIndex,
+        type_id: TypeId,
         field_mapping: Option<&[u32]>,
         types: impl IntoIterator<Item = Arc<Type>>,
     ) -> Function {
@@ -645,9 +645,9 @@ impl<'a> Generator<'a> {
             #[rustfmt::skip]
             let _ = instructions
                 .local_get(a)
-                .struct_get(type_index, field_index)
+                .struct_get(type_id, field_index)
                 .local_get(b)
-                .struct_get(type_index, field_index)
+                .struct_get(type_id, field_index)
                 .eq(self.function_eq(&type_))
                 .bool_not()
                 .if_(BlockType::Empty)
@@ -662,7 +662,7 @@ impl<'a> Generator<'a> {
     fn code_union_eq(
         &mut self,
         type_: &Arc<Type>,
-        supertype_index: TypeIndex,
+        supertype_id: TypeId,
         custom_type: &TypedCustomType,
         args: &[Arc<Type>],
     ) -> Function {
@@ -704,11 +704,11 @@ impl<'a> Generator<'a> {
         let _ = instructions
             .local_get(a)
             .ref_as_non_null()
-            .struct_get(supertype_index, 0)
+            .struct_get(supertype_id, 0)
             .local_tee(tag)
             .local_get(b)
             .ref_as_non_null()
-            .struct_get(supertype_index, 0)
+            .struct_get(supertype_id, 0)
             .i32_ne()
             .if_(BlockType::Empty)
               .bool_const(false)
@@ -726,14 +726,14 @@ impl<'a> Generator<'a> {
             if null_tag == Some(i) {
                 let _ = instructions.unreachable();
             } else {
-                let (type_index, eq_index) =
+                let (type_id, eq_index) =
                     self.function_variant_eq(type_, custom_type, constructor, args);
                 #[rustfmt::skip]
                 let _ = instructions
                     .local_get(a)
-                    .ref_cast_non_null(HeapType::Concrete(type_index.0))
+                    .ref_cast_non_null(HeapType::Concrete(type_id.0))
                     .local_get(b)
-                    .ref_cast_non_null(HeapType::Concrete(type_index.0))
+                    .ref_cast_non_null(HeapType::Concrete(type_id.0))
                     .call(eq_index)
                     .return_();
             }
@@ -751,7 +751,7 @@ impl<'a> Generator<'a> {
         let (_, _, args) = return_
             .named_type_information()
             .expect("named type information");
-        let (type_index, tag) = match &variant.custom_type {
+        let (type_id, tag) = match &variant.custom_type {
             CustomType::External { .. } | CustomType::Enum { .. } => {
                 panic!("external/enum types should not reach code generation")
             }
@@ -760,24 +760,24 @@ impl<'a> Generator<'a> {
                 constructor,
                 ..
             } => (
-                self.mono_struct_type_index(&return_, custom_type, constructor, &args)
+                self.mono_struct_type_id(&return_, custom_type, constructor, &args)
                     .0,
                 None,
             ),
             CustomType::Union { custom_type, .. } => {
-                let (_, type_index, _) = self.mono_union_subtype_index(
+                let (_, type_id, _) = self.mono_union_subtype_id(
                     &return_,
                     custom_type,
                     &variant.constructor,
                     &args,
                 );
-                (type_index, variant.tag)
+                (type_id, variant.tag)
             }
         };
         let null_supertype = if num_fields == 0 {
             if let CustomType::Union { custom_type, .. } = &variant.custom_type {
                 if Self::null_variant_tag(custom_type).is_some() {
-                    Some(self.mono_union_supertype_index(&return_, custom_type))
+                    Some(self.mono_union_supertype_id(&return_, custom_type))
                 } else {
                     None
                 }
@@ -799,7 +799,7 @@ impl<'a> Generator<'a> {
             None
         };
         self.code_variant_constructor(
-            type_index,
+            type_id,
             num_fields,
             tag,
             null_supertype,
@@ -809,17 +809,17 @@ impl<'a> Generator<'a> {
 
     fn code_variant_constructor(
         &mut self,
-        struct_index: TypeIndex,
+        struct_index: TypeId,
         num_fields: u32,
         tag: Option<i32>,
-        null_supertype: Option<TypeIndex>,
+        null_supertype: Option<TypeId>,
         field_mapping: Option<&[u32]>,
     ) -> Function {
         let mut function = Function::new(vec![]);
         let mut instructions = function.extend_instructions(self);
-        if let Some(supertype_index) = null_supertype {
+        if let Some(supertype_id) = null_supertype {
             let _ = instructions
-                .ref_null(HeapType::Concrete(supertype_index.0))
+                .ref_null(HeapType::Concrete(supertype_id.0))
                 .end();
             return function;
         }
@@ -994,7 +994,7 @@ impl<'a> Generator<'a> {
         function
     }
 
-    pub(super) fn function_repr(&mut self, type_: &Arc<Type>) -> FunctionIndex {
+    pub(super) fn function_repr(&mut self, type_: &Arc<Type>) -> FunctionId {
         if type_.is_int() {
             return self.get_function_builtin_external(BuiltinFunctionExternal::IntRepr);
         }
@@ -1054,13 +1054,13 @@ impl<'a> Generator<'a> {
         custom_type: &TypedCustomType,
         constructor: &TypedRecordConstructor,
         args: &[Arc<Type>],
-    ) -> (TypeIndex, FunctionIndex) {
+    ) -> (TypeId, FunctionId) {
         let name = self.type_pretty_name(type_);
-        let (_, type_index, types) =
-            self.mono_union_subtype_index(type_, custom_type, constructor, args);
+        let (_, type_id, types) =
+            self.mono_union_subtype_id(type_, custom_type, constructor, args);
         let constructor_name = constructor.name.clone();
         let builtin = BuiltinFunction::CustomTypeRepr(
-            self.val_type_ref(type_index),
+            self.val_type_ref(type_id),
             name + "." + constructor_name.clone(),
             Some(constructor_name.clone()),
         );
@@ -1072,9 +1072,9 @@ impl<'a> Generator<'a> {
             .expect("constructor in union");
         let mapping = layout.fields(variant_index).to_vec();
         let repr_index = self.get_function_builtin(builtin, |s| {
-            s.code_composite_repr(&constructor_name, Some(&mapping), type_index, &types)
+            s.code_composite_repr(&constructor_name, Some(&mapping), type_id, &types)
         });
-        (type_index, repr_index)
+        (type_id, repr_index)
     }
 
     pub(super) fn code_float_repr(&self) -> Function {
@@ -1227,7 +1227,7 @@ impl<'a> Generator<'a> {
         let list_type = type_::list(item_type.clone());
         let (custom_type, cons, _, args) = self.list_type_cons(&list_type);
         let (_, struct_index, _) =
-            self.mono_union_subtype_index(&list_type, &custom_type, &cons, &args);
+            self.mono_union_subtype_id(&list_type, &custom_type, &cons, &args);
         let mut function = Function::new(vec![(1, ValType::I32)]);
         // params
         let lst = 0; // List(a)
@@ -1297,15 +1297,15 @@ impl<'a> Generator<'a> {
     }
 
     fn code_tuple_repr(&mut self, types: &[Arc<Type>]) -> Function {
-        let type_index = self.tuple_type_index(types.iter().cloned());
-        self.code_composite_repr(&"#".into(), None, type_index, types)
+        let type_id = self.tuple_type_id(types.iter().cloned());
+        self.code_composite_repr(&"#".into(), None, type_id, types)
     }
 
     fn code_composite_repr(
         &mut self,
         name: &EcoString,
         field_mapping: Option<&[u32]>,
-        type_index: TypeIndex,
+        type_id: TypeId,
         types: &[Arc<Type>],
     ) -> Function {
         let mut function = Function::new(vec![(1, ValType::I32)]);
@@ -1342,7 +1342,7 @@ impl<'a> Generator<'a> {
                 .byte_store(b'(')
                 .i32_inc(dest)
                 .local_get(value)
-                .struct_get(type_index, first_idx)
+                .struct_get(type_id, first_idx)
                 .local_get(dest)
                 .call(self.function_repr(first_type))
                 .local_get(dest)
@@ -1358,7 +1358,7 @@ impl<'a> Generator<'a> {
                     .byte_store(b' ')
                     .i32_inc(dest)
                     .local_get(value)
-                    .struct_get(type_index, field_index)
+                    .struct_get(type_id, field_index)
                     .local_get(dest)
                     .call(self.function_repr(type_))
                     .local_get(dest)
@@ -1457,13 +1457,13 @@ impl<'a> Generator<'a> {
                 custom_type,
                 constructor,
             } => {
-                let (type_index, types) =
-                    self.mono_struct_type_index(type_, custom_type, constructor, args);
-                return self.code_composite_repr(&constructor.name, None, type_index, &types);
+                let (type_id, types) =
+                    self.mono_struct_type_id(type_, custom_type, constructor, args);
+                return self.code_composite_repr(&constructor.name, None, type_id, &types);
             }
             CustomType::Union { custom_type, .. } => {
                 let _ = instructions.block(BlockType::Result(ValType::I32));
-                let supertype_index = self.mono_union_supertype_index(type_, custom_type);
+                let supertype_id = self.mono_union_supertype_id(type_, custom_type);
                 let null_tag = Self::null_variant_tag(custom_type);
 
                 // Handle null variant before struct_get
@@ -1494,19 +1494,19 @@ impl<'a> Generator<'a> {
                 let _ = instructions
                     .local_get(value)
                     .ref_as_non_null()
-                    .struct_get(supertype_index, 0)
+                    .struct_get(supertype_id, 0)
                     .br_table(0..n - 1, n - 1);
                 for (i, constructor) in custom_type.constructors.iter().enumerate() {
                     let _ = instructions.end();
                     if null_tag == Some(i) {
                         let _ = instructions.unreachable();
                     } else {
-                        let (type_index, repr_index) =
+                        let (type_id, repr_index) =
                             self.function_variant_repr(type_, custom_type, constructor, args);
                         #[rustfmt::skip]
                         let _ = instructions
                             .local_get(value)
-                            .ref_cast_non_null(HeapType::Concrete(type_index.0))
+                            .ref_cast_non_null(HeapType::Concrete(type_id.0))
                             .local_get(ptr)
                             .call(repr_index)
                             .br(n - 1 - i as u32);
@@ -1596,7 +1596,7 @@ impl<'a> Generator<'a> {
                 .local_get(i)
                 .local_get(src)
                 .i32_load8_u(MemArg { offset: 0, align: 0, memory_index: 0 })
-                .array_set(self.string.type_index)
+                .array_set(self.string.type_id)
                 .i32_inc(src)
                 .i32_inc(i)
                 .br(1)
@@ -1686,7 +1686,7 @@ impl<'a> Generator<'a> {
         &mut self,
         builtin: BuiltinFunction,
         code_fn: impl FnOnce(&mut Self) -> Function,
-    ) -> FunctionIndex {
+    ) -> FunctionId {
         if let Some(index) = self.builtins.get(&builtin) {
             return *index;
         }

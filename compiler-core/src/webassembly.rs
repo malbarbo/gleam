@@ -28,12 +28,10 @@ use std::{
     str::Chars,
     sync::Arc,
 };
-use wasm_encoder::{
-    BlockType, CodeSection, CompositeInnerType, CompositeType, ConstExpr, DataCountSection,
-    DataSection, ElementSection, Elements, EntityType, ExportKind, ExportSection, FieldType,
-    Function, FunctionSection, GlobalSection, GlobalType, HeapType, ImportSection, IndirectNameMap,
-    InstructionSink, MemArg, MemorySection, MemoryType, Module, NameMap, NameSection, RefType,
-    StartSection, StorageType, StructType, SubType, TypeSection, ValType,
+use walrus::{
+    ConstExpr, DataId, FieldType, FunctionBuilder, FunctionId, GlobalId, HeapType,
+    InstrSeqBuilder, LocalId, MemoryId, RefType, StorageType, TypeId, ValType,
+    ir::{BinaryOp, ExtendedLoad, InstrSeqId, InstrSeqType, LoadKind, MemArg, StoreKind, UnaryOp, Value},
 };
 
 use crate::{
@@ -80,38 +78,9 @@ const STDERR: i32 = 2;
 
 const BOOL_VALTYPE: ValType = ValType::I32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct FunctionIndex(u32);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct TypeIndex(u32);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct GlobalIndex(u32);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct LocalIndex(u32);
-
-impl From<FunctionIndex> for u32 {
-    fn from(i: FunctionIndex) -> u32 {
-        i.0
-    }
-}
-impl From<TypeIndex> for u32 {
-    fn from(i: TypeIndex) -> u32 {
-        i.0
-    }
-}
-impl From<GlobalIndex> for u32 {
-    fn from(i: GlobalIndex) -> u32 {
-        i.0
-    }
-}
-impl From<LocalIndex> for u32 {
-    fn from(i: LocalIndex) -> u32 {
-        i.0
-    }
-}
+// walrus types are used directly for indices:
+// FunctionId → FunctionId, TypeId → TypeId,
+// GlobalId → GlobalId, LocalId → LocalId.
 
 const OK_GENERIC_ID: u64 = u64::MAX;
 const ERROR_GENERIC_ID: u64 = u64::MAX - 1;
@@ -194,9 +163,7 @@ pub fn module(
     generator.compile()
 }
 
-fn eliminate_dead_code(wasm: Vec<u8>, builtin_data_names: &[String]) -> Vec<u8> {
-    let mut module =
-        walrus::Module::from_buffer(&wasm).expect("generated wasm to be a valid module");
+fn eliminate_dead_code(module: &mut walrus::Module, builtin_data_names: &[String]) {
     // Clear element segments so declared functions are not treated as roots.
     for elem in module.elements.iter().map(|e| e.id()).collect::<Vec<_>>() {
         module.elements.delete(elem);
@@ -230,7 +197,7 @@ fn eliminate_dead_code(wasm: Vec<u8>, builtin_data_names: &[String]) -> Vec<u8> 
     for &(id, _, _) in &active_data {
         module.data.get_mut(id).kind = walrus::DataKind::Passive;
     }
-    walrus::passes::gc::run(&mut module);
+    walrus::passes::gc::run(module);
     // Re-add memory export and restore only needed data segments.
     let surviving_mem = module.memories.iter().next().map(|m| m.id());
     if let Some(mem) = surviving_mem {
@@ -280,7 +247,6 @@ fn eliminate_dead_code(wasm: Vec<u8>, builtin_data_names: &[String]) -> Vec<u8> 
             }
         }
     }
-    module.emit_wasm()
 }
 
 /// Check if a data segment is needed based on its name and surviving functions.
@@ -344,7 +310,7 @@ impl WasmType {
     fn union(
         name: EcoString,
         fields: Vec<(EcoString, ValType)>,
-        supertype: Option<TypeIndex>,
+        supertype: Option<TypeId>,
     ) -> WasmType {
         WasmType {
             name: Some(name),
@@ -358,31 +324,31 @@ enum WasmTypeKind {
     Array(StorageType),
     Function(Vec<ValType>, Vec<ValType>),
     Struct(Vec<(EcoString, ValType)>),
-    Union(Vec<(EcoString, ValType)>, Option<TypeIndex>),
+    Union(Vec<(EcoString, ValType)>, Option<TypeId>),
 }
 
 #[derive(Clone)]
 enum WasmConst {
     String {
-        dest: GlobalIndex,
-        src: GlobalIndex,
+        dest: GlobalId,
+        src: GlobalId,
     },
     Constant {
-        global_index: GlobalIndex,
+        global_index: GlobalId,
         value: Box<TypedConstant>,
     },
     Struct {
-        global_index: GlobalIndex,
-        type_index: TypeIndex,
+        global_index: GlobalId,
+        type_id: TypeId,
         tag: Option<i32>,
         elements: Vec<TypedConstant>,
     },
     Function {
-        dest: GlobalIndex,
-        src: FunctionIndex,
+        dest: GlobalId,
+        src: FunctionId,
     },
     Var {
-        global_index: GlobalIndex,
+        global_index: GlobalId,
         name: EcoString,
     },
 }
@@ -391,10 +357,10 @@ enum WasmConst {
 struct WasmFunction {
     name: EcoString,
     export: bool,
-    index: FunctionIndex,
-    type_index: TypeIndex,
+    index: FunctionId,
+    type_id: TypeId,
     code: Rc<Vec<u8>>,
-    locals: Vec<(LocalIndex, EcoString)>,
+    locals: Vec<(LocalId, EcoString)>,
 }
 
 impl std::cmp::Eq for WasmFunction {}
@@ -458,7 +424,7 @@ struct Variant {
 #[derive(Clone)]
 struct LocalFunction {
     location: SrcSpan,
-    parent_id: FunctionIndex,
+    parent_id: FunctionId,
     type_: Arc<Type>,
     arguments: Vec<TypedArg>,
     body: Vec<TypedStatement>,
@@ -548,24 +514,21 @@ impl UnionFieldLayout {
 }
 
 struct Generator<'a> {
-    global_section: GlobalSection,
-    import_section: ImportSection,
-    export_section: ExportSection,
-    data_section: DataSection,
-    /// Names of builtin data segments, indexed by segment index.
+    pub(super) wasm_module: walrus::Module,
+    memory: Option<MemoryId>,
+    /// Names of builtin data segments, in the order they appear in the
+    /// builtins module. Used by [`eliminate_dead_code`] to decide which
+    /// data segments to keep after dead-code elimination.
     builtin_data_names: Vec<String>,
-    global_names: NameMap,
-    wasm_types: IndexMap<WasmType, TypeIndex>,
+    wasm_types: IndexMap<WasmType, TypeId>,
     types: HashMap<(EcoString, EcoString), CustomType>,
     variants: HashMap<(EcoString, EcoString), Variant>,
-    functions: BTreeSet<WasmFunction>,
-    function_next_id: FunctionIndex,
     local_functions: HashMap<EcoString, LocalFunction>,
-    builtins: HashMap<BuiltinFunction, FunctionIndex>,
-    builtins_external: HashMap<BuiltinFunctionExternal, FunctionIndex>,
-    main: Option<FunctionIndex>,
-    // String literals and its index in the global section
-    strings: HashMap<EcoString, GlobalIndex>,
+    builtins: HashMap<BuiltinFunction, FunctionId>,
+    builtins_external: HashMap<BuiltinFunctionExternal, FunctionId>,
+    main: Option<FunctionId>,
+    /// String literals and its global id.
+    strings: HashMap<EcoString, GlobalId>,
     consts: Vec<WasmConst>,
     globals: Rc<RefCell<Vec<Id>>>,
     int: IntType,
@@ -586,18 +549,21 @@ impl<'a> Generator<'a> {
         all_modules: &'a HashMap<EcoString, &'a TypedModule>,
         all_line_numbers: &'a HashMap<EcoString, LineNumbers>,
     ) -> Self {
+        let mut wasm_module = walrus::Module::from_buffer(BUILTINS_WASM)
+            .expect("builtins wasm to be a valid module");
+        let memory = wasm_module.memories.iter().next().map(|m| m.id());
+        // String is a mutable i8 array. Add it once and reuse for all string literals.
+        let string_type_id = wasm_module.types.add_array(StringType::field_type());
+        wasm_module.types.get_mut(string_type_id).name = Some("String".to_string());
+        let mut wasm_types = IndexMap::new();
+        let _ = wasm_types.insert(StringType::wasm_type(), string_type_id);
         Generator {
-            global_section: GlobalSection::new(),
-            import_section: ImportSection::new(),
-            export_section: ExportSection::new(),
-            data_section: DataSection::new(),
+            wasm_module,
+            memory,
             builtin_data_names: Vec::new(),
-            global_names: NameMap::new(),
-            wasm_types: IndexMap::new(),
+            wasm_types,
             types: HashMap::new(),
             variants: HashMap::new(),
-            functions: BTreeSet::new(),
-            function_next_id: FunctionIndex(0),
             local_functions: HashMap::new(),
             builtins: HashMap::new(),
             builtins_external: HashMap::new(),
@@ -608,7 +574,7 @@ impl<'a> Generator<'a> {
             int: IntType::I32,
             float: FloatType::F64,
             string: StringType {
-                type_index: TypeIndex(0),
+                type_id: string_type_id,
             },
             module,
             line_numbers,
@@ -716,170 +682,10 @@ impl<'a> Generator<'a> {
 
     fn compile(mut self) -> Result<Vec<u8>, Error> {
         let start = self.generate()?;
-
-        let mut module = Module::default();
-
-        // type section
-        let mut type_section = TypeSection::new();
-        for (type_, _index) in &self.wasm_types {
-            match &type_.kind {
-                WasmTypeKind::Array(storage_type) => type_section.ty().array(storage_type, true),
-                WasmTypeKind::Function(params, results) => {
-                    type_section.ty().function(params.clone(), results.clone())
-                }
-                WasmTypeKind::Struct(val_types) => {
-                    type_section
-                        .ty()
-                        .struct_(val_types.iter().map(|val_type| FieldType {
-                            element_type: StorageType::Val(val_type.1),
-                            mutable: false,
-                        }));
-                }
-                WasmTypeKind::Union(val_types, supertype_idx) => {
-                    type_section.ty().subtype(&SubType {
-                        is_final: false,
-                        supertype_idx: supertype_idx.map(|i| i.0),
-                        composite_type: CompositeType {
-                            inner: CompositeInnerType::Struct(StructType {
-                                fields: iter::once(&("tag".into(), ValType::I32))
-                                    .chain(val_types)
-                                    .map(|val_type| FieldType {
-                                        element_type: StorageType::Val(val_type.1),
-                                        mutable: false,
-                                    })
-                                    .collect_vec()
-                                    .into(),
-                            }),
-                            shared: false,
-                        },
-                    });
-                }
-            }
-        }
-        let _ = module.section(&type_section);
-
-        // import section
-        let _ = module.section(&self.import_section);
-
-        // function section
-        let mut function_section = FunctionSection::new();
-        for function in &self.functions {
-            let _ = function_section.function(function.type_index.0);
-        }
-        let _ = module.section(&function_section);
-
-        // memory section (only needed when builtins use linear memory)
-        if !self.import_section.is_empty() {
-            let mut memory_section = MemorySection::new();
-            let _ = memory_section.memory(MemoryType {
-                minimum: 17,
-                maximum: None,
-                memory64: false,
-                shared: false,
-                page_size_log2: None,
-            });
-            let _ = module.section(&memory_section);
-        }
-
-        // global section
-        let _ = module.section(&self.global_section);
-
-        // export section
-        for function in self.functions.iter().filter(|f| f.export) {
-            let _ = self
-                .export_section
-                .export(&function.name, ExportKind::Func, function.index.0);
-        }
-        let _ = module.section(&self.export_section);
-
-        // start section
-        let _ = module.section(&StartSection {
-            function_index: start,
-        });
-
-        // element section
-        let mut element_section = ElementSection::new();
-        let _ = element_section.declared(Elements::Functions(
-            self.functions.iter().map(|f| f.index.0).collect(),
-        ));
-        let _ = module.section(&element_section);
-
-        // data count section
-        let _ = module.section(&DataCountSection {
-            count: self.data_section.len(),
-        });
-
-        // code section
-        let mut codes_section = CodeSection::new();
-        for function in &self.functions {
-            let _ = codes_section.raw(&function.code);
-        }
-        let _ = module.section(&codes_section);
-
-        // data section
-        let _ = module.section(&self.data_section);
-
-        // name section
-        let mut names = NameSection::new();
-        names.module(&self.module.name);
-
-        // name section / function names
-        let mut function_names = NameMap::new();
-        for function in &self.functions {
-            function_names.append(function.index.0, &function.name);
-        }
-        names.functions(&function_names);
-
-        // name section / type names
-        let mut type_names = NameMap::new();
-        for (wasm_type, index) in &self.wasm_types {
-            if let Some(name) = &wasm_type.name {
-                type_names.append(index.0, name);
-            }
-        }
-        names.types(&type_names);
-
-        // name section / global names
-        names.globals(&self.global_names);
-
-        // name section / local names
-        let mut locals = IndirectNameMap::new();
-        for function in &self.functions {
-            let mut name_map = NameMap::new();
-            for (index, name) in &function.locals {
-                name_map.append(index.0, name);
-            }
-            locals.append(function.index.0, &name_map);
-        }
-        names.locals(&locals);
-
-        // name section / field names
-        let mut fields = IndirectNameMap::new();
-        for (type_, index) in &self.wasm_types {
-            let mut name_map = NameMap::new();
-            match &type_.kind {
-                WasmTypeKind::Struct(items) => {
-                    for (index, (name, _)) in items.iter().enumerate() {
-                        name_map.append(index as u32, name);
-                    }
-                }
-                WasmTypeKind::Union(items, _) => {
-                    name_map.append(0, "tag");
-                    for (index, (name, _)) in items.iter().enumerate() {
-                        name_map.append(index as u32 + 1, name);
-                    }
-                }
-                _ => {}
-            }
-            fields.append(index.0, &name_map);
-        }
-        names.fields(&fields);
-
-        let _ = module.section(&names);
-
-        // finalize
-        let wasm = module.finish();
-        Ok(eliminate_dead_code(wasm, &self.builtin_data_names))
+        self.wasm_module.name = Some(self.module.name.to_string());
+        self.wasm_module.start = Some(start);
+        eliminate_dead_code(&mut self.wasm_module, &self.builtin_data_names);
+        Ok(self.wasm_module.emit_wasm())
     }
 
     fn generate(&mut self) -> Result<u32, Error> {
@@ -1108,17 +914,17 @@ impl<'a> Generator<'a> {
         let builtins = parse_builtins(BUILTINS_WASM);
 
         // Add imports
-        for (module, name, type_index) in &builtins.imports {
+        for (module, name, type_id) in &builtins.imports {
             let (params, results) = builtins
                 .types
-                .get(*type_index)
+                .get(*type_id)
                 .expect("import type at index")
                 .clone();
-            let type_index = self.function_type_index_with_val_types(params, results);
+            let type_id = self.function_type_id_with_val_types(params, results);
             let _ = self
                 .import_section
-                .import(module, name, EntityType::Function(type_index.0));
-            self.function_next_id = FunctionIndex(self.function_next_id.0 + 1);
+                .import(module, name, EntityType::Function(type_id.0));
+            self.function_next_id = FunctionId(self.function_next_id.0 + 1);
         }
 
         // Add globals
@@ -1310,8 +1116,8 @@ impl<'a> Generator<'a> {
                 .map(|c| (c, PRELUDE_MODULE_NAME)),
         );
         // Add String
-        let index = TypeIndex(self.wasm_types.len() as u32);
-        self.string.type_index = *self
+        let index = TypeId(self.wasm_types.len() as u32);
+        self.string.type_id = *self
             .wasm_types
             .entry(StringType::wasm_type())
             .or_insert(index);
@@ -1555,7 +1361,7 @@ impl<'a> Generator<'a> {
             {
                 let id = self.function(function, true, function_name(function).into());
                 if is_main_funtion(function) {
-                    self.main = Some(FunctionIndex(id.index))
+                    self.main = Some(FunctionId(id.index))
                 }
             }
             // Private, generic, and external functions are compiled elsewhere.
@@ -1572,11 +1378,11 @@ impl<'a> Generator<'a> {
         } else if type_.is_string() {
             self.string.val_type()
         } else if let Some(types) = type_.tuple_types() {
-            let type_index = self.tuple_type_index(types);
-            self.composite_val_type(type_index)
+            let type_id = self.tuple_type_id(types);
+            self.composite_val_type(type_id)
         } else if let Some((params, return_)) = type_.fn_types() {
-            let type_index = self.function_type_index(params, Some(return_));
-            self.function_val_type(type_index)
+            let type_id = self.function_type_id(params, Some(return_));
+            self.function_val_type(type_id)
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             self.custom_type_val_type(type_, &custom_type, args)
         } else if let Some((_, name)) = type_.named_type_name() {
@@ -1601,29 +1407,29 @@ impl<'a> Generator<'a> {
             .collect()
     }
 
-    fn val_type_ref(&self, type_index: TypeIndex) -> ValType {
+    fn val_type_ref(&self, type_id: TypeId) -> ValType {
         RefType {
-            heap_type: HeapType::Concrete(type_index.0),
+            heap_type: HeapType::Concrete(type_id.0),
             nullable: false,
         }
         .into()
     }
 
-    fn val_type_ref_nullable(&self, type_index: TypeIndex) -> ValType {
+    fn val_type_ref_nullable(&self, type_id: TypeId) -> ValType {
         RefType {
-            heap_type: HeapType::Concrete(type_index.0),
+            heap_type: HeapType::Concrete(type_id.0),
             nullable: true,
         }
         .into()
     }
 
-    fn type_index(&mut self, type_: &Arc<Type>) -> TypeIndex {
+    fn type_id(&mut self, type_: &Arc<Type>) -> TypeId {
         if type_.is_string() {
-            self.string.type_index
+            self.string.type_id
         } else if let Some(types) = type_.tuple_types() {
-            self.tuple_type_index(types)
+            self.tuple_type_id(types)
         } else if let Some((params, return_)) = type_.fn_types() {
-            self.function_type_index(params, Some(return_))
+            self.function_type_id(params, Some(return_))
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             match custom_type {
                 CustomType::External { .. } | CustomType::Enum { .. } => {
@@ -1633,18 +1439,18 @@ impl<'a> Generator<'a> {
                     custom_type,
                     constructor,
                 } => {
-                    let (type_index, _) =
-                        self.mono_struct_type_index(type_, &custom_type, &constructor, &args);
-                    type_index
+                    let (type_id, _) =
+                        self.mono_struct_type_id(type_, &custom_type, &constructor, &args);
+                    type_id
                 }
                 CustomType::Union { custom_type, .. } => {
                     if let Some(constructor) = custom_type_inferred_constructor(&custom_type, type_)
                     {
-                        let (_, type_index, _) =
-                            self.mono_union_subtype_index(type_, &custom_type, constructor, &args);
-                        type_index
+                        let (_, type_id, _) =
+                            self.mono_union_subtype_id(type_, &custom_type, constructor, &args);
+                        type_id
                     } else {
-                        self.mono_union_supertype_index(type_, &custom_type)
+                        self.mono_union_supertype_id(type_, &custom_type)
                     }
                 }
             }
@@ -1653,36 +1459,36 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn function_type_index(
+    fn function_type_id(
         &mut self,
         arguments: impl IntoIterator<Item = Arc<Type>>,
         return_: Option<Arc<Type>>,
-    ) -> TypeIndex {
+    ) -> TypeId {
         let params = self.val_types(arguments);
         let results = self.val_types(return_);
-        self.function_type_index_with_val_types(params, results)
+        self.function_type_id_with_val_types(params, results)
     }
 
-    fn function_type_index_with_val_types(
+    fn function_type_id_with_val_types(
         &mut self,
         params: Vec<ValType>,
         result: Vec<ValType>,
-    ) -> TypeIndex {
-        let index = TypeIndex(self.wasm_types.len() as u32);
+    ) -> TypeId {
+        let index = TypeId(self.wasm_types.len() as u32);
         *self
             .wasm_types
             .entry(WasmType::function(params, result))
             .or_insert(index)
     }
 
-    fn function_val_type(&self, type_index: TypeIndex) -> ValType {
-        self.val_type_ref(type_index)
+    fn function_val_type(&self, type_id: TypeId) -> ValType {
+        self.val_type_ref(type_id)
     }
 
-    fn tuple_type_index(&mut self, types: impl IntoIterator<Item = Arc<Type>>) -> TypeIndex {
+    fn tuple_type_id(&mut self, types: impl IntoIterator<Item = Arc<Type>>) -> TypeId {
         let types = types.into_iter().collect_vec();
         let val_types = self.val_types(types.iter().cloned());
-        let index = TypeIndex(self.wasm_types.len() as u32);
+        let index = TypeId(self.wasm_types.len() as u32);
         let name = self
             .type_pretty_name(&type_::tuple(types))
             .replace("#", "Tuple");
@@ -1699,12 +1505,12 @@ impl<'a> Generator<'a> {
             .or_insert(index)
     }
 
-    fn struct_type_index(
+    fn struct_type_id(
         &mut self,
         name: EcoString,
         fields: Vec<(EcoString, ValType)>,
-    ) -> TypeIndex {
-        let index = TypeIndex(self.wasm_types.len() as u32);
+    ) -> TypeId {
+        let index = TypeId(self.wasm_types.len() as u32);
         *self
             .wasm_types
             .entry(WasmType::struct_(name, fields))
@@ -1731,17 +1537,17 @@ impl<'a> Generator<'a> {
             .collect()
     }
 
-    fn mono_struct_type_index(
+    fn mono_struct_type_id(
         &mut self,
         type_: &Arc<Type>,
         custom_type: &TypedCustomType,
         constructor: &TypedRecordConstructor,
         args: &[Arc<Type>],
-    ) -> (TypeIndex, Vec<Arc<Type>>) {
+    ) -> (TypeId, Vec<Arc<Type>>) {
         let types = Monomorphizer::variant_constructor(custom_type, constructor, args);
         let fields = self.fields(constructor, &types);
         let name = self.type_pretty_name(type_);
-        (self.struct_type_index(name, fields), types)
+        (self.struct_type_id(name, fields), types)
     }
 
     fn union_layout(&self, type_: &Arc<Type>) -> UnionFieldLayout {
@@ -1754,11 +1560,11 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn mono_union_supertype_index(
+    fn mono_union_supertype_id(
         &mut self,
         type_: &Arc<Type>,
         custom_type: &TypedCustomType,
-    ) -> TypeIndex {
+    ) -> TypeId {
         let layout = self.union_layout(type_);
         let first = custom_type
             .constructors
@@ -1786,22 +1592,22 @@ impl<'a> Generator<'a> {
         }
 
         let name = custom_type.name.clone();
-        let index = TypeIndex(self.wasm_types.len() as u32);
+        let index = TypeId(self.wasm_types.len() as u32);
         *self
             .wasm_types
             .entry(WasmType::union(name, shared_fields, None))
             .or_insert(index)
     }
 
-    fn mono_union_subtype_index(
+    fn mono_union_subtype_id(
         &mut self,
         type_: &Arc<Type>,
         custom_type: &TypedCustomType,
         constructor: &TypedRecordConstructor,
         args: &[Arc<Type>],
-    ) -> (TypeIndex, TypeIndex, Vec<Arc<Type>>) {
+    ) -> (TypeId, TypeId, Vec<Arc<Type>>) {
         let layout = self.union_layout(type_);
-        let supertype_index = self.mono_union_supertype_index(type_, custom_type);
+        let supertype_id = self.mono_union_supertype_id(type_, custom_type);
         let types = Monomorphizer::variant_constructor(custom_type, constructor, args);
         let variant_index = custom_type
             .constructors
@@ -1836,16 +1642,16 @@ impl<'a> Generator<'a> {
         name += ".";
         name += constructor.name.clone();
 
-        let index = TypeIndex(self.wasm_types.len() as u32);
-        let type_index = *self
+        let index = TypeId(self.wasm_types.len() as u32);
+        let type_id = *self
             .wasm_types
-            .entry(WasmType::union(name, fields, Some(supertype_index)))
+            .entry(WasmType::union(name, fields, Some(supertype_id)))
             .or_insert(index);
-        (supertype_index, type_index, types)
+        (supertype_id, type_id, types)
     }
 
-    fn composite_val_type(&self, type_index: TypeIndex) -> ValType {
-        self.val_type_ref(type_index)
+    fn composite_val_type(&self, type_id: TypeId) -> ValType {
+        self.val_type_ref(type_id)
     }
 
     fn custom_type_val_type(
@@ -1863,11 +1669,11 @@ impl<'a> Generator<'a> {
                 ..
             } => {
                 let (struct_index, _) =
-                    self.mono_struct_type_index(type_, custom_type, constructor, &args);
+                    self.mono_struct_type_id(type_, custom_type, constructor, &args);
                 self.composite_val_type(struct_index)
             }
             CustomType::Union { custom_type, .. } => {
-                let struct_index = self.mono_union_supertype_index(type_, custom_type);
+                let struct_index = self.mono_union_supertype_id(type_, custom_type);
                 if Self::null_variant_tag(custom_type).is_some() {
                     self.val_type_ref_nullable(struct_index)
                 } else {
@@ -1902,30 +1708,30 @@ impl<'a> Generator<'a> {
                 let id = self.add_const(
                     const_name,
                     self.string.val_type_nullable(),
-                    const_expr_ref_null(self.string.type_index),
+                    const_expr_ref_null(self.string.type_id),
                     export,
                     true,
                 );
                 let src = self.string_index(value);
                 self.consts.push(WasmConst::String {
-                    dest: GlobalIndex(id.index),
+                    dest: GlobalId(id.index),
                     src,
                 });
                 id
             }
             Constant::Tuple { elements, .. } => {
-                let type_index = self.tuple_type_index(elements.iter().map(|e| e.type_()));
-                let val_type = self.val_type_ref_nullable(type_index);
+                let type_id = self.tuple_type_id(elements.iter().map(|e| e.type_()));
+                let val_type = self.val_type_ref_nullable(type_id);
                 let id = self.add_const(
                     const_name,
                     val_type,
-                    const_expr_ref_null(type_index),
+                    const_expr_ref_null(type_id),
                     export,
                     true,
                 );
                 self.consts.push(WasmConst::Struct {
-                    global_index: GlobalIndex(id.index),
-                    type_index,
+                    global_index: GlobalId(id.index),
+                    type_id,
                     tag: None,
                     elements: elements.clone(),
                 });
@@ -1936,17 +1742,17 @@ impl<'a> Generator<'a> {
                 let CustomType::Union { custom_type, .. } = custom_type else {
                     panic!("list type should be a union")
                 };
-                let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
-                let val_type = self.val_type_ref_nullable(supertype_index);
+                let supertype_id = self.mono_union_supertype_id(type_, &custom_type);
+                let val_type = self.val_type_ref_nullable(supertype_id);
                 let id = self.add_const(
                     const_name,
                     val_type,
-                    const_expr_ref_null(supertype_index),
+                    const_expr_ref_null(supertype_id),
                     export,
                     true,
                 );
                 self.consts.push(WasmConst::Constant {
-                    global_index: GlobalIndex(id.index),
+                    global_index: GlobalId(id.index),
                     value: Box::new(module_constant.value.as_ref().clone()),
                 });
                 id
@@ -1974,19 +1780,19 @@ impl<'a> Generator<'a> {
                         custom_type,
                         constructor,
                     } => {
-                        let (type_index, _) =
-                            self.mono_struct_type_index(type_, &custom_type, &constructor, &args);
-                        let val_type = self.val_type_ref_nullable(type_index);
+                        let (type_id, _) =
+                            self.mono_struct_type_id(type_, &custom_type, &constructor, &args);
+                        let val_type = self.val_type_ref_nullable(type_id);
                         let id = self.add_const(
                             const_name,
                             val_type,
-                            const_expr_ref_null(type_index),
+                            const_expr_ref_null(type_id),
                             export,
                             true,
                         );
                         self.consts.push(WasmConst::Struct {
-                            global_index: GlobalIndex(id.index),
-                            type_index,
+                            global_index: GlobalId(id.index),
+                            type_id,
                             tag: None,
                             elements: arguments.iter().map(|e| &e.value).cloned().collect(),
                         });
@@ -2000,19 +1806,19 @@ impl<'a> Generator<'a> {
                             .constructors
                             .get(index as usize)
                             .expect("constructor at index");
-                        let (_, type_index, _) =
-                            self.mono_union_subtype_index(type_, &custom_type, constructor, &args);
-                        let val_type = self.val_type_ref_nullable(type_index);
+                        let (_, type_id, _) =
+                            self.mono_union_subtype_id(type_, &custom_type, constructor, &args);
+                        let val_type = self.val_type_ref_nullable(type_id);
                         let id = self.add_const(
                             const_name,
                             val_type,
-                            const_expr_ref_null(type_index),
+                            const_expr_ref_null(type_id),
                             export,
                             true,
                         );
                         self.consts.push(WasmConst::Struct {
-                            global_index: GlobalIndex(id.index),
-                            type_index,
+                            global_index: GlobalId(id.index),
+                            type_id,
                             tag: Some(index.into()),
                             elements: arguments.iter().map(|e| &e.value).cloned().collect(),
                         });
@@ -2035,22 +1841,22 @@ impl<'a> Generator<'a> {
                 } else if let Some((CustomType::Enum { .. }, _)) = self.custom_type(type_) {
                     (ConstExpr::i32_const(0), ValType::I32)
                 } else {
-                    let type_index = self.type_index(type_);
+                    let type_id = self.type_id(type_);
                     (
-                        const_expr_ref_null(type_index),
-                        self.val_type_ref_nullable(type_index),
+                        const_expr_ref_null(type_id),
+                        self.val_type_ref_nullable(type_id),
                     )
                 };
                 let id = self.add_const(const_name, val_type, expr, export, true);
                 let var_id = self.var_id(&Scope::Global(self.globals.clone()), name, type_);
                 if let IdKind::Func = var_id.kind {
                     self.consts.push(WasmConst::Function {
-                        dest: GlobalIndex(id.index),
-                        src: FunctionIndex(var_id.index),
+                        dest: GlobalId(id.index),
+                        src: FunctionId(var_id.index),
                     });
                 } else {
                     self.consts.push(WasmConst::Var {
-                        global_index: GlobalIndex(id.index),
+                        global_index: GlobalId(id.index),
                         name: name.clone(),
                     });
                 }
@@ -2069,7 +1875,7 @@ impl<'a> Generator<'a> {
                     true,
                 );
                 self.consts.push(WasmConst::Constant {
-                    global_index: GlobalIndex(id.index),
+                    global_index: GlobalId(id.index),
                     value: Box::new(module_constant.value.as_ref().clone()),
                 });
                 id
@@ -2131,7 +1937,7 @@ impl<'a> Generator<'a> {
                 elements, type_, ..
             } => {
                 let (custom_type, cons, item_type, _) = self.list_type_cons(type_);
-                let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
+                let supertype_id = self.mono_union_supertype_id(type_, &custom_type);
                 let cons_variant =
                     self.variant_expect(PRELUDE_MODULE_NAME.into(), cons.name.clone());
                 let cons_fn = self.variant_constructor(
@@ -2139,16 +1945,16 @@ impl<'a> Generator<'a> {
                     type_.clone(),
                     cons_variant,
                 );
-                let _ = instructions.ref_null(HeapType::Concrete(supertype_index.0));
+                let _ = instructions.ref_null(HeapType::Concrete(supertype_id.0));
                 for element in elements.iter().rev() {
                     let _ = instructions.constant(self, element).call(cons_fn);
                 }
             }
             Constant::Tuple { elements, .. } => {
-                let type_index = self.tuple_type_index(elements.iter().map(|e| e.type_()));
+                let type_id = self.tuple_type_id(elements.iter().map(|e| e.type_()));
                 let _ = instructions
                     .constants(self, elements)
-                    .struct_new(type_index);
+                    .struct_new(type_id);
             }
             Constant::Record {
                 name,
@@ -2252,9 +2058,9 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn function_next_id(&mut self) -> FunctionIndex {
+    fn function_next_id(&mut self) -> FunctionId {
         let id = self.function_next_id;
-        self.function_next_id = FunctionIndex(self.function_next_id.0 + 1);
+        self.function_next_id = FunctionId(self.function_next_id.0 + 1);
         id
     }
 
@@ -2281,20 +2087,20 @@ impl<'a> Generator<'a> {
         self.local_functions = saved_local_functions;
         let _ = instructions.end();
 
-        let type_index = self.function_type_index(
+        let type_id = self.function_type_id(
             function_params_types(&function),
             Some(function.return_type.clone()),
         );
         let _ = self.functions.insert(WasmFunction {
             name,
             index,
-            type_index,
+            type_id,
             code: code.into_raw_body().into(),
             export,
             locals: locals
                 .names()
                 .into_iter()
-                .map(|(i, n)| (LocalIndex(i), n))
+                .map(|(i, n)| (LocalId(i), n))
                 .collect(),
         });
 
@@ -2354,17 +2160,17 @@ impl<'a> Generator<'a> {
         let _ = instructions.end();
 
         let (params, return_) = type_.fn_types().expect("function type");
-        let type_index = self.function_type_index(params, Some(return_));
+        let type_id = self.function_type_id(params, Some(return_));
         let _ = self.functions.insert(WasmFunction {
             name,
             index,
-            type_index,
+            type_id,
             code: code.into_raw_body().into(),
             export: false,
             locals: locals
                 .names()
                 .into_iter()
-                .map(|(i, n)| (LocalIndex(i), n))
+                .map(|(i, n)| (LocalId(i), n))
                 .collect(),
         });
 
@@ -2543,12 +2349,12 @@ impl<'a> Generator<'a> {
                 ..
             } => {
                 let (custom_type, cons, item_type, args) = self.list_type_cons(type_);
-                let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
-                let _ = self.mono_union_subtype_index(type_, &custom_type, &cons, &args);
+                let supertype_id = self.mono_union_supertype_id(type_, &custom_type);
+                let _ = self.mono_union_subtype_id(type_, &custom_type, &cons, &args);
                 if let Some(rest) = tail {
                     let _ = instructions.expression(self, locals, scope.clone(), rest);
                 } else {
-                    let _ = instructions.ref_null(HeapType::Concrete(supertype_index.0));
+                    let _ = instructions.ref_null(HeapType::Concrete(supertype_id.0));
                 }
                 let cons_variant =
                     self.variant_expect(PRELUDE_MODULE_NAME.into(), cons.name.clone());
@@ -2566,17 +2372,17 @@ impl<'a> Generator<'a> {
                 }
             }
             TypedExpr::Tuple { elements, .. } => {
-                let type_index = self.tuple_type_index(elements.iter().map(|e| e.type_()));
+                let type_id = self.tuple_type_id(elements.iter().map(|e| e.type_()));
                 let _ = instructions
                     .expressions(self, locals, scope.clone(), elements)
-                    .struct_new(type_index);
+                    .struct_new(type_id);
             }
             TypedExpr::TupleIndex { index, tuple, .. } => {
-                let type_index =
-                    self.tuple_type_index(tuple.type_().tuple_types().expect("tuple type"));
+                let type_id =
+                    self.tuple_type_id(tuple.type_().tuple_types().expect("tuple type"));
                 let _ = instructions
                     .expression(self, locals, scope.clone(), tuple)
-                    .struct_get(type_index, *index as u32);
+                    .struct_get(type_id, *index as u32);
             }
             TypedExpr::PositionalAccess { index, record, .. } => {
                 // Same as RecordAccess but by position
@@ -2586,7 +2392,7 @@ impl<'a> Generator<'a> {
                         custom_type,
                         constructor,
                     } => {
-                        let (type_index, _) = self.mono_struct_type_index(
+                        let (type_id, _) = self.mono_struct_type_id(
                             &record.type_(),
                             &custom_type,
                             &constructor,
@@ -2594,7 +2400,7 @@ impl<'a> Generator<'a> {
                         );
                         let _ = instructions
                             .expression(self, locals, scope, record)
-                            .struct_get(type_index, *index as u32);
+                            .struct_get(type_id, *index as u32);
                     }
                     CustomType::Union { custom_type, .. } => {
                         let layout = self.union_layout(&record.type_()).clone();
@@ -2603,7 +2409,7 @@ impl<'a> Generator<'a> {
                                 .constructors
                                 .get(variant as usize)
                                 .expect("constructor at index");
-                            let (_, type_index, _) = self.mono_union_subtype_index(
+                            let (_, type_id, _) = self.mono_union_subtype_id(
                                 &record.type_(),
                                 &custom_type,
                                 constructor,
@@ -2612,15 +2418,15 @@ impl<'a> Generator<'a> {
                             let field_index = layout.field(variant as usize, *index);
                             let _ = instructions
                                 .expression(self, locals, scope, record)
-                                .ref_cast_non_null(HeapType::Concrete(type_index.0))
-                                .struct_get(type_index, field_index);
+                                .ref_cast_non_null(HeapType::Concrete(type_id.0))
+                                .struct_get(type_id, field_index);
                         } else {
-                            let supertype_index =
-                                self.mono_union_supertype_index(&record.type_(), &custom_type);
+                            let supertype_id =
+                                self.mono_union_supertype_id(&record.type_(), &custom_type);
                             let field_index = layout.shared_field(*index);
                             let _ = instructions
                                 .expression(self, locals, scope, record)
-                                .struct_get(supertype_index, field_index);
+                                .struct_get(supertype_id, field_index);
                         }
                     }
                     CustomType::External { .. } | CustomType::Enum { .. } => {
@@ -2697,7 +2503,7 @@ impl<'a> Generator<'a> {
                     let _ = instructions
                         .expressions(self, locals, scope.clone(), args)
                         .expression(self, locals, scope, fun)
-                        .call_ref(self.function_type_index(args_types, Some(type_.clone())).0);
+                        .call_ref(self.function_type_id(args_types, Some(type_.clone())).0);
                 } else {
                     let index = locals.for_call(fun);
                     let _ = instructions
@@ -2705,7 +2511,7 @@ impl<'a> Generator<'a> {
                         .local_set(index)
                         .expressions(self, locals, scope, args)
                         .local_get(index)
-                        .call_ref(self.function_type_index(args_types, Some(type_.clone())).0);
+                        .call_ref(self.function_type_id(args_types, Some(type_.clone())).0);
                 }
             }
             TypedExpr::Fn {
@@ -2743,7 +2549,7 @@ impl<'a> Generator<'a> {
                         custom_type,
                         constructor,
                     } => {
-                        let (type_index, _) = self.mono_struct_type_index(
+                        let (type_id, _) = self.mono_struct_type_id(
                             &record.type_(),
                             &custom_type,
                             &constructor,
@@ -2751,7 +2557,7 @@ impl<'a> Generator<'a> {
                         );
                         let _ = instructions
                             .expression(self, locals, scope, record)
-                            .struct_get(type_index, *index as u32);
+                            .struct_get(type_id, *index as u32);
                     }
                     CustomType::Union { custom_type, .. } => {
                         let layout = self.union_layout(&record.type_()).clone();
@@ -2760,7 +2566,7 @@ impl<'a> Generator<'a> {
                                 .constructors
                                 .get(variant as usize)
                                 .expect("constructor at index");
-                            let (_, type_index, _) = self.mono_union_subtype_index(
+                            let (_, type_id, _) = self.mono_union_subtype_id(
                                 &record.type_(),
                                 &custom_type,
                                 constructor,
@@ -2769,16 +2575,16 @@ impl<'a> Generator<'a> {
                             let field_index = layout.field(variant as usize, *index);
                             let _ = instructions
                                 .expression(self, locals, scope, record)
-                                .ref_cast_non_null(HeapType::Concrete(type_index.0))
-                                .struct_get(type_index, field_index);
+                                .ref_cast_non_null(HeapType::Concrete(type_id.0))
+                                .struct_get(type_id, field_index);
                         } else {
                             // Shared field — access via supertype
-                            let supertype_index =
-                                self.mono_union_supertype_index(&record.type_(), &custom_type);
+                            let supertype_id =
+                                self.mono_union_supertype_id(&record.type_(), &custom_type);
                             let field_index = layout.shared_field(*index);
                             let _ = instructions
                                 .expression(self, locals, scope, record)
-                                .struct_get(supertype_index, field_index);
+                                .struct_get(supertype_id, field_index);
                         }
                     }
                     CustomType::External { .. } | CustomType::Enum { .. } => {
@@ -2805,7 +2611,7 @@ impl<'a> Generator<'a> {
                     CustomType::Struct { .. } | CustomType::Union { .. } => {
                         let (params, return_) =
                             constructor.type_().fn_types().expect("function type");
-                        let index = self.function_type_index(params, Some(return_));
+                        let index = self.function_type_id(params, Some(return_));
                         let _ = instructions
                             .expressions(
                                 self,
@@ -3306,7 +3112,7 @@ impl<'a> Generator<'a> {
             } => {
                 let (custom_type, cons, _, args) = self.list_type_cons(type_);
                 let (_, cons_index, _) =
-                    self.mono_union_subtype_index(type_, &custom_type, &cons, &args);
+                    self.mono_union_subtype_id(type_, &custom_type, &cons, &args);
                 let right = locals.for_pattern(pattern);
                 let _ = instructions.local_set(right);
                 if !elements.is_empty() {
@@ -3340,12 +3146,12 @@ impl<'a> Generator<'a> {
                 }
             }
             Pattern::Tuple { elements, .. } => {
-                let type_index = self.tuple_type_index(elements.iter().map(|e| e.type_()));
+                let type_id = self.tuple_type_id(elements.iter().map(|e| e.type_()));
                 let _ = instructions.patterns(
                     self,
                     locals,
                     &mut scope,
-                    (type_index, None),
+                    (type_id, None),
                     None,
                     pattern,
                     elements.iter(),
@@ -3373,14 +3179,14 @@ impl<'a> Generator<'a> {
                     } => {
                         let custom_type = custom_type.clone();
                         let constructor = constructor.clone();
-                        let (type_index, _) =
-                            self.mono_struct_type_index(type_, &custom_type, &constructor, &args);
+                        let (type_id, _) =
+                            self.mono_struct_type_id(type_, &custom_type, &constructor, &args);
                         assert_eq!(constructor.arguments.len(), arguments.len());
                         let _ = instructions.patterns(
                             self,
                             locals,
                             &mut scope,
-                            (type_index, None),
+                            (type_id, None),
                             None,
                             pattern,
                             arguments.iter().map(|arg| &arg.value),
@@ -3405,7 +3211,7 @@ impl<'a> Generator<'a> {
                                 .bool_not()
                                 .br_if(fail_depth);
                         } else {
-                            let (supertype_index, type_index, _) = self.mono_union_subtype_index(
+                            let (supertype_id, type_id, _) = self.mono_union_subtype_id(
                                 type_,
                                 &custom_type,
                                 constructor,
@@ -3416,13 +3222,13 @@ impl<'a> Generator<'a> {
                                 let _ = instructions.ref_is_null().br_if(fail_depth);
                                 let _ = instructions
                                     .local_get(right)
-                                    .struct_get(supertype_index, 0)
+                                    .struct_get(supertype_id, 0)
                                     .i32_const(tag as i32)
                                     .i32_ne()
                                     .br_if(fail_depth);
                             } else {
                                 let _ = instructions
-                                    .struct_get(supertype_index, 0)
+                                    .struct_get(supertype_id, 0)
                                     .i32_const(tag as i32)
                                     .i32_ne()
                                     .br_if(fail_depth);
@@ -3433,7 +3239,7 @@ impl<'a> Generator<'a> {
                                 self,
                                 locals,
                                 &mut scope,
-                                (supertype_index, Some(type_index)),
+                                (supertype_id, Some(type_id)),
                                 Some(field_mapping),
                                 pattern,
                                 arguments.iter().map(|arg| &arg.value),
@@ -3526,7 +3332,7 @@ impl<'a> Generator<'a> {
         locals: &Locals,
         scope: &mut Scope,
         instructions: &mut ExtendedInstructionSink<'_>,
-        (type_index, subtype_index): (TypeIndex, Option<TypeIndex>),
+        (type_id, subtype_id): (TypeId, Option<TypeId>),
         field_mapping: Option<&[u32]>,
         pattern: &Pattern<Arc<Type>>,
         elements: impl IntoIterator<Item = &'b Pattern<Arc<Type>>> + Clone,
@@ -3536,15 +3342,15 @@ impl<'a> Generator<'a> {
         let _ = instructions.local_set(right);
         for (field_index, element) in elements.into_iter().enumerate() {
             let _ = instructions.local_get(right);
-            if let Some(subtype_index) = subtype_index {
+            if let Some(subtype_id) = subtype_id {
                 let field_index = field_mapping
                     .and_then(|m| m.get(field_index).copied())
                     .unwrap_or(field_index as u32 + 1);
                 let _ = instructions
-                    .ref_cast_non_null(HeapType::Concrete(subtype_index.0))
-                    .struct_get(subtype_index, field_index);
+                    .ref_cast_non_null(HeapType::Concrete(subtype_id.0))
+                    .struct_get(subtype_id, field_index);
             } else {
-                let _ = instructions.struct_get(type_index, field_index as u32);
+                let _ = instructions.struct_get(type_id, field_index as u32);
             }
             *scope = self._pattern(locals, scope.clone(), instructions, element, fail_depth);
         }
@@ -3707,11 +3513,11 @@ impl<'a> Generator<'a> {
                 self.expression_var(scope, instructions, name, type_);
             }
             ClauseGuard::TupleIndex { tuple, index, .. } => {
-                let type_index =
-                    self.tuple_type_index(tuple.type_().tuple_types().expect("tuple type"));
+                let type_id =
+                    self.tuple_type_id(tuple.type_().tuple_types().expect("tuple type"));
                 let _ = instructions
                     .clause_guard(self, locals, scope, tuple)
-                    .struct_get(type_index, *index as u32);
+                    .struct_get(type_id, *index as u32);
             }
             ClauseGuard::FieldAccess {
                 index, container, ..
@@ -3727,11 +3533,11 @@ impl<'a> Generator<'a> {
                         custom_type,
                         constructor,
                     } => {
-                        let (type_index, _) =
-                            self.mono_struct_type_index(&type_, &custom_type, &constructor, &args);
+                        let (type_id, _) =
+                            self.mono_struct_type_id(&type_, &custom_type, &constructor, &args);
                         let _ = instructions
                             .clause_guard(self, locals, scope, container)
-                            .struct_get(type_index, index);
+                            .struct_get(type_id, index);
                     }
                     CustomType::Union { custom_type, .. } => {
                         let layout = self.union_layout(&type_).clone();
@@ -3742,13 +3548,13 @@ impl<'a> Generator<'a> {
                             .iter()
                             .position(|c| c.name == constructor.name)
                             .expect("constructor in union");
-                        let (_, type_index, _) =
-                            self.mono_union_subtype_index(&type_, &custom_type, constructor, &args);
+                        let (_, type_id, _) =
+                            self.mono_union_subtype_id(&type_, &custom_type, constructor, &args);
                         let field_index = layout.field(variant, index as u64);
                         let _ = instructions
                             .clause_guard(self, locals, scope, container)
-                            .ref_cast_non_null(HeapType::Concrete(type_index.0))
-                            .struct_get(type_index, field_index);
+                            .ref_cast_non_null(HeapType::Concrete(type_id.0))
+                            .struct_get(type_id, field_index);
                     }
                 }
             }
@@ -3784,7 +3590,7 @@ impl<'a> Generator<'a> {
         id
     }
 
-    fn get_function_builtin_external(&mut self, builtin: BuiltinFunctionExternal) -> FunctionIndex {
+    fn get_function_builtin_external(&mut self, builtin: BuiltinFunctionExternal) -> FunctionId {
         if let Some(id) = self.builtins_external.get(&builtin) {
             return *id;
         }
@@ -3840,12 +3646,12 @@ impl<'a> Generator<'a> {
         results: Vec<ValType>,
         code: Vec<u8>,
     ) -> WasmFunction {
-        let type_index = self.function_type_index_with_val_types(params, results);
+        let type_id = self.function_type_id_with_val_types(params, results);
         let index = self.function_next_id();
         let function = WasmFunction {
             name: name.clone(),
             index,
-            type_index,
+            type_id,
             code: code.into(),
             export,
             locals: vec![],
@@ -3855,8 +3661,8 @@ impl<'a> Generator<'a> {
     }
 }
 
-fn const_expr_ref_null(type_index: TypeIndex) -> ConstExpr {
-    ConstExpr::ref_null(HeapType::Concrete(type_index.0))
+fn const_expr_ref_null(type_id: TypeId) -> ConstExpr {
+    ConstExpr::ref_null(HeapType::Concrete(type_id.0))
 }
 
 fn is_main_funtion(function: &TypedFunction) -> bool {

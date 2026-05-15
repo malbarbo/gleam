@@ -2429,9 +2429,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.44"
+version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21b2ebcf727b7760c461f091f9f0f539b77b8e87f2fd88131e7f1b433b3cece4"
+checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
 ]
@@ -3092,9 +3092,9 @@ checksum = "81cdd64d312baedb58e21336b31bc043b77e01cc99033ce76ef539f78e965ebc"
 
 [[package]]
 name = "syn"
-version = "2.0.114"
+version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4d107df263a3013ef9b1879b0df87d706ff80f65a86ea879bd9c31f9b307c2a"
+checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3730,8 +3730,9 @@ dependencies = [
 
 [[package]]
 name = "walrus"
-version = "0.25.2"
-source = "git+https://github.com/wasm-bindgen/walrus.git?branch=full-gc-ext#7c77f731305cb4c44614dec315bfa6ca24e5a626"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e151599d689dac80e85c66a7cfa6ffd1b2ab79220517f9161040a87a5041aee3"
 dependencies = [
  "anyhow",
  "gimli",
@@ -3745,8 +3746,9 @@ dependencies = [
 
 [[package]]
 name = "walrus-macro"
-version = "0.25.0"
-source = "git+https://github.com/wasm-bindgen/walrus.git?branch=full-gc-ext#7c77f731305cb4c44614dec315bfa6ca24e5a626"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a9b0525d7ea6e5f906aca581a172e5c91b4c595290dfa8ad4a2bc9ffef33b44"
 dependencies = [
  "heck",
  "proc-macro2",
