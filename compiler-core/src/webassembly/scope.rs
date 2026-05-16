@@ -330,7 +330,17 @@ impl Locals {
             TypedPattern::Discard { .. } => {
                 self._insert_with_val_type(generator, pattern, ValType::I32);
             }
-            _ => {
+            TypedPattern::Int { .. }
+            | TypedPattern::Float { .. }
+            | TypedPattern::String { .. }
+            | TypedPattern::BitArraySize { .. }
+            | TypedPattern::Assign { .. }
+            | TypedPattern::List { .. }
+            | TypedPattern::Constructor { .. }
+            | TypedPattern::Tuple { .. }
+            | TypedPattern::BitArray { .. }
+            | TypedPattern::StringPrefix { .. }
+            | TypedPattern::Invalid { .. } => {
                 self._insert(
                     generator,
                     pattern,
@@ -489,16 +499,14 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
     }
 
     fn visit_typed_clause_guard(&mut self, guard: &'ast TypedClauseGuard) {
-        match guard {
-            ClauseGuard::BinaryOperator {
-                operator: BinOp::DivInt | BinOp::DivFloat,
-                left,
-                right,
-                ..
-            } => {
-                self.locals.insert_guard_div(self.generator, left, right);
-            }
-            _ => {}
+        if let ClauseGuard::BinaryOperator {
+            operator: BinOp::DivInt | BinOp::DivFloat,
+            left,
+            right,
+            ..
+        } = guard
+        {
+            self.locals.insert_guard_div(self.generator, left, right);
         }
         visit_typed_clause_guard(self, guard);
     }

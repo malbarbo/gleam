@@ -184,7 +184,7 @@ fn eliminate_dead_code(module: &mut walrus::Module, builtin_data_names: &[String
         .map(|(idx, d)| {
             let kind = match &d.kind {
                 walrus::DataKind::Active { memory, offset } => Some((*memory, offset.clone())),
-                _ => None,
+                walrus::DataKind::Passive => None,
             };
             let name = builtin_data_names.get(idx).cloned();
             (d.id(), name, kind)
@@ -375,7 +375,7 @@ impl CustomType {
             CustomType::Union { custom_type, .. } => {
                 Generator::null_variant_tag(custom_type).is_none()
             }
-            _ => false,
+            CustomType::External { .. } | CustomType::Enum { .. } => false,
         }
     }
 }
@@ -720,7 +720,12 @@ impl<'a> Generator<'a> {
                 .next()
                 .expect("builtin to have at least one parameter"),
             // Builtins without I32 — return a dummy (unused by type_())
-            _ => type_::int(),
+            BuiltinFunctionExternal::StringConcat
+            | BuiltinFunctionExternal::StringNumBytes
+            | BuiltinFunctionExternal::StringGetByte
+            | BuiltinFunctionExternal::IntToUtfCodepoint
+            | BuiltinFunctionExternal::ParseInt
+            | BuiltinFunctionExternal::ParseFloat => type_::int(),
         }
     }
 
@@ -1457,7 +1462,9 @@ impl<'a> Generator<'a> {
             .expect("named type information");
         match self.types.get(&(module, name)).expect("union type") {
             CustomType::Union { layout, .. } => layout.clone(),
-            _ => panic!("expected union type"),
+            CustomType::External { .. } | CustomType::Enum { .. } | CustomType::Struct { .. } => {
+                panic!("expected union type")
+            }
         }
     }
 
@@ -2185,7 +2192,10 @@ impl<'a> Generator<'a> {
                     self.assignment_assert(locals, scope, instructions, assignment, rest);
                     return;
                 }
-                _ => {
+                Statement::Expression(_)
+                | Statement::Assignment(_)
+                | Statement::Use(_)
+                | Statement::Assert(_) => {
                     scope = self.statement(instructions, scope, locals, statement);
                     if !rest.is_empty() {
                         let _ = instructions.drop();
@@ -2420,7 +2430,9 @@ impl<'a> Generator<'a> {
                 ValueConstructorVariant::ModuleConstant { literal, .. } => {
                     self._constant(instructions, literal);
                 }
-                _ => {
+                ValueConstructorVariant::LocalVariable { .. }
+                | ValueConstructorVariant::ModuleFn { .. }
+                | ValueConstructorVariant::Record { .. } => {
                     self.expression_var(&scope, instructions, name, &expression.type_());
                 }
             },
@@ -2806,12 +2818,12 @@ impl<'a> Generator<'a> {
         name: &EcoString,
         type_: &Arc<Type>,
     ) {
-        if let Some(info) = self.local_functions.get(name).cloned() {
-            if type_.fn_types().is_some() {
-                let id = self.function_local_generic(&info, type_);
-                let _ = instructions.ref_func(id.func_id());
-                return;
-            }
+        if let Some(info) = self.local_functions.get(name).cloned()
+            && type_.fn_types().is_some()
+        {
+            let id = self.function_local_generic(&info, type_);
+            let _ = instructions.ref_func(id.func_id());
+            return;
         }
         let id = self.var_id(scope, name, type_);
 

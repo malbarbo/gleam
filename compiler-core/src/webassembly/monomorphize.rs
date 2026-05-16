@@ -632,7 +632,7 @@ fn get_unbound_or_generic_id(type_: &Arc<Type>) -> Option<u64> {
             TypeVar::Unbound { id } | TypeVar::Generic { id } => Some(*id),
             TypeVar::Link { type_ } => get_unbound_or_generic_id(type_),
         },
-        _ => None,
+        Type::Named { .. } | Type::Fn { .. } | Type::Tuple { .. } => None,
     }
 }
 
