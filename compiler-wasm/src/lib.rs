@@ -186,7 +186,11 @@ fn do_compile_package(project: Project, target: Target) -> Result<(), Error> {
             emit_typescript_definitions: false,
             prelude_location: Utf8PathBuf::from("./gleam_prelude.mjs"),
         },
-        Target::WebAssembly => TargetCodegenConfiguration::WebAssembly,
+        Target::WebAssembly => TargetCodegenConfiguration::WebAssembly {
+            int: config.webassembly.int,
+            float: config.webassembly.float,
+            opt_level: config.webassembly.opt_level,
+        },
     };
 
     tracing::info!("Compiling package");

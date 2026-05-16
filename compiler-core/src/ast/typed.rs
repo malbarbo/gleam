@@ -931,6 +931,11 @@ impl TypedExpr {
         matches!(self, Self::Case { .. })
     }
 
+    #[must_use]
+    pub fn is_todo_with_no_message(&self) -> bool {
+        matches!(self, Self::Todo { message: None, .. })
+    }
+
     /// Returns `true` if the typed expr is [`Pipeline`].
     ///
     /// [`Pipeline`]: TypedExpr::Pipeline

@@ -33,7 +33,11 @@ pub fn command(options: CompilePackage) -> Result<()> {
                 .javascript_prelude
                 .ok_or_else(|| Error::JavaScriptPreludeRequired)?,
         },
-        Target::WebAssembly => TargetCodegenConfiguration::WebAssembly,
+        Target::WebAssembly => TargetCodegenConfiguration::WebAssembly {
+            int: config.webassembly.int,
+            float: config.webassembly.float,
+            opt_level: config.webassembly.opt_level,
+        },
     };
 
     tracing::info!("Compiling package");
