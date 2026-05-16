@@ -33,7 +33,11 @@ pub fn prepare(path: &str) -> String {
             emit_typescript_definitions: config.javascript.typescript_declarations,
             prelude_location: Utf8PathBuf::from("../prelude.mjs"),
         },
-        Target::WebAssembly => TargetCodegenConfiguration::WebAssembly,
+        Target::WebAssembly => TargetCodegenConfiguration::WebAssembly {
+            int: config.webassembly.int,
+            float: config.webassembly.float,
+            opt_level: config.webassembly.opt_level,
+        },
     };
 
     let ids = gleam_core::uid::UniqueIdGenerator::new();
