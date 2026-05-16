@@ -677,3 +677,279 @@ pub fn main() {
     // should share a single "Option" supertype.
     assert_eq!(names.iter().filter(|n| n.as_str() == "Option").count(), 1,);
 }
+
+// Cyclic types reachable only through private functions: pre_emit_user_types
+// must visit private function signatures as well, otherwise the fallback path
+// in val_type/type_index stack-overflows during code generation.
+#[test]
+fn private_cyclic_mutual_structs() {
+    run_ok(
+        r#"
+type Wrap {
+    Wrap(inner: Choice)
+}
+
+type Choice {
+    C1(w: Wrap, n: Int)
+}
+
+fn first(c: Choice) -> Wrap {
+    case c {
+        C1(w, _) -> w
+    }
+}
+
+pub fn main() {
+    let _ = first
+    0
+}
+"#,
+    );
+}
+
+// Cyclic types referenced only via an inner lambda's signature (the public
+// function's own signature doesn't mention them).
+#[test]
+fn private_cyclic_via_body_only() {
+    run_ok(
+        r#"
+type Wrap {
+    Wrap(inner: Choice)
+}
+
+type Choice {
+    C1(w: Wrap, n: Int)
+}
+
+pub fn main() -> Int {
+    let unpack = fn(c: Choice) -> Int {
+        case c {
+            C1(_, n) -> n
+        }
+    }
+    let _ = unpack
+    0
+}
+"#,
+    );
+}
+
+// Probe: function pattern-matches Result where the second type parameter
+// is never bound to a concrete type. The Error subtype is not monomorphized
+// for this instantiation, but the function still needs to be compiled.
+#[test]
+fn unbound_type_var_in_unused_variant() {
+    run_ok(
+        r#"
+pub fn check(r: Result(Int, x)) -> Int {
+    case r {
+        Ok(n) -> n
+        Error(_) -> -1
+    }
+}
+
+pub fn main() {
+    let assert 5 = check(Ok(5))
+    0
+}
+"#,
+    );
+}
+
+// Probe: a union variant with an external-type field.
+#[test]
+fn probe_union_variant_with_external_field() {
+    run_ok(
+        r#"
+pub type I64 {}
+
+@external(webassembly, "builtins", "_int_to_i64")
+fn to_i64(value: Int) -> I64
+
+@external(webassembly, "builtins", "_i64_to_int")
+fn from_i64(value: I64) -> Int
+
+pub type Holder {
+    HoldI64(value: I64)
+    HoldStr(value: String)
+}
+
+pub fn main() {
+    let h = HoldI64(to_i64(42))
+    case h {
+        HoldI64(v) -> from_i64(v)
+        HoldStr(_) -> -1
+    }
+}
+"#,
+    );
+}
+
+// Probe: a struct with an enum-typed field. Enums map to ValType::I32 but
+// have no TypeNode key.
+#[test]
+fn probe_struct_with_enum_field() {
+    run_ok(
+        r#"
+pub type Color {
+    Red
+    Green
+    Blue
+}
+
+pub type Painted {
+    Painted(color: Color, label: Int)
+}
+
+pub fn main() -> Int {
+    let p = Painted(Red, 42)
+    case p {
+        Painted(_, n) -> n
+    }
+}
+"#,
+    );
+}
+
+// Probe: a function-typed field whose params/return reference an external
+// type. Function node emission must also handle external val_types.
+#[test]
+fn probe_function_field_with_external_param() {
+    run_ok(
+        r#"
+pub type I64 {}
+
+@external(webassembly, "builtins", "_int_to_i64")
+fn to_i64(value: Int) -> I64
+
+@external(webassembly, "builtins", "_i64_to_int")
+fn from_i64(value: I64) -> Int
+
+pub type Handler {
+    Handler(act: fn(I64) -> I64)
+}
+
+pub fn main() {
+    let h = Handler(fn(x) { x })
+    case h {
+        Handler(f) -> {
+            let assert 42 = from_i64(f(to_i64(42)))
+            0
+        }
+    }
+}
+"#,
+    );
+}
+
+// Probe: a tuple containing an external type. Same gap as
+// `probe_struct_with_external_field` but exercised via tuple emission.
+#[test]
+fn probe_tuple_with_external_element() {
+    run_ok(
+        r#"
+pub type I64 {}
+
+@external(webassembly, "builtins", "_int_to_i64")
+fn to_i64(value: Int) -> I64
+
+@external(webassembly, "builtins", "_i64_to_int")
+fn from_i64(value: I64) -> Int
+
+pub fn main() {
+    let t = #(to_i64(42), 1)
+    assert from_i64(t.0) == 42
+    0
+}
+"#,
+    );
+}
+
+// Probe: a struct with a field of external type (I64) that maps to a
+// non-ref ValType. The lazy emit path must resolve the val_type for that
+// field without panicking, since External types have no TypeNodeKey.
+#[test]
+fn probe_struct_with_external_field() {
+    run_ok(
+        r#"
+pub type I64 {}
+
+@external(webassembly, "builtins", "_int_to_i64")
+fn to_i64(value: Int) -> I64
+
+@external(webassembly, "builtins", "_i64_to_int")
+fn from_i64(value: I64) -> Int
+
+pub type Wrapper {
+    Wrapper(value: I64)
+}
+
+pub fn main() {
+    let w = Wrapper(to_i64(42))
+    assert from_i64(w.value) == 42
+    0
+}
+"#,
+    );
+}
+
+// Probe: two distinct concrete instantiations of a generic union with no
+// shared fields. The supertype's TypeNodeKey is identical for both
+// (UnionSuper{name:"Option", shared_field_types:[]}), so the second
+// monomorphization sees the supertype as already visited and does not add
+// it to its batch — but the subtypes still reference it via supertype_key.
+// Verifies that subtype emission resolves the supertype via the existing
+// type_node_cache rather than only via the current-batch key_to_idx.
+#[test]
+fn probe_dual_option_monomorphizations_validate() {
+    let src = r#"
+pub type Option(a) {
+    None
+    Some(a)
+}
+
+pub fn main() -> Int {
+    let a = Some(1)
+    let b = Some(1.0)
+    assert a == Some(1)
+    assert b == Some(1.0)
+    0
+}
+"#;
+    let bytes = compile_wasm(src, vec![]);
+    let tmp = std::env::temp_dir().join("probe_dual_option.wasm");
+    std::fs::write(&tmp, &bytes).expect("write wasm");
+    let out = std::process::Command::new("wasm-tools")
+        .args(["validate", "--features", "all"])
+        .arg(&tmp)
+        .output()
+        .expect("wasm-tools");
+    let _ = std::fs::remove_file(&tmp);
+    assert!(
+        out.status.success(),
+        "wasm-tools validate failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// Probe: generic function that accesses the field of the generic variant.
+// Forces emission of the Error subtype for multiple concrete instantiations.
+#[test]
+fn generic_variant_field_access_multiple_instantiations() {
+    run_ok(
+        r#"
+pub fn unwrap_err(r: Result(Int, x), default: x) -> x {
+    case r {
+        Ok(_) -> default
+        Error(e) -> e
+    }
+}
+
+pub fn main() {
+    let assert "boom" = unwrap_err(Error("boom"), "x")
+    let assert 42 = unwrap_err(Error(42), 0)
+    0
+}
+"#,
+    );
+}

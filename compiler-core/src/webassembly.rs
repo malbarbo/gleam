@@ -5,12 +5,14 @@ mod monomorphize;
 mod scope;
 #[cfg(test)]
 mod tests;
+mod types_emit;
 
 pub use builtins::builtin_function_names;
 use builtins::*;
 use instructions::*;
 use monomorphize::*;
 use scope::*;
+use types_emit::*;
 
 use ecow::EcoString;
 use indexmap::IndexMap;
@@ -479,67 +481,10 @@ impl UnionFieldLayout {
     }
 }
 
-// === User-type emission via Tarjan SCC + walrus `add_rec_group` ===
-//
-// Eagerly walks function signatures and constant types of the current module,
-// recursively expanding via field types to find all reachable WASM type
-// nodes (plain struct / union supertype + N subtypes / tuple / function).
-// Builds a dependency graph between nodes, runs Tarjan to obtain SCCs in
-// reverse topological order, and emits each SCC either as a singleton via
-// `add_struct`/`add_composite`/`add` (preserving arena-level dedup) or via
-// `add_rec_group` when the SCC has a self-loop or more than one node.
-//
-// Types referenced only from expression bodies (e.g., `Some(1)` inside a fn
-// returning `Nil`) are NOT discovered here — the existing lazy emission path
-// still handles them. Lazy emission is safe for those types because they do
-// not form cycles (otherwise existing tests would already crash).
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum TypeNodeKey {
-    Plain {
-        name: EcoString,
-    },
-    UnionSuper {
-        name: EcoString,
-        shared_field_types: Vec<EcoString>,
-    },
-    UnionSub {
-        pretty: EcoString,
-        constructor: EcoString,
-    },
-    Function {
-        params: Vec<EcoString>,
-        results: Vec<EcoString>,
-    },
-}
-
-#[derive(Debug, Clone)]
-enum TypeNodeKind {
-    PlainStruct,
-    Tuple,
-    UnionSupertype,
-    UnionSubtype,
-    Function,
-}
-
-#[derive(Debug, Clone)]
-struct TypeNode {
-    key: TypeNodeKey,
-    kind: TypeNodeKind,
-    walrus_name: Option<EcoString>,
-    is_final: bool,
-    supertype_key: Option<TypeNodeKey>,
-    field_types: Vec<Arc<Type>>,
-    field_labels: Vec<EcoString>,
-    /// For Function: number of result types at the tail of `field_types`.
-    result_count: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct TypeNodeFieldRef {
-    descriptor_idx: Option<usize>,
-    nullable: bool,
-}
+// See `types_emit.rs` for the SCC-based user-type emission machinery
+// (descriptors, Tarjan, composite builders). The orchestration methods on
+// `Generator` (visit_*, emit_*, register_*, lookup_*, ensure_emitted_lazy)
+// stay in this file because they need access to private generator state.
 
 struct Generator<'a> {
     pub(super) wasm_module: walrus::Module,
@@ -548,7 +493,7 @@ struct Generator<'a> {
     builtin_data_names: Vec<String>,
     wasm_types: IndexMap<WasmType, TypeId>,
     /// High-level cache keyed by TypeNodeKey, populated by
-    /// `pre_emit_user_types`. Bypasses the ValType chicken-and-egg during
+    /// `ensure_emitted_lazy`. Bypasses the ValType chicken-and-egg during
     /// cyclic emission (the existing `wasm_types` cache's key includes
     /// resolved ValTypes, which require TypeIds we haven't allocated yet).
     type_node_cache: HashMap<TypeNodeKey, TypeId>,
@@ -731,7 +676,6 @@ impl<'a> Generator<'a> {
         self.types_prelude();
         self.types();
         self.types_imported();
-        self.pre_emit_user_types();
         self.functions_builtins(builtins);
         self.constants();
         self.functions();
@@ -1100,164 +1044,90 @@ impl<'a> Generator<'a> {
 
     // === User-type emission (Tarjan SCC + add_rec_group) ===
 
-    fn pre_emit_user_types(&mut self) {
-        let descriptors = self.discover_type_nodes();
-        if descriptors.is_empty() {
-            return;
+    /// Lazy entry point: starting from `root`, walk the type graph (metadata
+    /// only, no expression AST), collect TypeNode descriptors for everything
+    /// reachable and not yet in the cache, then emit them as SCCs (rec groups
+    /// for cycles / self-loops, singletons via add_struct/add_composite/add
+    /// for acyclic nodes — preserves arena-level dedup).
+    fn ensure_emitted_lazy(&mut self, root: &Arc<Type>) {
+        let mut state =
+            VisitState::new(self.type_node_cache.keys().cloned().collect(), root.clone());
+        while let Some(t) = state.to_visit.pop() {
+            self.visit_type_node(&t, &mut state);
         }
-        self.emit_type_nodes(descriptors);
+        if !state.descriptors.is_empty() {
+            self.emit_type_nodes(state.descriptors);
+        }
     }
 
-    fn discover_type_nodes(&self) -> Vec<TypeNode> {
-        let mut visited: HashSet<TypeNodeKey> = HashSet::new();
-        let mut descriptors: Vec<TypeNode> = Vec::new();
-        let mut to_visit: Vec<Arc<Type>> = Vec::new();
-
-        for f in self.module.definitions.functions.iter() {
-            if f.publicity.is_public()
-                && !is_generic_type(&function_type(f))
-                && f.external_webassembly.is_none()
-            {
-                for arg in &f.arguments {
-                    to_visit.push(arg.type_.clone());
-                }
-                to_visit.push(f.return_type.clone());
-            }
-        }
-        for c in &self.module.definitions.constants {
-            if !is_generic_type(&c.type_) {
-                to_visit.push(c.type_.clone());
-            }
-        }
-
-        while let Some(t) = to_visit.pop() {
-            self.visit_type_node(&t, &mut visited, &mut descriptors, &mut to_visit);
-        }
-
-        descriptors
-    }
-
-    fn visit_type_node(
-        &self,
-        t: &Arc<Type>,
-        visited: &mut HashSet<TypeNodeKey>,
-        descriptors: &mut Vec<TypeNode>,
-        to_visit: &mut Vec<Arc<Type>>,
-    ) {
-        if t.is_int() || t.is_float() || t.is_bool() || t.is_string() || t.is_utf_codepoint() {
-            return;
-        }
-        if let Some((_, n)) = t.named_type_name()
-            && n.as_str() == "Nil"
+    fn visit_type_node(&self, t: &Arc<Type>, state: &mut VisitState) {
+        // Unions create a supertype + N subtype descriptors via a dedicated
+        // path. All other kinds produce a single descriptor and share the
+        // key construction in `type_node_key_and_nullable`.
+        if let Some((
+            CustomType::Union {
+                custom_type,
+                layout,
+            },
+            args,
+        )) = self.custom_type(t)
         {
+            self.visit_union_type_nodes(t, &custom_type, &layout, &args, state);
             return;
         }
 
-        if let Some(types) = t.tuple_types() {
-            let pretty: EcoString = self.type_pretty_name(t).replace("#", "Tuple").into();
-            let key = TypeNodeKey::Plain {
-                name: pretty.clone(),
-            };
-            if !visited.insert(key.clone()) {
-                return;
-            }
+        let (key_opt, _) = self.type_node_key_and_nullable(t);
+        let Some(key) = key_opt else {
+            return; // primitives, Nil, externals, enums — no WASM type to emit
+        };
+        if !state.visited.insert(key.clone()) {
+            return;
+        }
+
+        let (kind, field_types, field_labels) = if let Some(types) = t.tuple_types() {
+            let name = self.tuple_pretty_name(t);
             let labels: Vec<EcoString> = (0..types.len())
                 .map(|i| EcoString::from(i.to_string()))
                 .collect();
-            descriptors.push(TypeNode {
-                key,
-                kind: TypeNodeKind::Tuple,
-                walrus_name: Some(pretty),
-                is_final: true,
-                supertype_key: None,
-                field_types: types.clone(),
-                field_labels: labels,
-                result_count: 0,
-            });
-            for el in types {
-                to_visit.push(el);
-            }
-            return;
-        }
-
-        if let Some((params, result)) = t.fn_types() {
-            let params_names: Vec<EcoString> =
-                params.iter().map(|p| self.type_pretty_name(p)).collect();
-            let result_name = self.type_pretty_name(&result);
-            let key = TypeNodeKey::Function {
-                params: params_names,
-                results: vec![result_name],
-            };
-            if !visited.insert(key.clone()) {
-                return;
-            }
+            (TypeNodeKind::Tuple { name }, types, labels)
+        } else if let Some((params, result)) = t.fn_types() {
             let mut field_types = params.clone();
             field_types.push(result.clone());
             let labels: Vec<EcoString> = (0..field_types.len())
                 .map(|i| EcoString::from(i.to_string()))
                 .collect();
-            descriptors.push(TypeNode {
-                key,
-                kind: TypeNodeKind::Function,
-                walrus_name: None,
-                is_final: true,
-                supertype_key: None,
-                field_types: field_types.clone(),
-                field_labels: labels,
-                result_count: 1,
-            });
-            for ft in field_types {
-                to_visit.push(ft);
-            }
+            (
+                TypeNodeKind::Function { result_count: 1 },
+                field_types,
+                labels,
+            )
+        } else if let Some((
+            CustomType::Struct {
+                custom_type,
+                constructor,
+            },
+            args,
+        )) = self.custom_type(t)
+        {
+            let name = self.type_pretty_name(t);
+            let field_types = Monomorphizer::variant_constructor(&custom_type, &constructor, &args);
+            let labels = self.record_field_labels(&constructor);
+            (TypeNodeKind::PlainStruct { name }, field_types, labels)
+        } else {
+            // Unreachable: type_node_key_and_nullable returns None for
+            // anything other than tuple/fn/struct/union.
             return;
-        }
+        };
 
-        if let Some((custom_type, args)) = self.custom_type(t) {
-            match custom_type {
-                CustomType::External { .. } | CustomType::Enum { .. } => {}
-                CustomType::Struct {
-                    custom_type: ct,
-                    constructor,
-                } => {
-                    let pretty = self.type_pretty_name(t);
-                    let key = TypeNodeKey::Plain {
-                        name: pretty.clone(),
-                    };
-                    if !visited.insert(key.clone()) {
-                        return;
-                    }
-                    let field_types = Monomorphizer::variant_constructor(&ct, &constructor, &args);
-                    let labels = self.record_field_labels(&constructor);
-                    descriptors.push(TypeNode {
-                        key,
-                        kind: TypeNodeKind::PlainStruct,
-                        walrus_name: Some(pretty),
-                        is_final: true,
-                        supertype_key: None,
-                        field_types: field_types.clone(),
-                        field_labels: labels,
-                        result_count: 0,
-                    });
-                    for ft in field_types {
-                        to_visit.push(ft);
-                    }
-                }
-                CustomType::Union {
-                    custom_type: ct,
-                    layout,
-                } => {
-                    self.visit_union_type_nodes(
-                        t,
-                        &ct,
-                        &layout,
-                        &args,
-                        visited,
-                        descriptors,
-                        to_visit,
-                    );
-                }
-            }
-        }
+        state.descriptors.push(TypeNode {
+            key,
+            kind,
+            is_final: true,
+            supertype_key: None,
+            field_types: field_types.clone(),
+            field_labels,
+        });
+        state.to_visit.extend(field_types);
     }
 
     fn visit_union_type_nodes(
@@ -1266,66 +1136,45 @@ impl<'a> Generator<'a> {
         ct: &TypedCustomType,
         layout: &UnionFieldLayout,
         args: &[Arc<Type>],
-        visited: &mut HashSet<TypeNodeKey>,
-        descriptors: &mut Vec<TypeNode>,
-        to_visit: &mut Vec<Arc<Type>>,
+        state: &mut VisitState,
     ) {
-        let first = ct.constructors.first().expect("union to have constructors");
-        let first_types = Monomorphizer::variant_constructor(ct, first, args);
-        let field_indices_0 = layout.fields(0);
-        let mut shared_field_types: Vec<Arc<Type>> = Vec::new();
-        let mut shared_field_labels: Vec<EcoString> = Vec::new();
-        for (pos, (arg, ftype)) in first.arguments.iter().zip(first_types.iter()).enumerate() {
-            let widx = field_indices_0.get(pos).copied().expect("field index");
-            if widx > layout.shared_count as u32 {
-                continue;
-            }
-            let label = arg
-                .label
-                .as_ref()
-                .map(|(_, l)| l.clone())
-                .unwrap_or_else(|| EcoString::from(pos.to_string()));
-            shared_field_labels.push(label);
-            shared_field_types.push(ftype.clone());
-        }
+        let (supertype_key, shared_field_types, shared_field_labels) =
+            self.union_supertype_key(ct, layout, args);
 
-        let supertype_fp: Vec<EcoString> = shared_field_types
-            .iter()
-            .map(|t| self.type_pretty_name(t))
-            .collect();
-        let supertype_key = TypeNodeKey::UnionSuper {
-            name: ct.name.clone(),
-            shared_field_types: supertype_fp,
-        };
-
-        if visited.insert(supertype_key.clone()) {
-            descriptors.push(TypeNode {
+        if state.visited.insert(supertype_key.clone()) {
+            state.descriptors.push(TypeNode {
                 key: supertype_key.clone(),
-                kind: TypeNodeKind::UnionSupertype,
-                walrus_name: Some(ct.name.clone()),
+                kind: TypeNodeKind::UnionSupertype {
+                    name: ct.name.clone(),
+                },
                 is_final: false,
                 supertype_key: None,
                 field_types: shared_field_types.clone(),
                 field_labels: shared_field_labels,
-                result_count: 0,
             });
-            for ft in &shared_field_types {
-                to_visit.push(ft.clone());
-            }
+            state.to_visit.extend(shared_field_types.iter().cloned());
         }
 
         let pretty = self.type_pretty_name(t);
         for (variant_idx, ctor) in ct.constructors.iter().enumerate() {
+            let types_v = Monomorphizer::variant_constructor(ct, ctor, args);
+            // Skip variants whose fields still contain type variables for
+            // this instantiation — e.g. `Error(?)` when visiting
+            // `Result(String, ?)`. Any later visit with concrete arguments
+            // (a real call site that constructs that variant) emits it then.
+            if types_v.iter().any(is_generic_type) {
+                continue;
+            }
+
             let subtype_name: EcoString = format!("{}.{}", pretty, ctor.name).into();
             let subtype_key = TypeNodeKey::UnionSub {
                 pretty: pretty.clone(),
                 constructor: ctor.name.clone(),
             };
-            if !visited.insert(subtype_key.clone()) {
+            if !state.visited.insert(subtype_key.clone()) {
                 continue;
             }
 
-            let types_v = Monomorphizer::variant_constructor(ct, ctor, args);
             let field_indices = layout.fields(variant_idx);
 
             let mut ordered: Vec<(u32, EcoString, Arc<Type>)> = ctor
@@ -1348,19 +1197,15 @@ impl<'a> Generator<'a> {
             let labels: Vec<EcoString> = ordered.iter().map(|(_, l, _)| l.clone()).collect();
             let field_types: Vec<Arc<Type>> = ordered.into_iter().map(|(_, _, t)| t).collect();
 
-            descriptors.push(TypeNode {
+            state.descriptors.push(TypeNode {
                 key: subtype_key,
-                kind: TypeNodeKind::UnionSubtype,
-                walrus_name: Some(subtype_name),
+                kind: TypeNodeKind::UnionSubtype { name: subtype_name },
                 is_final: true,
                 supertype_key: Some(supertype_key.clone()),
                 field_types: field_types.clone(),
                 field_labels: labels,
-                result_count: 0,
             });
-            for ft in field_types {
-                to_visit.push(ft);
-            }
+            state.to_visit.extend(field_types);
         }
     }
 
@@ -1379,6 +1224,62 @@ impl<'a> Generator<'a> {
             .collect()
     }
 
+    /// `TypeNodeKey::UnionSuper` for a concrete instantiation. Shared fields
+    /// are captured by name (pretty-printed) so two instantiations with the
+    /// same shared layout deduplicate to a single supertype.
+    fn union_supertype_key(
+        &self,
+        ct: &TypedCustomType,
+        layout: &UnionFieldLayout,
+        args: &[Arc<Type>],
+    ) -> (TypeNodeKey, Vec<Arc<Type>>, Vec<EcoString>) {
+        let (shared_types, shared_labels) = self.union_shared_supertype_fields(ct, layout, args);
+        let shared_field_types = shared_types
+            .iter()
+            .map(|t| self.type_pretty_name(t))
+            .collect();
+        let key = TypeNodeKey::UnionSuper {
+            name: ct.name.clone(),
+            shared_field_types,
+        };
+        (key, shared_types, shared_labels)
+    }
+
+    /// Pretty name for a tuple type, with the `#` separator replaced by
+    /// `Tuple` so the WASM type-section name matches the visible identifier.
+    fn tuple_pretty_name(&self, t: &Arc<Type>) -> EcoString {
+        self.type_pretty_name(t).replace("#", "Tuple")
+    }
+
+    /// Shared (supertype) fields of a union for a given concrete instantiation.
+    /// Returns `(field_types, field_labels)` in supertype declaration order.
+    fn union_shared_supertype_fields(
+        &self,
+        ct: &TypedCustomType,
+        layout: &UnionFieldLayout,
+        args: &[Arc<Type>],
+    ) -> (Vec<Arc<Type>>, Vec<EcoString>) {
+        let first = ct.constructors.first().expect("union to have constructors");
+        let first_types = Monomorphizer::variant_constructor(ct, first, args);
+        let field_indices_0 = layout.fields(0);
+        let mut types: Vec<Arc<Type>> = Vec::new();
+        let mut labels: Vec<EcoString> = Vec::new();
+        for (pos, (arg, ftype)) in first.arguments.iter().zip(first_types.iter()).enumerate() {
+            let widx = field_indices_0.get(pos).copied().expect("field index");
+            if widx > layout.shared_count as u32 {
+                continue;
+            }
+            let label = arg
+                .label
+                .as_ref()
+                .map(|(_, l)| l.clone())
+                .unwrap_or_else(|| EcoString::from(pos.to_string()));
+            labels.push(label);
+            types.push(ftype.clone());
+        }
+        (types, labels)
+    }
+
     fn type_node_key_and_nullable(&self, t: &Arc<Type>) -> (Option<TypeNodeKey>, bool) {
         if t.is_int() || t.is_float() || t.is_bool() || t.is_string() || t.is_utf_codepoint() {
             return (None, false);
@@ -1390,8 +1291,12 @@ impl<'a> Generator<'a> {
         }
 
         if t.tuple_types().is_some() {
-            let pretty: EcoString = self.type_pretty_name(t).replace("#", "Tuple").into();
-            return (Some(TypeNodeKey::Plain { name: pretty }), false);
+            return (
+                Some(TypeNodeKey::Plain {
+                    name: self.tuple_pretty_name(t),
+                }),
+                false,
+            );
         }
         if let Some((params, result)) = t.fn_types() {
             let params_names: Vec<EcoString> =
@@ -1414,36 +1319,16 @@ impl<'a> Generator<'a> {
                     (Some(TypeNodeKey::Plain { name: pretty }), false)
                 }
                 CustomType::Union {
-                    custom_type: ct, ..
+                    custom_type: ct,
+                    layout,
                 } => {
                     let args = t
                         .named_type_information()
                         .map(|(_, _, a)| a)
                         .unwrap_or_default();
-                    let first = ct.constructors.first().expect("union to have constructors");
-                    let first_types = Monomorphizer::variant_constructor(&ct, first, &args);
-                    let layout = UnionFieldLayout::compute(&ct);
-                    let field_indices_0 = layout.fields(0);
-                    let mut shared_field_types: Vec<Arc<Type>> = Vec::new();
-                    for (pos, ftype) in first_types.iter().enumerate() {
-                        let widx = field_indices_0.get(pos).copied().expect("idx");
-                        if widx > layout.shared_count as u32 {
-                            continue;
-                        }
-                        shared_field_types.push(ftype.clone());
-                    }
-                    let supertype_fp: Vec<EcoString> = shared_field_types
-                        .iter()
-                        .map(|t| self.type_pretty_name(t))
-                        .collect();
+                    let (key, _, _) = self.union_supertype_key(&ct, &layout, &args);
                     let nullable = Generator::null_variant_tag(&ct).is_some();
-                    (
-                        Some(TypeNodeKey::UnionSuper {
-                            name: ct.name.clone(),
-                            shared_field_types: supertype_fp,
-                        }),
-                        nullable,
-                    )
+                    (Some(key), nullable)
                 }
             }
         } else {
@@ -1452,182 +1337,227 @@ impl<'a> Generator<'a> {
     }
 
     fn emit_type_nodes(&mut self, descriptors: Vec<TypeNode>) {
-        let n = descriptors.len();
-        if n == 0 {
+        if descriptors.is_empty() {
             return;
         }
+        let key_to_idx = build_key_index(&descriptors);
+        let field_refs = self.build_field_refs(&descriptors, &key_to_idx);
+        let edges = build_dep_edges(&descriptors, &field_refs, &key_to_idx);
+        let sccs = tarjan_scc(descriptors.len(), &edges);
 
-        let mut key_to_idx: HashMap<TypeNodeKey, usize> = HashMap::new();
-        for (i, d) in descriptors.iter().enumerate() {
-            let _ = key_to_idx.insert(d.key.clone(), i);
-        }
-
-        let mut field_refs: Vec<Vec<TypeNodeFieldRef>> = Vec::with_capacity(n);
-        for d in &descriptors {
-            let mut refs = Vec::with_capacity(d.field_types.len());
-            for ft in &d.field_types {
-                let (key, nullable) = self.type_node_key_and_nullable(ft);
-                let descriptor_idx = key.as_ref().and_then(|k| key_to_idx.get(k).copied());
-                refs.push(TypeNodeFieldRef {
-                    descriptor_idx,
-                    nullable,
-                });
-            }
-            field_refs.push(refs);
-        }
-
-        // Build edges: field refs + supertype refs (subtype → its supertype).
-        let mut edges: Vec<Vec<usize>> = vec![Vec::new(); n];
-        for (i, d) in descriptors.iter().enumerate() {
-            if let Some(slot) = edges.get_mut(i) {
-                if let Some(refs) = field_refs.get(i) {
-                    for r in refs {
-                        if let Some(idx) = r.descriptor_idx {
-                            slot.push(idx);
-                        }
-                    }
-                }
-                if let Some(super_key) = &d.supertype_key
-                    && let Some(&super_idx) = key_to_idx.get(super_key)
-                {
-                    slot.push(super_idx);
-                }
-            }
-        }
-
-        let sccs = tarjan_scc(n, &edges);
-
-        let int = self.int;
-        let float = self.float;
-        let string_idx = self.string.type_index;
-        let mut assigned: Vec<Option<TypeId>> = vec![None; n];
-
+        let mut assigned: Vec<Option<TypeId>> = vec![None; descriptors.len()];
         for scc in &sccs {
-            let only_global = scc.first().copied();
-            let has_self_loop = scc.len() == 1
-                && only_global
-                    .and_then(|i| edges.get(i).map(|e| e.contains(&i)))
-                    .unwrap_or(false);
-
-            if scc.len() == 1 && !has_self_loop {
-                let global = only_global.expect("non-empty SCC");
-                let d = descriptors.get(global).expect("descriptor");
-                let refs = field_refs.get(global).expect("refs");
-                let val_types: Vec<ValType> = d
-                    .field_types
-                    .iter()
-                    .zip(refs.iter())
-                    .map(|(ft, r)| {
-                        resolve_val_type_assigned(ft, *r, &assigned, int, float, string_idx)
-                    })
-                    .collect();
-                let supertype_id = d
-                    .supertype_key
-                    .as_ref()
-                    .and_then(|k| key_to_idx.get(k))
-                    .and_then(|si| assigned.get(*si))
-                    .copied()
-                    .flatten();
-                let id = self.emit_singleton_type_node(d, &val_types, supertype_id);
-                if let Some(slot) = assigned.get_mut(global) {
-                    *slot = Some(id);
+            // Singleton without a self-loop: take the dedup-preserving path.
+            // Multi-node SCCs and self-loops need `add_rec_group`.
+            match scc.as_slice() {
+                &[global] if !edges.get(global).is_some_and(|e| e.contains(&global)) => {
+                    self.emit_acyclic_singleton(
+                        global,
+                        &descriptors,
+                        &field_refs,
+                        &key_to_idx,
+                        &mut assigned,
+                    );
                 }
-                self.register_type_node(d, id, &val_types, supertype_id);
-            } else {
-                let scc_indices: Vec<usize> = scc.clone();
-                let local_of: HashMap<usize, usize> = scc_indices
-                    .iter()
-                    .enumerate()
-                    .map(|(local, &global)| (global, local))
-                    .collect();
-
-                let scc_descriptors: Vec<TypeNode> = scc_indices
-                    .iter()
-                    .filter_map(|&g| descriptors.get(g).cloned())
-                    .collect();
-                let scc_refs: Vec<Vec<TypeNodeFieldRef>> = scc_indices
-                    .iter()
-                    .filter_map(|&g| field_refs.get(g).cloned())
-                    .collect();
-                let assigned_snapshot = assigned.clone();
-                let key_to_idx_snapshot = key_to_idx.clone();
-                let local_of_for_closure = local_of.clone();
-                let scc_descriptors_for_closure = scc_descriptors.clone();
-                let scc_refs_for_closure = scc_refs.clone();
-
-                let scc_size = scc_indices.len();
-                let ids = self.wasm_module.types.add_rec_group(scc_size, move |ids| {
-                    scc_descriptors_for_closure
-                        .iter()
-                        .zip(scc_refs_for_closure.iter())
-                        .map(|(d, refs)| {
-                            let val_types: Vec<ValType> = d
-                                .field_types
-                                .iter()
-                                .zip(refs.iter())
-                                .map(|(ft, r)| {
-                                    resolve_val_type_in_scc(
-                                        ft,
-                                        *r,
-                                        ids,
-                                        &assigned_snapshot,
-                                        &local_of_for_closure,
-                                        int,
-                                        float,
-                                        string_idx,
-                                    )
-                                })
-                                .collect();
-                            let composite =
-                                build_composite_for_node(&d.kind, val_types, d.result_count);
-                            let supertype_id = d.supertype_key.as_ref().and_then(|k| {
-                                let global = key_to_idx_snapshot.get(k)?;
-                                if let Some(local) = local_of_for_closure.get(global) {
-                                    ids.get(*local).copied()
-                                } else {
-                                    assigned_snapshot.get(*global).copied().flatten()
-                                }
-                            });
-                            (composite, d.is_final, supertype_id)
-                        })
-                        .collect()
-                });
-
-                for (local, &global) in scc_indices.iter().enumerate() {
-                    let id = *ids.get(local).expect("rec_group returned id");
-                    if let Some(slot) = assigned.get_mut(global) {
-                        *slot = Some(id);
-                    }
-                }
-                for (local, &global) in scc_indices.iter().enumerate() {
-                    let id = *ids.get(local).expect("rec_group returned id");
-                    let d = descriptors.get(global).expect("descriptor");
-                    let refs = field_refs.get(global).expect("refs");
-                    let val_types: Vec<ValType> = d
-                        .field_types
-                        .iter()
-                        .zip(refs.iter())
-                        .map(|(ft, r)| {
-                            resolve_val_type_in_scc(
-                                ft, *r, &ids, &assigned, &local_of, int, float, string_idx,
-                            )
-                        })
-                        .collect();
-                    let supertype_id = d.supertype_key.as_ref().and_then(|k| {
-                        let global_super = key_to_idx.get(k)?;
-                        if let Some(local) = local_of.get(global_super) {
-                            ids.get(*local).copied()
-                        } else {
-                            assigned.get(*global_super).copied().flatten()
-                        }
-                    });
-                    if let Some(name) = &d.walrus_name {
-                        self.wasm_module.types.get_mut(id).name = Some(name.to_string());
-                    }
-                    self.register_type_node(d, id, &val_types, supertype_id);
+                _ => {
+                    self.emit_cyclic_scc(
+                        scc,
+                        &descriptors,
+                        &field_refs,
+                        &key_to_idx,
+                        &mut assigned,
+                    );
                 }
             }
         }
+    }
+
+    fn build_field_refs(
+        &self,
+        descriptors: &[TypeNode],
+        key_to_idx: &HashMap<TypeNodeKey, usize>,
+    ) -> Vec<Vec<FieldRef>> {
+        descriptors
+            .iter()
+            .map(|d| {
+                d.field_types
+                    .iter()
+                    .map(|ft| self.field_ref(ft, key_to_idx))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn field_ref(&self, ft: &Arc<Type>, key_to_idx: &HashMap<TypeNodeKey, usize>) -> FieldRef {
+        let (key, nullable) = self.type_node_key_and_nullable(ft);
+        if let Some(k) = key.as_ref() {
+            if let Some(&idx) = key_to_idx.get(k) {
+                return FieldRef::InBatch { idx, nullable };
+            }
+            if let Some(&id) = self.type_node_cache.get(k) {
+                return FieldRef::Cached { id, nullable };
+            }
+        }
+        FieldRef::Direct(
+            self.direct_field_val_type(ft)
+                .expect("field type with no node key must resolve directly"),
+        )
+    }
+
+    /// Val type for fields that have no TypeNode key: primitives, externals,
+    /// and enums. Mirrors the non-cache branches of `val_type` so SCC
+    /// emission can fully resolve a field without re-entering generator
+    /// state from inside the `add_rec_group` closure.
+    fn direct_field_val_type(&self, t: &Arc<Type>) -> Option<ValType> {
+        if let Some(vt) = primitive_val_type(t, self.int, self.float, self.string.type_index) {
+            return Some(vt);
+        }
+        if let Some(vt) = named_numeric_val_type(t) {
+            return Some(vt);
+        }
+        match self.custom_type(t) {
+            Some((CustomType::External { val_type, .. }, _)) => Some(val_type),
+            Some((CustomType::Enum { .. }, _)) => Some(ValType::I32),
+            _ => None,
+        }
+    }
+
+    /// Emit a single non-cyclic node using the singleton (`add_struct` /
+    /// `add_composite` / `add`) walrus APIs — preserves arena-level dedup.
+    fn emit_acyclic_singleton(
+        &mut self,
+        global: usize,
+        descriptors: &[TypeNode],
+        field_refs: &[Vec<FieldRef>],
+        key_to_idx: &HashMap<TypeNodeKey, usize>,
+        assigned: &mut [Option<TypeId>],
+    ) {
+        let d = descriptors.get(global).expect("descriptor");
+        let refs = field_refs.get(global).expect("refs");
+        let val_types: Vec<ValType> = refs
+            .iter()
+            .map(|r| resolve_val_type(*r, &[], assigned, &HashMap::new()))
+            .collect();
+        let supertype_id = self.resolve_external_supertype(d, key_to_idx, assigned);
+        let id = self.emit_singleton_type_node(d, &val_types, supertype_id);
+        if let Some(slot) = assigned.get_mut(global) {
+            *slot = Some(id);
+        }
+        self.register_type_node(d, id, &val_types, supertype_id);
+    }
+
+    /// Look up the supertype TypeId for an acyclic node — first in the
+    /// current batch (`assigned`), then in `type_node_cache` (a prior batch).
+    fn resolve_external_supertype(
+        &self,
+        d: &TypeNode,
+        key_to_idx: &HashMap<TypeNodeKey, usize>,
+        assigned: &[Option<TypeId>],
+    ) -> Option<TypeId> {
+        let key = d.supertype_key.as_ref()?;
+        if let Some(&idx) = key_to_idx.get(key)
+            && let Some(Some(id)) = assigned.get(idx)
+        {
+            return Some(*id);
+        }
+        self.type_node_cache.get(key).copied()
+    }
+
+    /// Emit an SCC with cycles (or a singleton with a self-loop) via
+    /// `add_rec_group`. The IDs are pre-allocated by walrus and passed into
+    /// the closure so forward refs inside the SCC can resolve. `val_types`
+    /// and `supertype_id` per node are computed once inside the closure and
+    /// captured for reuse during the post-emit register pass.
+    fn emit_cyclic_scc(
+        &mut self,
+        scc: &[usize],
+        descriptors: &[TypeNode],
+        field_refs: &[Vec<FieldRef>],
+        key_to_idx: &HashMap<TypeNodeKey, usize>,
+        assigned: &mut [Option<TypeId>],
+    ) {
+        let local_of: HashMap<usize, usize> = scc
+            .iter()
+            .enumerate()
+            .map(|(local, &global)| (global, local))
+            .collect();
+
+        // `add_rec_group` borrows `&mut self.wasm_module.types`, so the
+        // closure can't touch any state reachable via `self`. Gather what
+        // it needs into snapshots first; pre-resolve supertype references
+        // so the cache lookup happens before the borrow starts.
+        let scc_nodes: Vec<(&TypeNode, &[FieldRef])> = scc
+            .iter()
+            .map(|&g| {
+                (
+                    descriptors.get(g).expect("descriptor"),
+                    field_refs.get(g).expect("refs").as_slice(),
+                )
+            })
+            .collect();
+        let assigned_snapshot: Vec<Option<TypeId>> = assigned.to_vec();
+        let supertype_srcs: Vec<Option<SupertypeSrc>> = scc_nodes
+            .iter()
+            .map(|(d, _)| self.resolve_supertype_src(d, key_to_idx, &local_of, assigned))
+            .collect();
+        let resolved: RefCell<Vec<(Vec<ValType>, Option<TypeId>)>> =
+            RefCell::new(Vec::with_capacity(scc.len()));
+
+        let ids = self.wasm_module.types.add_rec_group(scc.len(), |ids| {
+            scc_nodes
+                .iter()
+                .zip(supertype_srcs.iter())
+                .map(|((d, refs), src)| {
+                    let val_types: Vec<ValType> = refs
+                        .iter()
+                        .map(|r| resolve_val_type(*r, ids, &assigned_snapshot, &local_of))
+                        .collect();
+                    let supertype_id = resolve_supertype_id(*src, ids);
+                    let composite = build_composite_for_node(&d.kind, &val_types);
+                    resolved.borrow_mut().push((val_types, supertype_id));
+                    (composite, d.is_final, supertype_id)
+                })
+                .collect()
+        });
+
+        let resolved = resolved.into_inner();
+        for ((local, &global), (val_types, supertype_id)) in
+            scc.iter().enumerate().zip(resolved.iter())
+        {
+            let id = *ids.get(local).expect("rec_group returned id");
+            if let Some(slot) = assigned.get_mut(global) {
+                *slot = Some(id);
+            }
+            let d = descriptors.get(global).expect("descriptor");
+            self.set_walrus_name(id, &d.kind);
+            self.register_type_node(d, id, val_types, *supertype_id);
+        }
+    }
+
+    /// Locate a node's supertype before entering `add_rec_group`: same SCC
+    /// (`InScc`), earlier SCC in this batch or prior batch (`External`), or
+    /// none. The closure resolves `InScc` to a concrete `TypeId` once walrus
+    /// hands it the freshly-allocated `ids`.
+    fn resolve_supertype_src(
+        &self,
+        d: &TypeNode,
+        key_to_idx: &HashMap<TypeNodeKey, usize>,
+        local_of: &HashMap<usize, usize>,
+        assigned: &[Option<TypeId>],
+    ) -> Option<SupertypeSrc> {
+        let key = d.supertype_key.as_ref()?;
+        if let Some(&global) = key_to_idx.get(key) {
+            if let Some(&local) = local_of.get(&global) {
+                return Some(SupertypeSrc::InScc(local));
+            }
+            if let Some(&Some(id)) = assigned.get(global) {
+                return Some(SupertypeSrc::External(id));
+            }
+        }
+        self.type_node_cache
+            .get(key)
+            .copied()
+            .map(SupertypeSrc::External)
     }
 
     fn emit_singleton_type_node(
@@ -1636,44 +1566,34 @@ impl<'a> Generator<'a> {
         val_types: &[ValType],
         supertype_id: Option<TypeId>,
     ) -> TypeId {
+        // Function types use the dedicated `add(params, results)` walrus API.
+        // Struct-shaped composites (plain struct, tuple, union super/sub) go
+        // through `add_composite` with the appropriate finality + supertype.
+        // Both paths produce implicit singleton rec groups with arena-level
+        // dedup; see walrus types.rs::add_struct (sugar over add_composite).
         let id = match &d.kind {
-            TypeNodeKind::PlainStruct | TypeNodeKind::Tuple => {
-                let walrus_fields: Vec<FieldType> = val_types
-                    .iter()
-                    .map(|vt| FieldType {
-                        element_type: StorageType::Val(*vt),
-                        mutable: false,
-                    })
-                    .collect();
-                self.wasm_module.types.add_struct(walrus_fields)
+            TypeNodeKind::Function { result_count } => {
+                let (params, results) = split_function_val_types(val_types, *result_count);
+                self.wasm_module.types.add(params, results)
             }
-            TypeNodeKind::UnionSupertype | TypeNodeKind::UnionSubtype => {
-                let mut walrus_fields: Vec<FieldType> = vec![FieldType {
-                    element_type: StorageType::Val(ValType::I32),
-                    mutable: false,
-                }];
-                walrus_fields.extend(val_types.iter().map(|vt| FieldType {
-                    element_type: StorageType::Val(*vt),
-                    mutable: false,
-                }));
-                let comp = walrus::CompositeType::Struct(walrus::StructType {
-                    fields: walrus_fields.into_boxed_slice(),
-                });
+            TypeNodeKind::PlainStruct { .. }
+            | TypeNodeKind::Tuple { .. }
+            | TypeNodeKind::UnionSupertype { .. }
+            | TypeNodeKind::UnionSubtype { .. } => {
+                let comp = build_composite_for_node(&d.kind, val_types);
                 self.wasm_module
                     .types
                     .add_composite(comp, d.is_final, supertype_id)
             }
-            TypeNodeKind::Function => {
-                let total = val_types.len();
-                let param_count = total.saturating_sub(d.result_count);
-                let (params_slice, results_slice) = val_types.split_at(param_count);
-                self.wasm_module.types.add(params_slice, results_slice)
-            }
         };
-        if let Some(name) = &d.walrus_name {
+        self.set_walrus_name(id, &d.kind);
+        id
+    }
+
+    fn set_walrus_name(&mut self, id: TypeId, kind: &TypeNodeKind) {
+        if let Some(name) = kind.walrus_name() {
             self.wasm_module.types.get_mut(id).name = Some(name.to_string());
         }
-        id
     }
 
     fn register_type_node(
@@ -1684,51 +1604,28 @@ impl<'a> Generator<'a> {
         supertype_id: Option<TypeId>,
     ) {
         let _ = self.type_node_cache.insert(d.key.clone(), id);
-        match &d.kind {
-            TypeNodeKind::PlainStruct | TypeNodeKind::Tuple => {
-                let name = d.walrus_name.clone().unwrap_or_default();
-                let fields: Vec<(EcoString, ValType)> = d
-                    .field_labels
-                    .iter()
-                    .cloned()
-                    .zip(val_types.iter().copied())
-                    .collect();
-                let _ = self.wasm_types.insert(WasmType::struct_(name, fields), id);
+        let name = d.kind.walrus_name().cloned().unwrap_or_default();
+        let labeled_fields = || -> Vec<(EcoString, ValType)> {
+            d.field_labels
+                .iter()
+                .cloned()
+                .zip(val_types.iter().copied())
+                .collect()
+        };
+        let wasm_type = match &d.kind {
+            TypeNodeKind::PlainStruct { .. } | TypeNodeKind::Tuple { .. } => {
+                WasmType::struct_(name, labeled_fields())
             }
-            TypeNodeKind::UnionSupertype => {
-                let name = d.walrus_name.clone().unwrap_or_default();
-                let fields: Vec<(EcoString, ValType)> = d
-                    .field_labels
-                    .iter()
-                    .cloned()
-                    .zip(val_types.iter().copied())
-                    .collect();
-                let _ = self
-                    .wasm_types
-                    .insert(WasmType::union(name, fields, None), id);
+            TypeNodeKind::UnionSupertype { .. } => WasmType::union(name, labeled_fields(), None),
+            TypeNodeKind::UnionSubtype { .. } => {
+                WasmType::union(name, labeled_fields(), supertype_id)
             }
-            TypeNodeKind::UnionSubtype => {
-                let name = d.walrus_name.clone().unwrap_or_default();
-                let fields: Vec<(EcoString, ValType)> = d
-                    .field_labels
-                    .iter()
-                    .cloned()
-                    .zip(val_types.iter().copied())
-                    .collect();
-                let _ = self
-                    .wasm_types
-                    .insert(WasmType::union(name, fields, supertype_id), id);
+            TypeNodeKind::Function { result_count } => {
+                let (params, results) = split_function_val_types(val_types, *result_count);
+                WasmType::function(params.to_vec(), results.to_vec())
             }
-            TypeNodeKind::Function => {
-                let total = val_types.len();
-                let param_count = total.saturating_sub(d.result_count);
-                let (params_slice, results_slice) = val_types.split_at(param_count);
-                let _ = self.wasm_types.insert(
-                    WasmType::function(params_slice.to_vec(), results_slice.to_vec()),
-                    id,
-                );
-            }
-        }
+        };
+        let _ = self.wasm_types.insert(wasm_type, id);
     }
 
     fn add_custom_types<'b>(
@@ -2007,36 +1904,38 @@ impl<'a> Generator<'a> {
 
     fn val_type(&mut self, type_: &Arc<Type>) -> ValType {
         if type_.is_utf_codepoint() {
-            ValType::I32
-        } else if type_.is_int() {
-            self.int.val_type()
-        } else if type_.is_float() {
-            self.float.val_type()
-        } else if type_.is_string() {
-            self.string.val_type()
-        } else if let Some(vt) = self.lookup_node_val_type(type_) {
-            vt
-        } else if let Some(types) = type_.tuple_types() {
-            let type_index = self.tuple_type_index(types);
-            self.composite_val_type(type_index)
-        } else if let Some((params, return_)) = type_.fn_types() {
-            let type_index = self.function_type_index(params, Some(return_));
-            self.function_val_type(type_index)
-        } else if let Some((custom_type, args)) = self.custom_type(type_) {
-            self.custom_type_val_type(type_, &custom_type, args)
-        } else if let Some((_, name)) = type_.named_type_name() {
-            match name.as_str() {
-                "I32" => ValType::I32,
-                "I64" => ValType::I64,
-                "F32" => ValType::F32,
-                "F64" => ValType::F64,
-                _ => panic!("unexpected named type should not reach code generation: {name}"),
-            }
-        } else if type_.is_bit_array() {
-            todo!("BitArray is not yet supported");
-        } else {
-            panic!("unexpected type should not reach code generation: {type_:#?}");
+            return ValType::I32;
         }
+        if type_.is_int() {
+            return self.int.val_type();
+        }
+        if type_.is_float() {
+            return self.float.val_type();
+        }
+        if type_.is_string() {
+            return self.string.val_type();
+        }
+        if let Some(vt) = self.lookup_node_val_type(type_) {
+            return vt;
+        }
+        // Lazy SCC discovery + emit; covers cycles via add_rec_group and
+        // non-cyclic composites (tuple/fn/struct/union) via singleton emit.
+        self.ensure_emitted_lazy(type_);
+        if let Some(vt) = self.lookup_node_val_type(type_) {
+            return vt;
+        }
+        // Fallback for types not covered by visit_type_node (Nil, externals,
+        // enums, primitive named types like I32/I64/F32/F64).
+        if let Some(vt) = named_numeric_val_type(type_) {
+            return vt;
+        }
+        if let Some((custom_type, args)) = self.custom_type(type_) {
+            return self.custom_type_val_type(type_, &custom_type, args);
+        }
+        if type_.is_bit_array() {
+            todo!("BitArray is not yet supported");
+        }
+        panic!("unexpected type should not reach code generation: {type_:#?}");
     }
 
     pub(super) fn val_types(&mut self, types: impl IntoIterator<Item = Arc<Type>>) -> Vec<ValType> {
@@ -2062,14 +1961,20 @@ impl<'a> Generator<'a> {
 
     fn type_index(&mut self, type_: &Arc<Type>) -> TypeId {
         if type_.is_string() {
-            self.string.type_index
-        } else if let Some(id) = self.lookup_node_type_index(type_) {
-            id
-        } else if let Some(types) = type_.tuple_types() {
-            self.tuple_type_index(types)
-        } else if let Some((params, return_)) = type_.fn_types() {
-            self.function_type_index(params, Some(return_))
-        } else if let Some((custom_type, args)) = self.custom_type(type_) {
+            return self.string.type_index;
+        }
+        if let Some(id) = self.lookup_node_type_index(type_) {
+            return id;
+        }
+        // Lazy SCC discovery + emit; covers cycles via add_rec_group and
+        // non-cyclic composites via singleton emit (preserves arena dedup).
+        self.ensure_emitted_lazy(type_);
+        if let Some(id) = self.lookup_node_type_index(type_) {
+            return id;
+        }
+        // Fallback for types not covered by visit_type_node (externals,
+        // enums — caller should not normally hit these here).
+        if let Some((custom_type, args)) = self.custom_type(type_) {
             match custom_type {
                 CustomType::External { .. } | CustomType::Enum { .. } => {
                     panic!("external/enum types should not reach code generation")
@@ -2080,22 +1985,20 @@ impl<'a> Generator<'a> {
                 } => {
                     let (type_index, _) =
                         self.mono_struct_type_index(type_, &custom_type, &constructor, &args);
-                    type_index
+                    return type_index;
                 }
                 CustomType::Union { custom_type, .. } => {
                     if let Some(constructor) = custom_type_inferred_constructor(&custom_type, type_)
                     {
                         let (_, type_index, _) =
                             self.mono_union_subtype_index(type_, &custom_type, constructor, &args);
-                        type_index
-                    } else {
-                        self.mono_union_supertype_index(type_, &custom_type)
+                        return type_index;
                     }
+                    return self.mono_union_supertype_index(type_, &custom_type);
                 }
             }
-        } else {
-            panic!("unexpected type should not reach code generation: {type_:?}");
         }
+        panic!("unexpected type should not reach code generation: {type_:?}");
     }
 
     fn function_type_index(
@@ -2122,16 +2025,10 @@ impl<'a> Generator<'a> {
         id
     }
 
-    fn function_val_type(&self, type_index: TypeId) -> ValType {
-        self.val_type_ref(type_index)
-    }
-
     fn tuple_type_index(&mut self, types: impl IntoIterator<Item = Arc<Type>>) -> TypeId {
         let types = types.into_iter().collect_vec();
         let val_types = self.val_types(types.iter().cloned());
-        let name = self
-            .type_pretty_name(&type_::tuple(types))
-            .replace("#", "Tuple");
+        let name = self.tuple_pretty_name(&type_::tuple(types));
         let fields: Vec<(EcoString, ValType)> = val_types
             .into_iter()
             .enumerate()
@@ -4380,245 +4277,6 @@ fn is_generic_type(type_: &Arc<Type>) -> bool {
             TypeVar::Link { type_ } => is_generic_type(type_),
         },
         Type::Tuple { elements } => elements.iter().any(is_generic_type),
-    }
-}
-
-/// Tarjan's SCC algorithm. Returns SCCs in reverse topological order
-/// (post-order: leaves first, roots last).
-fn tarjan_scc(node_count: usize, edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
-    struct State {
-        index_of: Vec<Option<usize>>,
-        lowlink: Vec<usize>,
-        on_stack: Vec<bool>,
-        stack: Vec<usize>,
-        next_index: usize,
-        sccs: Vec<Vec<usize>>,
-    }
-
-    fn strongconnect(v: usize, edges: &[Vec<usize>], state: &mut State) {
-        if let Some(slot) = state.index_of.get_mut(v) {
-            *slot = Some(state.next_index);
-        }
-        if let Some(slot) = state.lowlink.get_mut(v) {
-            *slot = state.next_index;
-        }
-        state.next_index += 1;
-        state.stack.push(v);
-        if let Some(slot) = state.on_stack.get_mut(v) {
-            *slot = true;
-        }
-
-        let neighbors = edges.get(v).cloned().unwrap_or_default();
-        for w in neighbors {
-            if state.index_of.get(w).copied().flatten().is_none() {
-                strongconnect(w, edges, state);
-                let w_low = state.lowlink.get(w).copied().unwrap_or(0);
-                if let Some(slot) = state.lowlink.get_mut(v) {
-                    *slot = (*slot).min(w_low);
-                }
-            } else if state.on_stack.get(w).copied().unwrap_or(false) {
-                let w_idx = state.index_of.get(w).copied().flatten().unwrap_or(0);
-                if let Some(slot) = state.lowlink.get_mut(v) {
-                    *slot = (*slot).min(w_idx);
-                }
-            }
-        }
-
-        let v_low = state.lowlink.get(v).copied().unwrap_or(0);
-        let v_idx = state.index_of.get(v).copied().flatten().unwrap_or(0);
-        if v_low == v_idx {
-            let mut scc = Vec::new();
-            loop {
-                let w = state
-                    .stack
-                    .pop()
-                    .expect("tarjan: stack non-empty at SCC pop");
-                if let Some(slot) = state.on_stack.get_mut(w) {
-                    *slot = false;
-                }
-                let stop = w == v;
-                scc.push(w);
-                if stop {
-                    break;
-                }
-            }
-            state.sccs.push(scc);
-        }
-    }
-
-    let mut state = State {
-        index_of: vec![None; node_count],
-        lowlink: vec![0; node_count],
-        on_stack: vec![false; node_count],
-        stack: Vec::new(),
-        next_index: 0,
-        sccs: Vec::new(),
-    };
-
-    for v in 0..node_count {
-        if state.index_of.get(v).copied().flatten().is_none() {
-            strongconnect(v, edges, &mut state);
-        }
-    }
-
-    state.sccs
-}
-
-#[cfg(test)]
-#[test]
-fn test_tarjan_scc() {
-    // Simple cycle: 0 → 1 → 0
-    let sccs = tarjan_scc(2, &[vec![1], vec![0]]);
-    assert_eq!(sccs.len(), 1);
-    assert_eq!(sccs[0].len(), 2);
-
-    // DAG: 0 → 1 → 2 (3 singleton SCCs in reverse topo order: 2, 1, 0)
-    let sccs = tarjan_scc(3, &[vec![1], vec![2], vec![]]);
-    assert_eq!(sccs, vec![vec![2], vec![1], vec![0]]);
-
-    // Self-loop: 0 → 0
-    let sccs = tarjan_scc(1, &[vec![0]]);
-    assert_eq!(sccs, vec![vec![0]]);
-
-    // Mixed: 0 → 1, 1 → 2, 2 → 1 (SCCs: {1,2}, {0})
-    let sccs = tarjan_scc(3, &[vec![1], vec![2], vec![1]]);
-    assert_eq!(sccs.len(), 2);
-    let mut first: Vec<usize> = sccs[0].clone();
-    first.sort();
-    assert_eq!(first, vec![1, 2]);
-    assert_eq!(sccs[1], vec![0]);
-}
-
-/// ValType for a field whose referenced type (if any) is already emitted
-/// (its TypeId is in `assigned`). Used for singleton-non-cyclic SCC emission.
-fn resolve_val_type_assigned(
-    t: &Arc<Type>,
-    info: TypeNodeFieldRef,
-    assigned: &[Option<TypeId>],
-    int: IntType,
-    float: FloatType,
-    string_idx: TypeId,
-) -> ValType {
-    if let Some(v) = primitive_val_type(t, int, float, string_idx) {
-        return v;
-    }
-    let idx = info
-        .descriptor_idx
-        .expect("emit: field type not discovered");
-    let id = assigned
-        .get(idx)
-        .copied()
-        .flatten()
-        .expect("emit: ref to type emitted in later SCC");
-    ValType::Ref(RefType {
-        heap_type: HeapType::Concrete(id),
-        nullable: info.nullable,
-    })
-}
-
-/// ValType for a field inside an SCC being emitted via `add_rec_group`.
-/// Resolves via the SCC's pre-allocated `ids` for cyclic refs and `assigned`
-/// for external refs.
-fn resolve_val_type_in_scc(
-    t: &Arc<Type>,
-    info: TypeNodeFieldRef,
-    ids: &[TypeId],
-    assigned: &[Option<TypeId>],
-    local_of: &HashMap<usize, usize>,
-    int: IntType,
-    float: FloatType,
-    string_idx: TypeId,
-) -> ValType {
-    if let Some(v) = primitive_val_type(t, int, float, string_idx) {
-        return v;
-    }
-    let idx = info
-        .descriptor_idx
-        .expect("emit: field type not discovered");
-    let id = if let Some(local) = local_of.get(&idx) {
-        *ids.get(*local).expect("scc rec_group id")
-    } else {
-        assigned
-            .get(idx)
-            .copied()
-            .flatten()
-            .expect("scc: external ref not yet emitted")
-    };
-    ValType::Ref(RefType {
-        heap_type: HeapType::Concrete(id),
-        nullable: info.nullable,
-    })
-}
-
-fn primitive_val_type(
-    t: &Arc<Type>,
-    int: IntType,
-    float: FloatType,
-    string_idx: TypeId,
-) -> Option<ValType> {
-    if t.is_int() {
-        return Some(int.val_type());
-    }
-    if t.is_float() {
-        return Some(float.val_type());
-    }
-    if t.is_string() {
-        return Some(ValType::Ref(RefType {
-            heap_type: HeapType::Concrete(string_idx),
-            nullable: false,
-        }));
-    }
-    if t.is_bool() || t.is_utf_codepoint() {
-        return Some(ValType::I32);
-    }
-    if let Some((_, n)) = t.named_type_name()
-        && n.as_str() == "Nil"
-    {
-        return Some(ValType::I32);
-    }
-    None
-}
-
-fn build_composite_for_node(
-    kind: &TypeNodeKind,
-    val_types: Vec<ValType>,
-    result_count: usize,
-) -> walrus::CompositeType {
-    match kind {
-        TypeNodeKind::PlainStruct | TypeNodeKind::Tuple => {
-            let fields: Vec<FieldType> = val_types
-                .into_iter()
-                .map(|vt| FieldType {
-                    element_type: StorageType::Val(vt),
-                    mutable: false,
-                })
-                .collect();
-            walrus::CompositeType::Struct(walrus::StructType {
-                fields: fields.into_boxed_slice(),
-            })
-        }
-        TypeNodeKind::UnionSupertype | TypeNodeKind::UnionSubtype => {
-            let mut fields: Vec<FieldType> = vec![FieldType {
-                element_type: StorageType::Val(ValType::I32),
-                mutable: false,
-            }];
-            fields.extend(val_types.into_iter().map(|vt| FieldType {
-                element_type: StorageType::Val(vt),
-                mutable: false,
-            }));
-            walrus::CompositeType::Struct(walrus::StructType {
-                fields: fields.into_boxed_slice(),
-            })
-        }
-        TypeNodeKind::Function => {
-            let total = val_types.len();
-            let param_count = total.saturating_sub(result_count);
-            let (params_slice, results_slice) = val_types.split_at(param_count);
-            walrus::CompositeType::Function(walrus::FunctionType::new(
-                params_slice.to_vec().into_boxed_slice(),
-                results_slice.to_vec().into_boxed_slice(),
-            ))
-        }
     }
 }
 
