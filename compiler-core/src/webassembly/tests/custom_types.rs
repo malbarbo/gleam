@@ -187,6 +187,163 @@ pub fn main() {
 }
 
 #[test]
+fn mutual_operations() {
+    run_ok(
+        r#"
+type Expr {
+    Num(Int)
+    Op(BinOp)
+}
+
+type BinOp {
+    Add(Expr, Expr)
+    Mul(Expr, Expr)
+}
+
+fn eval(e: Expr) -> Int {
+    case e {
+        Num(n) -> n
+        Op(op) -> eval_op(op)
+    }
+}
+
+fn eval_op(op: BinOp) -> Int {
+    case op {
+        Add(a, b) -> eval(a) + eval(b)
+        Mul(a, b) -> eval(a) * eval(b)
+    }
+}
+
+fn depth(e: Expr) -> Int {
+    case e {
+        Num(_) -> 0
+        Op(op) -> 1 + depth_op(op)
+    }
+}
+
+fn depth_op(op: BinOp) -> Int {
+    case op {
+        Add(a, b) -> max(depth(a), depth(b))
+        Mul(a, b) -> max(depth(a), depth(b))
+    }
+}
+
+fn max(a: Int, b: Int) -> Int {
+    case a > b {
+        True -> a
+        False -> b
+    }
+}
+
+pub fn main() {
+    // (1 + 2) * 3 = 9
+    let e = Op(Mul(Op(Add(Num(1), Num(2))), Num(3)))
+    assert eval(e) == 9
+    assert depth(e) == 2
+
+    // 4 + (5 * 6) = 34
+    let e = Op(Add(Num(4), Op(Mul(Num(5), Num(6)))))
+    assert eval(e) == 34
+    assert depth(e) == 2
+
+    assert eval(Num(7)) == 7
+    assert depth(Num(7)) == 0
+}
+"#,
+    );
+}
+
+#[test]
+#[ignore = "stack overflow in codegen: SCC type emission unimplemented (see compiler-core/webassembly-type-scc-plan.md)"]
+fn self_shared_recursive_field() {
+    run_ok(
+        r#"
+pub type X {
+    X1(child: X, n: Int)
+    X2(child: X, s: String)
+}
+
+pub fn first(x: X) -> Int {
+    case x {
+        X1(_, n) -> n
+        X2(_, _) -> 0
+    }
+}
+
+pub fn main() {
+    let _ = first
+    0
+}
+"#,
+    );
+}
+
+#[test]
+#[ignore = "stack overflow in codegen: SCC type emission unimplemented (see compiler-core/webassembly-type-scc-plan.md)"]
+fn mutual_unions_shared_cross_refs() {
+    run_ok(
+        r#"
+pub type A {
+    A1(b: B, n: Int)
+    A2(b: B, s: String)
+}
+
+pub type B {
+    B1(a: A, n: Int)
+    B2(a: A, s: String)
+}
+
+pub fn show_a(a: A) -> Int {
+    case a {
+        A1(_, n) -> n
+        A2(_, _) -> 0
+    }
+}
+
+pub fn show_b(b: B) -> Int {
+    case b {
+        B1(_, n) -> n
+        B2(_, _) -> 0
+    }
+}
+
+pub fn main() {
+    let _ = show_a
+    let _ = show_b
+    0
+}
+"#,
+    );
+}
+
+#[test]
+#[ignore = "stack overflow in codegen: SCC type emission unimplemented (see compiler-core/webassembly-type-scc-plan.md)"]
+fn mutual_structs_cycle() {
+    run_ok(
+        r#"
+pub type Wrap {
+    Wrap(inner: Choice)
+}
+
+pub type Choice {
+    C1(w: Wrap, n: Int)
+}
+
+pub fn first(c: Choice) -> Wrap {
+    case c {
+        C1(w, _) -> w
+    }
+}
+
+pub fn main() {
+    let _ = first
+    0
+}
+"#,
+    );
+}
+
+#[test]
 fn tree_operations() {
     run_ok(
         r#"
