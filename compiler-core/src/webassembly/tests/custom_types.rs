@@ -254,7 +254,6 @@ pub fn main() {
 }
 
 #[test]
-#[ignore = "stack overflow in codegen: SCC type emission unimplemented (see compiler-core/webassembly-type-scc-plan.md)"]
 fn self_shared_recursive_field() {
     run_ok(
         r#"
@@ -279,7 +278,6 @@ pub fn main() {
 }
 
 #[test]
-#[ignore = "stack overflow in codegen: SCC type emission unimplemented (see compiler-core/webassembly-type-scc-plan.md)"]
 fn mutual_unions_shared_cross_refs() {
     run_ok(
         r#"
@@ -317,7 +315,86 @@ pub fn main() {
 }
 
 #[test]
-#[ignore = "stack overflow in codegen: SCC type emission unimplemented (see compiler-core/webassembly-type-scc-plan.md)"]
+fn wasm_tools_validate_cyclic_outputs() {
+    // M0 acceptance: validate WASM output of the 3 cyclic tests + function-in-cycle
+    // with wasm-tools to confirm the rec_group emission is well-formed.
+    for (name, src) in [
+        (
+            "self_shared",
+            r#"
+pub type X { X1(child: X, n: Int)  X2(child: X, s: String) }
+pub fn first(x: X) -> Int { case x { X1(_, n) -> n  X2(_, _) -> 0 } }
+pub fn main() { let _ = first 0 }
+"#,
+        ),
+        (
+            "mutual_unions",
+            r#"
+pub type A { A1(b: B, n: Int)  A2(b: B, s: String) }
+pub type B { B1(a: A, n: Int)  B2(a: A, s: String) }
+pub fn show_a(a: A) -> Int { case a { A1(_, n) -> n  A2(_, _) -> 0 } }
+pub fn show_b(b: B) -> Int { case b { B1(_, n) -> n  B2(_, _) -> 0 } }
+pub fn main() { let _ = show_a  let _ = show_b  0 }
+"#,
+        ),
+        (
+            "mutual_structs",
+            r#"
+pub type Wrap { Wrap(inner: Choice) }
+pub type Choice { C1(w: Wrap, n: Int) }
+pub fn first(c: Choice) -> Wrap { case c { C1(w, _) -> w } }
+pub fn main() { let _ = first  0 }
+"#,
+        ),
+        (
+            "function_in_cycle",
+            r#"
+pub type Handler { Handler(act: fn(Handler) -> Int) }
+pub fn run(h: Handler) -> Int { case h { Handler(f) -> f(h) } }
+pub fn main() { let h = Handler(fn(_) { 42 }) assert run(h) == 42 }
+"#,
+        ),
+    ] {
+        let bytes = compile_wasm(src, vec![]);
+        let tmp = std::env::temp_dir().join(format!("validate_{name}.wasm"));
+        std::fs::write(&tmp, &bytes).expect("write wasm");
+        let out = std::process::Command::new("wasm-tools")
+            .args(["validate", "--features", "all"])
+            .arg(&tmp)
+            .output()
+            .expect("wasm-tools not found");
+        let _ = std::fs::remove_file(&tmp);
+        assert!(
+            out.status.success(),
+            "wasm-tools validate failed for {name}:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn function_field_recursive() {
+    run_ok(
+        r#"
+pub type Handler {
+    Handler(act: fn(Handler) -> Int)
+}
+
+pub fn run(h: Handler) -> Int {
+    case h {
+        Handler(f) -> f(h)
+    }
+}
+
+pub fn main() {
+    let h = Handler(fn(_) { 42 })
+    assert run(h) == 42
+}
+"#,
+    );
+}
+
+#[test]
 fn mutual_structs_cycle() {
     run_ok(
         r#"
