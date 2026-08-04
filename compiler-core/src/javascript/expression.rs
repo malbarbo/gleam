@@ -457,7 +457,7 @@ impl<'module, 'a> Generator<'module, 'a> {
                         u8_slice(&bytes)
                     }
 
-                    (Some(size_value), _) if size_value == 8.into() => value,
+                    (Some(size_value), _) if size_value == 8.into() => to_js_number(value),
 
                     (Some(size_value), _) if size_value <= 0.into() => nil(),
 
@@ -465,6 +465,7 @@ impl<'module, 'a> Generator<'module, 'a> {
                         self.tracker.sized_integer_segment_used = true;
                         let size = details.size;
                         let is_big = bool(segment.endianness().is_big());
+                        let value = to_js_number(value);
                         docvec!["sizedInt(", value, ", ", size, ", ", is_big, ")"]
                     }
                 },
@@ -521,9 +522,10 @@ impl<'module, 'a> Generator<'module, 'a> {
                 (Some(size_value), size)
             }
             Some(size) => {
-                let mut size = self.not_in_tail_position(Some(Ordering::Strict), |this| {
-                    this.wrap_expression(size)
-                });
+                let mut size =
+                    to_js_number(self.not_in_tail_position(Some(Ordering::Strict), |this| {
+                        this.wrap_expression(size)
+                    }));
 
                 if unit != 1 {
                     size = size.group().append(" * ".to_doc().append(unit.to_doc()));
@@ -2205,7 +2207,7 @@ impl<'module, 'a> Generator<'module, 'a> {
                         u8_slice(&bytes)
                     }
 
-                    (Some(size_value), _) if size_value == 8.into() => value,
+                    (Some(size_value), _) if size_value == 8.into() => to_js_number(value),
 
                     (Some(size_value), _) if size_value <= 0.into() => nil(),
 
@@ -2213,6 +2215,7 @@ impl<'module, 'a> Generator<'module, 'a> {
                         self.tracker.sized_integer_segment_used = true;
                         let size = details.size;
                         let is_big = bool(segment.endianness().is_big());
+                        let value = to_js_number(value);
                         docvec!["sizedInt(", value, ", ", size, ", ", is_big, ")"]
                     }
                 },
@@ -2271,10 +2274,10 @@ impl<'module, 'a> Generator<'module, 'a> {
             }
 
             Some(size) => {
-                let mut size = match context {
+                let mut size = to_js_number(match context {
                     Context::Constant => self.constant_expression(context, size),
                     Context::Guard => self.guard_constant_expression(size),
-                };
+                });
                 if unit != 1 {
                     size = size.group().append(" * ".to_doc().append(unit.to_doc()));
                 }
@@ -2540,6 +2543,26 @@ impl AssertExpression {
 
 pub fn int(value: &str) -> Document<'_> {
     eco_string_int(value.into())
+}
+
+/// Bit array offsets, sizes and byte values are plain JavaScript numbers in the
+/// prelude, so a `gleam.Int` has to be converted before being used as one.
+pub fn to_js_number(value: Document<'_>) -> Document<'_> {
+    if is_bigint_enabled() {
+        docvec!["Number(", value, ")"]
+    } else {
+        value
+    }
+}
+
+/// The inverse of `to_js_number`: a number read out of a bit array is a
+/// `gleam.Int`.
+pub fn to_gleam_int(value: Document<'_>) -> Document<'_> {
+    if is_bigint_enabled() {
+        docvec!["BigInt(", value, ")"]
+    } else {
+        value
+    }
 }
 
 pub fn eco_string_int<'a>(value: EcoString) -> Document<'a> {

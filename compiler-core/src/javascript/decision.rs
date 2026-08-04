@@ -12,7 +12,7 @@ use crate::{
     },
     format::break_block,
     javascript::{
-        expression::{eco_string_int, string},
+        expression::{eco_string_int, string, to_gleam_int, to_js_number},
         maybe_escape_property,
     },
     pretty::{Document, Documentable, break_, concat, join, line, nil},
@@ -1250,7 +1250,7 @@ impl<'generator, 'module, 'a> Variables<'generator, 'module, 'a> {
                         (Some(start), _) if start == BigInt::ZERO => self
                             .read_size_to_doc(size)
                             .expect("unexpected catch all size"),
-                        (Some(start), Some(end)) => (start + end).to_doc(),
+                        (Some(start), Some(end)) => bit_offset(start + end),
                         (_, _) => docvec![start_doc.clone(), " + ", self.read_size_to_doc(size)],
                     };
                     let check = self.bit_array_slice_to_float(value, start_doc, end, endianness);
@@ -1367,7 +1367,7 @@ impl<'generator, 'module, 'a> Variables<'generator, 'module, 'a> {
                     && from_bits.clone() % 8 == BigInt::ZERO =>
             {
                 let from_byte: BigInt = from_bits / 8;
-                return docvec![bit_array, ".byteAt(", from_byte, ")"];
+                return to_gleam_int(docvec![bit_array, ".byteAt(", bit_offset(from_byte), ")"]);
             }
 
             // If we're reading all the remaining bits/bytes of an array we'll
@@ -1386,8 +1386,8 @@ impl<'generator, 'module, 'a> Variables<'generator, 'module, 'a> {
                 // If both the start and and are known at compile time we can use
                 // those directly in the slice call and perform no addition at
                 // runtime.
-                let start = from_bits.clone().to_doc();
-                let end = (from_bits + size).to_doc();
+                let start = bit_offset(from_bits.clone());
+                let end = bit_offset(from_bits + size);
                 (start, end)
             } else {
                 // Otherwise we'll have to sum the variable part and the constant
@@ -1403,9 +1403,9 @@ impl<'generator, 'module, 'a> Variables<'generator, 'module, 'a> {
             };
 
         match type_ {
-            ReadType::Int => {
-                self.bit_array_slice_to_int(bit_array, start, end, endianness, *signed)
-            }
+            ReadType::Int => to_gleam_int(
+                self.bit_array_slice_to_int(bit_array, start, end, endianness, *signed),
+            ),
             ReadType::Float => self.bit_array_slice_to_float(bit_array, start, end, endianness),
             ReadType::BitArray => self.bit_array_slice_with_end(bit_array, from, end),
             ReadType::String | ReadType::UtfCodepoint => {
@@ -1421,7 +1421,7 @@ impl<'generator, 'module, 'a> Variables<'generator, 'module, 'a> {
 
         let mut pieces = vec![];
         if offset.constant != BigInt::ZERO {
-            pieces.push(eco_string_int(offset.constant.to_string().into()));
+            pieces.push(bit_offset(offset.constant.clone()));
         }
 
         for (variable, times) in offset
@@ -1429,12 +1429,12 @@ impl<'generator, 'module, 'a> Variables<'generator, 'module, 'a> {
             .iter()
             .sorted_by(|(one, _), (other, _)| one.name().cmp(other.name()))
         {
-            let mut variable = match variable {
+            let mut variable = to_js_number(match variable {
                 VariableUsage::PatternSegment(segment_name, _) => self
                     .get_segment_value(segment_name)
                     .expect("segment referenced in a check before being created"),
                 VariableUsage::OutsideVariable(name) => self.local_var(name).to_doc(),
-            };
+            });
             if *times != 1 {
                 variable = variable.append(" * ").append(*times)
             }
@@ -1471,11 +1471,11 @@ impl<'generator, 'module, 'a> Variables<'generator, 'module, 'a> {
     ///
     fn read_size_to_doc(&mut self, size: &ReadSize) -> Option<Document<'a>> {
         match size {
-            ReadSize::ConstantBits(value) => Some(value.clone().to_doc()),
+            ReadSize::ConstantBits(value) => Some(bit_offset(value.clone())),
             ReadSize::VariableBits { variable, unit } => {
-                let variable = self.local_var(variable.name());
+                let variable = to_js_number(self.local_var(variable.name()).to_doc());
                 Some(if *unit == 1 {
-                    variable.to_doc()
+                    variable
                 } else {
                     docvec![variable, " * ", *unit as i64]
                 })
@@ -1635,7 +1635,12 @@ impl<'generator, 'module, 'a> Variables<'generator, 'module, 'a> {
             // optimise this by reading all the subsequent bytes and checking
             // they have a specific value.
             for byte in bytes {
-                let byte_access = docvec![bit_array.clone(), ".byteAt(", from_byte.clone(), ")"];
+                let byte_access = docvec![
+                    bit_array.clone(),
+                    ".byteAt(",
+                    bit_offset(from_byte.clone()),
+                    ")"
+                ];
                 checks.push(docvec![byte_access, equality, byte]);
                 from_byte += 1;
             }
@@ -1686,7 +1691,12 @@ impl<'generator, 'module, 'a> Variables<'generator, 'module, 'a> {
             // all the bytes starting at the given offset match the int bytes.
             let mut checks = vec![];
             for byte in bit_array_segment_int_value_to_bytes(literal_int, size * 8, *endianness) {
-                let byte_access = docvec![bit_array.clone(), ".byteAt(", from_byte.clone(), ")"];
+                let byte_access = docvec![
+                    bit_array.clone(),
+                    ".byteAt(",
+                    bit_offset(from_byte.clone()),
+                    ")"
+                ];
                 checks.push(docvec![byte_access, equality, byte]);
                 from_byte += 1;
             }
@@ -1700,7 +1710,7 @@ impl<'generator, 'module, 'a> Variables<'generator, 'module, 'a> {
                 (Some(start), _) if start == BigInt::ZERO => self
                     .read_size_to_doc(size)
                     .expect("unexpected catch all size"),
-                (Some(start), Some(end)) => (start + end).to_doc(),
+                (Some(start), Some(end)) => bit_offset(start + end),
                 (_, _) => docvec![start_doc.clone(), " + ", self.read_size_to_doc(size)],
             };
             let check = self.bit_array_slice_to_int(bit_array, start_doc, end, endianness, *signed);
@@ -1736,7 +1746,7 @@ impl<'generator, 'module, 'a> Variables<'generator, 'module, 'a> {
             (Some(start), _) if start == BigInt::ZERO => self
                 .read_size_to_doc(size)
                 .expect("unexpected catch all size"),
-            (Some(start), Some(end)) => (start + end).to_doc(),
+            (Some(start), Some(end)) => bit_offset(start + end),
             (_, _) => docvec![start_doc.clone(), " + ", self.read_size_to_doc(size)],
         };
         let check = self.bit_array_slice_to_float(bit_array, start_doc, end, endianness);
@@ -1998,6 +2008,12 @@ fn reassignment_doc(variable_name: EcoString, value: Document<'_>) -> Document<'
 
 fn let_doc(variable_name: EcoString, value: Document<'_>) -> Document<'_> {
     docvec!["let ", variable_name, " = ", value, ";"]
+}
+
+/// Bit offsets and sizes are plain JavaScript numbers, unlike `BigInt::to_doc`
+/// which emits a `gleam.Int`.
+fn bit_offset<'a>(value: BigInt) -> Document<'a> {
+    Document::eco_string(eco_format!("{value}"))
 }
 
 /// Calculates the length of str as utf16 without escape characters.
