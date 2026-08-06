@@ -950,6 +950,9 @@ pub trait UntypedConstantFolder {
     /// You probably don't want to override this method.
     fn update_constant(&mut self, constant: UntypedConstant) -> UntypedConstant {
         match constant {
+            // sgleam: no dedicated fold method.
+            Constant::Call { .. } => constant,
+
             Constant::Int {
                 location,
                 value,
@@ -1181,7 +1184,8 @@ pub trait UntypedConstantFolder {
     /// You probably don't want to override this method.
     fn walk_constant(&mut self, constant: UntypedConstant) -> UntypedConstant {
         match constant {
-            Constant::Var { .. }
+            Constant::Call { .. }
+            | Constant::Var { .. }
             | Constant::Int { .. }
             | Constant::Float { .. }
             | Constant::String { .. }

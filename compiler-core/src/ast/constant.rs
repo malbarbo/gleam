@@ -80,6 +80,16 @@ pub enum Constant<T, RecordTag> {
         right: Box<Self>,
     },
 
+    /// sgleam: a call to a module function, produced only when
+    /// `parse::is_const_call_enabled()` is set.
+    Call {
+        location: SrcSpan,
+        module: Option<(EcoString, SrcSpan)>,
+        name: EcoString,
+        arguments: Vec<CallArg<Self>>,
+        type_: T,
+    },
+
     /// A placeholder constant used to allow module analysis to continue
     /// even when there are type errors. Should never end up in generated code.
     Invalid {
@@ -105,6 +115,7 @@ impl TypedConstant {
             | Constant::Record { type_, .. }
             | Constant::RecordUpdate { type_, .. }
             | Constant::Var { type_, .. }
+            | Constant::Call { type_, .. }
             | Constant::Invalid { type_, .. } => type_.clone(),
         }
     }
@@ -148,7 +159,7 @@ impl TypedConstant {
                 .find_map(|element| element.find_node(byte_index))
                 .or_else(|| tail.as_deref().and_then(|tail| tail.find_node(byte_index)))
                 .unwrap_or(Located::Constant(self)),
-            Constant::Record { arguments, .. } => arguments
+            Constant::Record { arguments, .. } | Constant::Call { arguments, .. } => arguments
                 .iter()
                 .find_map(|argument| argument.find_node(byte_index))
                 .unwrap_or(Located::Constant(self)),
@@ -194,7 +205,7 @@ impl TypedConstant {
             } => value_constructor
                 .as_ref()
                 .map(|constructor| constructor.definition_location()),
-            Constant::RecordUpdate { .. } => None,
+            Constant::RecordUpdate { .. } | Constant::Call { .. } => None,
         }
     }
 
@@ -212,7 +223,7 @@ impl TypedConstant {
                 .map(|element| element.referenced_variables())
                 .fold(im::hashset![], im::HashSet::union),
 
-            Constant::Record { arguments, .. } => arguments
+            Constant::Record { arguments, .. } | Constant::Call { arguments, .. } => arguments
                 .iter()
                 .map(|argument| argument.value.referenced_variables())
                 .fold(im::hashset![], im::HashSet::union),
@@ -381,6 +392,34 @@ impl TypedConstant {
             ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
             (Constant::StringConcatenation { .. }, _) => false,
 
+            (
+                Constant::Call {
+                    module,
+                    name,
+                    arguments,
+                    ..
+                },
+                Constant::Call {
+                    module: other_module,
+                    name: other_name,
+                    arguments: other_arguments,
+                    ..
+                },
+            ) => {
+                let modules_are_equal = match (module, other_module) {
+                    (None, None) => true,
+                    (None, Some(_)) | (Some(_), None) => false,
+                    (Some((one, _)), Some((other, _))) => one == other,
+                };
+
+                modules_are_equal
+                    && name == other_name
+                    && pairwise_all(arguments, other_arguments, |(one, other)| {
+                        one.label == other.label && one.value.syntactically_eq(&other.value)
+                    })
+            }
+            (Constant::Call { .. }, _) => false,
+
             (Constant::Invalid { .. }, _) => false,
         }
     }
@@ -416,6 +455,7 @@ impl TypedConstant {
             | Constant::BitArray { .. }
             | Constant::StringConcatenation { .. }
             | Constant::Var { .. }
+            | Constant::Call { .. }
             | Constant::Invalid { .. } => None,
         }
     }
@@ -439,6 +479,7 @@ impl<A, B> Constant<A, B> {
             | Constant::RecordUpdate { location, .. }
             | Constant::BitArray { location, .. }
             | Constant::Var { location, .. }
+            | Constant::Call { location, .. }
             | Constant::Invalid { location, .. }
             | Constant::StringConcatenation { location, .. } => *location,
         }
@@ -458,6 +499,7 @@ impl<A, B> Constant<A, B> {
             | Constant::RecordUpdate { .. }
             | Constant::BitArray { .. }
             | Constant::StringConcatenation { .. }
+            | Constant::Call { .. }
             | Constant::Invalid { .. } => false,
         }
     }

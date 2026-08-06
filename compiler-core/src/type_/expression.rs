@@ -1678,6 +1678,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                         | Constant::RecordUpdate { .. }
                         | Constant::BitArray { .. }
                         | Constant::Var { .. }
+                        | Constant::Call { .. }
                         | Constant::StringConcatenation { .. }
                         | Constant::Invalid { .. } => (),
                     }
@@ -3722,6 +3723,95 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
     // helper for infer_const to get the value of a constant ignoring annotations
     fn infer_const_value(&mut self, value: UntypedConstant) -> TypedConstant {
         match value {
+            // sgleam: same shape as the `Constant::Record` arm below, but the
+            // callee is a module function so there is no tag or field map to
+            // carry over.
+            Constant::Call {
+                location,
+                module,
+                name,
+                mut arguments,
+                ..
+            } => {
+                let constructor = match self.infer_value_constructor(&module, &name, &location) {
+                    Ok(constructor) => constructor,
+                    Err(error) => {
+                        self.problems.error(error);
+                        return self.new_invalid_constant(location);
+                    }
+                };
+
+                let field_map = match &constructor.variant {
+                    ValueConstructorVariant::ModuleFn { field_map, .. } => field_map.clone(),
+                    ValueConstructorVariant::Record { .. }
+                    | ValueConstructorVariant::ModuleConstant { .. }
+                    | ValueConstructorVariant::LocalVariable { .. } => None,
+                };
+
+                let result = match &field_map {
+                    Some(field_map) => {
+                        field_map.reorder(&mut arguments, location, IncorrectArityContext::Function)
+                    }
+                    None => assert_no_labelled_arguments(
+                        &arguments,
+                        UnexpectedLabelledArgKind::FunctionParameter,
+                    ),
+                };
+                if let Err(error) = result {
+                    self.problems.error(error);
+                    return self.new_invalid_constant(location);
+                }
+
+                let (mut arguments_types, return_type) = match match_fun_type(
+                    constructor.type_.clone(),
+                    arguments.len(),
+                    self.environment,
+                ) {
+                    Ok(types) => types,
+                    Err(error) => {
+                        self.problems.error(convert_not_fun_error(
+                            error,
+                            location,
+                            location,
+                            CallKind::Function,
+                        ));
+                        return self.new_invalid_constant(location);
+                    }
+                };
+
+                let arguments = arguments_types
+                    .iter_mut()
+                    .zip(arguments)
+                    .map(|(type_, argument): (&mut Arc<Type>, _)| {
+                        let CallArg {
+                            label,
+                            value,
+                            location,
+                            implicit,
+                        } = argument;
+                        let value = self.infer_const(&None, value);
+                        if let Err(error) = unify(type_.clone(), value.type_()) {
+                            self.problems
+                                .error(convert_unify_error(error, value.location()))
+                        }
+                        CallArg {
+                            label,
+                            value,
+                            implicit,
+                            location,
+                        }
+                    })
+                    .collect_vec();
+
+                Constant::Call {
+                    location,
+                    module,
+                    name,
+                    arguments,
+                    type_: return_type,
+                }
+            }
+
             Constant::Int {
                 location,
                 value,
@@ -3866,6 +3956,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                     | Constant::RecordUpdate { .. }
                     | Constant::BitArray { .. }
                     | Constant::Var { .. }
+                    | Constant::Call { .. }
                     | Constant::StringConcatenation { .. }
                     | Constant::Invalid { .. } => typed_record,
                 };
@@ -5269,6 +5360,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             | Constant::Record { .. }
             | Constant::RecordUpdate { .. }
             | Constant::BitArray { .. }
+            | Constant::Call { .. }
             | Constant::StringConcatenation { .. }
             | Constant::Invalid { .. } => (),
         }
@@ -5384,6 +5476,20 @@ fn invalid_with_annotated_type(constant: TypedConstant, new_type: Arc<Type>) -> 
             module,
             name,
             constructor,
+            type_: new_type,
+        },
+
+        Constant::Call {
+            location,
+            module,
+            name,
+            arguments,
+            type_: _,
+        } => Constant::Call {
+            location,
+            module,
+            name,
+            arguments,
             type_: new_type,
         },
     }

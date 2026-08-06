@@ -86,11 +86,25 @@ use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 pub use token::Token;
 use vec1::{Vec1, vec1};
 
 #[cfg(test)]
 mod tests;
+
+/// sgleam: when set, a constant expression may call a function
+/// (`Constant::Call`). Only the REPL turns this on, and only while compiling
+/// the module it generates, so student code keeps rejecting `const x = f()`.
+static CONST_CALL: AtomicBool = AtomicBool::new(false);
+
+pub fn is_const_call_enabled() -> bool {
+    CONST_CALL.load(AtomicOrdering::SeqCst)
+}
+
+pub fn set_const_call_enabled(enabled: bool) {
+    CONST_CALL.store(enabled, AtomicOrdering::SeqCst);
+}
 
 #[derive(Debug)]
 pub struct Parsed {
@@ -3388,6 +3402,12 @@ where
                         self.advance(); // name
 
                         match self.tok0 {
+                            Some((_, Token::LeftParen, _)) if is_const_call_enabled() => self
+                                .parse_const_call_finish(
+                                    start,
+                                    Some((name, SrcSpan::new(start, module_end))),
+                                    end_name,
+                                ),
                             Some((_, Token::LeftParen, _)) => parse_error(
                                 ParseErrorType::UnexpectedFunction,
                                 SrcSpan {
@@ -3422,6 +3442,9 @@ where
                 self.advance(); // name
 
                 match self.tok0 {
+                    Some((_, Token::LeftParen, _)) if is_const_call_enabled() => {
+                        self.parse_const_call_finish(start, None, name)
+                    }
                     Some((_, Token::LeftParen, _)) => parse_error(
                         ParseErrorType::UnexpectedFunction,
                         SrcSpan {
@@ -3482,6 +3505,28 @@ where
                 Ok(Some(left))
             }
         }
+    }
+
+    // sgleam: parse the '( .. )' of a call in a constant expression
+    fn parse_const_call_finish(
+        &mut self,
+        start: u32,
+        module: Option<(EcoString, SrcSpan)>,
+        name: EcoString,
+    ) -> Result<Option<UntypedConstant>, ParseError> {
+        let _ = self.expect_one(&Token::LeftParen)?;
+        let arguments =
+            Parser::series_of(self, &Parser::parse_const_record_arg, Some(&Token::Comma))?;
+        let (_, end) =
+            self.expect_one_following_series(&Token::RightParen, "a constant call argument")?;
+
+        Ok(Some(Constant::Call {
+            location: SrcSpan { start, end },
+            module,
+            name,
+            arguments,
+            type_: (),
+        }))
     }
 
     // Parse the '( .. )' of a const type constructor

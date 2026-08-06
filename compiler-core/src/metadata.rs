@@ -285,6 +285,34 @@ impl RemapIds {
 
     fn constant(&mut self, constant: TypedConstant) -> TypedConstant {
         match constant {
+            Constant::Call {
+                location,
+                module,
+                name,
+                arguments,
+                type_,
+            } => Constant::Call {
+                location,
+                module,
+                name,
+                arguments: arguments
+                    .into_iter()
+                    .map(
+                        |CallArg {
+                             label,
+                             location,
+                             value,
+                             implicit,
+                         }| CallArg {
+                            label,
+                            location,
+                            value: self.constant(value),
+                            implicit,
+                        },
+                    )
+                    .collect(),
+                type_: self.type_(type_),
+            },
             Constant::Int {
                 location,
                 value,

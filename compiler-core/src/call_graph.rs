@@ -509,6 +509,20 @@ impl<'a> CallGraphBuilder<'a> {
                 self.constant(left);
                 self.constant(right);
             }
+
+            Constant::Call {
+                module,
+                name,
+                arguments,
+                ..
+            } => {
+                if module.is_none() {
+                    self.referenced(name);
+                }
+                for argument in arguments {
+                    self.constant(&argument.value);
+                }
+            }
         }
     }
 }

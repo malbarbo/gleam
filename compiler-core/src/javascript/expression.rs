@@ -2160,6 +2160,23 @@ impl<'module, 'a> Generator<'module, 'a> {
                 docvec![left, " + ", right]
             }
 
+            Constant::Call {
+                module,
+                name,
+                arguments,
+                ..
+            } => {
+                let function = match module {
+                    Some((module, _)) => docvec!["$", module, ".", maybe_escape_identifier(name)],
+                    None => maybe_escape_identifier(name).to_doc(),
+                };
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| self.constant_expression(context, &argument.value))
+                    .collect_vec();
+                docvec![function, call_arguments(arguments)]
+            }
+
             Constant::RecordUpdate { .. } => {
                 panic!("record updates should not reach code generation")
             }
@@ -2515,6 +2532,9 @@ impl<'module, 'a> Generator<'module, 'a> {
             | Constant::String { .. }
             | Constant::RecordUpdate { .. }
             | Constant::StringConcatenation { .. }
+            // sgleam: a constant used in a guard is inlined by the type checker,
+            // so a call can reach here.
+            | Constant::Call { .. }
             | Constant::Invalid { .. } => self.constant_expression(Context::Guard, expression),
         }
     }

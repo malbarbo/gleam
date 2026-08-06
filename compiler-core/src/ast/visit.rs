@@ -1102,6 +1102,12 @@ where
 
 pub fn visit_typed_constant<'a, V: Visit<'a> + ?Sized>(v: &mut V, constant: &'a TypedConstant) {
     match constant {
+        // sgleam: no dedicated visitor method, just walk the arguments.
+        super::Constant::Call { arguments, .. } => {
+            for argument in arguments {
+                v.visit_typed_constant(&argument.value);
+            }
+        }
         super::Constant::Int {
             location,
             value,

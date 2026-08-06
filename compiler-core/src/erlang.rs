@@ -750,6 +750,7 @@ fn const_string_concatenate_argument<'a>(
     env: &mut Env<'a>,
 ) -> Document<'a> {
     match value {
+        Constant::Call { .. } => unreachable!("sgleam: const call is javascript only"),
         Constant::String { value, .. } => docvec!['"', string_inner(value), "\"/utf8"],
 
         Constant::Var {
@@ -869,6 +870,7 @@ fn const_segment<'a>(
 
     let create_document = |env: &mut Env<'a>| {
         match value {
+            Constant::Call { .. } => unreachable!("sgleam: const call is javascript only"),
             // Skip the normal <<value/utf8>> surrounds
             Constant::String { value, .. } => value.to_doc().surround("\"", "\""),
 
@@ -1718,6 +1720,7 @@ fn int<'a>(value: &str) -> Document<'a> {
 
 fn const_inline<'a>(literal: &'a TypedConstant, env: &mut Env<'a>) -> Document<'a> {
     match literal {
+        Constant::Call { .. } => unreachable!("sgleam: const call is javascript only"),
         Constant::Int { value, .. } => int(value),
         Constant::Float { value, .. } => float(value),
         Constant::String { value, .. } => string(value),
@@ -2010,6 +2013,7 @@ fn clause_guard_string_concatenate_argument<'a>(
         }
 
         ClauseGuard::ModuleSelect { literal, .. } => match literal {
+            Constant::Call { .. } => unreachable!("sgleam: const call is javascript only"),
             Constant::String { value, .. } => docvec!['"', string_inner(value), "\"/utf8"],
             Constant::StringConcatenation { left, right, .. } => {
                 const_string_concatenate_inner(left, right, env)
@@ -3545,6 +3549,7 @@ fn find_referenced_private_functions(
     already_found: &mut im::HashSet<EcoString>,
 ) {
     match constant {
+        Constant::Call { .. } => unreachable!("sgleam: const call is javascript only"),
         Constant::Invalid { .. } => panic!("invalid constants should not reach code generation"),
         Constant::RecordUpdate { .. } => {
             panic!("record updates should not reach code generation")

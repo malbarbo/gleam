@@ -507,6 +507,26 @@ impl<'comments> Formatter<'comments> {
                 self.bit_array(segment_docs, packing, location)
             }
 
+            Constant::Call {
+                module,
+                name,
+                arguments,
+                location,
+                ..
+            } => {
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| self.constant_call_arg(argument))
+                    .collect_vec();
+                let function = match module {
+                    Some((module, _)) => module.to_doc().append(".").append(name.as_str()),
+                    None => name.to_doc(),
+                };
+                function
+                    .append(self.wrap_arguments(arguments, location.end))
+                    .group()
+            }
+
             Constant::Record {
                 name,
                 arguments,
