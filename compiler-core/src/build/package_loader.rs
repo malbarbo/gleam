@@ -68,6 +68,7 @@ pub struct PackageLoader<'a, IO> {
     already_defined_modules: &'a mut im::HashMap<EcoString, DefinedModuleOrigin>,
     incomplete_modules: &'a HashSet<EcoString>,
     cached_warnings: CachedWarnings,
+    loaded_interfaces: &'a im::HashMap<EcoString, crate::type_::ModuleInterface>,
 }
 
 impl<'a, IO> PackageLoader<'a, IO>
@@ -88,6 +89,7 @@ where
         stale_modules: &'a mut StaleTracker,
         already_defined_modules: &'a mut im::HashMap<EcoString, DefinedModuleOrigin>,
         incomplete_modules: &'a HashSet<EcoString>,
+        loaded_interfaces: &'a im::HashMap<EcoString, crate::type_::ModuleInterface>,
     ) -> Self {
         Self {
             io,
@@ -103,6 +105,7 @@ where
             stale_modules,
             already_defined_modules,
             incomplete_modules,
+            loaded_interfaces,
         }
     }
 
@@ -172,12 +175,24 @@ where
                 // and does not need to be recompiled.
                 Input::Cached(info) => {
                     tracing::debug!(module = %info.name, "module_to_load_from_cache");
-                    let module = self.load_cached_module(info)?;
+                    // Already decoded in an earlier compilation of this same
+                    // process and unchanged since: the interface in memory is
+                    // the one the cache file holds, so decoding it again would
+                    // rebuild what is already there.
+                    let module = match self.loaded_interfaces.get(&info.name) {
+                        Some(module) => {
+                            let mut module = module.clone();
+                            if !self.cached_warnings.should_use() {
+                                module.warnings.clear();
+                            }
+                            module
+                        }
+                        None => self.load_cached_module(info)?,
+                    };
                     loaded.cached.push(module);
                 }
             }
         }
-
         Ok(loaded)
     }
 
