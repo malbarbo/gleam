@@ -156,6 +156,7 @@ where
             stale_modules,
             already_defined_modules,
             incomplete_modules,
+            existing_modules,
         );
 
         let loaded = if self.compile_modules {
