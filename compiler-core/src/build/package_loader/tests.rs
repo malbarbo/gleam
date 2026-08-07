@@ -103,6 +103,7 @@ fn run_loader_with_mode(
         already_defined_modules: &mut defined,
         incomplete_modules: &mut HashSet::new(),
         cached_warnings: CachedWarnings::Ignore,
+        loaded_interfaces: &imbl::HashMap::new(),
     };
     let loaded = loader.run().unwrap();
 
