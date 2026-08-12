@@ -349,12 +349,16 @@ where
                 *emit_source_maps,
                 prelude_location,
             ),
-            TargetCodegenConfiguration::Erlang { app_file, output } => self.perform_erlang_codegen(
-                *output,
-                modules,
-                cached_module_names,
-                app_file.as_ref(),
-            ),
+            TargetCodegenConfiguration::Erlang { app_file, output } => {
+                #[cfg(feature = "disable-erlang")]
+                panic!("Erlang code generation is disabled.");
+                self.perform_erlang_codegen(
+                    *output,
+                    modules,
+                    cached_module_names,
+                    app_file.as_ref(),
+                )
+            }
         }
     }
 
