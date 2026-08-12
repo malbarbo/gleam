@@ -374,6 +374,8 @@ where
                 prelude_location,
             ),
             TargetCodegenConfiguration::Erlang { app_file } => {
+                #[cfg(feature = "disable-erlang")]
+                panic!("Erlang code generation is disabled.");
                 self.perform_erlang_codegen(modules, cached_module_names, app_file.as_ref())
             }
         }
