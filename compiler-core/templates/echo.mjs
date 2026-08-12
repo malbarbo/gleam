@@ -1,7 +1,10 @@
 function echo(value, message, file, line) {
   const grey = "\u001b[90m";
   const reset_color = "\u001b[39m";
-  const file_line = `${file}:${line}`;
+  // A host that generates the module it compiles knows the place by another
+  // name than the file it wrote, and says so here.
+  const file_line =
+    globalThis.gleam_echo_location?.(file, line) ?? `${file}:${line}`;
   const inspector = new Echo$Inspector();
   const string_value = inspector.inspect(value);
   const string_message = message === undefined ? "" : " " + message;
