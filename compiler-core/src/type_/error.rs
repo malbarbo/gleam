@@ -9,6 +9,7 @@ use crate::{
     ast::{BinOp, BitArraySegmentTruncation, Layer, SrcSpan, TodoKind},
     build::Target,
     exhaustiveness::ImpossibleBitArraySegmentPattern,
+    javascript::is_bigint_enabled,
     parse::LiteralFloatValue,
     type_::{Type, expression::ComparisonOutcome, printer::Names},
 };
@@ -2071,7 +2072,9 @@ pub fn check_javascript_int_safety(int_value: &BigInt, location: SrcSpan, proble
     let js_min_safe_integer = -9007199254740991i64;
     let js_max_safe_integer = 9007199254740991i64;
 
-    if *int_value < js_min_safe_integer.into() || *int_value > js_max_safe_integer.into() {
+    if !is_bigint_enabled()
+        && (*int_value < js_min_safe_integer.into() || *int_value > js_max_safe_integer.into())
+    {
         problems.warning(Warning::JavaScriptIntUnsafe { location });
     }
 }

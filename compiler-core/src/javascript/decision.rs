@@ -14,7 +14,7 @@ use crate::{
     },
     javascript::{
         TypeVariant,
-        expression::{eco_string_int, string},
+        expression::{eco_string_int, string, to_gleam_int, to_js_number},
         maybe_escape_property,
     },
     strings::{convert_string_escape_chars, length_utf16},
@@ -1338,7 +1338,7 @@ impl<'generator, 'module, 'a, 'doc> Variables<'generator, 'module, 'a, 'doc> {
                 arena,
                 value,
                 SPACE_TRIPLE_EQUAL_SPACE_DOCUMENT,
-                expected.clone()
+                eco_string_int(arena, eco_format!("{expected}"))
             ],
             RuntimeCheck::StringPrefix { prefix, .. } => {
                 docvec![
@@ -1566,13 +1566,16 @@ impl<'generator, 'module, 'a, 'doc> Variables<'generator, 'module, 'a, 'doc> {
                     && from_bits.clone() % 8 == BigInt::ZERO =>
             {
                 let from_byte: BigInt = from_bits / 8;
-                return docvec![
+                return to_gleam_int(
                     arena,
-                    bit_array,
-                    DOT_BYTE_AT_OPEN_PAREN_DOCUMENT,
-                    from_byte,
-                    CLOSE_PAREN_DOCUMENT
-                ];
+                    docvec![
+                        arena,
+                        bit_array,
+                        DOT_BYTE_AT_OPEN_PAREN_DOCUMENT,
+                        from_byte,
+                        CLOSE_PAREN_DOCUMENT
+                    ],
+                );
             }
 
             // If we're reading all the remaining bits/bytes of an array we'll
@@ -1610,9 +1613,10 @@ impl<'generator, 'module, 'a, 'doc> Variables<'generator, 'module, 'a, 'doc> {
             };
 
         match type_ {
-            ReadType::Int => {
-                self.bit_array_slice_to_int(arena, bit_array, start, end, endianness, *signed)
-            }
+            ReadType::Int => to_gleam_int(
+                arena,
+                self.bit_array_slice_to_int(arena, bit_array, start, end, endianness, *signed),
+            ),
             ReadType::Float => {
                 self.bit_array_slice_to_float(arena, bit_array, start, end, endianness)
             }
@@ -1635,7 +1639,9 @@ impl<'generator, 'module, 'a, 'doc> Variables<'generator, 'module, 'a, 'doc> {
 
         let mut pieces = vec![];
         if offset.constant != BigInt::ZERO {
-            pieces.push(eco_string_int(arena, offset.constant.to_string().into()));
+            // A bit offset is a plain JavaScript number, not a `gleam.Int`, so
+            // it does not go through `eco_string_int`.
+            pieces.push(offset.constant.clone().to_doc(arena));
         }
 
         for (variable, times) in offset
@@ -1643,12 +1649,15 @@ impl<'generator, 'module, 'a, 'doc> Variables<'generator, 'module, 'a, 'doc> {
             .iter()
             .sorted_by(|(one, _), (other, _)| one.name().cmp(other.name()))
         {
-            let mut variable = match variable {
-                VariableUsage::PatternSegment(segment_name, _) => self
-                    .get_segment_value(arena, segment_name)
-                    .expect("segment referenced in a check before being created"),
-                VariableUsage::OutsideVariable(name) => self.local_var(name).to_doc(arena),
-            };
+            let mut variable = to_js_number(
+                arena,
+                match variable {
+                    VariableUsage::PatternSegment(segment_name, _) => self
+                        .get_segment_value(arena, segment_name)
+                        .expect("segment referenced in a check before being created"),
+                    VariableUsage::OutsideVariable(name) => self.local_var(name).to_doc(arena),
+                },
+            );
             if *times != 1 {
                 variable = variable
                     .append(arena, SPACE_TIMES_SPACE_DOCUMENT)
@@ -1700,9 +1709,9 @@ impl<'generator, 'module, 'a, 'doc> Variables<'generator, 'module, 'a, 'doc> {
         match size {
             ReadSize::ConstantBits(value) => Some(value.clone().to_doc(arena)),
             ReadSize::VariableBits { variable, unit } => {
-                let variable = self.local_var(variable.name());
+                let variable = to_js_number(arena, self.local_var(variable.name()).to_doc(arena));
                 Some(if *unit == 1 {
-                    variable.to_doc(arena)
+                    variable
                 } else {
                     docvec![arena, variable, SPACE_TIMES_SPACE_DOCUMENT, *unit as i64]
                 })
