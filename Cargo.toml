@@ -32,7 +32,7 @@ imbl = { version = "7", features = ["serde"] }
 # Extra iter methods
 itertools = "0"
 # Parsing
-regex = "1"
+regex = { package = "regex-lite", version = "0.1" }
 # Colours in terminal
 termcolor = "1"
 # Data (de)serialisation
