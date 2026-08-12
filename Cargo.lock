@@ -1156,7 +1156,7 @@ dependencies = [
  "itertools 0.15.0",
  "num-bigint 0.5.1",
  "num-traits",
- "regex",
+ "regex-lite",
  "src-span",
 ]
 
@@ -1552,7 +1552,7 @@ dependencies = [
  "opener",
  "pretty_assertions",
  "pubgrub",
- "regex",
+ "regex-lite",
  "reqwest",
  "rpassword",
  "rustls-native-certs",
@@ -1614,7 +1614,7 @@ dependencies = [
  "pulldown-cmark",
  "radix_trie",
  "rand 0.10.3",
- "regex",
+ "regex-lite",
  "serde",
  "serde_derive",
  "serde_json",
@@ -1785,7 +1785,7 @@ dependencies = [
  "prost 0.13.5",
  "prost-build",
  "pubgrub",
- "regex",
+ "regex-lite",
  "ring",
  "serde",
  "serde_json",
@@ -3370,6 +3370,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
+
+[[package]]
 name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4076,7 +4082,7 @@ dependencies = [
  "imbl",
  "insta",
  "itertools 0.15.0",
- "regex",
+ "regex-lite",
  "toml 1.1.4+spec-1.1.0",
  "walkdir",
 ]
@@ -4102,7 +4108,7 @@ dependencies = [
  "imbl",
  "insta",
  "itertools 0.15.0",
- "regex",
+ "regex-lite",
  "test-helpers-rs",
  "toml 1.1.4+spec-1.1.0",
 ]
@@ -4116,7 +4122,7 @@ dependencies = [
  "imbl",
  "insta",
  "itertools 0.15.0",
- "regex",
+ "regex-lite",
  "test-helpers-rs",
  "toml 1.1.4+spec-1.1.0",
 ]
