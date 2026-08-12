@@ -619,12 +619,15 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                                 u8_slice(arena, &bytes)
                             }
 
-                            (Some(size_value), _) if size_value == 8.into() => value,
+                            (Some(size_value), _) if size_value == 8.into() => {
+                                to_js_number(arena, value)
+                            }
 
                             _ => {
                                 self.tracker.sized_integer_segment_used = true;
                                 let size = details.size;
                                 let is_big = bool(segment.endianness().is_big());
+                                let value = to_js_number(arena, value);
                                 docvec![
                                     arena,
                                     SIZED_INT_OPEN_PAREN_DOCUMENT,
@@ -747,9 +750,12 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                 (Some(size_value), size)
             }
             Some(size) => {
-                let mut size = self.not_in_tail_position(Some(Ordering::Strict), |this| {
-                    this.wrap_expression(arena, size)
-                });
+                let mut size = to_js_number(
+                    arena,
+                    self.not_in_tail_position(Some(Ordering::Strict), |this| {
+                        this.wrap_expression(arena, size)
+                    }),
+                );
 
                 if unit != 1 {
                     size = size.group(arena).append(
@@ -2139,7 +2145,11 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
         // If we have a constant value divided by zero then it's safe to replace
         // it directly with 0.
         if left.is_literal() && right.is_zero_compile_time_number() {
-            "0".to_doc(arena)
+            if is_bigint_enabled() {
+                "0n".to_doc(arena)
+            } else {
+                "0".to_doc(arena)
+            }
         } else if right.is_non_zero_compile_time_number() {
             let division = if let TypedExpr::BinOp { .. } = left {
                 docvec![
@@ -2151,11 +2161,15 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
             } else {
                 docvec![arena, left_doc, SPACE_SLASH_SPACE_DOCUMENT, right_doc]
             };
-            docvec![
-                arena,
-                GLOBAL_THIS_DOT_MATH_DOT_TRUNC_DOCUMENT,
-                wrap_arguments(arena, [division])
-            ]
+            if is_bigint_enabled() {
+                division
+            } else {
+                docvec![
+                    arena,
+                    GLOBAL_THIS_DOT_MATH_DOT_TRUNC_DOCUMENT,
+                    wrap_arguments(arena, [division])
+                ]
+            }
         } else {
             self.tracker.int_division_used = true;
             docvec![
@@ -2939,12 +2953,15 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                                 u8_slice(arena, &bytes)
                             }
 
-                            (Some(size_value), _) if size_value == 8.into() => value,
+                            (Some(size_value), _) if size_value == 8.into() => {
+                                to_js_number(arena, value)
+                            }
 
                             _ => {
                                 self.tracker.sized_integer_segment_used = true;
                                 let size = details.size;
                                 let is_big = bool(segment.endianness().is_big());
+                                let value = to_js_number(arena, value);
                                 docvec![
                                     arena,
                                     SIZED_INT_OPEN_PAREN_DOCUMENT,
@@ -3069,10 +3086,13 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
             }
 
             Some(size) => {
-                let mut size = match context {
-                    Context::Constant => self.constant_expression(arena, context, size),
-                    Context::Guard => self.guard_constant_expression(arena, size),
-                };
+                let mut size = to_js_number(
+                    arena,
+                    match context {
+                        Context::Constant => self.constant_expression(arena, context, size),
+                        Context::Guard => self.guard_constant_expression(arena, size),
+                    },
+                );
                 if unit != 1 {
                     size = size.group(arena).append(
                         arena,
@@ -3605,6 +3625,32 @@ pub fn int<'a, 'doc>(arena: &'doc DocumentArena<'a, 'doc>, value: &'a str) -> Do
     eco_string_int(arena, value.into())
 }
 
+/// Bit array offsets, sizes and byte values are plain JavaScript numbers in the
+/// prelude, so a `gleam.Int` has to be converted before being used as one.
+pub fn to_js_number<'a, 'doc>(
+    arena: &'doc DocumentArena<'a, 'doc>,
+    value: Document<'a, 'doc>,
+) -> Document<'a, 'doc> {
+    if is_bigint_enabled() {
+        docvec![arena, "Number(", value, ")"]
+    } else {
+        value
+    }
+}
+
+/// The inverse of `to_js_number`: a number read out of a bit array is a
+/// `gleam.Int`.
+pub fn to_gleam_int<'a, 'doc>(
+    arena: &'doc DocumentArena<'a, 'doc>,
+    value: Document<'a, 'doc>,
+) -> Document<'a, 'doc> {
+    if is_bigint_enabled() {
+        docvec![arena, "BigInt(", value, ")"]
+    } else {
+        value
+    }
+}
+
 pub fn eco_string_int<'a, 'doc>(
     arena: &'doc DocumentArena<'a, 'doc>,
     value: EcoString,
@@ -3637,6 +3683,10 @@ pub fn eco_string_int<'a, 'doc>(
     }
 
     out.push_str(value);
+
+    if is_bigint_enabled() {
+        out.push('n');
+    }
 
     out.to_doc(arena)
 }
