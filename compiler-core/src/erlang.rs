@@ -765,6 +765,9 @@ fn const_string_concatenate_argument<'a>(
                 literal: Constant::StringConcatenation { left, right, .. },
                 ..
             } => const_string_concatenate_inner(left, right, env),
+            ValueConstructorVariant::ModuleLet { .. } => {
+                unreachable!("sgleam: a module let is javascript only")
+            }
             ValueConstructorVariant::LocalVariable { .. }
             | ValueConstructorVariant::ModuleConstant { .. }
             | ValueConstructorVariant::ModuleFn { .. }
@@ -1670,6 +1673,10 @@ fn var<'a>(name: &'a str, constructor: &'a ValueConstructor, env: &mut Env<'a>) 
 
         ValueConstructorVariant::ModuleConstant { literal, .. } => const_inline(literal, env),
 
+        ValueConstructorVariant::ModuleLet { .. } => {
+            unreachable!("sgleam: a module let is javascript only")
+        }
+
         ValueConstructorVariant::ModuleFn {
             arity,
             external_erlang: Some((module, name)),
@@ -2216,6 +2223,7 @@ fn docs_arguments_call<'a>(
             }
             ValueConstructorVariant::LocalVariable { .. }
             | ValueConstructorVariant::ModuleConstant { .. }
+            | ValueConstructorVariant::ModuleLet { .. }
             | ValueConstructorVariant::Record { .. } => {
                 unreachable!("The above clause guard ensures that this is a module fn")
             }
@@ -2511,6 +2519,11 @@ fn expr<'a>(expression: &'a TypedExpr, env: &mut Env<'a>) -> Document<'a> {
             constructor: ModuleValueConstructor::Record { name, arity: 0, .. },
             ..
         } => atom_string(to_snake_case(name)),
+
+        TypedExpr::ModuleSelect {
+            constructor: ModuleValueConstructor::ModuleLet { .. },
+            ..
+        } => unreachable!("sgleam: a module let is javascript only"),
 
         TypedExpr::ModuleSelect {
             constructor: ModuleValueConstructor::Constant { literal, .. },

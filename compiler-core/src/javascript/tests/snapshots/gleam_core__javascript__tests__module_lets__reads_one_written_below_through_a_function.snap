@@ -1,0 +1,28 @@
+---
+source: compiler-core/src/javascript/tests/module_lets.rs
+expression: "\npub let x = read()\n\npub fn read() {\n  y\n}\n\npub let y = 1\n"
+---
+----- SOURCE CODE
+
+pub let x = read()
+
+pub fn read() {
+  y
+}
+
+pub let y = 1
+
+
+----- ERROR
+error: Value used before it is defined
+  ┌─ /src/one/two.gleam:2:1
+  │
+2 │ pub let x = read()
+  │ ^^^^^^^^^ This reads `y`
+  ·
+8 │ pub let y = 1
+  │ --------- Defined here
+
+`y` is bound below this one, and a binding at module level
+runs when the module is loaded, in the order it was written. So
+`y` has no value yet when this one runs.

@@ -1,0 +1,11 @@
+---
+source: compiler-core/src/javascript/tests/module_lets.rs
+expression: "\nlet x = 1\n"
+---
+----- SOURCE CODE
+
+let x = 1
+
+
+----- COMPILED JAVASCRIPT
+const x = 1;

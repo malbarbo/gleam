@@ -537,6 +537,7 @@ impl Inliner<'_> {
                     }
                 }
                 ValueConstructorVariant::ModuleConstant { .. }
+                | ValueConstructorVariant::ModuleLet { .. }
                 | ValueConstructorVariant::ModuleFn { .. }
                 | ValueConstructorVariant::Record { .. } => expression,
             },
@@ -862,6 +863,7 @@ impl Inliner<'_> {
                 // function calls, so they also cannot be inlined.
                 ValueConstructorVariant::LocalVariable { .. }
                 | ValueConstructorVariant::ModuleConstant { .. }
+                | ValueConstructorVariant::ModuleLet { .. }
                 | ValueConstructorVariant::Record { .. } => function,
             },
             TypedExpr::ModuleSelect {
@@ -888,9 +890,9 @@ impl Inliner<'_> {
                         function
                     }
                 }
-                ModuleValueConstructor::Record { .. } | ModuleValueConstructor::Constant { .. } => {
-                    function
-                }
+                ModuleValueConstructor::Record { .. }
+                | ModuleValueConstructor::Constant { .. }
+                | ModuleValueConstructor::ModuleLet { .. } => function,
             },
             // Direct calls to anonymous functions can always be inlined
             TypedExpr::Fn {
@@ -1612,6 +1614,7 @@ impl FunctionToInlinable {
                         }
                     }
                     ValueConstructorVariant::ModuleConstant { .. }
+                    | ValueConstructorVariant::ModuleLet { .. }
                     | ValueConstructorVariant::ModuleFn { .. }
                     | ValueConstructorVariant::Record { .. } => {}
                 }
@@ -1715,7 +1718,8 @@ impl FunctionToInlinable {
             ValueConstructorVariant::LocalVariable { .. } => {
                 Some(InlinableValueConstructor::LocalVariable)
             }
-            ValueConstructorVariant::ModuleConstant { .. } => None,
+            ValueConstructorVariant::ModuleConstant { .. }
+            | ValueConstructorVariant::ModuleLet { .. } => None,
             ValueConstructorVariant::ModuleFn { name, module, .. } => {
                 Some(InlinableValueConstructor::Function {
                     name: name.clone(),

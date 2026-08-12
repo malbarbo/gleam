@@ -1,0 +1,19 @@
+---
+source: compiler-core/src/javascript/tests/module_lets.rs
+expression: "\npub fn read() {\n  y\n}\n\npub let y = 1\n"
+---
+----- SOURCE CODE
+
+pub fn read() {
+  y
+}
+
+pub let y = 1
+
+
+----- COMPILED JAVASCRIPT
+export const y = 1;
+
+export function read() {
+  return y;
+}

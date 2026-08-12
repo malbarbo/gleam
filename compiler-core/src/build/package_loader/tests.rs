@@ -93,6 +93,7 @@ fn run_loader(fs: InMemoryFileSystem, root: &Utf8Path, artefact: &Utf8Path) -> L
         already_defined_modules: &mut defined,
         incomplete_modules: &mut HashSet::new(),
         cached_warnings: CachedWarnings::Ignore,
+        loaded_interfaces: &im::HashMap::new(),
     };
     let loaded = loader.run().unwrap();
 

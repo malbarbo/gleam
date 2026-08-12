@@ -19,7 +19,8 @@ pub use self::telemetry::{NullTelemetry, Telemetry};
 use crate::ast::{
     self, CallArg, CustomType, DefinitionLocation, TypeAst, TypedArg, TypedClauseGuard,
     TypedConstant, TypedCustomType, TypedDefinitions, TypedExpr, TypedFunction, TypedImport,
-    TypedModuleConstant, TypedPattern, TypedRecordConstructor, TypedStatement, TypedTypeAlias,
+    TypedModuleConstant, TypedModuleLet, TypedPattern, TypedRecordConstructor, TypedStatement,
+    TypedTypeAlias,
 };
 use crate::type_::{Type, TypedCallArg};
 use crate::{
@@ -285,6 +286,7 @@ pub struct Module {
 ///
 enum DocumentableDefinition<'a> {
     Constant(&'a mut TypedModuleConstant),
+    ModuleLet(&'a mut TypedModuleLet),
     TypeAlias(&'a mut TypedTypeAlias),
     CustomType(&'a mut TypedCustomType),
     Function(&'a mut TypedFunction),
@@ -295,6 +297,7 @@ impl<'a> DocumentableDefinition<'a> {
     pub fn location(&self) -> SrcSpan {
         match self {
             Self::Constant(module_constant) => module_constant.location,
+            Self::ModuleLet(module_let) => module_let.location,
             Self::TypeAlias(type_alias) => type_alias.location,
             Self::CustomType(custom_type) => custom_type.location,
             Self::Function(function) => function.location,
@@ -316,6 +319,9 @@ impl<'a> DocumentableDefinition<'a> {
             }
             Self::Constant(constant) => {
                 let _ = constant.documentation.replace(new_documentation);
+            }
+            Self::ModuleLet(module_let) => {
+                let _ = module_let.documentation.replace(new_documentation);
             }
         }
     }
@@ -352,6 +358,7 @@ impl Module {
         let TypedDefinitions {
             imports,
             constants,
+            module_lets,
             custom_types,
             type_aliases,
             functions,
@@ -359,6 +366,7 @@ impl Module {
 
         let mut definitions = ((imports.iter_mut()).map(DocumentableDefinition::Import))
             .chain((constants.iter_mut()).map(DocumentableDefinition::Constant))
+            .chain((module_lets.iter_mut()).map(DocumentableDefinition::ModuleLet))
             .chain((custom_types.iter_mut()).map(DocumentableDefinition::CustomType))
             .chain((type_aliases.iter_mut()).map(DocumentableDefinition::TypeAlias))
             .chain((functions.iter_mut()).map(DocumentableDefinition::Function))

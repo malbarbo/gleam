@@ -8,12 +8,12 @@ use crate::{
     GLEAM_CORE_PACKAGE_NAME, STDLIB_PACKAGE_NAME,
     ast::{
         self, Arg, BitArrayOption, CustomType, DefinitionLocation, Function, GroupedDefinitions,
-        Import, ModuleConstant, Publicity, RecordConstructor, RecordConstructorArg, SrcSpan,
-        Statement, TypeAlias, TypeAst, TypeAstConstructor, TypeAstFn, TypeAstHole, TypeAstTuple,
-        TypeAstVar, TypedCustomType, TypedDefinitions, TypedExpr, TypedFunction, TypedImport,
-        TypedModule, TypedModuleConstant, TypedTypeAlias, UntypedArg, UntypedCustomType,
-        UntypedFunction, UntypedImport, UntypedModule, UntypedModuleConstant, UntypedStatement,
-        UntypedTypeAlias,
+        Import, ModuleConstant, ModuleLet, Publicity, RecordConstructor, RecordConstructorArg,
+        SrcSpan, Statement, TypeAlias, TypeAst, TypeAstConstructor, TypeAstFn, TypeAstHole,
+        TypeAstTuple, TypeAstVar, TypedCustomType, TypedDefinitions, TypedExpr, TypedFunction,
+        TypedImport, TypedModule, TypedModuleConstant, TypedModuleLet, TypedTypeAlias, UntypedArg,
+        UntypedCustomType, UntypedFunction, UntypedImport, UntypedModule, UntypedModuleConstant,
+        UntypedModuleLet, UntypedStatement, UntypedTypeAlias,
     },
     build::{Origin, Outcome, Target},
     call_graph::{CallGraphNode, into_dependency_order},
@@ -284,11 +284,15 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
         // first, then ones that depend on those, etc.
         let mut typed_functions = Vec::with_capacity(definitions.functions.len());
         let mut typed_constants = Vec::with_capacity(definitions.constants.len());
-        let definition_groups =
-            match into_dependency_order(definitions.functions, definitions.constants) {
-                Ok(definition_groups) => definition_groups,
-                Err(error) => return self.all_errors(error),
-            };
+        let mut typed_module_lets = Vec::with_capacity(definitions.module_lets.len());
+        let definition_groups = match into_dependency_order(
+            definitions.functions,
+            definitions.constants,
+            definitions.module_lets,
+        ) {
+            Ok(definition_groups) => definition_groups,
+            Err(error) => return self.all_errors(error),
+        };
 
         let mut working_constants = vec![];
         let mut working_functions = vec![];
@@ -302,6 +306,9 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
                     }
                     CallGraphNode::ModuleConstant(constant) => {
                         working_constants.push(self.infer_module_constant(constant, &mut env))
+                    }
+                    CallGraphNode::ModuleLet(module_let) => {
+                        typed_module_lets.push(self.infer_module_let(module_let, &mut env))
                     }
                 };
             }
@@ -323,9 +330,14 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             }
         }
 
+        // sgleam: a module let runs when the module is loaded, so it is emitted
+        // in the order it was written, not in the order it was inferred.
+        typed_module_lets.sort_by_key(|module_let| module_let.location.start);
+
         let typed_definitions = TypedDefinitions {
             imports: typed_imports,
             constants: typed_constants,
+            module_lets: typed_module_lets,
             custom_types: typed_custom_types,
             type_aliases: typed_type_aliases,
             functions: typed_functions,
@@ -419,6 +431,104 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
 
     fn all_errors<T>(&mut self, error: Error) -> Outcome<T, Vec1<Error>> {
         Outcome::TotalFailure(Vec1::from_vec_push(self.problems.take_errors(), error))
+    }
+
+    /// sgleam: a value bound at module level by an arbitrary expression. It is
+    /// inferred as the body of a function is, and registered as a value of the
+    /// module so later definitions and other modules can read it.
+    fn infer_module_let(
+        &mut self,
+        module_let: UntypedModuleLet,
+        environment: &mut Environment<'_>,
+    ) -> TypedModuleLet {
+        let ModuleLet {
+            documentation: doc,
+            location,
+            publicity,
+            name,
+            name_location,
+            annotation,
+            value,
+            type_: (),
+        } = module_let;
+        self.check_name_case(name_location, &name, Named::Variable);
+
+        environment.references.begin_constant();
+
+        let definition = FunctionDefinition {
+            has_body: true,
+            has_erlang_external: false,
+            has_javascript_external: false,
+        };
+        let mut expr_typer = ExprTyper::new(environment, definition, &mut self.problems);
+        let typed_value = expr_typer.infer(*value);
+
+        // Check the annotation, if there is one, against the type inferred.
+        if let Some(annotation) = &annotation {
+            match expr_typer.type_from_ast(annotation) {
+                Ok(annotated_type) => {
+                    if let Err(error) = unify(annotated_type, typed_value.type_())
+                        .map_err(|error| convert_unify_error(error, typed_value.location()))
+                    {
+                        expr_typer.problems.error(error);
+                    }
+                }
+                Err(error) => expr_typer.problems.error(error),
+            }
+        }
+
+        let minimum_required_version = expr_typer.minimum_required_version;
+        if minimum_required_version > self.minimum_required_version {
+            self.minimum_required_version = minimum_required_version;
+        }
+
+        let type_ = type_::generalise(typed_value.type_());
+
+        let variant = ValueConstructorVariant::ModuleLet {
+            documentation: doc.as_ref().map(|(_, doc)| doc.clone()),
+            location,
+            module: self.module_name.clone(),
+            name: name.clone(),
+        };
+
+        environment.insert_variable(
+            name.clone(),
+            variant.clone(),
+            type_.clone(),
+            publicity,
+            Deprecation::NotDeprecated,
+        );
+        environment.insert_module_value(
+            name.clone(),
+            ValueConstructor {
+                publicity,
+                deprecation: Deprecation::NotDeprecated,
+                variant,
+                type_: type_.clone(),
+            },
+        );
+
+        environment
+            .references
+            .register_constant(name.clone(), location, publicity);
+        environment.references.register_value_reference(
+            environment.current_module.clone(),
+            name.clone(),
+            &name,
+            name_location,
+            ReferenceKind::Definition,
+        );
+
+        ModuleLet {
+            documentation: doc,
+            location,
+            publicity,
+            name,
+            name_location,
+            annotation,
+            value: Box::new(typed_value),
+            type_,
+        }
     }
 
     fn infer_module_constant(

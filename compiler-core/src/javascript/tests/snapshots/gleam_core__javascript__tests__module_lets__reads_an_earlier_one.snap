@@ -1,0 +1,15 @@
+---
+source: compiler-core/src/javascript/tests/module_lets.rs
+expression: "\npub let a = 1\n\npub let b = a + 1\n"
+---
+----- SOURCE CODE
+
+pub let a = 1
+
+pub let b = a + 1
+
+
+----- COMPILED JAVASCRIPT
+export const a = 1;
+
+export const b = a + 1;

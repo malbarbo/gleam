@@ -1307,6 +1307,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 implementations, ..
             } => implementations,
             ValueConstructorVariant::Record { .. }
+            | ValueConstructorVariant::ModuleLet { .. }
             | ValueConstructorVariant::LocalVariable { .. } => return Ok(()),
         };
 
@@ -2490,6 +2491,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                         location, origin, ..
                     } => (*location, origin.clone()),
                     ValueConstructorVariant::ModuleFn { .. }
+                    | ValueConstructorVariant::ModuleLet { .. }
                     | ValueConstructorVariant::Record { .. } => {
                         return Err(Error::NonLocalClauseGuardVariable { location, name });
                     }
@@ -2755,6 +2757,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                         }
 
                         ModuleValueConstructor::Record { .. }
+                        | ModuleValueConstructor::ModuleLet { .. }
                         | ModuleValueConstructor::Fn { .. } => {
                             Err(Error::RecordAccessUnknownType { location })
                         }
@@ -2839,6 +2842,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
 
             variant @ (ValueConstructorVariant::LocalVariable { .. }
             | ValueConstructorVariant::ModuleConstant { .. }
+            | ValueConstructorVariant::ModuleLet { .. }
             | ValueConstructorVariant::Record { .. }) => {
                 variant.to_module_value_constructor(Arc::clone(&type_), &module_name, &label)
             }
@@ -3375,6 +3379,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             }
             ValueConstructorVariant::LocalVariable { .. }
             | ValueConstructorVariant::ModuleConstant { .. }
+            | ValueConstructorVariant::ModuleLet { .. }
             | ValueConstructorVariant::ModuleFn { .. } => {
                 return Err(Error::RecordUpdateInvalidConstructor {
                     location: constructor.location(),
@@ -3661,6 +3666,11 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 name: value_name,
                 ..
             }
+            | ValueConstructorVariant::ModuleLet {
+                module,
+                name: value_name,
+                ..
+            }
             | ValueConstructorVariant::ModuleConstant {
                 module,
                 name: value_name,
@@ -3676,6 +3686,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             }
             ValueConstructorVariant::ModuleFn { name, module, .. }
             | ValueConstructorVariant::Record { name, module, .. }
+            | ValueConstructorVariant::ModuleLet { name, module, .. }
             | ValueConstructorVariant::ModuleConstant { name, module, .. } => {
                 self.environment.references.register_value_reference(
                     module.clone(),
@@ -3745,6 +3756,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                     ValueConstructorVariant::ModuleFn { field_map, .. } => field_map.clone(),
                     ValueConstructorVariant::Record { .. }
                     | ValueConstructorVariant::ModuleConstant { .. }
+                    | ValueConstructorVariant::ModuleLet { .. }
                     | ValueConstructorVariant::LocalVariable { .. } => None,
                 };
 
@@ -3905,6 +3917,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                     }
 
                     ValueConstructorVariant::ModuleFn { .. }
+                    | ValueConstructorVariant::ModuleLet { .. }
                     | ValueConstructorVariant::LocalVariable { .. } => {
                         self.problems
                             .error(Error::NonLocalClauseGuardVariable { location, name });
@@ -3944,6 +3957,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                     } => match &value_constructor.variant {
                         ValueConstructorVariant::ModuleConstant { literal, .. } => literal.clone(),
                         ValueConstructorVariant::LocalVariable { .. }
+                        | ValueConstructorVariant::ModuleLet { .. }
                         | ValueConstructorVariant::ModuleFn { .. }
                         | ValueConstructorVariant::Record { .. } => typed_record,
                     },
@@ -4138,6 +4152,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                     ),
 
                     ValueConstructorVariant::ModuleFn { .. }
+                    | ValueConstructorVariant::ModuleLet { .. }
                     | ValueConstructorVariant::LocalVariable { .. } => {
                         self.problems
                             .error(Error::NonLocalClauseGuardVariable { location, name });
@@ -4193,6 +4208,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                     ),
 
                     ValueConstructorVariant::ModuleFn { .. }
+                    | ValueConstructorVariant::ModuleLet { .. }
                     | ValueConstructorVariant::LocalVariable { .. } => {
                         self.problems
                             .error(Error::NonLocalClauseGuardVariable { location, name });
@@ -4373,6 +4389,11 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 };
 
                 match constructor.variant {
+                    ValueConstructorVariant::ModuleLet { .. } => {
+                        self.problems
+                            .error(Error::NonLocalClauseGuardVariable { location, name });
+                        self.new_invalid_constant(location)
+                    }
                     ValueConstructorVariant::ModuleConstant { .. }
                     | ValueConstructorVariant::ModuleFn { .. }
                     | ValueConstructorVariant::LocalVariable { .. } => Constant::Var {
@@ -5888,6 +5909,7 @@ fn static_compare(one: &TypedExpr, other: &TypedExpr) -> StaticComparison {
             (
                 ValueConstructorVariant::LocalVariable { .. }
                 | ValueConstructorVariant::ModuleConstant { .. }
+                | ValueConstructorVariant::ModuleLet { .. }
                 | ValueConstructorVariant::ModuleFn { .. }
                 | ValueConstructorVariant::Record { .. },
                 _,

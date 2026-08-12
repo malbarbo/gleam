@@ -925,6 +925,7 @@ where
     let TypedDefinitions {
         imports,
         constants,
+        module_lets,
         custom_types,
         type_aliases,
         functions,
@@ -936,6 +937,10 @@ where
 
     for constant in constants {
         v.visit_typed_module_constant(constant);
+    }
+
+    for module_let in module_lets {
+        v.visit_typed_expr(&module_let.value);
     }
 
     for custom_type in custom_types {

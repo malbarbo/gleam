@@ -203,6 +203,7 @@ impl<'context, 'problems> Importer<'context, 'problems> {
                 );
             }
             ValueConstructorVariant::ModuleConstant { module, .. }
+            | ValueConstructorVariant::ModuleLet { module, .. }
             | ValueConstructorVariant::ModuleFn { module, .. } => {
                 self.environment.references.register_value(
                     used_name.clone(),

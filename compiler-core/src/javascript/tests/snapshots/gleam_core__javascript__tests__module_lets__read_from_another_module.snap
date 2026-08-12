@@ -1,0 +1,23 @@
+---
+source: compiler-core/src/javascript/tests/module_lets.rs
+expression: "\nimport other\n\npub fn main() {\n  other.x\n}\n"
+---
+----- SOURCE CODE
+-- other.gleam
+pub let x = 1
+
+-- main.gleam
+
+import other
+
+pub fn main() {
+  other.x
+}
+
+
+----- COMPILED JAVASCRIPT
+import * as $other from "../other.mjs";
+
+export function main() {
+  return $other.x;
+}

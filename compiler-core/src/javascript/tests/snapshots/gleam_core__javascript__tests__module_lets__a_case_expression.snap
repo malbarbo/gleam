@@ -1,0 +1,21 @@
+---
+source: compiler-core/src/javascript/tests/module_lets.rs
+expression: "\npub let x = case 1 {\n  1 -> \"a\"\n  _ -> \"b\"\n}\n"
+---
+----- SOURCE CODE
+
+pub let x = case 1 {
+  1 -> "a"
+  _ -> "b"
+}
+
+
+----- COMPILED JAVASCRIPT
+export const x = (() => {
+  let $ = 1;
+  if ($ === 1) {
+    return "a";
+  } else {
+    return "b";
+  }
+})();

@@ -1,0 +1,27 @@
+---
+source: compiler-core/src/javascript/tests/module_lets.rs
+expression: "\npub type Wibble {\n  Wibble(Int)\n}\n\npub let x = Wibble(1)\n"
+---
+----- SOURCE CODE
+
+pub type Wibble {
+  Wibble(Int)
+}
+
+pub let x = Wibble(1)
+
+
+----- COMPILED JAVASCRIPT
+import { CustomType as $CustomType } from "../gleam.mjs";
+
+export class Wibble extends $CustomType {
+  constructor($0) {
+    super();
+    this[0] = $0;
+  }
+}
+export const Wibble$Wibble = ($0) => new Wibble($0);
+export const Wibble$isWibble = (value) => value instanceof Wibble;
+export const Wibble$Wibble$0 = (value) => value[0];
+
+export const x = new Wibble(1);

@@ -1,0 +1,19 @@
+---
+source: compiler-core/src/javascript/tests/module_lets.rs
+expression: "\npub let x = 1\n\npub fn other() {\n  1\n}\n"
+---
+----- SOURCE CODE
+
+pub let x = 1
+
+pub fn other() {
+  1
+}
+
+
+----- COMPILED JAVASCRIPT
+export const x = 1;
+
+export function other() {
+  return 1;
+}

@@ -466,6 +466,18 @@ impl<'comments> Formatter<'comments> {
                 };
                 head.append(" = ").append(self.const_expr(value).group())
             }
+
+            Definition::ModuleLet(module_let) => {
+                let head = pub_(module_let.publicity)
+                    .append("let ")
+                    .append(module_let.name.as_str());
+                let head = match &module_let.annotation {
+                    None => head,
+                    Some(type_) => head.append(": ").append(self.type_ast(type_)),
+                };
+                head.append(" = ")
+                    .append(self.expr(&module_let.value).group())
+            }
         }
     }
 

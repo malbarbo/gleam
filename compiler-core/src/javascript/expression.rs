@@ -585,6 +585,17 @@ impl<'module, 'a> Generator<'module, 'a> {
         result
     }
 
+    /// sgleam: the value of a module level `let`, in expression position. A
+    /// statement expression — a `case`, a `panic` — becomes an immediately
+    /// invoked function, which is what a strict position asks for.
+    pub fn module_let_value(&mut self, expression: &'a TypedExpr) -> Document<'a> {
+        self.function_position = Position::Expression(Ordering::Strict);
+        self.scope_position = Position::Expression(Ordering::Strict);
+        let document = self.wrap_expression(expression);
+        debug_assert!(self.statement_level.is_empty());
+        document
+    }
+
     /// Use the `_block` variable if the expression is JS statement.
     pub fn wrap_expression(&mut self, expression: &'a TypedExpr) -> Document<'a> {
         match (expression, &self.scope_position) {
@@ -729,6 +740,7 @@ impl<'module, 'a> Generator<'module, 'a> {
             }
             ValueConstructorVariant::ModuleFn { .. }
             | ValueConstructorVariant::ModuleConstant { .. }
+            | ValueConstructorVariant::ModuleLet { .. }
             | ValueConstructorVariant::LocalVariable { .. } => self.local_var(name).to_doc(),
         }
     }
@@ -2013,7 +2025,9 @@ impl<'module, 'a> Generator<'module, 'a> {
         constructor: &'a ModuleValueConstructor,
     ) -> Document<'a> {
         match constructor {
-            ModuleValueConstructor::Fn { .. } | ModuleValueConstructor::Constant { .. } => {
+            ModuleValueConstructor::Fn { .. }
+            | ModuleValueConstructor::Constant { .. }
+            | ModuleValueConstructor::ModuleLet { .. } => {
                 docvec!["$", module, ".", maybe_escape_identifier(label)]
             }
 

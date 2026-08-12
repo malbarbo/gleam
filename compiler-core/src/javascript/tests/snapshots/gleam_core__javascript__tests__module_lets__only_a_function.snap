@@ -1,0 +1,15 @@
+---
+source: compiler-core/src/javascript/tests/module_lets.rs
+expression: "\npub fn other() {\n  1\n}\n"
+---
+----- SOURCE CODE
+
+pub fn other() {
+  1
+}
+
+
+----- COMPILED JAVASCRIPT
+export function other() {
+  return 1;
+}

@@ -179,6 +179,9 @@ impl<'a, 'env> PatternPrinter<'a, 'env> {
                     ValueConstructorVariant::ModuleConstant { literal, .. } => {
                         const_inline(literal, self.environment)
                     }
+                    ValueConstructorVariant::ModuleLet { .. } => {
+                        unreachable!("sgleam: a module let is javascript only")
+                    }
                     ValueConstructorVariant::LocalVariable { .. }
                     | ValueConstructorVariant::ModuleFn { .. }
                     | ValueConstructorVariant::Record { .. } => {

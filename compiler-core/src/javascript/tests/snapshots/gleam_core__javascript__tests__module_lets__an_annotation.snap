@@ -1,0 +1,11 @@
+---
+source: compiler-core/src/javascript/tests/module_lets.rs
+expression: "\npub let x: Int = 1\n"
+---
+----- SOURCE CODE
+
+pub let x: Int = 1
+
+
+----- COMPILED JAVASCRIPT
+export const x = 1;

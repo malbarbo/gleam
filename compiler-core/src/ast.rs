@@ -74,6 +74,7 @@ impl TypedModule {
         let TypedDefinitions {
             imports,
             constants,
+            module_lets,
             custom_types,
             type_aliases,
             functions,
@@ -83,6 +84,7 @@ impl TypedModule {
             .iter()
             .find_map(|import| import.find_node(byte_index))
             .or_else(|| (constants.iter()).find_map(|constant| constant.find_node(byte_index)))
+            .or_else(|| (module_lets.iter()).find_map(|let_| let_.find_node(byte_index)))
             .or_else(|| (custom_types.iter()).find_map(|type_| type_.find_node(byte_index)))
             .or_else(|| (type_aliases.iter()).find_map(|alias| alias.find_node(byte_index)))
             .or_else(|| (functions.iter()).find_map(|function| function.find_node(byte_index)))
@@ -101,12 +103,18 @@ impl TypedModule {
         let TypedDefinitions {
             imports,
             constants,
+            module_lets,
             custom_types,
             type_aliases,
             functions,
         } = &self.definitions;
 
-        imports.len() + constants.len() + custom_types.len() + type_aliases.len() + functions.len()
+        imports.len()
+            + constants.len()
+            + module_lets.len()
+            + custom_types.len()
+            + type_aliases.len()
+            + functions.len()
     }
 }
 
@@ -114,6 +122,8 @@ impl TypedModule {
 pub struct TypedDefinitions {
     pub imports: Vec<TypedImport>,
     pub constants: Vec<TypedModuleConstant>,
+    /// sgleam: in the order they were written, which is the order they run in.
+    pub module_lets: Vec<TypedModuleLet>,
     pub custom_types: Vec<TypedCustomType>,
     pub type_aliases: Vec<TypedTypeAlias>,
     pub functions: Vec<TypedFunction>,
@@ -151,7 +161,8 @@ impl UntypedModule {
                 Definition::Function(_)
                 | Definition::TypeAlias(_)
                 | Definition::CustomType(_)
-                | Definition::ModuleConstant(_) => None,
+                | Definition::ModuleConstant(_)
+                | Definition::ModuleLet(_) => None,
             })
             .collect()
     }
@@ -1079,6 +1090,43 @@ impl TypedModuleConstant {
     }
 }
 
+pub type UntypedModuleLet = ModuleLet<(), UntypedExpr>;
+pub type TypedModuleLet = ModuleLet<Arc<Type>, TypedExpr>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// sgleam: a value bound at module level by an arbitrary expression, produced
+/// only when `parse::is_module_let_enabled()` is set. Unlike a constant it is
+/// computed when the module is loaded, so it may not be used where a constant
+/// is required, and the bindings of a module run in the order they are written.
+///
+/// ```gleam
+/// pub let start = compute_start()
+/// ```
+pub struct ModuleLet<T, Expr> {
+    pub documentation: Option<(u32, EcoString)>,
+    /// From the "(pub) let" keyword to the end of the ": Type" annotation, or
+    /// (without one) of the name.
+    pub location: SrcSpan,
+    pub publicity: Publicity,
+    pub name: EcoString,
+    pub name_location: SrcSpan,
+    pub annotation: Option<TypeAst>,
+    pub value: Box<Expr>,
+    pub type_: T,
+}
+
+impl TypedModuleLet {
+    pub fn find_node(&self, byte_index: u32) -> Option<Located<'_>> {
+        if let Some(annotation) = &self.annotation
+            && let Some(located) = annotation.find_node(byte_index, self.type_.clone())
+        {
+            return Some(located);
+        }
+
+        self.value.find_node(byte_index)
+    }
+}
+
 pub type UntypedCustomType = CustomType<()>;
 pub type TypedCustomType = CustomType<Arc<Type>>;
 
@@ -1204,6 +1252,7 @@ pub enum Definition<T, Expr, ConstantRecordTag, PackageName> {
     CustomType(CustomType<T>),
     Import(Import<PackageName>),
     ModuleConstant(ModuleConstant<T, ConstantRecordTag>),
+    ModuleLet(ModuleLet<T, Expr>),
 }
 
 impl<A, B, C, E> Definition<A, B, C, E> {
@@ -1213,7 +1262,8 @@ impl<A, B, C, E> Definition<A, B, C, E> {
             | Definition::Import(Import { location, .. })
             | Definition::TypeAlias(TypeAlias { location, .. })
             | Definition::CustomType(CustomType { location, .. })
-            | Definition::ModuleConstant(ModuleConstant { location, .. }) => *location,
+            | Definition::ModuleConstant(ModuleConstant { location, .. })
+            | Definition::ModuleLet(ModuleLet { location, .. }) => *location,
         }
     }
 
@@ -1256,6 +1306,9 @@ impl<A, B, C, E> Definition<A, B, C, E> {
             })
             | Definition::ModuleConstant(ModuleConstant {
                 documentation: doc, ..
+            })
+            | Definition::ModuleLet(ModuleLet {
+                documentation: doc, ..
             }) => doc.as_ref().map(|(_, doc)| doc.clone()),
         }
     }
@@ -1265,6 +1318,7 @@ impl<A, B, C, E> Definition<A, B, C, E> {
             Definition::Function(Function { publicity, .. })
             | Definition::CustomType(CustomType { publicity, .. })
             | Definition::ModuleConstant(ModuleConstant { publicity, .. })
+            | Definition::ModuleLet(ModuleLet { publicity, .. })
             | Definition::TypeAlias(TypeAlias { publicity, .. }) => publicity.is_internal(),
 
             Definition::Import(_) => false,
@@ -4155,6 +4209,7 @@ pub enum TodoKind {
 pub struct GroupedDefinitions {
     pub functions: Vec<UntypedFunction>,
     pub constants: Vec<UntypedModuleConstant>,
+    pub module_lets: Vec<UntypedModuleLet>,
     pub custom_types: Vec<UntypedCustomType>,
     pub imports: Vec<UntypedImport>,
     pub type_aliases: Vec<UntypedTypeAlias>,
@@ -4176,10 +4231,16 @@ impl GroupedDefinitions {
             custom_types,
             functions,
             constants,
+            module_lets,
             imports,
             type_aliases,
         } = self;
-        functions.len() + constants.len() + imports.len() + custom_types.len() + type_aliases.len()
+        functions.len()
+            + constants.len()
+            + module_lets.len()
+            + imports.len()
+            + custom_types.len()
+            + type_aliases.len()
     }
 
     fn add(&mut self, statement: UntypedDefinition) {
@@ -4189,6 +4250,7 @@ impl GroupedDefinitions {
             Definition::TypeAlias(type_alias) => self.type_aliases.push(type_alias),
             Definition::CustomType(custom_type) => self.custom_types.push(custom_type),
             Definition::ModuleConstant(constant) => self.constants.push(constant),
+            Definition::ModuleLet(let_) => self.module_lets.push(let_),
         }
     }
 }

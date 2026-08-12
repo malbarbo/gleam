@@ -60,7 +60,7 @@ use crate::ast::{
     Arg, ArgNames, Assert, AssignName, Assignment, AssignmentKind, BinOp, BitArrayOption,
     BitArraySegment, BitArraySize, CAPTURE_VARIABLE, CallArg, Clause, ClauseGuard, Constant,
     CustomType, Definition, Function, FunctionLiteralKind, HasLocation, Import, IntOperator,
-    Module, ModuleConstant, Pattern, Publicity, RecordBeingUpdated, RecordConstructor,
+    Module, ModuleConstant, ModuleLet, Pattern, Publicity, RecordBeingUpdated, RecordConstructor,
     RecordConstructorArg, RecordUpdateArg, SrcSpan, Statement, TailPattern, TargetedDefinition,
     TodoKind, TypeAlias, TypeAst, TypeAstConstructor, TypeAstConstructorName, TypeAstFn,
     TypeAstHole, TypeAstTuple, TypeAstVar, UnqualifiedImport, UntypedArg, UntypedClause,
@@ -104,6 +104,20 @@ pub fn is_const_call_enabled() -> bool {
 
 pub fn set_const_call_enabled(enabled: bool) {
     CONST_CALL.store(enabled, AtomicOrdering::SeqCst);
+}
+
+/// sgleam: when set, a module may bind a value with `let`
+/// (`Definition::ModuleLet`). Only the REPL turns this on, and only while
+/// compiling the module it generates, so student code keeps rejecting a `let`
+/// outside a function.
+static MODULE_LET: AtomicBool = AtomicBool::new(false);
+
+pub fn is_module_let_enabled() -> bool {
+    MODULE_LET.load(AtomicOrdering::SeqCst)
+}
+
+pub fn set_module_let_enabled(enabled: bool) {
+    MODULE_LET.store(enabled, AtomicOrdering::SeqCst);
 }
 
 #[derive(Debug)]
@@ -350,6 +364,17 @@ where
                 self.advance();
                 self.advance();
                 self.parse_module_const(start, true, &attributes)
+            }
+
+            // sgleam: module level lets
+            (Some((start, Token::Let, _)), _) if is_module_let_enabled() => {
+                self.advance();
+                self.parse_module_let(start, false, &attributes)
+            }
+            (Some((start, Token::Pub, _)), Some((_, Token::Let, _))) if is_module_let_enabled() => {
+                self.advance();
+                self.advance();
+                self.parse_module_let(start, true, &attributes)
             }
 
             // Function
@@ -3185,6 +3210,49 @@ where
                     },
                 })))
             }
+            _ => parse_error(
+                ParseErrorType::NoValueAfterEqual,
+                SrcSpan {
+                    start: eq_s,
+                    end: eq_e,
+                },
+            ),
+        }
+    }
+
+    /// sgleam: `let name = <expression>` at module level. It reads a whole
+    /// expression, not a constant one, so it is only accepted while
+    /// `is_module_let_enabled()`.
+    fn parse_module_let(
+        &mut self,
+        start: u32,
+        public: bool,
+        attributes: &Attributes,
+    ) -> Result<Option<UntypedDefinition>, ParseError> {
+        let (name_start, name, name_end) = self.expect_name()?;
+        let documentation = self.take_documentation(name_start);
+
+        let annotation = self.parse_type_annotation(&Token::Colon)?;
+
+        let (eq_s, eq_e) = self.expect_one(&Token::Equal)?;
+        match self.parse_expression()? {
+            Some(value) => Ok(Some(Definition::ModuleLet(ModuleLet {
+                documentation,
+                location: SrcSpan {
+                    start,
+                    end: annotation
+                        .as_ref()
+                        .map(|annotation| annotation.location().end)
+                        .unwrap_or(0)
+                        .max(name_end),
+                },
+                publicity: self.publicity(public, attributes.internal)?,
+                name,
+                name_location: SrcSpan::new(name_start, name_end),
+                annotation,
+                value: Box::new(value),
+                type_: (),
+            }))),
             _ => parse_error(
                 ParseErrorType::NoValueAfterEqual,
                 SrcSpan {

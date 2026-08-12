@@ -60,6 +60,13 @@ pub trait UntypedModuleFolder: TypeAstFolder + UntypedExprFolder {
                         let definition = self.walk_module_constant(constant);
                         TargetedDefinition { definition, target }
                     }
+
+                    // sgleam: a module let is generated code, never formatted
+                    // or folded, so it is passed through untouched.
+                    Definition::ModuleLet(module_let) => TargetedDefinition {
+                        definition: Definition::ModuleLet(module_let),
+                        target,
+                    },
                 }
             })
             .collect();

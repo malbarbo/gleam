@@ -2659,6 +2659,36 @@ Names in a Gleam module must be unique so one will need to be renamed."
             }
         }
 
+        TypeError::ModuleLetUsedBeforeDefined {
+            location,
+            definition_location,
+            name,
+        } => Diagnostic {
+            title: "Value used before it is defined".into(),
+            text: format!(
+                "`{name}` is bound below this one, and a binding at module level
+runs when the module is loaded, in the order it was written. So
+`{name}` has no value yet when this one runs."
+            ),
+            hint: None,
+            level: Level::Error,
+            location: Some(Location {
+                label: Label {
+                    text: Some(format!("This reads `{name}`")),
+                    span: *location,
+                },
+                path: path.clone(),
+                src: src.clone(),
+                extra_labels: vec![ExtraLabel {
+                    src_info: None,
+                    label: Label {
+                        text: Some("Defined here".into()),
+                        span: *definition_location,
+                    },
+                }],
+            }),
+        },
+
         TypeError::DuplicateTypeName {
             name,
             location,

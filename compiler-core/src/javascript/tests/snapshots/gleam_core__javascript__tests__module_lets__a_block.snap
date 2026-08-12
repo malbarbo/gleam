@@ -1,0 +1,17 @@
+---
+source: compiler-core/src/javascript/tests/module_lets.rs
+expression: "\npub let x = {\n  let a = 1\n  a + 1\n}\n"
+---
+----- SOURCE CODE
+
+pub let x = {
+  let a = 1
+  a + 1
+}
+
+
+----- COMPILED JAVASCRIPT
+export const x = (() => {
+  let a = 1;
+  return a + 1;
+})();

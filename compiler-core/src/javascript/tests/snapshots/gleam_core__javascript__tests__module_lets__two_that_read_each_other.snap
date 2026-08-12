@@ -1,0 +1,24 @@
+---
+source: compiler-core/src/javascript/tests/module_lets.rs
+expression: "\npub let a = b\n\npub let b = a\n"
+---
+----- SOURCE CODE
+
+pub let a = b
+
+pub let b = a
+
+
+----- ERROR
+error: Value used before it is defined
+  ┌─ /src/one/two.gleam:2:1
+  │
+2 │ pub let a = b
+  │ ^^^^^^^^^ This reads `b`
+3 │ 
+4 │ pub let b = a
+  │ --------- Defined here
+
+`b` is bound below this one, and a binding at module level
+runs when the module is loaded, in the order it was written. So
+`b` has no value yet when this one runs.

@@ -140,6 +140,7 @@ impl TypedConstant {
                 ..
             } if location.contains(byte_index) => match &constructor.variant {
                 ValueConstructorVariant::ModuleConstant { module, .. }
+                | ValueConstructorVariant::ModuleLet { module, .. }
                 | ValueConstructorVariant::ModuleFn { module, .. }
                 | ValueConstructorVariant::Record { module, .. } => Located::ModuleName {
                     location: *location,
@@ -442,6 +443,7 @@ impl TypedConstant {
             } => match &constructor.variant {
                 ValueConstructorVariant::ModuleConstant { literal, .. } => literal.list_elements(),
                 ValueConstructorVariant::LocalVariable { .. }
+                | ValueConstructorVariant::ModuleLet { .. }
                 | ValueConstructorVariant::ModuleFn { .. }
                 | ValueConstructorVariant::Record { .. } => None,
             },

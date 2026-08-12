@@ -743,6 +743,16 @@ pub enum ValueConstructorVariant {
         variant_index: u16,
         documentation: Option<EcoString>,
     },
+
+    /// sgleam: a value bound at module level by an arbitrary expression. It has
+    /// no literal, so unlike a constant it cannot be inlined at a use. Last, so
+    /// the variants a cached interface was written with keep their numbers.
+    ModuleLet {
+        documentation: Option<EcoString>,
+        location: SrcSpan,
+        module: EcoString,
+        name: EcoString,
+    },
 }
 
 impl ValueConstructorVariant {
@@ -779,6 +789,18 @@ impl ValueConstructorVariant {
                 ..
             } => ModuleValueConstructor::Constant {
                 literal: literal.clone(),
+                location: *location,
+                documentation: documentation.clone(),
+            },
+
+            Self::ModuleLet {
+                documentation,
+                location,
+                module,
+                name,
+            } => ModuleValueConstructor::ModuleLet {
+                module: module.clone(),
+                name: name.clone(),
                 location: *location,
                 documentation: documentation.clone(),
             },
@@ -821,6 +843,7 @@ impl ValueConstructorVariant {
         match self {
             ValueConstructorVariant::LocalVariable { location, .. }
             | ValueConstructorVariant::ModuleConstant { location, .. }
+            | ValueConstructorVariant::ModuleLet { location, .. }
             | ValueConstructorVariant::ModuleFn { location, .. }
             | ValueConstructorVariant::Record { location, .. } => *location,
         }
@@ -839,6 +862,7 @@ impl ValueConstructorVariant {
                 matches!(origin.syntax, VariableSyntax::Generated)
             }
             ValueConstructorVariant::ModuleConstant { .. }
+            | ValueConstructorVariant::ModuleLet { .. }
             | ValueConstructorVariant::ModuleFn { .. }
             | ValueConstructorVariant::Record { .. } => false,
         }
@@ -859,6 +883,7 @@ impl ValueConstructorVariant {
     pub fn implementations(&self) -> Implementations {
         match self {
             ValueConstructorVariant::Record { .. }
+            | ValueConstructorVariant::ModuleLet { .. }
             | ValueConstructorVariant::LocalVariable { .. } => Implementations {
                 gleam: true,
                 can_run_on_erlang: true,
@@ -880,6 +905,7 @@ impl ValueConstructorVariant {
         match self {
             ValueConstructorVariant::LocalVariable { .. }
             | ValueConstructorVariant::ModuleConstant { .. }
+            | ValueConstructorVariant::ModuleLet { .. }
             | ValueConstructorVariant::ModuleFn { .. } => None,
             ValueConstructorVariant::Record { field_map, .. } => field_map.as_ref(),
         }
@@ -928,6 +954,14 @@ pub enum ModuleValueConstructor {
         location: SrcSpan,
         documentation: Option<EcoString>,
     },
+
+    /// sgleam: a value bound at module level by an arbitrary expression.
+    ModuleLet {
+        module: EcoString,
+        name: EcoString,
+        location: SrcSpan,
+        documentation: Option<EcoString>,
+    },
 }
 
 impl ModuleValueConstructor {
@@ -935,6 +969,7 @@ impl ModuleValueConstructor {
         match self {
             ModuleValueConstructor::Fn { location, .. }
             | ModuleValueConstructor::Record { location, .. }
+            | ModuleValueConstructor::ModuleLet { location, .. }
             | ModuleValueConstructor::Constant { location, .. } => *location,
         }
     }
@@ -943,6 +978,7 @@ impl ModuleValueConstructor {
         match self {
             ModuleValueConstructor::Record { documentation, .. }
             | ModuleValueConstructor::Fn { documentation, .. }
+            | ModuleValueConstructor::ModuleLet { documentation, .. }
             | ModuleValueConstructor::Constant { documentation, .. } => documentation.as_deref(),
         }
     }
@@ -970,7 +1006,9 @@ impl ModuleValueConstructor {
             // the `function1` and `function2` functions, and must return
             // `Purity::Unknown`. See the documentation for the `Purity` type
             // for more information on why this is the case.
-            ModuleValueConstructor::Constant { .. } => Purity::Unknown,
+            ModuleValueConstructor::Constant { .. } | ModuleValueConstructor::ModuleLet { .. } => {
+                Purity::Unknown
+            }
 
             // Constructing records is always pure
             ModuleValueConstructor::Record { .. } => Purity::Pure,
@@ -1447,6 +1485,9 @@ impl ValueConstructor {
             | ValueConstructorVariant::ModuleConstant {
                 location, module, ..
             }
+            | ValueConstructorVariant::ModuleLet {
+                location, module, ..
+            }
             | ValueConstructorVariant::ModuleFn {
                 location, module, ..
             } => DefinitionLocation {
@@ -1467,6 +1508,7 @@ impl ValueConstructor {
 
             ValueConstructorVariant::ModuleFn { documentation, .. }
             | ValueConstructorVariant::Record { documentation, .. }
+            | ValueConstructorVariant::ModuleLet { documentation, .. }
             | ValueConstructorVariant::ModuleConstant { documentation, .. } => {
                 Some(documentation.as_ref()?.as_str())
             }
@@ -1497,6 +1539,7 @@ impl ValueConstructor {
             // `Purity::Unknown`. See the documentation for the `Purity` type
             // for more information on why this is the case.
             ValueConstructorVariant::LocalVariable { .. }
+            | ValueConstructorVariant::ModuleLet { .. }
             | ValueConstructorVariant::ModuleConstant { .. } => Purity::Unknown,
 
             // Constructing records is always pure
@@ -1525,6 +1568,7 @@ impl ValueConstructor {
             ValueConstructorVariant::ModuleFn { field_map, .. }
             | ValueConstructorVariant::Record { field_map, .. } => field_map.as_ref(),
             ValueConstructorVariant::LocalVariable { .. }
+            | ValueConstructorVariant::ModuleLet { .. }
             | ValueConstructorVariant::ModuleConstant { .. } => None,
         }
     }

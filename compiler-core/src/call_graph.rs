@@ -9,12 +9,12 @@ use crate::{
     ast::{
         AssignName, AssignmentKind, BitArrayOption, BitArraySize, ClauseGuard, Constant, Pattern,
         SrcSpan, Statement, UntypedClauseGuard, UntypedExpr, UntypedFunction,
-        UntypedModuleConstant, UntypedPattern, UntypedStatement,
+        UntypedModuleConstant, UntypedModuleLet, UntypedPattern, UntypedStatement,
     },
     type_::Error,
 };
 use itertools::Itertools;
-use petgraph::{Directed, stable_graph::NodeIndex, stable_graph::StableGraph};
+use petgraph::{Directed, stable_graph::NodeIndex, stable_graph::StableGraph, visit::Dfs};
 
 #[derive(Debug, Default)]
 struct CallGraphBuilder<'a> {
@@ -28,6 +28,9 @@ pub enum CallGraphNode {
     Function(UntypedFunction),
 
     ModuleConstant(UntypedModuleConstant),
+
+    /// sgleam: a value bound at module level by an arbitrary expression.
+    ModuleLet(UntypedModuleLet),
 }
 
 impl<'a> CallGraphBuilder<'a> {
@@ -80,6 +83,37 @@ impl<'a> CallGraphBuilder<'a> {
             });
         }
         Ok(())
+    }
+
+    /// sgleam: as `register_module_const_existence`, for a module let.
+    fn register_module_let_existence(
+        &mut self,
+        module_let: &'a UntypedModuleLet,
+    ) -> Result<(), Error> {
+        let name = &module_let.name;
+        let location = module_let.location;
+
+        let index = self.graph.add_node(());
+        let previous = self.names.insert(name, Some((index, location)));
+
+        if let Some(Some((_, previous_location))) = previous {
+            return Err(Error::DuplicateName {
+                location_a: location,
+                location_b: previous_location,
+                name: name.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn register_references_module_let(&mut self, module_let: &'a UntypedModuleLet) {
+        self.current_function = self
+            .names
+            .get(module_let.name.as_str())
+            .expect("Module let must already have been registered as existing")
+            .expect("Module let must not be shadowed at module level")
+            .0;
+        self.expression(&module_let.value);
     }
 
     fn register_references_constant(&mut self, constant: &'a UntypedModuleConstant) {
@@ -533,6 +567,7 @@ impl<'a> CallGraphBuilder<'a> {
 pub fn into_dependency_order(
     functions: Vec<UntypedFunction>,
     constants: Vec<UntypedModuleConstant>,
+    module_lets: Vec<UntypedModuleLet>,
 ) -> Result<Vec<Vec<CallGraphNode>>, Error> {
     let mut grapher = CallGraphBuilder::default();
 
@@ -544,6 +579,10 @@ pub fn into_dependency_order(
         grapher.register_module_const_existence(constant)?;
     }
 
+    for module_let in &module_lets {
+        grapher.register_module_let_existence(module_let)?;
+    }
+
     // Build the call graph between the module functions.
     for function in &functions {
         grapher.register_references(function);
@@ -553,8 +592,14 @@ pub fn into_dependency_order(
         grapher.register_references_constant(constant);
     }
 
+    for module_let in &module_lets {
+        grapher.register_references_module_let(module_let);
+    }
+
     // Consume the grapher to get the graph
     let graph = grapher.into_graph();
+
+    check_module_let_order(&graph, &module_lets, functions.len() + constants.len())?;
 
     // Determine the order in which the functions should be compiled by looking
     // at which other functions they depend on.
@@ -567,6 +612,7 @@ pub fn into_dependency_order(
         .into_iter()
         .map(CallGraphNode::Function)
         .chain(constants.into_iter().map(CallGraphNode::ModuleConstant))
+        .chain(module_lets.into_iter().map(CallGraphNode::ModuleLet))
         .map(Some)
         .collect_vec();
 
@@ -587,4 +633,45 @@ pub fn into_dependency_order(
         .collect_vec();
 
     Ok(ordered)
+}
+
+/// sgleam: a module let runs when the module is loaded, in the order it was
+/// written, so reading one written below it reads a binding that has no value
+/// yet. The reference is followed through whatever the let calls, and a name
+/// merely mentioned counts as read — a closure that is never called is
+/// rejected along with the calls that would really fail.
+fn check_module_let_order(
+    graph: &StableGraph<(), (), Directed>,
+    module_lets: &[UntypedModuleLet],
+    base: usize,
+) -> Result<(), Error> {
+    for (i, module_let) in module_lets.iter().enumerate() {
+        let mut first: Option<&UntypedModuleLet> = None;
+        let mut dfs = Dfs::new(graph, NodeIndex::new(base + i));
+        while let Some(node) = dfs.next(graph) {
+            let Some(other) = node
+                .index()
+                .checked_sub(base)
+                .and_then(|index| module_lets.get(index))
+            else {
+                continue;
+            };
+            if other.location.start <= module_let.location.start {
+                continue;
+            }
+            // The earliest of them, so the message does not depend on the
+            // order the graph is walked in.
+            if first.is_none_or(|first| other.location.start < first.location.start) {
+                first = Some(other);
+            }
+        }
+        if let Some(other) = first {
+            return Err(Error::ModuleLetUsedBeforeDefined {
+                location: module_let.location,
+                definition_location: other.location,
+                name: other.name.clone(),
+            });
+        }
+    }
+    Ok(())
 }

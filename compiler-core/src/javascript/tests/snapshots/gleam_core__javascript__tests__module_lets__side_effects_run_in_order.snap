@@ -1,0 +1,22 @@
+---
+source: compiler-core/src/javascript/tests/module_lets.rs
+expression: "\n@external(javascript, \"./ffi.mjs\", \"print\")\npub fn print(a: String) -> Nil\n\npub let a = print(\"first\")\n\npub let b = print(\"second\")\n"
+---
+----- SOURCE CODE
+
+@external(javascript, "./ffi.mjs", "print")
+pub fn print(a: String) -> Nil
+
+pub let a = print("first")
+
+pub let b = print("second")
+
+
+----- COMPILED JAVASCRIPT
+import { print } from "./ffi.mjs";
+
+export { print };
+
+export const a = print("first");
+
+export const b = print("second");

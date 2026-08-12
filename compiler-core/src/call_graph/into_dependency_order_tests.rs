@@ -79,7 +79,7 @@ fn parse_and_order(
         })
         .collect_vec();
 
-    Ok(into_dependency_order(functions, constants)?
+    Ok(into_dependency_order(functions, constants, vec![])?
         .into_iter()
         .map(|level| {
             level
@@ -87,6 +87,7 @@ fn parse_and_order(
                 .map(|function| match function {
                     CallGraphNode::Function(f) => f.name.map(|(_, name)| name).unwrap(),
                     CallGraphNode::ModuleConstant(c) => c.name,
+                    CallGraphNode::ModuleLet(l) => l.name,
                 })
                 .collect_vec()
         })

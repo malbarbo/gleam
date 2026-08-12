@@ -218,6 +218,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                 let origin = match &variable.variant {
                     ValueConstructorVariant::LocalVariable { origin, .. } => origin.clone(),
                     ValueConstructorVariant::ModuleConstant { .. }
+                    | ValueConstructorVariant::ModuleLet { .. }
                     | ValueConstructorVariant::ModuleFn { .. }
                     | ValueConstructorVariant::Record { .. } => VariableOrigin::generated(),
                 };
@@ -1166,6 +1167,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                     }
                     ValueConstructorVariant::LocalVariable { .. }
                     | ValueConstructorVariant::ModuleConstant { .. }
+                    | ValueConstructorVariant::ModuleLet { .. }
                     | ValueConstructorVariant::ModuleFn { .. } => {
                         panic!("Unexpected value constructor type for a constructor pattern.")
                     }
@@ -1386,6 +1388,11 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                 match &constructor.variant {
                     ValueConstructorVariant::LocalVariable { .. } => (),
                     ValueConstructorVariant::ModuleConstant {
+                        name: canonical,
+                        module,
+                        ..
+                    }
+                    | ValueConstructorVariant::ModuleLet {
                         name: canonical,
                         module,
                         ..

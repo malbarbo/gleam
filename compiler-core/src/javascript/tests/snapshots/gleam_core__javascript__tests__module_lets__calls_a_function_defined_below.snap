@@ -1,0 +1,19 @@
+---
+source: compiler-core/src/javascript/tests/module_lets.rs
+expression: "\npub let x = double(21)\n\npub fn double(n) {\n  n * 2\n}\n"
+---
+----- SOURCE CODE
+
+pub let x = double(21)
+
+pub fn double(n) {
+  n * 2
+}
+
+
+----- COMPILED JAVASCRIPT
+export const x = double(21);
+
+export function double(n) {
+  return n * 2;
+}

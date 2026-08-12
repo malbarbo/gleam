@@ -25,6 +25,7 @@ mod functions;
 mod generics;
 mod inlining;
 mod lists;
+mod module_lets;
 mod modules;
 mod numbers;
 mod panic;

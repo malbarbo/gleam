@@ -731,6 +731,10 @@ impl<'a> Generator<'a> {
             }
         }
 
+        for module_let in &self.module.definitions.module_lets {
+            definitions.push(self.module_let(module_let))
+        }
+
         for function in &self.module.definitions.functions {
             if let Some(definition) = self.module_function(function) {
                 definitions.push(definition)
@@ -912,6 +916,48 @@ impl<'a> Generator<'a> {
             ";",
             self.source_map_tracker(value.location().end),
         ])
+    }
+
+    /// sgleam: a value bound at module level by an arbitrary expression. It is
+    /// evaluated when the module is loaded, so it is always emitted, even when
+    /// nothing reads it.
+    fn module_let(&mut self, module_let: &'a TypedModuleLet) -> Document<'a> {
+        let TypedModuleLet {
+            location,
+            publicity,
+            name,
+            value,
+            ..
+        } = module_let;
+
+        let head = if publicity.is_private() {
+            "const "
+        } else {
+            "export const "
+        };
+
+        let mut generator = expression::Generator::new(
+            self.module.name.clone(),
+            self.src_path.clone(),
+            self.line_numbers,
+            name.clone(),
+            vec![],
+            &mut self.tracker,
+            self.module_scope.clone(),
+            self.source_map_builder.clone(),
+        );
+
+        let document = generator.module_let_value(value);
+
+        docvec![
+            self.source_map_tracker(location.start),
+            head,
+            maybe_escape_identifier(name),
+            " = ",
+            document,
+            ";",
+            self.source_map_tracker(value.location().end),
+        ]
     }
 
     fn register_in_scope(&mut self, name: &str) {

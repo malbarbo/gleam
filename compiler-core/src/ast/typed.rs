@@ -1333,7 +1333,8 @@ impl TypedExpr {
             TypedExpr::ModuleSelect { constructor, .. } => match constructor {
                 ModuleValueConstructor::Record { field_map, .. }
                 | ModuleValueConstructor::Fn { field_map, .. } => field_map.as_ref(),
-                ModuleValueConstructor::Constant { .. } => None,
+                ModuleValueConstructor::Constant { .. }
+                | ModuleValueConstructor::ModuleLet { .. } => None,
             },
         }
     }

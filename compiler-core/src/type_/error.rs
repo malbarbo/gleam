@@ -266,6 +266,15 @@ pub enum Error {
         name: EcoString,
     },
 
+    /// sgleam: a module let read one written below it, directly or through
+    /// something it calls. A module let runs when the module is loaded, in the
+    /// order it was written, so this would read a binding before it has run.
+    ModuleLetUsedBeforeDefined {
+        location: SrcSpan,
+        definition_location: SrcSpan,
+        name: EcoString,
+    },
+
     DuplicateImport {
         location: SrcSpan,
         previous_location: SrcSpan,
@@ -1372,7 +1381,8 @@ impl Error {
             | Error::ExternalTypeWithConstructors { location, .. }
             | Error::RecordUpdateVariantWithNoFields { location }
             | Error::QualifiedTypeMissingName { location }
-            | Error::LowercaseBoolPattern { location } => location.start,
+            | Error::LowercaseBoolPattern { location }
+            | Error::ModuleLetUsedBeforeDefined { location, .. } => location.start,
             Error::UnknownLabels { unknown, .. } => {
                 unknown.iter().map(|(_, s)| s.start).min().unwrap_or(0)
             }

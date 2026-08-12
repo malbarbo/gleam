@@ -223,6 +223,17 @@ impl RemapIds {
             ValueConstructorVariant::LocalVariable { location, origin } => {
                 ValueConstructorVariant::LocalVariable { location, origin }
             }
+            ValueConstructorVariant::ModuleLet {
+                documentation,
+                location,
+                module,
+                name,
+            } => ValueConstructorVariant::ModuleLet {
+                documentation,
+                location,
+                module,
+                name,
+            },
             ValueConstructorVariant::ModuleConstant {
                 documentation,
                 location,
