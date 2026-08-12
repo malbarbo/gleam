@@ -55,7 +55,7 @@
 pub mod error;
 pub mod extra;
 pub mod lexer;
-mod token;
+pub mod token;
 
 use crate::Warning;
 use crate::analyse::Inferred;
@@ -255,6 +255,10 @@ where
         parser
     }
 
+    pub fn tok01(&self) -> (Option<Spanned>, Option<Spanned>) {
+        (self.token0.clone(), self.token1.clone())
+    }
+
     fn parse_module(&mut self) -> Result<Parsed, ParseError> {
         let definitions = self.series_of(&Parser::parse_definition, None);
         let definitions = self.ensure_no_errors_or_remaining_input(definitions)?;
@@ -277,7 +281,7 @@ where
     // place and instead we collect LexErrors in `self.lex_errors` and attempt to continue parsing.
     // Once parsing has returned we want to surface an error in the order:
     // 1) LexError, 2) ParseError, 3) More Tokens Left
-    fn ensure_no_errors_or_remaining_input<A>(
+    pub fn ensure_no_errors_or_remaining_input<A>(
         &mut self,
         parse_result: Result<A, ParseError>,
     ) -> Result<A, ParseError> {
@@ -319,7 +323,7 @@ where
         }
     }
 
-    fn parse_definition(&mut self) -> Result<Option<TargetedDefinition>, ParseError> {
+    pub fn parse_definition(&mut self) -> Result<Option<TargetedDefinition>, ParseError> {
         let mut attributes = Attributes::default();
         let location = self.parse_attributes(&mut attributes)?;
 
@@ -1265,7 +1269,7 @@ where
         }
     }
 
-    fn parse_statement(&mut self) -> Result<Option<UntypedStatement>, ParseError> {
+    pub fn parse_statement(&mut self) -> Result<Option<UntypedStatement>, ParseError> {
         match self.token0.take() {
             Some((start, Token::Use, end)) => {
                 self.advance();
@@ -4523,7 +4527,7 @@ functions are declared separately from types.";
     }
 
     // Parse a series by repeating a parser, and possibly a separator
-    fn series_of<A>(
+    pub fn series_of<A>(
         &mut self,
         parser: &impl Fn(&mut Self) -> Result<Option<A>, ParseError>,
         sep: Option<&Token>,
