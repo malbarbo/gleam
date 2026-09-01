@@ -1661,8 +1661,8 @@ pub(crate) struct ImportedNames {
     unqualified: HashMap<(EcoString, EcoString), EcoString>,
 }
 
-/// How the module being generated writes a record constructor of another module.
-pub(crate) struct RecordReference {
+/// How the module being generated writes a value of another module.
+pub(crate) struct Reference {
     /// The module alias to qualify the name with, without the leading `$`.
     pub qualifier: Option<EcoString>,
     /// The name to write.
@@ -1671,11 +1671,8 @@ pub(crate) struct RecordReference {
 
 impl UsageTracker {
     /// How the module being generated writes the record constructor `name` of
-    /// `module`. `written` is the qualifier the constant that names it carries,
-    /// which belongs to the module that defines the constant, so it is only
-    /// taken when this module has the same import.
-    ///
-    /// Registers an import when this module names the constructor nowhere.
+    /// `module`, which it names one way or another: an import is registered
+    /// when it names it nowhere.
     ///
     pub fn record_reference(
         &mut self,
@@ -1683,34 +1680,50 @@ impl UsageTracker {
         module: &EcoString,
         name: &EcoString,
         written: Option<&str>,
-    ) -> RecordReference {
+    ) -> Reference {
+        if let Some(reference) = self.value_reference(module, name, written) {
+            return reference;
+        }
+        Reference {
+            qualifier: Some(self.inlined_module_alias(package, module)),
+            name: name.clone(),
+        }
+    }
+
+    /// What the module being generated calls the value `name` of `module`,
+    /// when it calls it anything. `written` is the qualifier the constant that
+    /// names it carries, which belongs to the module that defines the
+    /// constant, so it is only taken when this module has the same import.
+    ///
+    pub fn value_reference(
+        &self,
+        module: &EcoString,
+        name: &EcoString,
+        written: Option<&str>,
+    ) -> Option<Reference> {
         let alias = self.imported_names.module_aliases.get(module);
         if written.is_some()
             && let Some(alias) = alias
         {
-            return RecordReference {
+            return Some(Reference {
                 qualifier: Some(alias.clone()),
                 name: name.clone(),
-            };
+            });
         }
         let unqualified = self
             .imported_names
             .unqualified
             .get(&(module.clone(), name.clone()));
         if let Some(local) = unqualified {
-            return RecordReference {
+            return Some(Reference {
                 qualifier: None,
                 name: local.clone(),
-            };
+            });
         }
-        let alias = match alias {
-            Some(alias) => alias.clone(),
-            None => self.inlined_module_alias(package, module),
-        };
-        RecordReference {
-            qualifier: Some(alias),
+        alias.map(|alias| Reference {
+            qualifier: Some(alias.clone()),
             name: name.clone(),
-        }
+        })
     }
 
     /// The alias the generated code gives `module`, which it does not import

@@ -2876,24 +2876,12 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                 }
             }
 
-            Constant::Var { name, module, .. } => {
-                match (module, context) {
-                    (None, Context::Guard) => self.local_var(name).to_doc(arena),
-                    (None, Context::Constant) => maybe_escape_identifier(name).to_doc(arena),
-                    (Some((module, _)), _) => {
-                        // JS keywords can be accessed here, but we must escape anyway
-                        // as we escape when exporting such names in the first place,
-                        // and the imported name has to match the exported name.
-                        docvec![
-                            arena,
-                            DOLLAR_DOCUMENT,
-                            module,
-                            DOT_DOCUMENT,
-                            maybe_escape_identifier(name)
-                        ]
-                    }
-                }
-            }
+            Constant::Var {
+                name,
+                module,
+                constructor,
+                ..
+            } => self.constant_var(arena, context, module, name, constructor.as_deref()),
 
             Constant::StringConcatenation { left, right, .. } => {
                 let left = self.constant_expression(arena, context, left);
@@ -3398,7 +3386,12 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                 self.constant_bit_array(arena, segments, Context::Guard)
             }
 
-            Constant::Var { name, .. } => self.local_var(name).to_doc(arena),
+            Constant::Var {
+                name,
+                module,
+                constructor,
+                ..
+            } => self.constant_var(arena, Context::Guard, module, name, constructor.as_deref()),
 
             Constant::Record { .. }
             | Constant::Int { .. }
@@ -3427,6 +3420,82 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
         )
     }
 
+    /// The value a constant names, written the way this module reaches it.
+    ///
+    /// A public constant is inlined at the places that read it, so a name of
+    /// the module that *defines* it is what the inlined value carries, and it
+    /// means nothing here. Where this module has no name of its own for the
+    /// value, the value itself goes in instead.
+    ///
+    fn constant_var(
+        &mut self,
+        arena: &'doc DocumentArena<'a, 'doc>,
+        context: Context,
+        module: &'a Option<(EcoString, SrcSpan)>,
+        name: &'a EcoString,
+        constructor: Option<&'a ValueConstructor>,
+    ) -> Document<'a, 'doc> {
+        match self.value_reference(constructor, module) {
+            ValueReference::Inlined(literal) => self.constant_expression(arena, context, literal),
+            ValueReference::Named(Reference {
+                qualifier: Some(module),
+                name,
+            }) => qualified_value(arena, module, &name),
+            ValueReference::Named(Reference {
+                qualifier: None,
+                name,
+            }) => maybe_escape_identifier(&name).to_doc(arena),
+            ValueReference::Written => match (module, context) {
+                (None, Context::Guard) => self.local_var(name).to_doc(arena),
+                (None, Context::Constant) => maybe_escape_identifier(name).to_doc(arena),
+                (Some((module, _)), _) => qualified_value(arena, module.clone(), name),
+            },
+        }
+    }
+
+    /// How this module reaches the value a constant names: with a name of its
+    /// own imports, or, having none, with the value of the constant itself. A
+    /// function is no such value, so nothing can be done for one.
+    ///
+    fn value_reference(
+        &mut self,
+        constructor: Option<&'a ValueConstructor>,
+        module: &Option<(EcoString, SrcSpan)>,
+    ) -> ValueReference<'a> {
+        let Some(constructor) = constructor else {
+            return ValueReference::Written;
+        };
+        let (defined_in, defined_as, literal) = match &constructor.variant {
+            ValueConstructorVariant::ModuleConstant {
+                module,
+                name,
+                literal,
+                ..
+            } => (module, name, Some(literal)),
+            ValueConstructorVariant::ModuleFn { module, name, .. } => (module, name, None),
+            ValueConstructorVariant::LocalVariable { .. }
+            | ValueConstructorVariant::Record { .. } => return ValueReference::Written,
+        };
+        // A value of this module is in scope wherever the constant lands, and
+        // the qualifier is empty for it.
+        if *defined_in == self.module_name {
+            return ValueReference::Written;
+        }
+        // A private value is exported by no module, so no name reaches it.
+        let reference = if constructor.publicity.is_private() {
+            None
+        } else {
+            let written = module.as_ref().map(|(module, _)| module.as_str());
+            self.tracker
+                .value_reference(defined_in, defined_as, written)
+        };
+        match (reference, literal) {
+            (Some(reference), _) => ValueReference::Named(reference),
+            (None, Some(literal)) => ValueReference::Inlined(literal),
+            (None, None) => ValueReference::Written,
+        }
+    }
+
     /// How this module writes the record constructor a constant names.
     ///
     /// A public constant is inlined at the places that read it, so the
@@ -3440,8 +3509,8 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
         record_constructor: Option<&ValueConstructor>,
         module: &Option<(EcoString, SrcSpan)>,
         name: &EcoString,
-    ) -> RecordReference {
-        let written = || RecordReference {
+    ) -> Reference {
+        let written = || Reference {
             qualifier: module.as_ref().map(|(module, _)| module.clone()),
             name: name.clone(),
         };
@@ -3837,6 +3906,35 @@ fn call_arguments<'a, 'doc, Elements: IntoIterator<Item = Document<'a, 'doc>>>(
         CLOSE_PAREN_DOCUMENT
     ]
     .group(arena)
+}
+
+/// A value of another module, as the generated code names it.
+fn qualified_value<'a, 'doc>(
+    arena: &'doc DocumentArena<'a, 'doc>,
+    module: EcoString,
+    name: &EcoString,
+) -> Document<'a, 'doc> {
+    // JS keywords can be accessed here, but we must escape anyway as we escape
+    // when exporting such names in the first place, and the imported name has
+    // to match the exported name.
+    docvec![
+        arena,
+        DOLLAR_DOCUMENT,
+        module,
+        DOT_DOCUMENT,
+        maybe_escape_identifier(name)
+    ]
+}
+
+/// How the module being generated writes the value a constant names.
+enum ValueReference<'a> {
+    /// As the constant carries it: a value of this module, or a name that
+    /// still means here what it meant where the constant was written.
+    Written,
+    /// A name of this module's own imports.
+    Named(Reference),
+    /// No name here reaches the value, so its own value goes in its place.
+    Inlined(&'a TypedConstant),
 }
 
 /// The package of the type a record constructor builds.

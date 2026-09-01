@@ -1,0 +1,41 @@
+---
+source: compiler-core/src/javascript/tests/case_clause_guards.rs
+expression: "import wibble.{two}\n\npub fn main() {\n  case two {\n    x if x == two -> \"eq\"\n    _ -> \"ne\"\n  }\n}\n"
+---
+----- SOURCE CODE
+-- wibble.gleam
+
+pub type Wibble {
+  Wibble(Int)
+}
+
+const one = Wibble(1)
+
+pub const two = one
+
+
+-- main.gleam
+import wibble.{two}
+
+pub fn main() {
+  case two {
+    x if x == two -> "eq"
+    _ -> "ne"
+  }
+}
+
+
+----- COMPILED JAVASCRIPT
+import { isEqual } from "../gleam.mjs";
+import * as $wibble from "../wibble.mjs";
+import { two } from "../wibble.mjs";
+
+export function main() {
+  let $ = two;
+  let x = $;
+  if (isEqual(x, new $wibble.Wibble(1))) {
+    return "eq";
+  } else {
+    return "ne";
+  }
+}
