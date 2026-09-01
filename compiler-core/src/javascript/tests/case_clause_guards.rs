@@ -710,3 +710,97 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn constant_of_another_module_naming_a_constant_in_guard() {
+    assert_js!(
+        (
+            "wibble",
+            "
+pub type Wibble {
+  Wibble(Int)
+}
+
+pub const one = Wibble(1)
+"
+        ),
+        (
+            "wobble",
+            "
+import wibble
+
+pub const wobble = wibble.one
+"
+        ),
+        r#"import wobble.{wobble}
+
+pub fn main() {
+  case wobble {
+    x if x == wobble -> "eq"
+    _ -> "ne"
+  }
+}
+"#,
+    );
+}
+
+#[test]
+fn constant_of_another_module_naming_a_constant_of_a_module_in_scope_in_guard() {
+    assert_js!(
+        (
+            "wibble",
+            "
+pub type Wibble {
+  Wibble(Int)
+}
+
+pub const one = Wibble(1)
+"
+        ),
+        (
+            "wobble",
+            "
+import wibble
+
+pub const wobble = wibble.one
+"
+        ),
+        r#"import wibble
+import wobble.{wobble}
+
+pub fn main() {
+  case wobble {
+    x if x == wobble && wibble.one == wobble -> "eq"
+    _ -> "ne"
+  }
+}
+"#,
+    );
+}
+
+#[test]
+fn constant_of_another_module_naming_a_private_constant_in_guard() {
+    assert_js!(
+        (
+            "wibble",
+            "
+pub type Wibble {
+  Wibble(Int)
+}
+
+const one = Wibble(1)
+
+pub const two = one
+"
+        ),
+        r#"import wibble.{two}
+
+pub fn main() {
+  case two {
+    x if x == two -> "eq"
+    _ -> "ne"
+  }
+}
+"#,
+    );
+}
