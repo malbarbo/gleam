@@ -11,6 +11,7 @@ use crate::{
     line_numbers::LineNumbers,
     type_::{
         ModuleValueConstructor, Type, TypedCallArg, ValueConstructor, ValueConstructorVariant,
+        prelude::is_prelude_module,
     },
 };
 use pretty_arena::*;
@@ -1015,7 +1016,7 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                 ..
             } => {
                 let type_ = constructor.type_.clone();
-                self.record_constructor(arena, type_, None, variant_name, name, *arity)
+                self.record_constructor(arena, type_, None, variant_name, name.clone(), *arity)
             }
             ValueConstructorVariant::ModuleFn { .. }
             | ValueConstructorVariant::ModuleConstant { .. }
@@ -1874,7 +1875,7 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                 ..
             } => self.wrap_return(
                 arena,
-                construct_record(arena, Some(module_alias), name, arguments),
+                construct_record(arena, Some(module_alias.clone()), name.clone(), arguments),
             ),
 
             // Record construction
@@ -1895,7 +1896,10 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                         self.tracker.error_used = true;
                     }
                 }
-                self.wrap_return(arena, construct_record(arena, None, name, arguments))
+                self.wrap_return(
+                    arena,
+                    construct_record(arena, None, name.clone(), arguments),
+                )
             }
 
             // Tail call optimisation. If we are calling the current function
@@ -2378,7 +2382,7 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                 Some(self.singleton_equal(
                     arena,
                     left_doc,
-                    Some(module_alias),
+                    Some(module_alias.clone()),
                     name.clone(),
                     should_be_equal,
                     name.clone(),
@@ -2434,7 +2438,7 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
         &mut self,
         arena: &'doc DocumentArena<'a, 'doc>,
         value: Document<'a, 'doc>,
-        module: Option<&'a str>,
+        module: Option<EcoString>,
         name: EcoString,
         should_be_equal: bool,
         variant_name: EcoString,
@@ -2690,7 +2694,14 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
 
             ModuleValueConstructor::Record {
                 name, arity, type_, ..
-            } => self.record_constructor(arena, type_.clone(), Some(module), name, name, *arity),
+            } => self.record_constructor(
+                arena,
+                type_.clone(),
+                Some(EcoString::from(module)),
+                name,
+                name.clone(),
+                *arity,
+            ),
         }
     }
 
@@ -2802,6 +2813,7 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                 module,
                 name,
                 type_,
+                record_constructor,
                 ..
             } => {
                 let tag = expression
@@ -2816,6 +2828,9 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                     }
                 }
 
+                let reference =
+                    self.record_reference(type_, record_constructor.as_deref(), module, name);
+
                 // If there's no arguments, then this is either a constructor
                 // which takes arguments being referenced rather than called,
                 // or a variant with no fields at all.
@@ -2826,9 +2841,9 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                     return self.record_constructor(
                         arena,
                         type_.clone(),
-                        module.as_ref().map(|(name, _)| name.as_str()),
+                        reference.qualifier,
                         &tag,
-                        name,
+                        reference.name,
                         arity,
                     );
                 }
@@ -2842,12 +2857,8 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                     .map(|argument| self.constant_expression(arena, context, &argument.value))
                     .collect_vec();
 
-                let constructor = construct_record(
-                    arena,
-                    module.as_ref().map(|(module, _)| module.as_str()),
-                    name,
-                    field_values,
-                );
+                let constructor =
+                    construct_record(arena, reference.qualifier, reference.name, field_values);
                 match context {
                     Context::Constant => {
                         docvec![arena, PURE_JAVASCRIPT_COMMENT_DOCUMENT, constructor]
@@ -3295,12 +3306,14 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                 ..
             } = &constructor.variant =>
             {
+                let reference =
+                    self.record_reference(&right.type_(), Some(constructor), module, name);
                 let left_doc = self.guard(arena, left);
                 Some(self.singleton_equal(
                     arena,
                     left_doc,
-                    module.as_ref().map(|(module, _)| module.as_str()),
-                    name.clone(),
+                    reference.qualifier,
+                    reference.name,
                     should_be_equal,
                     variant_name.clone(),
                     right.type_(),
@@ -3414,13 +3427,56 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
         )
     }
 
+    /// How this module writes the record constructor a constant names.
+    ///
+    /// A public constant is inlined at the places that read it, so the
+    /// qualifier the constant carries is the one the module that *defines* it
+    /// wrote, and it names nothing here. The name is taken from this module's
+    /// own imports instead, and an import is added when it has none.
+    ///
+    fn record_reference(
+        &mut self,
+        type_: &Type,
+        record_constructor: Option<&ValueConstructor>,
+        module: &Option<(EcoString, SrcSpan)>,
+        name: &EcoString,
+    ) -> RecordReference {
+        let written = || RecordReference {
+            qualifier: module.as_ref().map(|(module, _)| module.clone()),
+            name: name.clone(),
+        };
+        let Some(ValueConstructor {
+            variant:
+                ValueConstructorVariant::Record {
+                    module: defined_in,
+                    name: defined_as,
+                    ..
+                },
+            ..
+        }) = record_constructor
+        else {
+            return written();
+        };
+        // A constructor of this module, or of the prelude, is in scope wherever
+        // the constant lands, and the qualifier is empty for both.
+        if *defined_in == self.module_name || is_prelude_module(defined_in) {
+            return written();
+        }
+        let Some(package) = record_type_package(type_) else {
+            return written();
+        };
+        let written = module.as_ref().map(|(module, _)| module.as_str());
+        self.tracker
+            .record_reference(&package, defined_in, defined_as, written)
+    }
+
     pub(crate) fn record_constructor(
         &mut self,
         arena: &'doc DocumentArena<'a, 'doc>,
         type_: Arc<Type>,
-        qualifier: Option<&'a str>,
+        qualifier: Option<EcoString>,
         variant_name: &EcoString,
-        name: &'a EcoString,
+        name: EcoString,
         arity: u16,
     ) -> Document<'a, 'doc> {
         if qualifier.is_none() && type_.is_result_constructor() {
@@ -3455,7 +3511,7 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                 ],
                 None => {
                     if module != self.module_name {
-                        let alias = if name == variant_name {
+                        let alias = if name == *variant_name {
                             None
                         } else {
                             Some(eco_format!("{type_name}${name}$const"))
@@ -3783,10 +3839,19 @@ fn call_arguments<'a, 'doc, Elements: IntoIterator<Item = Document<'a, 'doc>>>(
     .group(arena)
 }
 
+/// The package of the type a record constructor builds.
+fn record_type_package(type_: &Type) -> Option<EcoString> {
+    match type_.return_type() {
+        Some(return_type) => return_type.named_type_name_and_package(),
+        None => type_.named_type_name_and_package(),
+    }
+    .map(|(package, _, _)| package)
+}
+
 pub(crate) fn construct_record<'a, 'doc>(
     arena: &'doc DocumentArena<'a, 'doc>,
-    module: Option<&'a str>,
-    name: &'a str,
+    module: Option<EcoString>,
+    name: EcoString,
     arguments: impl IntoIterator<Item = Document<'a, 'doc>>,
 ) -> Document<'a, 'doc> {
     let mut any_arguments = false;

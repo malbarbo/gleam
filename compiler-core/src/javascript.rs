@@ -345,6 +345,13 @@ impl<'a, 'doc> Generator<'a> {
             imports.register_module(path, [], [member]);
         }
 
+        // A constant inlined from another module can name a record constructor
+        // of a module this one never imports, so those imports are added here.
+        for ((package, module), alias) in self.tracker.inlined_modules.iter() {
+            let path = self.import_path(package, module);
+            imports.register_module(path, [eco_format!("${alias}")], Vec::new());
+        }
+
         // If we have some Gleam code that looks something like this:
         // ```gleam
         // import option.{None}
@@ -1048,18 +1055,35 @@ impl<'a, 'doc> Generator<'a> {
             Some((AssignName::Variable(name), _)) => (false, name.as_str()),
         };
 
-        let module_name = eco_format!("${module_name}");
         let path = self.import_path(package, module);
-        let unqualified_imports = unqualified.iter().map(|i| {
-            let alias = i.as_name.as_ref().map(|n| {
-                self.register_in_scope(n);
-                maybe_escape_identifier(n).to_doc(arena)
-            });
-            let name = maybe_escape_identifier(&i.name);
-            Member { name, alias }
-        });
+        let unqualified_imports = unqualified
+            .iter()
+            .map(|i| {
+                let alias = i.as_name.as_ref().map(|n| {
+                    self.register_in_scope(n);
+                    maybe_escape_identifier(n).to_doc(arena)
+                });
+                let name = maybe_escape_identifier(&i.name);
+                let local = maybe_escape_identifier(i.as_name.as_ref().unwrap_or(&i.name));
+                _ = self
+                    .tracker
+                    .imported_names
+                    .unqualified
+                    .insert((module.into(), i.name.clone()), local);
+                Member { name, alias }
+            })
+            .collect_vec();
 
-        let aliases = if discarded { vec![] } else { vec![module_name] };
+        let aliases = if discarded {
+            vec![]
+        } else {
+            _ = self
+                .tracker
+                .imported_names
+                .module_aliases
+                .insert(module.into(), module_name.into());
+            vec![eco_format!("${module_name}")]
+        };
         imports.register_module(path, aliases, unqualified_imports);
     }
 
@@ -1612,6 +1636,106 @@ pub(crate) struct UsageTracker {
     /// singleton constant. However, if we are using `instanceof`, we still need
     /// to import it.
     pub variants_used_in_instanceof: HashSet<TypeVariant>,
+    /// What the module's own imports named, so that a constant inlined from
+    /// another module can be written with a name that means something here.
+    pub imported_names: ImportedNames,
+    /// The modules a record constructor of an inlined constant comes from and
+    /// that the module does not import itself, with the alias the generated
+    /// code gives them.
+    pub inlined_modules: HashMap<(EcoString, EcoString), EcoString>,
+}
+
+/// What the module being generated calls the values of the modules it imports.
+///
+/// A public constant is inlined at the places that read it, and the inlined
+/// value keeps the qualifiers written in the module that defines it. Those name
+/// nothing in the module the value lands in, so the emitter looks here for a
+/// name it can write instead.
+///
+#[derive(Debug, Default)]
+pub(crate) struct ImportedNames {
+    /// The alias, without the leading `$`, the module knows an import by.
+    module_aliases: HashMap<EcoString, EcoString>,
+    /// The name the module gives a value it imports unqualified, by the module
+    /// that defines the value and the name it has there.
+    unqualified: HashMap<(EcoString, EcoString), EcoString>,
+}
+
+/// How the module being generated writes a record constructor of another module.
+pub(crate) struct RecordReference {
+    /// The module alias to qualify the name with, without the leading `$`.
+    pub qualifier: Option<EcoString>,
+    /// The name to write.
+    pub name: EcoString,
+}
+
+impl UsageTracker {
+    /// How the module being generated writes the record constructor `name` of
+    /// `module`. `written` is the qualifier the constant that names it carries,
+    /// which belongs to the module that defines the constant, so it is only
+    /// taken when this module has the same import.
+    ///
+    /// Registers an import when this module names the constructor nowhere.
+    ///
+    pub fn record_reference(
+        &mut self,
+        package: &EcoString,
+        module: &EcoString,
+        name: &EcoString,
+        written: Option<&str>,
+    ) -> RecordReference {
+        let alias = self.imported_names.module_aliases.get(module);
+        if written.is_some()
+            && let Some(alias) = alias
+        {
+            return RecordReference {
+                qualifier: Some(alias.clone()),
+                name: name.clone(),
+            };
+        }
+        let unqualified = self
+            .imported_names
+            .unqualified
+            .get(&(module.clone(), name.clone()));
+        if let Some(local) = unqualified {
+            return RecordReference {
+                qualifier: None,
+                name: local.clone(),
+            };
+        }
+        let alias = match alias {
+            Some(alias) => alias.clone(),
+            None => self.inlined_module_alias(package, module),
+        };
+        RecordReference {
+            qualifier: Some(alias),
+            name: name.clone(),
+        }
+    }
+
+    /// The alias the generated code gives `module`, which it does not import
+    /// itself. Registering it is what makes the import be written out.
+    ///
+    fn inlined_module_alias(&mut self, package: &EcoString, module: &EcoString) -> EcoString {
+        let key = (package.clone(), module.clone());
+        if let Some(alias) = self.inlined_modules.get(&key) {
+            return alias.clone();
+        }
+        let base = module.replace("/", "$");
+        let mut alias = base.clone();
+        let mut count = 1;
+        while self.alias_taken(&alias) {
+            count += 1;
+            alias = eco_format!("{base}${count}");
+        }
+        _ = self.inlined_modules.insert(key, alias.clone());
+        alias
+    }
+
+    fn alias_taken(&self, alias: &EcoString) -> bool {
+        self.imported_names.module_aliases.values().contains(alias)
+            || self.inlined_modules.values().contains(alias)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]

@@ -625,3 +625,88 @@ pub fn main() {
 "
     );
 }
+
+// A constant of another module is inlined into the guard, and the inlined value
+// names its record constructor the way the module that defines the constant
+// does, which means nothing here.
+#[test]
+fn constant_of_another_module_in_guard() {
+    assert_js!(
+        (
+            "wibble",
+            "
+pub type Wibble {
+  Wibble(Int)
+}
+
+pub const wibble = Wibble(1)
+"
+        ),
+        r#"import wibble.{wibble}
+
+pub fn main() {
+  case wibble {
+    x if x == wibble -> "eq"
+    _ -> "ne"
+  }
+}
+"#,
+    );
+}
+
+#[test]
+fn constant_of_another_module_in_guard_without_a_module_alias() {
+    assert_js!(
+        (
+            "wibble",
+            "
+pub type Wibble {
+  Wibble(Int)
+}
+
+pub const wibble = Wibble(1)
+"
+        ),
+        r#"import wibble.{wibble} as _
+
+pub fn main() {
+  case wibble {
+    x if x == wibble -> "eq"
+    _ -> "ne"
+  }
+}
+"#,
+    );
+}
+
+#[test]
+fn constant_of_another_module_naming_a_qualified_variant_in_guard() {
+    assert_js!(
+        (
+            "wibble",
+            "
+pub type Wibble {
+  Wibble
+  Wobble
+}
+"
+        ),
+        (
+            "wobble",
+            "
+import wibble
+
+pub const wibble = wibble.Wibble
+"
+        ),
+        r#"import wobble.{wibble}
+
+pub fn main() {
+  case wibble {
+    x if x == wibble -> "eq"
+    _ -> "ne"
+  }
+}
+"#,
+    );
+}
