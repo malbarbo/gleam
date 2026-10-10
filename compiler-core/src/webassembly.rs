@@ -871,20 +871,6 @@ impl<'a> Generator<'a> {
         type_pretty_name(&self.module.names, type_)
     }
 
-    fn mangle(&self, name: &EcoString, type_: &Arc<Type>) -> EcoString {
-        if type_.fn_types().is_some() {
-            name.clone() + &self.type_pretty_name(type_)[2..]
-        } else {
-            name.clone()
-                + "::"
-                + self
-                    .type_pretty_name(type_)
-                    .as_str()
-                    .replace(' ', "")
-                    .as_str()
-        }
-    }
-
     fn types_external(&mut self) -> Result<(), Error> {
         for custom_type in &self.module.definitions.custom_types {
             let type_ = if let Some((module, name, span)) = &custom_type.external_webassembly {
@@ -1533,7 +1519,7 @@ impl<'a> Generator<'a> {
         args: &[Arc<Type>],
     ) -> (TypeId, Vec<Arc<Type>>) {
         let types = Monomorphizer::variant_constructor(custom_type, constructor, args);
-        let key = custom_type_key(type_);
+        let key = qualified_type_name(type_);
         if let Some(id) = self.custom_type_begin(&key) {
             return (id, types);
         }
@@ -1741,7 +1727,7 @@ impl<'a> Generator<'a> {
             .map(|(_, _, a)| a)
             .unwrap_or_default();
         let types = Monomorphizer::variant_constructor(custom_type, first, &args);
-        let custom_type_key = custom_type_key(type_);
+        let custom_type_key = qualified_type_name(type_);
         if let Some(id) = self.custom_type_begin(&custom_type_key) {
             return id;
         }
@@ -2366,7 +2352,7 @@ impl<'a> Generator<'a> {
         export: bool,
         base_name: EcoString,
     ) -> Id {
-        let name = self.mangle(&base_name, required_type);
+        let name = mangle(&base_name, required_type);
         if let Some(id) = self.find_global(&name) {
             return id;
         }
@@ -2424,7 +2410,7 @@ impl<'a> Generator<'a> {
     }
 
     fn function_local_generic(&mut self, info: &LocalFunction, required_type: &Arc<Type>) -> Id {
-        let type_name = self.type_pretty_name(required_type).replace(" ", "");
+        let type_name = qualified_type_name(required_type).replace(" ", "");
         let name: EcoString = format!(
             "anonymous@{}-{}#{}:{type_name}",
             info.location.start, info.location.end, info.specialization
@@ -2795,7 +2781,7 @@ impl<'a> Generator<'a> {
                 body,
                 ..
             } => {
-                let type_name = self.type_pretty_name(type_).replace(" ", "");
+                let type_name = qualified_type_name(type_).replace(" ", "");
                 let name: EcoString = format!(
                     "anonymous@{}-{}#{}:{type_name}",
                     location.start, location.end, self.specialization
@@ -4034,47 +4020,73 @@ fn type_pretty_name(names: &Names, type_: &Arc<Type>) -> EcoString {
     Printer::new(names).print_type(type_)
 }
 
-/// A key that identifies the instantiation of the custom type `type_`.
-fn custom_type_key(type_: &Arc<Type>) -> EcoString {
-    fn write(key: &mut EcoString, type_: &Arc<Type>) {
+fn mangle(name: &EcoString, type_: &Arc<Type>) -> EcoString {
+    let type_name = qualified_type_name(type_);
+    if type_.fn_types().is_some() {
+        name.clone() + &type_name[2..]
+    } else {
+        name.clone() + "::" + type_name.replace(" ", "")
+    }
+}
+
+/// The name of `type_` with the types qualified by their module, except
+/// the prelude ones, so different types have different names.
+fn qualified_type_name(type_: &Arc<Type>) -> EcoString {
+    fn write(name: &mut EcoString, type_vars: &mut Vec<u64>, type_: &Arc<Type>) {
         match &**type_ {
             Type::Named {
                 module,
-                name,
+                name: type_name,
                 arguments,
                 ..
             } => {
-                key.push_str(module);
-                key.push('.');
-                key.push_str(name);
-                write_all(key, arguments);
+                if module != PRELUDE_MODULE_NAME {
+                    name.push_str(module);
+                    name.push('.');
+                }
+                name.push_str(type_name);
+                if !arguments.is_empty() {
+                    write_all(name, type_vars, arguments);
+                }
             }
             Type::Fn { arguments, return_ } => {
-                key.push_str("fn");
-                write_all(key, arguments);
-                write(key, return_);
+                name.push_str("fn");
+                write_all(name, type_vars, arguments);
+                name.push_str(" -> ");
+                write(name, type_vars, return_);
             }
             Type::Tuple { elements } => {
-                key.push('#');
-                write_all(key, elements);
+                name.push('#');
+                write_all(name, type_vars, elements);
             }
             Type::Var { type_ } => match type_.borrow().deref() {
-                TypeVar::Link { type_ } => write(key, type_),
-                TypeVar::Unbound { .. } | TypeVar::Generic { .. } => key.push('_'),
+                TypeVar::Link { type_ } => write(name, type_vars, type_),
+                TypeVar::Unbound { id } | TypeVar::Generic { id } => {
+                    let index = type_vars
+                        .iter()
+                        .position(|var| var == id)
+                        .unwrap_or_else(|| {
+                            type_vars.push(*id);
+                            type_vars.len() - 1
+                        });
+                    name.push_str(&format!("t{index}"));
+                }
             },
         }
     }
-    fn write_all(key: &mut EcoString, types: &[Arc<Type>]) {
-        key.push('(');
-        for type_ in types {
-            write(key, type_);
-            key.push(',');
+    fn write_all(name: &mut EcoString, type_vars: &mut Vec<u64>, types: &[Arc<Type>]) {
+        name.push('(');
+        for (index, type_) in types.iter().enumerate() {
+            if index > 0 {
+                name.push_str(", ");
+            }
+            write(name, type_vars, type_);
         }
-        key.push(')');
+        name.push(')');
     }
-    let mut key = EcoString::new();
-    write(&mut key, type_);
-    key
+    let mut name = EcoString::new();
+    write(&mut name, &mut vec![], type_);
+    name
 }
 
 fn remap_val_type(val_type: &ValType, remap: &impl Fn(TypeId) -> TypeId) -> ValType {

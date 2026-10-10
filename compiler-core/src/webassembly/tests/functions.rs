@@ -1582,3 +1582,51 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn specializations_with_same_type_name() {
+    let result = run_wasm(
+        r#"
+import thepackage/a/y as ay
+import thepackage/b/y as by
+
+fn id(x: t) -> t { x }
+
+fn apply(x: t) -> t {
+    let f = fn(y) { id(y) }
+    f(x)
+}
+
+pub fn main() {
+    assert ay.value(id(ay.new())) == 3
+    assert by.value(id(by.new())) == 4.5
+    assert ay.value(apply(ay.new())) == 3
+    assert by.value(apply(by.new())) == 4.5
+    0
+}
+"#,
+        vec![
+            ("thepackage", "thepackage/a/x", "pub type T { T(Int) }"),
+            (
+                "thepackage",
+                "thepackage/a/y",
+                "import thepackage/a/x
+pub fn new() { x.T(3) }
+pub fn value(t: x.T) { let x.T(v) = t v }",
+            ),
+            ("thepackage", "thepackage/b/x", "pub type T { T(Float) }"),
+            (
+                "thepackage",
+                "thepackage/b/y",
+                "import thepackage/b/x
+pub fn new() { x.T(4.5) }
+pub fn value(t: x.T) { let x.T(v) = t v }",
+            ),
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
