@@ -88,6 +88,7 @@ pub(super) enum BuiltinFunctionExternal {
     StringJoin,
     UtfCodepointToInt,
     UnsafeIntToUtfCodepoint,
+    StringPopGrapheme,
 }
 
 pub fn builtin_function_names() -> Vec<EcoString> {
@@ -145,6 +146,7 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::StringJoin,
             BuiltinFunctionExternal::UtfCodepointToInt,
             BuiltinFunctionExternal::UnsafeIntToUtfCodepoint,
+            BuiltinFunctionExternal::StringPopGrapheme,
         ]
     }
 
@@ -198,6 +200,7 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::StringJoin => "_string_join",
             BuiltinFunctionExternal::UtfCodepointToInt => "_utf_codepoint_to_int",
             BuiltinFunctionExternal::UnsafeIntToUtfCodepoint => "_unsafe_int_to_utf_codepoint",
+            BuiltinFunctionExternal::StringPopGrapheme => "_string_pop_grapheme",
         }
     }
 
@@ -256,6 +259,10 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::StringJoin => (vec![list(string()), string()], string()),
             BuiltinFunctionExternal::UtfCodepointToInt => (vec![utf_codepoint()], int()),
             BuiltinFunctionExternal::UnsafeIntToUtfCodepoint => (vec![int()], utf_codepoint()),
+            BuiltinFunctionExternal::StringPopGrapheme => (
+                vec![string()],
+                result(tuple(vec![string(), string()]), nil()),
+            ),
         }
     }
 }

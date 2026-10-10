@@ -11,9 +11,9 @@ use super::*;
 
 pub(super) const RUST_MODULE: &str = "rust";
 
-const CABI_REALLOC: &str = "cabi_realloc";
-const ARENA_MARK: &str = "_arena_mark";
-const ARENA_RELEASE: &str = "_arena_release";
+pub(super) const CABI_REALLOC: &str = "cabi_realloc";
+pub(super) const ARENA_MARK: &str = "_arena_mark";
+pub(super) const ARENA_RELEASE: &str = "_arena_release";
 pub(super) const CONFIG: &str = "_config";
 
 /// How a Gleam type crosses the boundary.
@@ -106,7 +106,7 @@ pub(super) fn rust_signature(
 }
 
 impl<'a> Generator<'a> {
-    fn rust_function(&self, name: &str) -> FunctionId {
+    pub(super) fn rust_function(&self, name: &str) -> FunctionId {
         *self
             .rust_functions
             .get(name)
@@ -176,6 +176,8 @@ impl<'a> Generator<'a> {
                 Abi::Nil => &mut instructions,
                 Abi::String => instructions
                     .local_get(*local)
+                    .local_get(*local)
+                    .string_len()
                     .call(lower_string)
                     .local_get(*local)
                     .string_len(),
@@ -241,27 +243,38 @@ impl<'a> Generator<'a> {
     }
 
     /// `_lower_string(s) -> ptr`: copies the bytes of `s` to the arena.
-    fn function_lower_string(&mut self) -> FunctionId {
+    pub(super) fn function_lower_string(&mut self) -> FunctionId {
         self.glue_function("_lower_string".into(), |s| s.code_lower_string())
     }
 
+    /// `_lower_string(s, n) -> ptr`: copies the first `n` bytes of `s` to the
+    /// arena.
     fn code_lower_string(&mut self) -> FunctionId {
         let string_vt = self.string.val_type();
+        let bytes_vt = self.string.bytes_val_type();
         let cabi_realloc = self.rust_function(CABI_REALLOC);
         // params
         let s = self.wasm_local(string_vt); // String
+        let n = self.wasm_local(ValType::I32);
         // locals
+        let bytes = self.wasm_local(bytes_vt);
+        let off = self.wasm_local(ValType::I32);
         let ptr = self.wasm_local(ValType::I32);
         let i = self.wasm_local(ValType::I32);
-        let mut function = Function::new(self, "_lower_string", &[s], &[ValType::I32]);
+        let mut function = Function::new(self, "_lower_string", &[s, n], &[ValType::I32]);
         #[rustfmt::skip]
         let _ = function
             .extend_instructions(self)
+            .local_get(s)
+            .string_bytes()
+            .local_set(bytes)
+            .local_get(s)
+            .string_off()
+            .local_set(off)
             .i32_const(0)
             .i32_const(0)
             .i32_const(1)
-            .local_get(s)
-            .string_len()
+            .local_get(n)
             .call(cabi_realloc)
             .local_set(ptr)
             .block_(InstrSeqType::Simple(None), |block_s| {
@@ -270,17 +283,18 @@ impl<'a> Generator<'a> {
                     let loop_id = loop_s.id();
                     let _ = loop_s
                         .local_get(i)
-                        .local_get(s)
-                        .string_len()
+                        .local_get(n)
                         .i32_ge_u()
                         .br_if(block_id)
-                        // ptr[i] = s[i]
+                        // ptr[i] = bytes[off + i]
                         .local_get(ptr)
                         .local_get(i)
                         .i32_add()
-                        .local_get(s)
+                        .local_get(bytes)
+                        .local_get(off)
                         .local_get(i)
-                        .string_get()
+                        .i32_add()
+                        .bytes_get()
                         .i32_store8(MemArg { align: 1, offset: 0 })
                         .i32_inc(i)
                         .br(loop_id);
@@ -411,6 +425,8 @@ impl<'a> Generator<'a> {
             Abi::String => instructions
                 .local_get(addr)
                 .local_get(value)
+                .local_get(value)
+                .string_len()
                 .call(lower_string)
                 .i32_store(mem_arg(0))
                 .local_get(addr)

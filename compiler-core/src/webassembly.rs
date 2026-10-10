@@ -928,7 +928,8 @@ impl<'a> Generator<'a> {
             | BuiltinFunctionExternal::StringConcatList
             | BuiltinFunctionExternal::StringJoin
             | BuiltinFunctionExternal::UtfCodepointToInt
-            | BuiltinFunctionExternal::UnsafeIntToUtfCodepoint => type_::int(),
+            | BuiltinFunctionExternal::UnsafeIntToUtfCodepoint
+            | BuiltinFunctionExternal::StringPopGrapheme => type_::int(),
         }
     }
 
@@ -4973,6 +4974,7 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::UnsafeIntToUtfCodepoint => {
                 self.code_unsafe_int_to_utf_codepoint()
             }
+            BuiltinFunctionExternal::StringPopGrapheme => self.code_string_pop_grapheme(),
         };
         self.wasm_module.funcs.get_mut(index).name = Some(builtin.name().to_string());
         let _ = self.builtins_external.insert(builtin, index);

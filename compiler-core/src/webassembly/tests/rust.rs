@@ -120,3 +120,36 @@ pub fn main() {{
 "#
     ));
 }
+
+#[test]
+fn pop_grapheme() {
+    run_ok(
+        r#"
+@external(webassembly, "builtins", "_string_pop_grapheme")
+fn pop_grapheme(a: String) -> Result(#(String, String), Nil)
+@external(webassembly, "rust", "string_length")
+fn length(a: String) -> Int
+
+fn count(s: String, n: Int) -> Int {
+    case pop_grapheme(s) {
+        Ok(#(_, rest)) -> count(rest, n + 1)
+        Error(Nil) -> n
+    }
+}
+
+pub fn main() {
+    let assert Error(Nil) = pop_grapheme("")
+    let assert Ok(#("a", "bc")) = pop_grapheme("abc")
+    let assert Ok(#("e\u{0301}", "x")) = pop_grapheme("e\u{0301}x")
+    let assert Ok(#("👨‍👩‍👧", "!")) = pop_grapheme("👨‍👩‍👧!")
+    // a grapheme bigger than the first window of 64 bytes
+    let big = "e\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}"
+    let assert Ok(#(first, "z")) = pop_grapheme(big <> "z")
+    let assert True = first == big
+    let s = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzé👍🏽e\u{0301}"
+    let assert True = count(s, 0) == length(s)
+    let assert 101 = count(s, 0)
+}
+"#,
+    );
+}

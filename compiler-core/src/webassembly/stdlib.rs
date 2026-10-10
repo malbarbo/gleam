@@ -600,4 +600,96 @@ impl<'a> Generator<'a> {
         let _ = instructions.local_get(r).string_from_bytes().end();
         function.finish(self)
     }
+
+    /// `_string_pop_grapheme(s)`: asks Rust for the length of the first
+    /// grapheme of a window of the string, doubling the window while the
+    /// grapheme could continue past it, so the cost is O(grapheme) and not
+    /// O(string). Both parts are slices of `s`.
+    pub(super) fn code_string_pop_grapheme(&mut self) -> FunctionId {
+        let string_vt = self.string.val_type();
+        let pair = type_::tuple(vec![type_::string(), type_::string()]);
+        let pair_index = self.type_index(&pair);
+        let result_vt = self.val_type(&type_::result(pair.clone(), type_::nil()));
+        let ok_fn = self.ok_variant_constructor(pair.clone(), type_::nil());
+        let error_fn = self.error_variant_constructor(pair, type_::nil());
+        let lower_string = self.function_lower_string();
+        let prefix_len = self.rust_function(GRAPHEME_PREFIX_LEN);
+        let arena_mark = self.rust_function(ARENA_MARK);
+        let arena_release = self.rust_function(ARENA_RELEASE);
+        // params
+        let s = self.wasm_local(string_vt);
+        // locals
+        let len = self.wasm_local(ValType::I32);
+        let window = self.wasm_local(ValType::I32);
+        let n = self.wasm_local(ValType::I32);
+        let mark = self.wasm_local(ValType::I32);
+        let mut function = Function::new(self, "_string_pop_grapheme", &[s], &[result_vt]);
+        #[rustfmt::skip]
+        let _ = function
+            .extend_instructions(self)
+            .local_get(s)
+            .string_len()
+            .local_tee(len)
+            .i32_eqz()
+            .if_(InstrSeqType::Simple(None), |then_s| {
+                let _ = then_s.nil_const().call(error_fn).return_();
+            })
+            .i32_const(GRAPHEME_WINDOW)
+            .local_set(window)
+            .call(arena_mark)
+            .local_set(mark)
+            .loop_(InstrSeqType::Simple(None), |loop_s| {
+                let loop_id = loop_s.id();
+                let _ = loop_s
+                    // window = min(window, len)
+                    .local_get(window)
+                    .local_get(len)
+                    .i32_ge_u()
+                    .if_(InstrSeqType::Simple(None), |then_s| {
+                        let _ = then_s.local_get(len).local_set(window);
+                    })
+                    .local_get(s)
+                    .local_get(window)
+                    .call(lower_string)
+                    .local_get(window)
+                    // complete when the window is the whole string
+                    .local_get(window)
+                    .local_get(len)
+                    .i32_eq()
+                    .call(prefix_len)
+                    .local_set(n)
+                    .local_get(mark)
+                    .call(arena_release)
+                    .local_get(n)
+                    .i32_const(0)
+                    .i32_lt_s()
+                    .if_(InstrSeqType::Simple(None), |then_s| {
+                        let _ = then_s
+                            .local_get(window)
+                            .i32_const(1)
+                            .i32_shl()
+                            .local_set(window)
+                            .br(loop_id);
+                    });
+            })
+            .local_get(s)
+            .i32_const(0)
+            .local_get(n)
+            .string_slice()
+            .local_get(s)
+            .local_get(n)
+            .local_get(len)
+            .local_get(n)
+            .i32_sub()
+            .string_slice()
+            .struct_new(pair_index)
+            .call(ok_fn)
+            .end();
+        function.finish(self)
+    }
 }
+
+const GRAPHEME_PREFIX_LEN: &str = "_grapheme_prefix_len";
+
+/// The first window of `_string_pop_grapheme`, in bytes.
+const GRAPHEME_WINDOW: i32 = 64;
