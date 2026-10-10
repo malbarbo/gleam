@@ -173,9 +173,26 @@ pub fn module(
     generator.compile()
 }
 
-fn eliminate_dead_code(module: &mut walrus::Module, builtin_data_names: &[String]) {
-    // Clear element segments so declared functions are not treated as roots.
-    for elem in module.elements.iter().map(|e| e.id()).collect::<Vec<_>>() {
+fn eliminate_dead_code(
+    module: &mut walrus::Module,
+    builtin_exports: &[walrus::ExportId],
+    builtin_names: &HashSet<String>,
+) {
+    // The functions exported by the builtins are not exports of the program:
+    // only those reached from its code survive.
+    for &id in builtin_exports {
+        module.exports.delete(id);
+    }
+    // Clear declarative element segments so declared functions are not
+    // treated as roots. Active segments fill the table of the Rust builtins
+    // and must stay for their indirect calls.
+    for elem in module
+        .elements
+        .iter()
+        .filter(|e| matches!(e.kind, walrus::ElementKind::Declared))
+        .map(|e| e.id())
+        .collect::<Vec<_>>()
+    {
         module.elements.delete(elem);
     }
     // Remove memory export before GC so unused memory is not a root.
@@ -194,17 +211,15 @@ fn eliminate_dead_code(module: &mut walrus::Module, builtin_data_names: &[String
         .data
         .iter()
         .filter(|d| !matches!(d.kind, walrus::DataKind::Passive))
-        .enumerate()
-        .map(|(idx, d)| {
+        .map(|d| {
             let kind = match &d.kind {
                 walrus::DataKind::Active { memory, offset } => Some((*memory, offset.clone())),
                 walrus::DataKind::Passive => None,
             };
-            let name = builtin_data_names.get(idx).cloned();
-            (d.id(), name, kind)
+            (d.id(), kind)
         })
         .collect();
-    for &(id, _, _) in &active_data {
+    for &(id, _) in &active_data {
         module.data.get_mut(id).kind = walrus::DataKind::Passive;
     }
     walrus::passes::gc::run(module);
@@ -220,13 +235,12 @@ fn eliminate_dead_code(module: &mut walrus::Module, builtin_data_names: &[String
             .iter()
             .filter_map(|f| f.name.as_deref())
             .collect();
-        for (id, ref name, kind_info) in active_data {
+        let data_needed = is_builtin_data_needed(&surviving_names, builtin_names);
+        for (id, kind_info) in active_data {
             if let Some((_, offset)) = kind_info {
                 // Only restore if the data segment survived GC and is
                 // needed by a surviving function group.
-                if module.data.iter().any(|d| d.id() == id)
-                    && is_data_segment_needed(name, &surviving_names)
-                {
+                if module.data.iter().any(|d| d.id() == id) && data_needed {
                     module.data.get_mut(id).kind = walrus::DataKind::Active {
                         memory: mem,
                         offset,
@@ -242,7 +256,10 @@ fn eliminate_dead_code(module: &mut walrus::Module, builtin_data_names: &[String
             .data
             .iter()
             .any(|d| !matches!(d.kind, walrus::DataKind::Passive));
-        if !has_active_data && module.imports.iter().next().is_none() {
+        let uses_builtins = surviving_names
+            .iter()
+            .any(|name| builtin_names.contains(*name));
+        if !has_active_data && !uses_builtins && module.imports.iter().next().is_none() {
             for id in module
                 .exports
                 .iter()
@@ -259,34 +276,24 @@ fn eliminate_dead_code(module: &mut walrus::Module, builtin_data_names: &[String
     }
 }
 
-/// Check if a data segment is needed based on its name and surviving functions.
-fn is_data_segment_needed(name: &Option<String>, surviving: &HashSet<&str>) -> bool {
-    let name = match name {
-        Some(n) => n,
-        // No name → be conservative, keep it.
-        None => return true,
-    };
-    // Named dtoa segments (DEC_DIGITS_LUT is shared with itoa via LTO dedup)
-    if name.contains("dtoa") {
-        return surviving.contains("_f32_to_str")
-            || surviving.contains("_f64_to_str")
-            || surviving.contains("_i32_to_str")
-            || surviving.contains("_i64_to_str");
-    }
-    // Named fast_float segments
-    if name.contains("fast_float") {
-        return surviving.contains("_f32_parse") || surviving.contains("_f64_parse");
-    }
-    // Named itoa segments
-    if name.contains("itoa") {
-        return surviving.contains("_i32_to_str") || surviving.contains("_i64_to_str");
-    }
-    // Named lexical_core segments
-    if name.contains("lexical") {
-        return surviving.contains("_i32_parse") || surviving.contains("_i64_parse");
-    }
-    // Anonymous segments — keep if any builtin using memory survived
-    true
+/// Builtins that never read the data segments of builtins-wasm.
+const DATA_FREE_BUILTINS: &[&str] = &[
+    CONFIG,
+    ARENA_MARK,
+    ARENA_RELEASE,
+    CABI_REALLOC,
+    HEAP_BASE,
+    EXIT,
+    PRINT,
+];
+
+/// The data of builtins-wasm is needed when a builtin that may read it
+/// survived. Its segments can't be told apart: after LTO they mix several
+/// crates and most are anonymous.
+fn is_builtin_data_needed(surviving: &HashSet<&str>, builtin_names: &HashSet<String>) -> bool {
+    surviving
+        .iter()
+        .any(|name| builtin_names.contains(*name) && !DATA_FREE_BUILTINS.contains(name))
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -620,7 +627,11 @@ struct Generator<'a> {
     pub(super) wasm_module: walrus::Module,
     memory: Option<MemoryId>,
     /// Names of builtin data segments, indexed by segment index.
-    builtin_data_names: Vec<String>,
+    /// The functions exported by builtins-wasm, removed before the dead code
+    /// elimination.
+    builtin_exports: Vec<walrus::ExportId>,
+    /// The names of the functions of builtins-wasm.
+    builtin_names: HashSet<String>,
     wasm_types: IndexMap<WasmType, TypeId>,
     /// The type ids of the custom types instantiations.
     custom_type_ids: HashMap<EcoString, CustomTypeId>,
@@ -680,13 +691,20 @@ impl<'a> Generator<'a> {
         let mut wasm_module =
             walrus::Module::from_buffer(BUILTINS_WASM).expect("builtins wasm to be a valid module");
         let memory = wasm_module.memories.iter().next().map(|m| m.id());
+        let builtin_exports = wasm_module
+            .exports
+            .iter()
+            .filter(|e| matches!(e.item, walrus::ExportItem::Function(_)))
+            .map(|e| e.id())
+            .collect();
         let string = StringType::new(&mut wasm_module);
         let mut wasm_types = IndexMap::new();
         let _ = wasm_types.insert(StringType::wasm_type(), string.bytes_index);
         Generator {
             wasm_module,
             memory,
-            builtin_data_names: Vec::new(),
+            builtin_exports,
+            builtin_names: HashSet::new(),
             wasm_types,
             custom_type_ids: HashMap::new(),
             custom_type_definitions: Vec::new(),
@@ -827,7 +845,11 @@ impl<'a> Generator<'a> {
         let start = self.generate()?;
         self.wasm_module.name = Some(self.module.name.to_string());
         self.wasm_module.start = Some(start);
-        eliminate_dead_code(&mut self.wasm_module, &self.builtin_data_names);
+        eliminate_dead_code(
+            &mut self.wasm_module,
+            &self.builtin_exports,
+            &self.builtin_names,
+        );
         Ok(self.wasm_module.emit_wasm())
     }
 
@@ -1092,12 +1114,7 @@ impl<'a> Generator<'a> {
             let _ = available.insert(name, (params, results));
         }
 
-        self.builtin_data_names = self
-            .wasm_module
-            .data
-            .iter()
-            .map(|d| d.name.clone().unwrap_or_default())
-            .collect();
+        self.builtin_names = self.rust_functions.keys().map(|n| n.to_string()).collect();
 
         // Validate external function signatures and collect needed builtins
         self.validate_externals(&available)

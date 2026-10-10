@@ -153,3 +153,10 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn unused_builtins_are_removed() {
+    // The Rust exports and their data are not roots of the program.
+    let size = super::compile_wasm("pub fn main() { 1 }", vec![]).len();
+    assert!(size < 1000, "{size} bytes");
+}
