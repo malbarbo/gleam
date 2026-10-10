@@ -868,6 +868,191 @@ pub fn main() -> Int {
 }
 
 #[test]
+fn unbound_type_var_in_unused_variant() {
+    run_ok(
+        r#"
+pub fn check(r: Result(Int, x)) -> Int {
+    case r {
+        Ok(n) -> n
+        Error(_) -> -1
+    }
+}
+
+pub fn main() {
+    let assert 5 = check(Ok(5))
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn union_variant_with_external_field() {
+    run_ok(
+        r#"
+pub type I64 {}
+
+@external(webassembly, "builtins", "_int_to_i64")
+fn to_i64(value: Int) -> I64
+
+@external(webassembly, "builtins", "_i64_to_int")
+fn from_i64(value: I64) -> Int
+
+pub type Holder {
+    HoldI64(value: I64)
+    HoldStr(value: String)
+}
+
+pub fn main() {
+    let h = HoldI64(to_i64(42))
+    case h {
+        HoldI64(v) -> from_i64(v)
+        HoldStr(_) -> -1
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn struct_with_enum_field() {
+    run_ok(
+        r#"
+pub type Color {
+    Red
+    Green
+    Blue
+}
+
+pub type Painted {
+    Painted(color: Color, label: Int)
+}
+
+pub fn main() -> Int {
+    let p = Painted(Red, 42)
+    case p {
+        Painted(_, n) -> n
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn function_field_with_external_param() {
+    run_ok(
+        r#"
+pub type I64 {}
+
+@external(webassembly, "builtins", "_int_to_i64")
+fn to_i64(value: Int) -> I64
+
+@external(webassembly, "builtins", "_i64_to_int")
+fn from_i64(value: I64) -> Int
+
+pub type Handler {
+    Handler(act: fn(I64) -> I64)
+}
+
+pub fn main() {
+    let h = Handler(fn(x) { x })
+    case h {
+        Handler(f) -> {
+            let assert 42 = from_i64(f(to_i64(42)))
+            0
+        }
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn tuple_with_external_element() {
+    run_ok(
+        r#"
+pub type I64 {}
+
+@external(webassembly, "builtins", "_int_to_i64")
+fn to_i64(value: Int) -> I64
+
+@external(webassembly, "builtins", "_i64_to_int")
+fn from_i64(value: I64) -> Int
+
+pub fn main() {
+    let t = #(to_i64(42), 1)
+    assert from_i64(t.0) == 42
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn struct_with_external_field() {
+    run_ok(
+        r#"
+pub type I64 {}
+
+@external(webassembly, "builtins", "_int_to_i64")
+fn to_i64(value: Int) -> I64
+
+@external(webassembly, "builtins", "_i64_to_int")
+fn from_i64(value: I64) -> Int
+
+pub type Wrapper {
+    Wrapper(value: I64)
+}
+
+pub fn main() {
+    let w = Wrapper(to_i64(42))
+    assert from_i64(w.value) == 42
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn dual_option_monomorphizations() {
+    let src = r#"
+pub type Option(a) {
+    None
+    Some(a)
+}
+
+pub fn main() -> Int {
+    let a = Some(1)
+    let b = Some(1.0)
+    assert a == Some(1)
+    assert b == Some(1.0)
+    0
+}
+"#;
+    run_ok(src);
+}
+
+#[test]
+fn generic_variant_field_access_multiple_instantiations() {
+    run_ok(
+        r#"
+pub fn unwrap_err(r: Result(Int, x), default: x) -> x {
+    case r {
+        Ok(_) -> default
+        Error(e) -> e
+    }
+}
+
+pub fn main() {
+    let assert "boom" = unwrap_err(Error("boom"), "x")
+    let assert 42 = unwrap_err(Error(42), 0)
+    0
+}
+"#,
+    );
+}
+
+#[test]
 fn recursive_type_instantiations_with_same_type_name() {
     let result = super::run_wasm(
         r#"
