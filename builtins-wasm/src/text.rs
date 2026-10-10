@@ -39,24 +39,8 @@ pub fn trim_end(s: &str) -> &str {
 }
 
 /// Byte offset of the first occurrence of `needle`.
-///
-/// `memchr::memmem` would be faster for long needles, but its searchers are
-/// called through function pointers and the code generator cannot handle
-/// indirect calls in this module yet; `memchr` finds candidate positions.
 fn find(haystack: &str, needle: &str) -> Option<usize> {
-    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
-    let Some((&first, rest)) = n.split_first() else {
-        return Some(0);
-    };
-    let mut start = 0;
-    while h.len() - start >= n.len() {
-        let i = start + memchr::memchr(first, &h[start..=h.len() - n.len()])?;
-        if &h[i + 1..i + n.len()] == rest {
-            return Some(i);
-        }
-        start = i + 1;
-    }
-    None
+    memchr::memmem::find(haystack.as_bytes(), needle.as_bytes())
 }
 
 pub fn contains(haystack: &str, needle: &str) -> bool {

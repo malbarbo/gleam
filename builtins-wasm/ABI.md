@@ -1,3 +1,8 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  SPDX-FileCopyrightText: 2026 The Gleam contributors
+-->
+
 # builtins-wasm ABI
 
 Contract between the WebAssembly code generator (`compiler-core/src/webassembly.rs`),
@@ -192,13 +197,9 @@ The older exports (`_print`, `_exit`, `_i32_to_str`, `_i64_to_str`, `_f32_to_str
 `_f32_to_str`/`_f64_to_str` now write the `float_to_string` text (for `f32` and
 `f64` respectively) and `_i32_parse`/`_i64_parse` use the `from_str` grammar.
 
-The code generator cannot handle indirect calls in this module yet (its dead
-code elimination deletes the element segments, and walrus panics when a
-surviving function uses the table), so no function reachable from an export may
-make one: no `core::fmt` formatting (`write!`, `format!`, `{:?}`) and no
-`memchr::memmem` (its searchers are function pointers). Functions with
-`call_indirect` that are only reachable from the table (e.g. `Debug` impls
-referenced by panic sites) are harmless, since they are collected.
+Indirect calls are fine (`memchr::memmem` uses them): the code generator keeps
+the active element segments that fill the table. The panic handler still avoids
+`core::fmt`, which would bring a lot of code into every program that can panic.
 
 The code generator finds the exports by function name (the name section), so
 every export must stay a distinct function (LTO may otherwise merge identical

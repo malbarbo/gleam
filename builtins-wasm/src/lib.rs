@@ -35,7 +35,7 @@ mod exports {
     static ARENA: crate::arena::Arena = crate::arena::Arena;
 
     /// Only messages without arguments are printed (the location otherwise):
-    /// formatting would bring `core::fmt` and its indirect calls into the module.
+    /// formatting would bring `core::fmt` into every program that can panic.
     #[cfg(not(test))]
     #[panic_handler]
     fn panic(info: &core::panic::PanicInfo) -> ! {
