@@ -423,6 +423,7 @@ mod local_closures;
 mod memory;
 mod numbers;
 mod specialization;
+mod stdlib;
 mod strings;
 mod tail_calls;
 mod tuples;

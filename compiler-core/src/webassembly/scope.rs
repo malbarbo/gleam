@@ -525,7 +525,10 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
         left: &'ast TypedExpr,
         right: &'ast TypedExpr,
     ) {
-        if matches!(operator, BinOp::DivInt | BinOp::DivFloat) {
+        if matches!(
+            operator,
+            BinOp::DivInt | BinOp::RemainderInt | BinOp::DivFloat
+        ) {
             self.locals.insert_div(self.generator, left, right);
         }
         visit_typed_expr_bin_op(self, location, type_, operator, operator_start, left, right);
@@ -557,7 +560,7 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
 
     fn visit_typed_clause_guard(&mut self, guard: &'ast TypedClauseGuard) {
         if let ClauseGuard::BinaryOperator {
-            operator: BinOp::DivInt | BinOp::DivFloat,
+            operator: BinOp::DivInt | BinOp::RemainderInt | BinOp::DivFloat,
             left,
             right,
             ..

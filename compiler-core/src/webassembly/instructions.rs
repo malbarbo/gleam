@@ -535,6 +535,9 @@ impl<'a, 'b> Instructions<'a, 'b> {
     binop!(i32_eq, I32Eq);
     binop!(i32_ne, I32Ne);
     binop!(i32_lt_u, I32LtU);
+    binop!(i32_le_u, I32LeU);
+    binop!(i32_ge_s, I32GeS);
+    binop!(i32_lt_s, I32LtS);
     binop!(i32_gt_s, I32GtS);
     binop!(i32_ge_u, I32GeU);
     binop!(i32_add, I32Add);
@@ -607,49 +610,76 @@ impl<'a, 'b> Instructions<'a, 'b> {
         self
     }
 
+    /// Gleam division: `x / 0` is 0 and `MIN / -1` wraps to `MIN` instead of
+    /// trapping like `div_s`.
     pub(super) fn int_div(&mut self, dividend: LocalId, divisor: LocalId) -> &mut Self {
-        match self.int {
-            IntType::I32 => {
-                #[rustfmt::skip]
-                let _ = self
-                    .local_set(divisor)
-                    .local_set(dividend)
-                    .local_get(divisor)
-                    .if_else(
-                        ValType::I32,
-                        |then_s| {
-                            let _ = then_s
-                                .local_get(dividend)
-                                .local_get(divisor)
-                                .i32_div_s();
-                        },
-                        |else_s| {
-                            let _ = else_s.i32_const(0);
-                        },
-                    );
-            }
-            IntType::I64 => {
-                #[rustfmt::skip]
-                let _ = self
-                    .local_set(divisor)
-                    .local_set(dividend)
-                    .local_get(divisor)
-                    .i64_const(0)
-                    .i64_ne()
-                    .if_else(
-                        ValType::I64,
-                        |then_s| {
-                            let _ = then_s
-                                .local_get(dividend)
-                                .local_get(divisor)
-                                .i64_div_s();
-                        },
-                        |else_s| {
-                            let _ = else_s.i64_const(0);
-                        },
-                    );
-            }
-        }
+        let int_vt = self.int.val_type();
+        #[rustfmt::skip]
+        let _ = self
+            .local_set(divisor)
+            .local_set(dividend)
+            .local_get(divisor)
+            .int_eqz()
+            .if_else(
+                int_vt,
+                |then_s| {
+                    let _ = then_s.int_const(&0.into());
+                },
+                |else_s| {
+                    let _ = else_s
+                        .local_get(divisor)
+                        .int_const(&(-1).into())
+                        .int_eq()
+                        .if_else(
+                            int_vt,
+                            |then_s| {
+                                let _ = then_s
+                                    .int_const(&0.into())
+                                    .local_get(dividend)
+                                    .int_sub();
+                            },
+                            |else_s| {
+                                let _ = else_s
+                                    .local_get(dividend)
+                                    .local_get(divisor)
+                                    .int_div_s();
+                            },
+                        );
+                },
+            );
+        self
+    }
+
+    /// Gleam remainder: `x % 0` is 0 instead of trapping like `rem_s`.
+    pub(super) fn int_rem(&mut self, dividend: LocalId, divisor: LocalId) -> &mut Self {
+        let int_vt = self.int.val_type();
+        #[rustfmt::skip]
+        let _ = self
+            .local_set(divisor)
+            .local_set(dividend)
+            .local_get(divisor)
+            .int_eqz()
+            .if_else(
+                int_vt,
+                |then_s| {
+                    let _ = then_s.int_const(&0.into());
+                },
+                |else_s| {
+                    let _ = else_s
+                        .local_get(dividend)
+                        .local_get(divisor)
+                        .int_rem_s();
+                },
+            );
+        self
+    }
+
+    pub(super) fn int_eqz(&mut self) -> &mut Self {
+        let op = match self.int {
+            IntType::I32 => UnaryOp::I32Eqz,
+            IntType::I64 => UnaryOp::I64Eqz,
+        };
+        let _ = self.seq.as_mut().unop(op);
         self
     }
 
@@ -709,16 +739,55 @@ impl<'a, 'b> Instructions<'a, 'b> {
         self
     }
 
+    pub(super) fn int_to_float(&mut self) -> &mut Self {
+        let op = match (self.int, self.float) {
+            (IntType::I32, FloatType::F32) => UnaryOp::F32ConvertSI32,
+            (IntType::I32, FloatType::F64) => UnaryOp::F64ConvertSI32,
+            (IntType::I64, FloatType::F32) => UnaryOp::F32ConvertSI64,
+            (IntType::I64, FloatType::F64) => UnaryOp::F64ConvertSI64,
+        };
+        let _ = self.seq.as_mut().unop(op);
+        self
+    }
+
+    /// Saturating conversion: NaN gives 0 and out of range values give the
+    /// minimum or maximum `Int`.
+    pub(super) fn float_to_int_sat(&mut self) -> &mut Self {
+        let op = match (self.float, self.int) {
+            (FloatType::F32, IntType::I32) => UnaryOp::I32TruncSSatF32,
+            (FloatType::F64, IntType::I32) => UnaryOp::I32TruncSSatF64,
+            (FloatType::F32, IntType::I64) => UnaryOp::I64TruncSSatF32,
+            (FloatType::F64, IntType::I64) => UnaryOp::I64TruncSSatF64,
+        };
+        let _ = self.seq.as_mut().unop(op);
+        self
+    }
+
+    /// The number of bits of `Int`.
+    pub(super) fn int_bits(&self) -> i32 {
+        match self.int {
+            IntType::I32 => 32,
+            IntType::I64 => 64,
+        }
+    }
+
     int_op!(int_add, I32Add, I64Add);
     int_op!(int_sub, I32Sub, I64Sub);
     int_op!(int_mul, I32Mul, I64Mul);
-    int_op!(int_rem, I32RemS, I64RemS);
+    int_op!(int_div_s, I32DivS, I64DivS);
+    int_op!(int_rem_s, I32RemS, I64RemS);
     int_op!(int_eq, I32Eq, I64Eq);
     int_op!(int_ne, I32Ne, I64Ne);
     int_op!(int_lt, I32LtS, I64LtS);
     int_op!(int_le, I32LeS, I64LeS);
     int_op!(int_gt, I32GtS, I64GtS);
     int_op!(int_ge, I32GeS, I64GeS);
+    int_op!(int_ge_u, I32GeU, I64GeU);
+    int_op!(int_and, I32And, I64And);
+    int_op!(int_or, I32Or, I64Or);
+    int_op!(int_xor, I32Xor, I64Xor);
+    int_op!(int_shl, I32Shl, I64Shl);
+    int_op!(int_shr_s, I32ShrS, I64ShrS);
 }
 
 #[allow(unused)]
@@ -761,6 +830,19 @@ macro_rules! float_op {
                 FloatType::F64 => BinaryOp::$f64,
             };
             let _ = self.seq.as_mut().binop(op);
+            self
+        }
+    };
+}
+
+macro_rules! float_unop {
+    ($name:ident, $f32:ident, $f64:ident) => {
+        pub(super) fn $name(&mut self) -> &mut Self {
+            let op = match self.float {
+                FloatType::F32 => UnaryOp::$f32,
+                FloatType::F64 => UnaryOp::$f64,
+            };
+            let _ = self.seq.as_mut().unop(op);
             self
         }
     };
@@ -834,6 +916,13 @@ impl<'a, 'b> Instructions<'a, 'b> {
     float_op!(float_le, F32Le, F64Le);
     float_op!(float_gt, F32Gt, F64Gt);
     float_op!(float_ge, F32Ge, F64Ge);
+    float_op!(float_copysign, F32Copysign, F64Copysign);
+
+    float_unop!(float_floor, F32Floor, F64Floor);
+    float_unop!(float_ceil, F32Ceil, F64Ceil);
+    float_unop!(float_trunc, F32Trunc, F64Trunc);
+    float_unop!(float_sqrt, F32Sqrt, F64Sqrt);
+    float_unop!(float_abs, F32Abs, F64Abs);
 }
 
 #[derive(Clone, Copy)]

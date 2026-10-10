@@ -8,6 +8,7 @@ mod instructions;
 mod monomorphize;
 mod scope;
 mod specialization;
+mod stdlib;
 #[cfg(test)]
 mod tests;
 
@@ -18,6 +19,7 @@ use instructions::*;
 use monomorphize::*;
 use scope::*;
 use specialization::*;
+use stdlib::*;
 
 use ecow::EcoString;
 use indexmap::IndexMap;
@@ -899,7 +901,31 @@ impl<'a> Generator<'a> {
             | BuiltinFunctionExternal::StringGetByte
             | BuiltinFunctionExternal::IntToUtfCodepoint
             | BuiltinFunctionExternal::ParseInt
-            | BuiltinFunctionExternal::ParseFloat => type_::int(),
+            | BuiltinFunctionExternal::ParseFloat
+            | BuiltinFunctionExternal::IntBitwiseAnd
+            | BuiltinFunctionExternal::IntBitwiseOr
+            | BuiltinFunctionExternal::IntBitwiseExclusiveOr
+            | BuiltinFunctionExternal::IntBitwiseNot
+            | BuiltinFunctionExternal::IntBitwiseShiftLeft
+            | BuiltinFunctionExternal::IntBitwiseShiftRight
+            | BuiltinFunctionExternal::IntToFloat
+            | BuiltinFunctionExternal::FloatFloor
+            | BuiltinFunctionExternal::FloatCeiling
+            | BuiltinFunctionExternal::FloatTruncate
+            | BuiltinFunctionExternal::FloatRound
+            | BuiltinFunctionExternal::FloatSquareRoot
+            | BuiltinFunctionExternal::StringByteSize
+            | BuiltinFunctionExternal::StringByteSlice
+            | BuiltinFunctionExternal::StringPopCodeunit
+            | BuiltinFunctionExternal::StringStartsWith
+            | BuiltinFunctionExternal::StringEndsWith
+            | BuiltinFunctionExternal::StringRemovePrefix
+            | BuiltinFunctionExternal::StringRemoveSuffix
+            | BuiltinFunctionExternal::StringLessThan
+            | BuiltinFunctionExternal::StringConcatList
+            | BuiltinFunctionExternal::StringJoin
+            | BuiltinFunctionExternal::UtfCodepointToInt
+            | BuiltinFunctionExternal::UnsafeIntToUtfCodepoint => type_::int(),
         }
     }
 
@@ -3874,7 +3900,10 @@ impl<'a> Generator<'a> {
                 let (left, right) = locals.for_div(&scope, left, right);
                 instructions.int_div(left, right)
             }
-            BinOp::RemainderInt => instructions.int_rem(),
+            BinOp::RemainderInt => {
+                let (left, right) = locals.for_div(&scope, left, right);
+                instructions.int_rem(left, right)
+            }
             BinOp::LtInt => instructions.int_lt(),
             BinOp::LtEqInt => instructions.int_le(),
             BinOp::GtInt => instructions.int_gt(),
@@ -4618,9 +4647,10 @@ impl<'a> Generator<'a> {
                         .int_mul();
                 }
                 BinOp::RemainderInt => {
+                    let (a, b) = locals.for_guard_div(scope, left, right);
                     let _ = instructions
                         .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                        .int_rem();
+                        .int_rem(a, b);
                 }
                 BinOp::DivInt => {
                     let (a, b) = locals.for_guard_div(scope, left, right);
@@ -4831,6 +4861,36 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::MemoryToString => self.code_memory_to_string(),
             BuiltinFunctionExternal::ParseInt => self.code_parse_int(),
             BuiltinFunctionExternal::ParseFloat => self.code_parse_float(),
+            BuiltinFunctionExternal::IntBitwiseAnd => self.code_int_bitwise_binop(IntBitwise::And),
+            BuiltinFunctionExternal::IntBitwiseOr => self.code_int_bitwise_binop(IntBitwise::Or),
+            BuiltinFunctionExternal::IntBitwiseExclusiveOr => {
+                self.code_int_bitwise_binop(IntBitwise::ExclusiveOr)
+            }
+            BuiltinFunctionExternal::IntBitwiseNot => self.code_int_bitwise_not(),
+            BuiltinFunctionExternal::IntBitwiseShiftLeft => self.code_int_shift(true),
+            BuiltinFunctionExternal::IntBitwiseShiftRight => self.code_int_shift(false),
+            BuiltinFunctionExternal::IntToFloat => self.code_int_to_float(),
+            BuiltinFunctionExternal::FloatFloor => self.code_float_unop(FloatUnary::Floor),
+            BuiltinFunctionExternal::FloatCeiling => self.code_float_unop(FloatUnary::Ceiling),
+            BuiltinFunctionExternal::FloatTruncate => self.code_float_truncate(),
+            BuiltinFunctionExternal::FloatRound => self.code_float_round(),
+            BuiltinFunctionExternal::FloatSquareRoot => {
+                self.code_float_unop(FloatUnary::SquareRoot)
+            }
+            BuiltinFunctionExternal::StringByteSize => self.code_string_num_bytes(),
+            BuiltinFunctionExternal::StringByteSlice => self.code_string_byte_slice(),
+            BuiltinFunctionExternal::StringPopCodeunit => self.code_string_pop_codeunit(),
+            BuiltinFunctionExternal::StringStartsWith => self.function_string_starts_with(),
+            BuiltinFunctionExternal::StringEndsWith => self.code_string_ends_with(),
+            BuiltinFunctionExternal::StringRemovePrefix => self.code_string_remove_affix(true),
+            BuiltinFunctionExternal::StringRemoveSuffix => self.code_string_remove_affix(false),
+            BuiltinFunctionExternal::StringLessThan => self.code_string_less_than(),
+            BuiltinFunctionExternal::StringConcatList => self.code_string_join(false),
+            BuiltinFunctionExternal::StringJoin => self.code_string_join(true),
+            BuiltinFunctionExternal::UtfCodepointToInt => self.code_utf_codepoint_to_int(),
+            BuiltinFunctionExternal::UnsafeIntToUtfCodepoint => {
+                self.code_unsafe_int_to_utf_codepoint()
+            }
         };
         self.wasm_module.funcs.get_mut(index).name = Some(builtin.name().to_string());
         let _ = self.builtins_external.insert(builtin, index);

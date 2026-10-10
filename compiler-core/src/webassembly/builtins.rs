@@ -36,7 +36,7 @@ impl BuiltinFunction {
     }
 }
 
-#[derive(Hash, PartialEq, Eq, Ord, PartialOrd, Clone, Debug)]
+#[derive(Hash, PartialEq, Eq, Ord, PartialOrd, Clone, Copy, Debug)]
 pub(super) enum BuiltinFunctionExternal {
     StringConcat,
     StringNumBytes,
@@ -58,6 +58,30 @@ pub(super) enum BuiltinFunctionExternal {
     MemoryToString,
     ParseInt,
     ParseFloat,
+    IntBitwiseAnd,
+    IntBitwiseOr,
+    IntBitwiseExclusiveOr,
+    IntBitwiseNot,
+    IntBitwiseShiftLeft,
+    IntBitwiseShiftRight,
+    IntToFloat,
+    FloatFloor,
+    FloatCeiling,
+    FloatTruncate,
+    FloatRound,
+    FloatSquareRoot,
+    StringByteSize,
+    StringByteSlice,
+    StringPopCodeunit,
+    StringStartsWith,
+    StringEndsWith,
+    StringRemovePrefix,
+    StringRemoveSuffix,
+    StringLessThan,
+    StringConcatList,
+    StringJoin,
+    UtfCodepointToInt,
+    UnsafeIntToUtfCodepoint,
 }
 
 pub fn builtin_function_names() -> Vec<EcoString> {
@@ -91,6 +115,30 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::MemoryToString,
             BuiltinFunctionExternal::ParseInt,
             BuiltinFunctionExternal::ParseFloat,
+            BuiltinFunctionExternal::IntBitwiseAnd,
+            BuiltinFunctionExternal::IntBitwiseOr,
+            BuiltinFunctionExternal::IntBitwiseExclusiveOr,
+            BuiltinFunctionExternal::IntBitwiseNot,
+            BuiltinFunctionExternal::IntBitwiseShiftLeft,
+            BuiltinFunctionExternal::IntBitwiseShiftRight,
+            BuiltinFunctionExternal::IntToFloat,
+            BuiltinFunctionExternal::FloatFloor,
+            BuiltinFunctionExternal::FloatCeiling,
+            BuiltinFunctionExternal::FloatTruncate,
+            BuiltinFunctionExternal::FloatRound,
+            BuiltinFunctionExternal::FloatSquareRoot,
+            BuiltinFunctionExternal::StringByteSize,
+            BuiltinFunctionExternal::StringByteSlice,
+            BuiltinFunctionExternal::StringPopCodeunit,
+            BuiltinFunctionExternal::StringStartsWith,
+            BuiltinFunctionExternal::StringEndsWith,
+            BuiltinFunctionExternal::StringRemovePrefix,
+            BuiltinFunctionExternal::StringRemoveSuffix,
+            BuiltinFunctionExternal::StringLessThan,
+            BuiltinFunctionExternal::StringConcatList,
+            BuiltinFunctionExternal::StringJoin,
+            BuiltinFunctionExternal::UtfCodepointToInt,
+            BuiltinFunctionExternal::UnsafeIntToUtfCodepoint,
         ]
     }
 
@@ -120,11 +168,35 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::MemoryToString => "_memory_to_string",
             BuiltinFunctionExternal::ParseInt => "_parse_int",
             BuiltinFunctionExternal::ParseFloat => "_parse_float",
+            BuiltinFunctionExternal::IntBitwiseAnd => "_int_bitwise_and",
+            BuiltinFunctionExternal::IntBitwiseOr => "_int_bitwise_or",
+            BuiltinFunctionExternal::IntBitwiseExclusiveOr => "_int_bitwise_exclusive_or",
+            BuiltinFunctionExternal::IntBitwiseNot => "_int_bitwise_not",
+            BuiltinFunctionExternal::IntBitwiseShiftLeft => "_int_bitwise_shift_left",
+            BuiltinFunctionExternal::IntBitwiseShiftRight => "_int_bitwise_shift_right",
+            BuiltinFunctionExternal::IntToFloat => "_int_to_float",
+            BuiltinFunctionExternal::FloatFloor => "_float_floor",
+            BuiltinFunctionExternal::FloatCeiling => "_float_ceiling",
+            BuiltinFunctionExternal::FloatTruncate => "_float_truncate",
+            BuiltinFunctionExternal::FloatRound => "_float_round",
+            BuiltinFunctionExternal::FloatSquareRoot => "_float_square_root",
+            BuiltinFunctionExternal::StringByteSize => "_string_byte_size",
+            BuiltinFunctionExternal::StringByteSlice => "_string_byte_slice",
+            BuiltinFunctionExternal::StringPopCodeunit => "_string_pop_codeunit",
+            BuiltinFunctionExternal::StringStartsWith => "_string_starts_with",
+            BuiltinFunctionExternal::StringEndsWith => "_string_ends_with",
+            BuiltinFunctionExternal::StringRemovePrefix => "_string_remove_prefix",
+            BuiltinFunctionExternal::StringRemoveSuffix => "_string_remove_suffix",
+            BuiltinFunctionExternal::StringLessThan => "_string_less_than",
+            BuiltinFunctionExternal::StringConcatList => "_string_concat_list",
+            BuiltinFunctionExternal::StringJoin => "_string_join",
+            BuiltinFunctionExternal::UtfCodepointToInt => "_utf_codepoint_to_int",
+            BuiltinFunctionExternal::UnsafeIntToUtfCodepoint => "_unsafe_int_to_utf_codepoint",
         }
     }
 
     pub(super) fn type_(&self, i32: Arc<Type>) -> (Vec<Arc<Type>>, Arc<Type>) {
-        use type_::{float, int, nil, result, string, utf_codepoint};
+        use type_::{bool, float, int, list, nil, result, string, tuple, utf_codepoint};
         match self {
             BuiltinFunctionExternal::StringConcat => (vec![string(), string()], string()),
             BuiltinFunctionExternal::StringNumBytes => (vec![string()], int()),
@@ -152,6 +224,32 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::MemoryToString => (vec![i32.clone(), i32], string()),
             BuiltinFunctionExternal::ParseInt => (vec![string()], result(int(), nil())),
             BuiltinFunctionExternal::ParseFloat => (vec![string()], result(float(), nil())),
+            BuiltinFunctionExternal::IntBitwiseAnd => (vec![int(), int()], int()),
+            BuiltinFunctionExternal::IntBitwiseOr => (vec![int(), int()], int()),
+            BuiltinFunctionExternal::IntBitwiseExclusiveOr => (vec![int(), int()], int()),
+            BuiltinFunctionExternal::IntBitwiseNot => (vec![int()], int()),
+            BuiltinFunctionExternal::IntBitwiseShiftLeft => (vec![int(), int()], int()),
+            BuiltinFunctionExternal::IntBitwiseShiftRight => (vec![int(), int()], int()),
+            BuiltinFunctionExternal::IntToFloat => (vec![int()], float()),
+            BuiltinFunctionExternal::FloatFloor => (vec![float()], float()),
+            BuiltinFunctionExternal::FloatCeiling => (vec![float()], float()),
+            BuiltinFunctionExternal::FloatTruncate => (vec![float()], int()),
+            BuiltinFunctionExternal::FloatRound => (vec![float()], int()),
+            BuiltinFunctionExternal::FloatSquareRoot => (vec![float()], float()),
+            BuiltinFunctionExternal::StringByteSize => (vec![string()], int()),
+            BuiltinFunctionExternal::StringByteSlice => (vec![string(), int(), int()], string()),
+            BuiltinFunctionExternal::StringPopCodeunit => {
+                (vec![string()], tuple(vec![int(), string()]))
+            }
+            BuiltinFunctionExternal::StringStartsWith => (vec![string(), string()], bool()),
+            BuiltinFunctionExternal::StringEndsWith => (vec![string(), string()], bool()),
+            BuiltinFunctionExternal::StringRemovePrefix => (vec![string(), string()], string()),
+            BuiltinFunctionExternal::StringRemoveSuffix => (vec![string(), string()], string()),
+            BuiltinFunctionExternal::StringLessThan => (vec![string(), string()], bool()),
+            BuiltinFunctionExternal::StringConcatList => (vec![list(string())], string()),
+            BuiltinFunctionExternal::StringJoin => (vec![list(string()), string()], string()),
+            BuiltinFunctionExternal::UtfCodepointToInt => (vec![utf_codepoint()], int()),
+            BuiltinFunctionExternal::UnsafeIntToUtfCodepoint => (vec![int()], utf_codepoint()),
         }
     }
 }
