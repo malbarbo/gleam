@@ -469,6 +469,14 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                 arguments,
             ),
 
+            TypedExpr::Var { .. } | TypedExpr::ModuleSelect { .. }
+                if is_check_function(expression) =>
+            {
+                let function = self.check_function(arena, expression);
+                let arity = expression.type_().fn_arity().unwrap_or(0);
+                self.check_function_value(arena, function, arity, expression.location())
+            }
+
             TypedExpr::Var {
                 name, constructor, ..
             } => self.variable(arena, name, constructor),
@@ -983,6 +991,80 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
         self.statement_level.push(statement_doc);
 
         self.wrap_return(arena, block_variable.to_doc(arena))
+    }
+
+    /// A function of `sgleam/check` as the module writes it, without the
+    /// wrapper it gets as a value.
+    fn check_function(
+        &mut self,
+        arena: &'doc DocumentArena<'a, 'doc>,
+        function: &'a TypedExpr,
+    ) -> Document<'a, 'doc> {
+        if let TypedExpr::ModuleSelect {
+            module_alias,
+            label,
+            constructor,
+            ..
+        } = function
+        {
+            return self.module_select(arena, module_alias, label, constructor);
+        }
+        if let TypedExpr::Var {
+            name, constructor, ..
+        } = function
+        {
+            return self.variable(arena, name, constructor);
+        }
+        panic!("a function of sgleam/check is a name")
+    }
+
+    /// The arguments of a call into `sgleam/check`. Each value goes in a
+    /// thunk, and the file, function and line of the call follow, so a
+    /// failing check can name the place and report what it compared without
+    /// evaluating it twice.
+    fn check_arguments(
+        &self,
+        arena: &'doc DocumentArena<'a, 'doc>,
+        arguments: Vec<Document<'a, 'doc>>,
+        location: SrcSpan,
+    ) -> Vec<Document<'a, 'doc>> {
+        let src_path = self.src_path.clone().to_doc(arena);
+        let function = self
+            .function_name
+            .clone()
+            .to_doc(arena)
+            .surround(arena, '"', '"');
+        let line_number = self.line_numbers.line_number(location.start).to_doc(arena);
+        arguments
+            .into_iter()
+            .map(|arg| arg.surround(arena, "() => { return ", " }"))
+            .chain([src_path, function, line_number])
+            .collect()
+    }
+
+    /// A function of `sgleam/check` used as a value, which no call gives
+    /// thunks and a place. The wrapper gives them, and the place is where the
+    /// name is written.
+    fn check_function_value(
+        &self,
+        arena: &'doc DocumentArena<'a, 'doc>,
+        function: Document<'a, 'doc>,
+        arity: usize,
+        location: SrcSpan,
+    ) -> Document<'a, 'doc> {
+        let parameters = (0..arity)
+            .map(|i| eco_format!("_{i}").to_doc(arena))
+            .collect_vec();
+        let arguments = self.check_arguments(arena, parameters.clone(), location);
+        docvec![
+            arena,
+            "((",
+            arena.join(parameters, ", ".to_doc(arena)),
+            ") => ",
+            function,
+            call_arguments(arena, arguments),
+            ")"
+        ]
     }
 
     fn variable(
@@ -1847,7 +1929,7 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
         &mut self,
         arena: &'doc DocumentArena<'a, 'doc>,
         fun: &'a TypedExpr,
-        mut arguments: Vec<Document<'a, 'doc>>,
+        arguments: Vec<Document<'a, 'doc>>,
     ) -> Document<'a, 'doc> {
         match fun {
             // Qualified record construction
@@ -1949,27 +2031,11 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
             | TypedExpr::NegateBool { .. }
             | TypedExpr::NegateInt { .. }
             | TypedExpr::Invalid { .. } => {
-                if let TypedExpr::ModuleSelect {
-                    constructor: ModuleValueConstructor::Fn { module, .. },
-                    location,
-                    ..
-                } = fun
-                    && module == "sgleam/check"
-                {
-                    let src_path = self.src_path.clone().to_doc(arena);
-                    let function = self
-                        .function_name
-                        .clone()
-                        .to_doc(arena)
-                        .surround(arena, '"', '"');
-                    let line_number = self.line_numbers.line_number(location.start).to_doc(arena);
-                    arguments = arguments
-                        .into_iter()
-                        .map(|arg| arg.surround(arena, "() => { return ", " }"))
-                        .collect();
-                    arguments.push(src_path);
-                    arguments.push(function);
-                    arguments.push(line_number);
+                if is_check_function(fun) {
+                    let arguments = self.check_arguments(arena, arguments, fun.location());
+                    let fun = self.check_function(arena, fun);
+                    let arguments = call_arguments(arena, arguments);
+                    return self.wrap_return(arena, docvec![arena, fun, arguments]);
                 }
                 let fun = self.not_in_tail_position(None, |this| {
                     let is_fn_literal = matches!(fun, TypedExpr::Fn { .. });
@@ -2850,8 +2916,21 @@ impl<'module, 'a, 'doc> Generator<'module, 'a, 'doc> {
                 name,
                 module,
                 constructor,
+                location,
                 ..
-            } => self.constant_var(arena, context, module, name, constructor.as_deref()),
+            } => {
+                let document =
+                    self.constant_var(arena, context, module, name, constructor.as_deref());
+                match constructor.as_deref() {
+                    Some(ValueConstructor {
+                        variant: ValueConstructorVariant::ModuleFn { module, arity, .. },
+                        ..
+                    }) if module == "sgleam/check" => {
+                        self.check_function_value(arena, document, *arity, *location)
+                    }
+                    _ => document,
+                }
+            }
 
             Constant::BinaryOperator {
                 left,
@@ -3952,6 +4031,28 @@ pub(crate) fn array<'a, 'doc, Elements: IntoIterator<Item = Document<'a, 'doc>>>
             CLOSE_SQUARE_DOCUMENT
         ]
         .group(arena)
+    }
+}
+
+/// Returns `true` if the expression names a function of `sgleam/check`,
+/// `false` otherwise.
+fn is_check_function(expression: &TypedExpr) -> bool {
+    if let TypedExpr::ModuleSelect {
+        constructor: ModuleValueConstructor::Fn { module, .. },
+        ..
+    }
+    | TypedExpr::Var {
+        constructor:
+            ValueConstructor {
+                variant: ValueConstructorVariant::ModuleFn { module, .. },
+                ..
+            },
+        ..
+    } = expression
+    {
+        module == "sgleam/check"
+    } else {
+        false
     }
 }
 
