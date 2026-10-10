@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2022 The Gleam contributors
+
 use crate::{assert_erl, assert_js_module_error, assert_module_error};
 
 #[test]
@@ -36,7 +39,7 @@ pub fn x() { go(x: 1, y: 2) go(y: 3, x: 4) }"#
 #[test]
 fn public_local_function_calls() {
     // Public external function calls are inlined but the wrapper function is
-    // also printed in the erlang output and exported
+    // also printed in the Erlang output and exported
     assert_erl!(
         r#"
 @external(erlang, "m", "f")
@@ -417,6 +420,17 @@ fn multiple_discarded_args_in_external_are_passed_correctly_2() {
         r#"
 @external(erlang, "wibble", "wobble")
 pub fn woo(__: a, _two: b) -> Nil
+"#
+    );
+}
+
+#[test]
+// https://github.com/gleam-lang/gleam/issues/5970
+fn discarded_argument_called_value_does_not_have_the_same_name_as_discarded_one() {
+    assert_erl!(
+        r#"
+@external(erlang, "wibble", "wobble")
+pub fn woo(_: a, _value: b) -> Nil
 "#
     );
 }

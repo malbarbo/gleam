@@ -1,6 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 [package]
 name = "gleam-cli"
-version = "1.14.0"
+version = "1.19.1"
 authors = ["Louis Pilfold <louis@lpil.uk>"]
 edition = "2024"
 license = "Apache-2.0"
@@ -8,23 +11,23 @@ license = "Apache-2.0"
 [dependencies]
 # The pure compiler
 gleam-core = { path = "../compiler-core" }
+# The gleam formatter
+gleam-format = { path = "../format" }
 # The language server
 gleam-language-server = { path = "../language-server" }
 # OS SIGINT and SIGTERM signal handling
 ctrlc = { version = "3", features = ["termination"] }
-# Command line interface
-clap = { version = "4", features = ["derive"] }
-# Recursively traversing directories
-ignore = "0"
 # Allow user to type in sensitive information without showing it in the shell
 rpassword = "7"
 # Async runtime
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 # Further file system functions (i.e. copy directory)
 fs_extra = "1"
-tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
 # HTTP client
-reqwest = { version = "0", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "^0.13", default-features = false, features = ["rustls"] }
+# System trust store loading
+rustls-native-certs = "0.8"
 # Checksums
 sha2 = "0"
 # Getting hostname
@@ -35,34 +38,40 @@ toml_edit = "0"
 fslock = "0"
 # Provides a way to determine if two files are the same using filesystem node ids
 same-file = "1"
-# Open generated docs in browser
-opener = "0"
+# Creation of zip files
+zip = { version = "8", features = ["deflate"], default-features = false }
 
-camino = { workspace = true, features = ["serde1"] }
 async-trait.workspace = true
 base16.workspace = true
+camino = { workspace = true, features = ["serde1"] }
+clap = { workspace = true, features = ["derive"] }
 debug-ignore.workspace = true
 ecow.workspace = true
 flate2.workspace = true
 futures.workspace = true
 hexpm = { path = "../hexpm" }
+http-serde.workspace = true
 http.workspace = true
-im.workspace = true
+ignore.workspace = true
+imbl.workspace = true
 itertools.workspace = true
 lsp-server.workspace = true
 lsp-types.workspace = true
+opener.workspace = true
+pubgrub.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 strum.workspace = true
 tar.workspace = true
+tempfile.workspace = true
 termcolor.workspace = true
 toml.workspace = true
 tracing.workspace = true
-pubgrub.workspace = true
+xxhash-rust.workspace = true
 
 [dev-dependencies]
-# Creation of temporary directories
-tempfile = "3"
+# Setting file modification times for tests
+filetime = "0.2"
 pretty_assertions.workspace = true
 insta.workspace = true

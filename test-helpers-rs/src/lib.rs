@@ -1,6 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2024 The Gleam contributors
+
 use camino::{Utf8Path, Utf8PathBuf};
 use gleam_core::{
     io::{Content, FileSystemWriter, memory::InMemoryFileSystem},
+    javascript,
     version::COMPILER_VERSION,
 };
 use itertools::Itertools;
@@ -38,6 +42,15 @@ impl TestCompileOutput {
 
             match content {
                 _ if extension == Some("cache") => buffer.push_str("<.cache binary>"),
+
+                Content::Text(text) if text == javascript::PRELUDE => {
+                    buffer.push_str("<javascript prelude>")
+                }
+
+                Content::Text(text) if text == javascript::PRELUDE_TS_DEF => {
+                    buffer.push_str("<typescript prelude>")
+                }
+
                 Content::Binary(data) => write!(buffer, "<{} byte binary>", data.len()).unwrap(),
 
                 Content::Text(_) if normalised_path.ends_with("@@main.erl") => {
@@ -83,15 +96,28 @@ pub fn to_in_memory_filesystem(path: &Utf8Path) -> InMemoryFileSystem {
     let fs = InMemoryFileSystem::new();
 
     let files = walkdir::WalkDir::new(path)
-        .follow_links(true)
+        .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| entry.into_path());
 
     for fullpath in files {
-        let content = std::fs::read(&fullpath).unwrap();
         let path = fullpath.strip_prefix(path).unwrap();
+        let extension = path
+            .extension()
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or_default();
+        // Do not add build files
+        if extension == "lock"
+            || extension == "cache"
+            || extension == "cache_meta"
+            || extension == "abstr"
+        {
+            continue;
+        }
+        let content = std::fs::read(&fullpath).unwrap();
         fs.write_bytes(Utf8Path::from_path(path).unwrap(), &content)
             .unwrap();
     }

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2022 The Gleam contributors
+
 #[cfg(test)]
 mod tests;
 
@@ -29,6 +32,25 @@ pub(crate) struct NativeFileCopier<'a, IO> {
     to_compile: Vec<Utf8PathBuf>,
     elixir_files_copied: bool,
     check_module_conflicts: CheckModuleConflicts,
+
+    /// Gleam dependencies come with precompiled Erlang files as a nicety for
+    /// other build tools if they don’t have Gleam installed.
+    ///
+    /// When Gleam used to compile to textual Erlang we would simply overwrite
+    /// those and compile the up-to-date `.erl` files. So we could simply copy
+    /// over all `.erl` files and call it a day.
+    ///
+    /// However, now that Gleam compiler to `.abstr` files we need to explicitly
+    /// avoid to copy those precompiled `.erl` files, or we would be wasting a
+    /// lot of time compiling those and then compiling the up-to-date `.abstr`
+    /// files!
+    ///
+    /// If we're copying some `.erl` files those must be the ffi files included
+    /// in the project and nothing else.
+    ///
+    /// So this contains a set with the names of the precompiled Erlang files
+    /// that we have to ignore when copying Erlang files over.
+    precompiled_erlang_file_names: HashSet<EcoString>,
 }
 
 impl<'a, IO> NativeFileCopier<'a, IO>
@@ -40,6 +62,7 @@ where
         root: &'a Utf8Path,
         out: &'a Utf8Path,
         check_module_conflicts: CheckModuleConflicts,
+        precompiled_erlang_file_names: HashSet<EcoString>,
     ) -> Self {
         Self {
             io,
@@ -50,6 +73,7 @@ where
             seen_modules: HashMap::new(),
             elixir_files_copied: false,
             check_module_conflicts,
+            precompiled_erlang_file_names,
         }
     }
 
@@ -60,7 +84,7 @@ where
     /// Returns a list of files that need to be compiled (Elixir and Erlang).
     ///
     pub fn run(mut self) -> Result<CopiedNativeFiles> {
-        self.io.mkdir(&self.destination_dir)?;
+        self.io.mkdir(self.destination_dir)?;
 
         let src = self.paths.src_directory();
         self.copy_files(&src)?;
@@ -87,7 +111,7 @@ where
     fn copy_files(&mut self, src_root: &Utf8Path) -> Result<()> {
         let mut dir_walker = DirWalker::new(src_root.to_path_buf());
         while let Some(path) = dir_walker.next_file(&self.io)? {
-            self.copy(path, &src_root)?;
+            self.copy(path, src_root)?;
         }
         Ok(())
     }
@@ -112,6 +136,14 @@ where
 
         // Skip unknown file formats that are not supported native files
         if !crate::io::is_native_file_extension(extension) {
+            return Ok(());
+        }
+
+        // Skip precompiled Erlang files
+        if self
+            .precompiled_erlang_file_names
+            .contains(relative_path.as_str())
+        {
             return Ok(());
         }
 
@@ -184,9 +216,7 @@ where
         // Insert the full relative `.mjs` path in `seen_modules` as there is
         // no conflict if two `.mjs` files have the same name but are in
         // different subpaths, unlike Erlang files.
-        let existing = self
-            .seen_modules
-            .insert(mjs_path.clone(), relative_path.clone());
+        let existing = self.seen_modules.insert(mjs_path, relative_path.clone());
 
         // If there was no already existing one then there's no problem.
         let Some(existing) = existing else {
@@ -210,9 +240,9 @@ where
         // The only way for two `.mjs` files to clash is by having
         // the exact same path.
         assert_eq!(&existing, relative_path);
-        return Err(Error::DuplicateSourceFile {
+        Err(Error::DuplicateSourceFile {
             file: existing.to_string(),
-        });
+        })
     }
 
     /// Erlang module files cannot have the same name regardless of their

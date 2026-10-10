@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use camino::{Utf8Path, Utf8PathBuf};
 use ecow::EcoString;
 use flate2::{Compression, write::GzEncoder};
@@ -5,10 +8,10 @@ use gleam_core::{
     Error, Result,
     analyse::TargetSupport,
     ast::{CallArg, Statement, TypedExpr, TypedFunction},
-    build::{Codegen, Compile, Mode, Options, Package, Target},
+    build::{Codegen, Compile, ErlangOutput, Mode, Options, Package, Target},
     config::{GleamVersion, PackageConfig, SpdxLicense},
     docs::{Dependency, DependencyKind, DocContext},
-    error::{SmallVersion, wrap},
+    error::{FileIoCause, InvalidReadmeReason, SmallVersion, wrap},
     hex,
     manifest::ManifestPackageSource,
     paths::{self, ProjectPaths},
@@ -18,9 +21,9 @@ use gleam_core::{
 use hexpm::version::{Range, Version};
 use itertools::Itertools;
 use sha2::Digest;
-use std::{collections::HashMap, io::Write, path::PathBuf, time::Instant};
+use std::{collections::HashMap, io::Write};
 
-use crate::{build, cli, docs, fs, http::HttpClient};
+use crate::{build, cli, docs, fs, http::HttpClient, new::default_readme};
 
 const CORE_TEAM_PUBLISH_PASSWORD: &str = "Trans rights are human rights";
 
@@ -30,6 +33,8 @@ pub fn command(paths: &ProjectPaths, replace: bool, i_am_sure: bool) -> Result<(
     let should_publish = check_for_gleam_prefix(&config)?
         && check_for_version_zero(&config)?
         && check_repo_url(&config, i_am_sure)?;
+
+    check_for_invalid_readme(&config, paths)?;
 
     if !should_publish {
         println!("Not publishing.");
@@ -80,20 +85,21 @@ pub fn command(paths: &ProjectPaths, replace: bool, i_am_sure: bool) -> Result<(
     }
 
     let runtime = tokio::runtime::Runtime::new().expect("Unable to start Tokio async runtime");
+    let http = HttpClient::new();
     let hex_config = hexpm::Config::new();
-    let api_key =
-        crate::hex::HexAuthentication::new(&runtime, hex_config.clone()).get_or_create_api_key()?;
-    let start = Instant::now();
+    let credentials = crate::hex::HexAuthentication::new(&runtime, &http, hex_config.clone())
+        .get_or_create_api_credentials()?;
+    let credentials = crate::hex::write_credentials(&credentials)?;
     cli::print_publishing(&config.name, &config.version);
 
     runtime.block_on(hex::publish_package(
         package_tarball,
         config.version.to_string(),
         &config.name,
-        &api_key,
+        &credentials,
         &hex_config,
         replace,
-        &HttpClient::new(),
+        &http,
     ))?;
 
     cli::print_publishing_documentation();
@@ -101,32 +107,78 @@ pub fn command(paths: &ProjectPaths, replace: bool, i_am_sure: bool) -> Result<(
         &config.name,
         &config.version,
         docs_tarball,
-        &api_key,
+        &credentials,
         &hex_config,
-        &HttpClient::new(),
+        &http,
     ))?;
-    cli::print_published(start.elapsed());
+    cli::print_published("package and documentation");
     println!(
         "\nView your package at https://hex.pm/packages/{}",
-        &config.name
+        config.name
     );
 
     // Prompt the user to make a git tag if they have not.
     let has_repo = config.repository.is_some();
-    let git = PathBuf::from(".git");
-    let tag_name = config.tag_for_version(&config.version);
-    let git_tag = git.join("refs").join("tags").join(&tag_name);
-    if has_repo && git.exists() && !git_tag.exists() {
-        println!(
-            "
+    let repository_root = fs::get_git_repository_root(".".into());
+    if has_repo && let Some(repository_root) = repository_root {
+        let git = repository_root.join(".git");
+
+        let tag_name = config.tag_for_version(&config.version);
+        let git_tag = git.join("refs").join("tags").join(&tag_name);
+        let tag_exists = git_tag.exists();
+
+        if !tag_exists {
+            println!(
+                "
 Please push a git tag for this release so source code links in the
 HTML documentation will work:
 
     git tag {tag_name}
     git push origin {tag_name}
 "
-        )
+            );
+        }
     }
+    Ok(())
+}
+
+fn check_for_invalid_readme(config: &PackageConfig, paths: &ProjectPaths) -> Result<(), Error> {
+    let normalise = |string: String| {
+        string
+            .trim()
+            .replace("\r\n", "")
+            .replace("\n", "")
+            .replace("\t", "")
+            .replace(" ", "")
+    };
+
+    let project_readme = match fs::read(paths.readme()) {
+        Err(Error::FileIo {
+            cause: FileIoCause::NotFound,
+            ..
+        }) => {
+            return Err(Error::CannotPublishWithInvalidReadme {
+                reason: InvalidReadmeReason::Missing,
+            });
+        }
+        Err(error) => return Err(error),
+        Ok(project_readme) => project_readme,
+    };
+
+    let normalised_project_readme = normalise(project_readme);
+    if normalised_project_readme.is_empty() {
+        return Err(Error::CannotPublishWithInvalidReadme {
+            reason: InvalidReadmeReason::Empty,
+        });
+    }
+
+    let default_readme = default_readme(config.name.as_str());
+    if normalised_project_readme == normalise(default_readme) {
+        return Err(Error::CannotPublishWithInvalidReadme {
+            reason: InvalidReadmeReason::Default,
+        });
+    }
+
     Ok(())
 }
 
@@ -211,7 +263,7 @@ fn is_default_main(main: &TypedFunction, package_name: &EcoString) -> bool {
                     value: TypedExpr::String { value, .. },
                     ..
                 }) => {
-                    let default_argument = format!("Hello from {}!", &package_name);
+                    let default_argument = format!("Hello from {}!", package_name);
                     value == &default_argument
                 }
                 _ => false,
@@ -288,7 +340,7 @@ fn check_repo_url(config: &PackageConfig, i_am_sure: bool) -> Result<bool, Error
     println!(
         "The repository configuration in your `gleam.toml` file does not appear to be
 valid, {} returned status {}",
-        &url,
+        url,
         response.status()
     );
     let should_publish = i_am_sure || cli::confirm("\nDo you wish to continue?")?;
@@ -341,7 +393,7 @@ the maintainers listed on https://hex.pm/.
 
 struct Tarball {
     compile_result: Package,
-    cached_modules: im::HashMap<EcoString, type_::ModuleInterface>,
+    cached_modules: imbl::HashMap<EcoString, type_::ModuleInterface>,
     data: Vec<u8>,
     src_files_added: Vec<Utf8PathBuf>,
     generated_files_added: Vec<(Utf8PathBuf, String)>,
@@ -379,6 +431,18 @@ fn do_build_hex_tarball(paths: &ProjectPaths, config: &mut PackageConfig) -> Res
         })
         .collect();
 
+    // Build a lookup from hex package name to OTP application name
+    let hex_to_otp_app = manifest
+        .packages
+        .iter()
+        .filter_map(|package| {
+            package
+                .otp_app
+                .as_ref()
+                .map(|otp_app_name| (package.name.clone(), otp_app_name.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+
     // Build the project to check that it is valid
     let built = build::main(
         paths,
@@ -390,6 +454,7 @@ fn do_build_hex_tarball(paths: &ProjectPaths, config: &mut PackageConfig) -> Res
             codegen: Codegen::All,
             compile: Compile::All,
             no_print_progress: false,
+            erlang_output: ErlangOutput::Textual,
         },
         manifest,
     )?;
@@ -431,7 +496,7 @@ fn do_build_hex_tarball(paths: &ProjectPaths, config: &mut PackageConfig) -> Res
     for module in built.root_package.modules.iter() {
         if module.ast.type_info.contains_todo() {
             modules_containing_todo.push(module.name.clone());
-        } else if module.ast.type_info.contains_echo {
+        } else if !module.ast.type_info.references.echo_usages.is_empty() {
             modules_containing_echo.push(module.name.clone());
         }
     }
@@ -485,9 +550,14 @@ fn do_build_hex_tarball(paths: &ProjectPaths, config: &mut PackageConfig) -> Res
         Target::WebAssembly => vec![],
     };
     let src_files = project_files(Utf8Path::new(""))?;
-    let contents_tar_gz = contents_tarball(&src_files, &generated_files)?;
+    let contents_tar_gz = contents_tarball(paths, &src_files, &generated_files)?;
     let version = "3";
-    let metadata = metadata_config(&built.root_package.config, &src_files, &generated_files)?;
+    let metadata = metadata_config(
+        &built.root_package.config,
+        &hex_to_otp_app,
+        &src_files,
+        &generated_files,
+    )?;
 
     // Calculate checksum
     let mut hasher = sha2::Sha256::new();
@@ -501,10 +571,10 @@ fn do_build_hex_tarball(paths: &ProjectPaths, config: &mut PackageConfig) -> Res
     let mut tarball = Vec::new();
     {
         let mut tarball = tar::Builder::new(&mut tarball);
-        add_to_tar(&mut tarball, "VERSION", version.as_bytes())?;
-        add_to_tar(&mut tarball, "metadata.config", metadata.as_bytes())?;
-        add_to_tar(&mut tarball, "contents.tar.gz", contents_tar_gz.as_slice())?;
-        add_to_tar(&mut tarball, "CHECKSUM", checksum.as_bytes())?;
+        add_to_tar_from_memory(&mut tarball, "VERSION", version.as_bytes())?;
+        add_to_tar_from_memory(&mut tarball, "metadata.config", metadata.as_bytes())?;
+        add_to_tar_from_memory(&mut tarball, "contents.tar.gz", contents_tar_gz.as_slice())?;
+        add_to_tar_from_memory(&mut tarball, "CHECKSUM", checksum.as_bytes())?;
         tarball.finish().map_err(Error::finish_tar)?;
     }
     tracing::info!("Generated package Hex release tarball");
@@ -533,6 +603,7 @@ fn check_config_for_publishing(config: &PackageConfig) -> Result<()> {
 
 fn metadata_config<'a>(
     config: &'a PackageConfig,
+    hex_to_otp_app: &'a HashMap<EcoString, EcoString>,
     source_files: &[Utf8PathBuf],
     generated_files: &[(Utf8PathBuf, String)],
 ) -> Result<String> {
@@ -550,6 +621,10 @@ fn metadata_config<'a>(
         .map(|(name, requirement)| match requirement {
             Requirement::Hex { version } => Ok(ReleaseRequirement {
                 name,
+                otp_app: hex_to_otp_app
+                    .get(name)
+                    .map(EcoString::as_str)
+                    .unwrap_or(name.as_str()),
                 requirement: version,
             }),
             _ => Err(Error::PublishNonHexDependencies {
@@ -579,6 +654,7 @@ fn metadata_config<'a>(
 }
 
 fn contents_tarball(
+    paths: &ProjectPaths,
     files: &[Utf8PathBuf],
     data_files: &[(Utf8PathBuf, String)],
 ) -> Result<Vec<u8>, Error> {
@@ -587,10 +663,10 @@ fn contents_tarball(
         let mut tarball =
             tar::Builder::new(GzEncoder::new(&mut contents_tar_gz, Compression::default()));
         for path in files {
-            add_path_to_tar(&mut tarball, path)?;
+            add_to_tar_from_file_system(&mut tarball, paths, path)?;
         }
         for (path, contents) in data_files {
-            add_to_tar(&mut tarball, path, contents.as_bytes())?;
+            add_to_tar_from_memory(&mut tarball, path, contents.as_bytes())?;
         }
         tarball.finish().map_err(Error::finish_tar)?;
     }
@@ -604,7 +680,7 @@ fn project_files(base_path: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
         .chain(fs::native_files(&src))
         .collect();
     let private = base_path.join(Utf8Path::new("priv"));
-    let mut private_files: Vec<Utf8PathBuf> = fs::private_files(&private).collect();
+    let mut private_files: Vec<Utf8PathBuf> = fs::priv_directory_files(&private).collect();
     files.append(&mut private_files);
     let mut add = |path| {
         let path = base_path.join(path);
@@ -650,7 +726,7 @@ fn generated_erlang_files(
             continue;
         }
 
-        let name = module.compiled_erlang_path();
+        let name = module.compiled_textual_erlang_path();
         files.push((tar_src.join(&name), fs::read(build.join(name))?));
     }
 
@@ -663,39 +739,112 @@ fn generated_erlang_files(
     }
 
     // src/package.app.src file
-    let app = format!("{}.app", &package.config.name);
-    let appsrc = format!("{}.src", &app);
+    let app = format!("{}.app", package.config.name);
+    let appsrc = format!("{}.src", app);
     files.push((tar_src.join(appsrc), fs::read(ebin.join(app))?));
 
     Ok(files)
 }
 
-fn add_to_tar<P, W>(tarball: &mut tar::Builder<W>, path: P, data: &[u8]) -> Result<()>
+fn add_to_tar_from_memory<P, W>(tarball: &mut tar::Builder<W>, path: P, data: &[u8]) -> Result<()>
 where
     P: AsRef<Utf8Path>,
     W: Write,
 {
     let path = path.as_ref();
-    tracing::info!(file=?path, "Adding file to tarball");
+    tracing::info!(file=?path, "Adding in memory file to tarball");
+
     let mut header = tar::Header::new_gnu();
     header.set_mode(0o600);
     header.set_size(data.len() as u64);
     header.set_cksum();
     tarball
         .append_data(&mut header, path, data)
-        .map_err(|e| Error::add_tar(path, e))
+        .map_err(|error| Error::add_tar(path, error))
 }
 
-fn add_path_to_tar<P, W>(tarball: &mut tar::Builder<W>, path: P) -> Result<()>
+fn add_to_tar_from_file_system<P, W>(
+    tarball: &mut tar::Builder<W>,
+    paths: &ProjectPaths,
+    path: P,
+) -> Result<()>
 where
     P: AsRef<Utf8Path>,
     W: Write,
 {
     let path = path.as_ref();
-    tracing::info!(file=?path, "Adding file to tarball");
+    tracing::info!(file=?&path, "Adding file system file to tarball");
+
+    let path = fs::canonicalise(path)?;
+    let root = fs::canonicalise(paths.root())?;
+
+    let Ok(relative_path) = path.strip_prefix(&root) else {
+        return Err(Error::TarPathOutsideOfProjectRoot { path });
+    };
+
     tarball
-        .append_path(path)
-        .map_err(|e| Error::add_tar(path, e))
+        .append_path_with_name(&path, relative_path)
+        .map_err(|error| Error::add_tar(relative_path, error))
+}
+
+#[test]
+fn add_to_tar_symlink_rejection_test() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let path = std::fs::canonicalize(tmp_dir.path()).unwrap();
+    let path = Utf8Path::from_path(&path).expect("Non Utf-8 Path");
+    let root = path.join("package");
+    fs::mkdir(&root).expect("Create directory");
+    let paths = ProjectPaths::new(root);
+    let mut contents_tar_gz = Vec::new();
+    let mut tarball = tar::Builder::new(&mut contents_tar_gz);
+
+    // This file is outside the root of the project, so it should
+    // not be possible to add it to the tar archive.
+    let outside_path = path.join("outside.txt");
+    std::fs::write(&outside_path, "Hello").unwrap();
+    match add_to_tar_from_file_system(&mut tarball, &paths, &outside_path).unwrap_err() {
+        Error::TarPathOutsideOfProjectRoot { path } => assert_eq!(path, outside_path),
+        other => panic!("Unexpected error {other:?}"),
+    }
+}
+
+#[test]
+fn add_to_tar_accepts_file_inside_project_test() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let root = Utf8Path::from_path(tmp_dir.path())
+        .expect("Non Utf-8 Path")
+        .join("package");
+    let paths = ProjectPaths::new(root.clone());
+
+    let source_path = root.join("src").join("package.gleam");
+    fs::write(&source_path, "pub fn main() { 1 }").expect("Write file");
+
+    let mut contents_tar = Vec::new();
+    let mut tarball = tar::Builder::new(&mut contents_tar);
+    add_to_tar_from_file_system(&mut tarball, &paths, &source_path).unwrap();
+    tarball.finish().unwrap();
+    drop(tarball);
+
+    let mut archive = tar::Archive::new(contents_tar.as_slice());
+    let entries = archive
+        .entries()
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let path = Utf8PathBuf::from_path_buf(entry.path().unwrap().into_owned())
+                .expect("Non UTF-8 Path");
+            let contents = std::io::read_to_string(entry).unwrap();
+            (path, contents)
+        })
+        .collect_vec();
+
+    assert_eq!(
+        entries,
+        vec![(
+            Utf8PathBuf::from("src/package.gleam"),
+            "pub fn main() { 1 }".into()
+        )]
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -717,19 +866,25 @@ impl ReleaseMetadata<'_> {
     pub fn as_erlang(&self) -> String {
         fn link(link: &(&str, http::Uri)) -> String {
             format!(
-                "\n  {{<<\"{name}\">>, <<\"{url}\">>}}",
+                "\n  {{<<\"{name}\"/utf8>>, <<\"{url}\"/utf8>>}}",
                 name = link.0,
                 url = link.1
             )
         }
         fn file(name: impl AsRef<Utf8Path>) -> String {
-            format!("\n  <<\"{name}\">>", name = name.as_ref())
+            // Package paths must use `/` separators regardless of the platform
+            // the package was built on. Erlang treats `\` as an escape
+            // character inside a string literal, so native Windows separators
+            // would either silently corrupt the paths or stop other tools from
+            // parsing the metadata at all.
+            let name = name.as_ref().components().map(|c| c.as_str()).join("/");
+            format!("\n  <<\"{name}\"/utf8>>")
         }
 
         format!(
-            r#"{{<<"name">>, <<"{name}">>}}.
-{{<<"app">>, <<"{name}">>}}.
-{{<<"version">>, <<"{version}">>}}.
+            r#"{{<<"name">>, <<"{name}"/utf8>>}}.
+{{<<"app">>, <<"{name}"/utf8>>}}.
+{{<<"version">>, <<"{version}"/utf8>>}}.
 {{<<"description">>, <<"{description}"/utf8>>}}.
 {{<<"licenses">>, [{licenses}]}}.
 {{<<"build_tools">>, [{build_tools}]}}.
@@ -769,17 +924,19 @@ struct ReleaseRequirement<'a> {
     requirement: &'a Range,
     // Support alternate repositories at a later date.
     // repository: String,
+    otp_app: &'a str,
 }
 impl ReleaseRequirement<'_> {
     pub fn as_erlang(&self) -> String {
         format!(
             r#"
-  {{<<"{app}">>, [
-    {{<<"app">>, <<"{app}">>}},
+  {{<<"{name}"/utf8>>, [
+  {{<<"app">>, <<"{otp_app}"/utf8>>}},
     {{<<"optional">>, false}},
-    {{<<"requirement">>, <<"{requirement}">>}}
+    {{<<"requirement">>, <<"{requirement}"/utf8>>}}
   ]}}"#,
-            app = self.name,
+            name = self.name,
+            otp_app = self.otp_app,
             requirement = self.requirement,
         )
     }
@@ -800,29 +957,37 @@ fn release_metadata_as_erlang() {
     let github = "https://github.com/lpil/myapp".parse().unwrap();
     let req1 = Range::new("~> 1.2.3 or >= 5.0.0".into()).unwrap();
     let req2 = Range::new("~> 1.2".into()).unwrap();
+    let src = Utf8Path::new("src");
     let meta = ReleaseMetadata {
         name: "myapp",
         version: &version,
         description: "description goes here 🌈",
         source_files: &[
             Utf8PathBuf::from("gleam.toml"),
-            Utf8PathBuf::from("src/thingy.gleam"),
-            Utf8PathBuf::from("src/whatever.gleam"),
+            src.join("thingy.gleam"),
+            src.join("whatever.gleam"),
         ],
         generated_files: &[
-            (Utf8PathBuf::from("src/myapp.app"), "".into()),
-            (Utf8PathBuf::from("src/thingy.erl"), "".into()),
-            (Utf8PathBuf::from("src/whatever.erl"), "".into()),
+            (src.join("myapp.app"), "".into()),
+            (src.join("thingy.erl"), "".into()),
+            (src.join("whatever.erl"), "".into()),
         ],
         licenses: &licences,
         links: vec![("homepage", homepage), ("github", github)],
         requirements: vec![
             ReleaseRequirement {
                 name: "wibble",
+                otp_app: "wibble",
                 requirement: &req1,
             },
             ReleaseRequirement {
                 name: "wobble",
+                otp_app: "wobble",
+                requirement: &req2,
+            },
+            ReleaseRequirement {
+                name: "weeble_erl",
+                otp_app: "weeble",
                 requirement: &req2,
             },
         ],
@@ -830,35 +995,40 @@ fn release_metadata_as_erlang() {
     };
     assert_eq!(
         meta.as_erlang(),
-        r#"{<<"name">>, <<"myapp">>}.
-{<<"app">>, <<"myapp">>}.
-{<<"version">>, <<"1.2.3">>}.
+        r#"{<<"name">>, <<"myapp"/utf8>>}.
+{<<"app">>, <<"myapp"/utf8>>}.
+{<<"version">>, <<"1.2.3"/utf8>>}.
 {<<"description">>, <<"description goes here 🌈"/utf8>>}.
-{<<"licenses">>, [<<"MIT">>, <<"MPL-2.0">>]}.
-{<<"build_tools">>, [<<"gleam">>, <<"rebar3">>]}.
+{<<"licenses">>, [<<"MIT"/utf8>>, <<"MPL-2.0"/utf8>>]}.
+{<<"build_tools">>, [<<"gleam"/utf8>>, <<"rebar3"/utf8>>]}.
 {<<"links">>, [
-  {<<"homepage">>, <<"https://gleam.run/">>},
-  {<<"github">>, <<"https://github.com/lpil/myapp">>}
+  {<<"homepage"/utf8>>, <<"https://gleam.run/"/utf8>>},
+  {<<"github"/utf8>>, <<"https://github.com/lpil/myapp"/utf8>>}
 ]}.
 {<<"requirements">>, [
-  {<<"wibble">>, [
-    {<<"app">>, <<"wibble">>},
+  {<<"wibble"/utf8>>, [
+  {<<"app">>, <<"wibble"/utf8>>},
     {<<"optional">>, false},
-    {<<"requirement">>, <<"~> 1.2.3 or >= 5.0.0">>}
+    {<<"requirement">>, <<"~> 1.2.3 or >= 5.0.0"/utf8>>}
   ]},
-  {<<"wobble">>, [
-    {<<"app">>, <<"wobble">>},
+  {<<"wobble"/utf8>>, [
+  {<<"app">>, <<"wobble"/utf8>>},
     {<<"optional">>, false},
-    {<<"requirement">>, <<"~> 1.2">>}
+    {<<"requirement">>, <<"~> 1.2"/utf8>>}
+  ]},
+  {<<"weeble_erl"/utf8>>, [
+  {<<"app">>, <<"weeble"/utf8>>},
+    {<<"optional">>, false},
+    {<<"requirement">>, <<"~> 1.2"/utf8>>}
   ]}
 ]}.
 {<<"files">>, [
-  <<"gleam.toml">>,
-  <<"src/myapp.app">>,
-  <<"src/thingy.erl">>,
-  <<"src/thingy.gleam">>,
-  <<"src/whatever.erl">>,
-  <<"src/whatever.gleam">>
+  <<"gleam.toml"/utf8>>,
+  <<"src/myapp.app"/utf8>>,
+  <<"src/thingy.erl"/utf8>>,
+  <<"src/thingy.gleam"/utf8>>,
+  <<"src/whatever.erl"/utf8>>,
+  <<"src/whatever.gleam"/utf8>>
 ]}.
 "#
         .to_string()
@@ -869,10 +1039,10 @@ fn release_metadata_as_erlang() {
 fn prevent_publish_local_dependency() {
     let config = PackageConfig {
         dependencies: [("provided".into(), Requirement::path("./path/to/package"))].into(),
-        ..Default::default()
+        ..PackageConfig::default()
     };
     assert_eq!(
-        metadata_config(&config, &[], &[]),
+        metadata_config(&config, &HashMap::new(), &[], &[]),
         Err(Error::PublishNonHexDependencies {
             package: "provided".into()
         })
@@ -887,10 +1057,10 @@ fn prevent_publish_git_dependency() {
             Requirement::git("https://github.com/gleam-lang/gleam.git", "da6e917"),
         )]
         .into(),
-        ..Default::default()
+        ..PackageConfig::default()
     };
     assert_eq!(
-        metadata_config(&config, &[], &[]),
+        metadata_config(&config, &HashMap::new(), &[], &[]),
         Err(Error::PublishNonHexDependencies {
             package: "provided".into()
         })
@@ -898,7 +1068,7 @@ fn prevent_publish_git_dependency() {
 }
 
 fn quotes(x: &str) -> String {
-    format!(r#"<<"{x}">>"#)
+    format!(r#"<<"{x}"/utf8>>"#)
 }
 
 #[test]
@@ -1029,4 +1199,58 @@ src/also-ignored.gleam";
         .collect_vec();
 
     assert_eq!(expected_exported_files, chosen_exported_files);
+}
+
+#[test]
+fn find_git_repo_root_at_same_level() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = Utf8PathBuf::from_path_buf(tmp.path().join("my_project")).expect("Non Utf8 Path");
+
+    fs::mkdir(path.join(".git")).expect("Create directory");
+
+    let repository_root = fs::get_git_repository_root(path);
+    assert!(
+        repository_root
+            .expect("There should be repo root")
+            .ends_with("my_project")
+    );
+}
+
+#[test]
+fn find_missing_git_repo_root_at_same_level() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = Utf8PathBuf::from_path_buf(tmp.path().join("my_project")).expect("Non Utf8 Path");
+
+    let repository_root = fs::get_git_repository_root(path);
+    assert!(repository_root.is_none());
+}
+
+#[test]
+fn find_git_repo_root_at_lower_level() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = Utf8PathBuf::from_path_buf(tmp.path().join("my_project")).expect("Non Utf8 Path");
+
+    fs::mkdir(path.join(".git")).expect("Create directory");
+
+    let current_path = path.join("subdirectory").join("another_subdirectory");
+    fs::mkdir(&current_path).expect("Create directory");
+
+    let repository_root = fs::get_git_repository_root(current_path);
+    assert!(
+        repository_root
+            .expect("There should be repo root")
+            .ends_with("my_project")
+    );
+}
+
+#[test]
+fn find_missing_git_repo_root_at_lower_level() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = Utf8PathBuf::from_path_buf(tmp.path().join("my_project")).expect("Non Utf8 Path");
+
+    let current_path = path.join("subdirectory").join("another_subdirectory");
+    fs::mkdir(&current_path).expect("Create directory");
+
+    let repository_root = fs::get_git_repository_root(current_path);
+    assert!(repository_root.is_none());
 }

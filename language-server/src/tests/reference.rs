@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2025 The Gleam contributors
+
 use std::collections::HashMap;
 
 use lsp_types::{
@@ -13,7 +16,7 @@ fn find_references(
 ) -> Option<HashMap<String, Vec<Range>>> {
     let locations = tester.at(position, |engine, params, _| {
         let params = ReferenceParams {
-            text_document_position: TextDocumentPositionParams {
+            text_document_position_params: TextDocumentPositionParams {
                 text_document: params.text_document,
                 position,
             },
@@ -98,18 +101,21 @@ macro_rules! assert_references {
 
         let mut output = String::new();
         for (name, src) in project.root_package_modules.iter() {
-            output.push_str(&format!(
-                "-- {name}.gleam\n{}\n\n",
-                show_references(src, None, result.get(*name).unwrap_or(&Vec::new()))
-            ));
-        }
-        output.push_str(&format!(
-            "-- app.gleam\n{}",
-            show_references(
+            output.push_str("-- ");
+            output.push_str(name);
+            output.push_str(".gleam\n");
+            output.push_str(&show_references(
                 src,
-                Some(position),
-                result.get("app").unwrap_or(&Vec::new())
-            )
+                None,
+                result.get(*name).unwrap_or(&Vec::new()),
+            ));
+            output.push_str("\n\n");
+        }
+        output.push_str("-- app.gleam\n");
+        output.push_str(&show_references(
+            src,
+            Some(position),
+            result.get("app").unwrap_or(&Vec::new()),
         ));
 
         insta::assert_snapshot!(insta::internals::AutoName, output, src);
@@ -275,6 +281,78 @@ pub fn main() {
 }
 
 #[test]
+fn references_for_function_from_unqualified_aliased_reference() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub fn wibble() {
+  wibble()
+}
+"
+        ),
+        "
+import mod.{wibble as wobble}
+
+pub fn main() {
+  let value = wobble()
+  mod.wibble()
+  value
+}
+",
+        find_position_of("wobble()"),
+    );
+}
+
+#[test]
+fn references_for_function_from_import() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub fn wibble() {
+  wibble()
+}
+"
+        ),
+        "
+import mod.{wibble}
+
+pub fn main() {
+  let value = wibble()
+  mod.wibble()
+  value
+}
+",
+        find_position_of("wibble"),
+    );
+}
+
+#[test]
+fn references_for_function_from_import_alias() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub fn wibble() {
+  wibble()
+}
+"
+        ),
+        "
+import mod.{wibble as wobble}
+
+pub fn main() {
+  let value = wobble()
+  mod.wibble()
+  value
+}
+",
+        find_position_of("wobble"),
+    );
+}
+
+#[test]
 fn references_for_private_constant() {
     assert_references!(
         "
@@ -387,6 +465,81 @@ pub fn main() {
 }
 ",
         find_position_of("wibble +"),
+    );
+}
+
+#[test]
+fn references_for_constant_from_unqualified_aliased_referene() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub const wibble = 10
+
+fn wobble() {
+  wibble
+}
+"
+        ),
+        "
+import mod.{wibble as wobble}
+
+pub fn main() {
+  let value = mod.wibble
+  wobble + value
+}
+",
+        find_position_of("wobble +"),
+    );
+}
+
+#[test]
+fn references_for_constant_from_import() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub const wibble = 10
+
+fn wobble() {
+  wibble
+}
+"
+        ),
+        "
+import mod.{wibble}
+
+pub fn main() {
+  let value = mod.wibble
+  wibble + value
+}
+",
+        find_position_of("wibble"),
+    );
+}
+
+#[test]
+fn references_for_constant_from_import_alias() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub const wibble = 10
+
+fn wobble() {
+  wibble
+}
+"
+        ),
+        "
+import mod.{wibble as wobble}
+
+pub fn main() {
+  let value = mod.wibble
+  wobble + value
+}
+",
+        find_position_of("wobble"),
     );
 }
 
@@ -506,6 +659,81 @@ pub fn main() {
 }
 ",
         find_position_of("Wibble").nth_occurrence(3),
+    );
+}
+
+#[test]
+fn references_for_type_variant_from_unqualified_aliased_reference() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub type Wibble { Wibble }
+
+fn wobble() {
+  Wibble
+}
+"
+        ),
+        "
+import mod.{Wibble as Wobble}
+
+pub fn main() {
+  let value = mod.Wibble
+  Wobble
+}
+",
+        find_position_of("Wobble").nth_occurrence(2),
+    );
+}
+
+#[test]
+fn references_for_type_variant_from_import() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub type Wibble { Wibble }
+
+fn wobble() {
+  Wibble
+}
+"
+        ),
+        "
+import mod.{Wibble}
+
+pub fn main() {
+  let value = mod.Wibble
+  Wibble
+}
+",
+        find_position_of("Wibble"),
+    );
+}
+
+#[test]
+fn references_for_type_variant_from_import_alias() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub type Wibble { Wibble }
+
+fn wobble() {
+  Wibble
+}
+"
+        ),
+        "
+import mod.{Wibble as Wobble}
+
+pub fn main() {
+  let value = mod.Wibble
+  Wobble
+}
+",
+        find_position_of("Wobble"),
     );
 }
 
@@ -704,6 +932,78 @@ pub fn main() -> Wibble {
 }
 ",
         find_position_of("Wibble").nth_occurrence(2),
+    );
+}
+
+#[test]
+fn references_for_type_from_unqualified_aliased_reference() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub type Wibble { Wibble }
+
+fn wobble() -> Wibble {
+  todo
+}
+"
+        ),
+        "
+import mod.{type Wibble as Wobble}
+
+pub fn main() -> Wobble {
+  let _: mod.Wibble = todo
+}
+",
+        find_position_of("-> Wobble").under_char('W'),
+    );
+}
+
+#[test]
+fn references_for_type_from_import() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub type Wibble { Wibble }
+
+fn wobble() -> Wibble {
+  todo
+}
+"
+        ),
+        "
+import mod.{type Wibble}
+
+pub fn main() -> Wibble {
+  let _: mod.Wibble = todo
+}
+",
+        find_position_of("Wibble"),
+    );
+}
+
+#[test]
+fn references_for_type_from_import_alias() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub type Wibble { Wibble }
+
+fn wobble() -> Wibble {
+  todo
+}
+"
+        ),
+        "
+import mod.{type Wibble as Wobble}
+
+pub fn main() -> Wobble {
+  let _: mod.Wibble = todo
+}
+",
+        find_position_of("Wobble"),
     );
 }
 
@@ -1055,5 +1355,795 @@ fn main() {
 }
 ",
         find_position_of("digit").nth_occurrence(1)
+    );
+}
+
+#[test]
+fn references_for_local_variable_from_guard() {
+    assert_references!(
+        "
+pub fn main() {
+  let wibble = True
+  let wobble = False
+  case wibble {
+    True if wobble -> !wibble
+    False if !wobble -> wibble
+    _ -> wobble
+  }
+}
+",
+        find_position_of("wobble").nth_occurrence(2).under_char('o')
+    );
+}
+
+#[test]
+fn references_for_module_select_from_guard() {
+    assert_references!(
+        ("mod", "pub const wibble = 10"),
+        "
+import mod
+
+pub fn main() {
+  let wibble = True
+  case wibble {
+    True if mod.wibble < 5 -> !wibble
+    False if mod.wibble != 10 -> wibble
+    _ -> mod.wibble + 1
+  }
+}
+",
+        find_position_of("mod.wibble").under_char('w')
+    );
+}
+
+#[test]
+fn references_for_invalid_constant_todo_message_still_works() {
+    assert_references!(
+        "
+const wibble = 1
+const wobble = todo as wibble
+",
+        find_position_of("wibble")
+    );
+}
+
+#[test]
+fn references_for_invalid_constant_todo_message_still_works_2() {
+    assert_references!(
+        "
+const wibble = 1
+const wobble = todo as [wibble]
+",
+        find_position_of("wibble")
+    );
+}
+
+#[test]
+fn references_for_record_field() {
+    assert_references!(
+        "
+type Wibble {
+  Wibble(wibble: Int)
+}
+
+pub fn main() {
+  let value = Wibble(wibble: 1)
+  value.wibble
+}
+",
+        find_position_of("value.wibble").under_char('i')
+    );
+}
+
+#[test]
+fn references_for_record_field_in_module_not_importing_the_type_module() {
+    assert_references!(
+        TestProject::for_source(
+            "
+import wobble
+
+pub fn main() {
+  wobble.make().wibble
+}
+"
+        )
+        .add_module("wibble", "pub type Wibble {\n  Wibble(wibble: Int)\n}")
+        .add_module(
+            "wobble",
+            "import wibble\n\npub fn make() -> wibble.Wibble {\n  wibble.Wibble(wibble: 1)\n}"
+        ),
+        find_position_of("().wibble").under_char('b')
+    );
+}
+
+#[test]
+fn references_for_record_field_ignored_by_record_update_spread() {
+    // https://github.com/gleam-lang/gleam/pull/5533#pullrequestreview-4475156690
+    assert_references!(
+        "
+type Wibble {
+  Wibble(wibble: Int, wobble: Int)
+}
+
+pub fn main(w: Wibble) {
+  Wibble(..w, wibble: 2)
+}
+",
+        find_position_of("wobble: Int").under_char('w')
+    );
+}
+
+#[test]
+fn references_for_record_field_ignored_by_constant_record_update_spread() {
+    assert_references!(
+        "
+type Wibble {
+  Wibble(wibble: Int, wobble: Int)
+}
+
+const base = Wibble(wibble: 1, wobble: 2)
+
+const updated = Wibble(..base, wibble: 3)
+",
+        find_position_of("wobble: Int").under_char('w')
+    );
+}
+
+#[test]
+fn references_for_record_field_ignored_by_record_update_with_record_access_spread() {
+    assert_references!(
+        "
+type Container {
+  Container(inner: Wibble)
+}
+
+type Wibble {
+  Wibble(wibble: Int, wobble: Int)
+}
+
+pub fn main(c: Container) {
+  Wibble(..c.inner, wibble: 2)
+}
+",
+        find_position_of("wobble: Int").under_char('w')
+    );
+}
+
+#[test]
+fn references_for_record_field_ignored_by_nested_record_update_spread() {
+    assert_references!(
+        "
+type Wibble {
+  Wibble(wibble: Int, wobble: Int)
+}
+
+pub fn main(w: Wibble) {
+  Wibble(..Wibble(..w, wibble: 1), wobble: 2)
+}
+",
+        find_position_of("wibble: Int").under_char('w')
+    );
+}
+
+#[test]
+fn references_for_record_field_ignored_by_pipe_into_constructor() {
+    assert_references!(
+        "
+type Wibble {
+  Wibble(name: Int, age: Int)
+}
+
+pub fn main() {
+  1 |> Wibble(age: 2)
+}
+",
+        find_position_of("name: Int").under_char('n')
+    );
+}
+
+#[test]
+fn references_for_record_field_ignored_by_pattern_spread() {
+    assert_references!(
+        "
+type Wibble {
+  Wibble(wibble: Int, wobble: Int)
+}
+
+pub fn main(w: Wibble) {
+  case w {
+    Wibble(wibble: a, ..) -> a
+  }
+}
+",
+        find_position_of("wobble: Int").under_char('w')
+    );
+}
+
+#[test]
+fn references_for_value_from_import_imported_name() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub fn wibble() {
+  wibble()
+}
+"
+        ),
+        "
+import mod.{wibble as wobble}
+
+pub fn main() {
+  let value = wobble()
+  mod.wibble()
+  value
+}
+",
+        find_position_of("wibble"),
+    );
+}
+
+#[test]
+fn references_for_value_from_import_as() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub fn wibble() {
+  wibble()
+}
+"
+        ),
+        "
+import mod.{wibble as wobble}
+
+pub fn main() {
+  let value = wobble()
+  mod.wibble()
+  value
+}
+",
+        find_position_of("as"),
+    );
+}
+
+#[test]
+fn references_for_value_from_import_alias_name() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub fn wibble() {
+  wibble()
+}
+"
+        ),
+        "
+import mod.{wibble as wobble}
+
+pub fn main() {
+  let value = wobble()
+  mod.wibble()
+  value
+}
+",
+        find_position_of("wobble"),
+    );
+}
+
+#[test]
+fn references_for_type_from_import_type() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub type Wibble { Wibble }
+
+fn wobble() -> Wibble {
+  todo
+}
+"
+        ),
+        "
+import mod.{type Wibble as Wobble}
+
+pub fn main() -> Wobble {
+  let _: mod.Wibble = todo
+}
+",
+        find_position_of("type"),
+    );
+}
+
+#[test]
+fn references_for_type_from_import_imported_name() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub type Wibble { Wibble }
+
+fn wobble() -> Wibble {
+  todo
+}
+"
+        ),
+        "
+import mod.{type Wibble as Wobble}
+
+pub fn main() -> Wobble {
+  let _: mod.Wibble = todo
+}
+",
+        find_position_of("Wibble"),
+    );
+}
+
+#[test]
+fn references_for_type_from_import_as() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub type Wibble { Wibble }
+
+fn wobble() -> Wibble {
+  todo
+}
+"
+        ),
+        "
+import mod.{type Wibble as Wobble}
+
+pub fn main() -> Wobble {
+  let _: mod.Wibble = todo
+}
+",
+        find_position_of("as"),
+    );
+}
+
+#[test]
+fn references_for_type_from_import_clias_name() {
+    assert_references!(
+        (
+            "mod",
+            "
+pub type Wibble { Wibble }
+
+fn wobble() -> Wibble {
+  todo
+}
+"
+        ),
+        "
+import mod.{type Wibble as Wobble}
+
+pub fn main() -> Wobble {
+  let _: mod.Wibble = todo
+}
+",
+        find_position_of("Wobble"),
+    );
+}
+
+#[test]
+fn references_for_function_argument_label() {
+    assert_references!(
+        "
+pub fn replace(in string: String, each pattern: String) -> String {
+  todo
+}
+
+pub fn main() {
+  replace(in: \"hello\", each: \"l\")
+}
+",
+        find_position_of("in: \"hello\"").under_char('i')
+    );
+}
+
+#[test]
+fn references_for_function_argument_label_from_definition() {
+    assert_references!(
+        "
+pub fn replace(in string: String, each pattern: String) -> String {
+  todo
+}
+
+pub fn main() {
+  replace(in: \"hello\", each: \"l\")
+  replace(in: \"world\", each: \"o\")
+}
+",
+        find_position_of("in string").under_char('i')
+    );
+}
+
+#[test]
+fn references_for_function_argument_label_in_other_module() {
+    assert_references!(
+        (
+            "wibble",
+            "pub fn replace(in string: String, each pattern: String) -> String {\n  todo\n}"
+        ),
+        "
+import wibble
+
+pub fn main() {
+  wibble.replace(in: \"hello\", each: \"l\")
+}
+",
+        find_position_of("in: \"hello\"").under_char('i')
+    );
+}
+
+#[test]
+fn references_for_function_argument_label_ignored_by_pipe() {
+    assert_references!(
+        "
+pub fn replace(in string: String, each pattern: String) -> String {
+  todo
+}
+
+pub fn main() {
+  \"hello\" |> replace(each: \"l\")
+}
+",
+        find_position_of("in string").under_char('i')
+    );
+}
+
+#[test]
+fn references_for_function_argument_label_of_call_with_incorrect_arity() {
+    assert_references!(
+        "
+pub fn replace(in string: String, each pattern: String) -> String {
+  todo
+}
+
+pub fn main() {
+  replace(in: \"hello\")
+}
+",
+        find_position_of("in string").under_char('i')
+    );
+}
+
+#[test]
+fn references_for_function_argument_label_does_not_include_other_function() {
+    assert_references!(
+        "
+pub fn replace(in string: String) -> String {
+  todo
+}
+
+pub fn insert(in list: List(a)) -> List(a) {
+  todo
+}
+
+pub fn main() {
+  replace(in: \"hello\")
+  insert(in: [])
+}
+",
+        find_position_of("in string").under_char('i')
+    );
+}
+
+#[test]
+fn references_for_echo_in_current_module() {
+    assert_references!(
+        r#"
+pub fn wibble() {
+  echo "wibble" as "wobble"
+}
+
+fn wobble(a) {
+  a |> echo as "wibble" |> echo
+
+  echo a
+}
+        "#,
+        find_position_of("echo")
+    );
+}
+
+#[test]
+fn references_for_echo_in_same_package() {
+    assert_references!(
+        (
+            "woo",
+            r#"
+pub fn wubble(a, b) {
+  echo a as "wibble"
+  echo b
+}
+
+fn webble(a, b) {
+  echo a as "wibble"
+  echo b
+}
+            "#
+        ),
+        r#"
+pub fn wibble() {
+  echo "wibble"
+}
+        "#,
+        find_position_of("echo")
+    );
+}
+
+#[test]
+fn references_for_echo_are_not_shown_for_another_package() {
+    let source = r#"
+pub fn wibble() {
+  echo "wibble"
+}
+        "#;
+    assert_references!(
+        &TestProject::for_source(source).add_package_module(
+            "another",
+            "another_woo",
+            r#"
+pub fn wubble(a, b) {
+  echo a as "wibble"
+  echo b
+}
+
+fn webble(a, b) {
+  echo a as "wibble"
+  echo b
+}
+            "#
+        ),
+        find_position_of("echo")
+    );
+}
+
+#[test]
+fn references_for_echo_are_not_shown_for_dependency() {
+    let source = r#"
+pub fn wibble() {
+  echo "wibble"
+}
+        "#;
+    assert_references!(
+        &TestProject::for_source(source).add_dep_module(
+            "dep",
+            r#"
+pub fn wubble(a, b) {
+  echo a as "wibble"
+  echo b
+}
+
+fn webble(a, b) {
+  echo a as "wibble"
+  echo b
+}
+            "#
+        ),
+        find_position_of("echo")
+    );
+}
+
+#[test]
+fn references_for_todo_in_current_module() {
+    assert_references!(
+        r#"
+const wibble = todo
+pub const wobble = todo as "wobble"
+
+fn wubble() {
+  todo
+}
+
+pub fn webble() {
+  todo as "webble"
+}
+
+pub fn empty() {}
+
+pub fn woo() {
+ {}
+}
+        "#,
+        find_position_of("todo")
+    );
+}
+
+#[test]
+fn references_for_todo_in_same_package() {
+    assert_references!(
+        (
+            "woo",
+            r#"
+const wibble = todo
+pub const wobble = todo as "wobble"
+
+fn wubble() {
+  todo
+}
+
+pub fn webble() {
+  todo as "webble"
+}
+
+pub fn empty() {}
+
+pub fn woo() {
+ {}
+}
+            "#
+        ),
+        r#"
+pub fn webble() {
+  todo as "webble"
+}
+        "#,
+        find_position_of("todo")
+    );
+}
+
+#[test]
+fn references_for_todo_are_not_shown_for_another_package() {
+    let source = r#"
+pub fn webble() {
+  todo as "webble"
+}
+        "#;
+    assert_references!(
+        &TestProject::for_source(source).add_package_module(
+            "another",
+            "another_woo",
+            r#"
+fn wubble() {
+  todo
+}
+
+pub fn webble() {
+  todo as "webble"
+}
+
+pub fn empty() {}
+
+pub fn woo() {
+ {}
+}
+            "#
+        ),
+        find_position_of("todo")
+    );
+}
+
+#[test]
+fn references_for_todo_are_not_shown_for_dependency() {
+    let source = r#"
+pub fn webble() {
+  todo as "webble"
+}
+        "#;
+    assert_references!(
+        &TestProject::for_source(source).add_dep_module(
+            "dep",
+            r#"
+fn wubble() {
+  todo
+}
+
+pub fn webble() {
+  todo as "webble"
+}
+
+pub fn empty() {}
+
+pub fn woo() {
+ {}
+}
+            "#
+        ),
+        find_position_of("todo")
+    );
+}
+
+#[test]
+fn references_for_panic_in_current_module() {
+    assert_references!(
+        r#"
+pub fn wibble() {
+  panic
+}
+
+fn wobble() {
+  panic as "wobble"
+}
+        "#,
+        find_position_of("panic")
+    );
+}
+
+#[test]
+fn references_for_panic_in_same_package() {
+    assert_references!(
+        (
+            "woo",
+            r#"
+pub fn wibble() {
+  panic
+}
+
+fn wobble() {
+  panic as "wobble"
+}
+            "#
+        ),
+        r#"
+pub fn wibble() {
+  panic
+}
+
+fn wobble() {
+  panic as "wobble"
+}
+        "#,
+        find_position_of("panic")
+    );
+}
+
+#[test]
+fn references_for_panic_are_not_shown_for_another_package() {
+    let source = r#"
+pub fn wibble() {
+  panic
+}
+
+fn wobble() {
+  panic as "wobble"
+}
+        "#;
+    assert_references!(
+        &TestProject::for_source(source).add_package_module(
+            "another",
+            "another_woo",
+            r#"
+pub fn wibble() {
+  panic
+}
+
+fn wobble() {
+  panic as "wobble"
+}
+            "#
+        ),
+        find_position_of("panic")
+    );
+}
+
+#[test]
+fn references_for_panic_are_not_shown_for_dependency() {
+    let source = r#"
+pub fn wibble() {
+  panic
+}
+
+fn wobble() {
+  panic as "wobble"
+}
+        "#;
+    assert_references!(
+        &TestProject::for_source(source).add_dep_module(
+            "dep",
+            r#"
+pub fn wibble() {
+  panic
+}
+
+fn wobble() {
+  panic as "wobble"
+}
+            "#
+        ),
+        find_position_of("panic")
     );
 }

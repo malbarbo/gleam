@@ -1,18 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Gleam contributors
+
 [package]
 name = "gleam-language-server"
-version = "1.14.0"
+version = "1.19.1"
 authors = ["Louis Pilfold <louis@lpil.uk>"]
 edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
 gleam-core = { path = "../compiler-core" }
-
+gleam-format = { path = "../format" }
+src-span.workspace = true
 camino.workspace = true
 debug-ignore.workspace = true
 ecow.workspace = true
 hexpm = { path = "../hexpm" }
-im.workspace = true
+imbl.workspace = true
 itertools.workspace = true
 lsp-server.workspace = true
 lsp-types.workspace = true
@@ -22,6 +26,7 @@ vec1.workspace = true
 serde.workspace = true
 tracing.workspace = true
 toml.workspace = true
+num-bigint.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

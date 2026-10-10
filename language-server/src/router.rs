@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 use gleam_core::{
     Error, Result,
     build::SourceFingerprint,
-    error::{FileIoAction, FileKind},
-    io::{BeamCompiler, CommandExecutor, FileSystemReader, FileSystemWriter},
+    error::{FileIoAction, FileIoCause, FileKind},
+    io::{BeamCompilerIO, CommandExecutor, FileSystemReader, FileSystemWriter},
     paths::ProjectPaths,
 };
 use std::{
@@ -36,7 +39,7 @@ where
     // IO to be supplied from outside of gleam-core
     IO: FileSystemReader
         + FileSystemWriter
-        + BeamCompiler
+        + BeamCompilerIO
         + CommandExecutor
         + DownloadDependencies
         + MakeLocker
@@ -133,11 +136,11 @@ where
         let config_path = paths.root_config();
         let modification_time = io.modification_time(&config_path)?;
         let toml = io.read(&config_path)?;
-        let config = toml::from_str(&toml).map_err(|e| Error::FileIo {
+        let config = toml::from_str(&toml).map_err(|error| Error::FileIo {
             action: FileIoAction::Parse,
             kind: FileKind::File,
             path: config_path,
-            err: Some(e.to_string()),
+            cause: FileIoCause::Other(error.to_string()),
         })?;
         let engine = LanguageServerEngine::new(config, progress_reporter, io, paths)?;
         let project = Project {

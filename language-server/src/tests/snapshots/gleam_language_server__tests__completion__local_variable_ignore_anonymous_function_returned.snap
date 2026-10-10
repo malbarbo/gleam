@@ -2,6 +2,7 @@
 source: language-server/src/tests/completion.rs
 expression: "\npub fn main() {\n  fn(wibble: Int) {\n    let wabble = 1\n    let add_two = fn(wobble: Int) { wobble + 2 }\n    wibble + add_two(1)\n  }\n}\n"
 ---
+
 pub fn main() {
   fn(wibble: Int) {
     let wabble = 1
@@ -12,30 +13,10 @@ pub fn main() {
 
 
 ----- Completion content -----
-Error
-  kind:   Constructor
-  detail: gleam
-  sort:   4_Error
-False
-  kind:   EnumMember
-  detail: gleam
-  sort:   4_False
-Nil
-  kind:   EnumMember
-  detail: gleam
-  sort:   4_Nil
-Ok
-  kind:   Constructor
-  detail: gleam
-  sort:   4_Ok
-True
-  kind:   EnumMember
-  detail: gleam
-  sort:   4_True
 add_two
   kind:   Variable
   detail: fn(Int) -> Int
-  sort:   02_add_two
+  sort:   03_add_two
   desc:   app
   docs:   "A locally defined variable."
   edits:
@@ -43,14 +24,14 @@ add_two
 main
   kind:   Function
   detail: fn() -> fn(Int) -> Int
-  sort:   2_main
+  sort:   3_main
   desc:   app
   edits:
     [5:4-5:10]: "main"
 wabble
   kind:   Variable
   detail: Int
-  sort:   02_wabble
+  sort:   03_wabble
   desc:   app
   docs:   "A locally defined variable."
   edits:
@@ -58,7 +39,7 @@ wabble
 wibble
   kind:   Variable
   detail: Int
-  sort:   02_wibble
+  sort:   03_wibble
   desc:   app
   docs:   "A locally defined variable."
   edits:

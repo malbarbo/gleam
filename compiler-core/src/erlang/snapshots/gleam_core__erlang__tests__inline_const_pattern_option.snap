@@ -17,21 +17,19 @@ pub fn main() {
 
 ----- COMPILED ERLANG
 -module(my@mod).
--compile([no_auto_import, nowarn_unused_vars, nowarn_unused_function, nowarn_nomatch, inline]).
--define(FILEPATH, "project/test/my/mod.gleam").
+-compile([no_auto_import, nowarn_ignored, nowarn_unused_vars, nowarn_unused_function, nowarn_nomatch, inline]).
 -export([main/0]).
 
--file("project/test/my/mod.gleam", 1).
 -spec main() -> bitstring().
 main() ->
     Fifteen = 15,
-    X = <<5:(lists:max([(16), 0]))>>,
+    X = <<5:(erlang:max(0, 16))>>,
     case X of
         <<5:16>> ->
-            <<5:(lists:max([(16), 0]))>>;
+            <<5:(erlang:max(0, 16))>>;
 
         <<6:Fifteen>> ->
-            <<5:(lists:max([(Fifteen), 0]))>>;
+            <<5:(erlang:max(0, Fifteen))>>;
 
         _ ->
             <<>>

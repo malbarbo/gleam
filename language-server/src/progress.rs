@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 use debug_ignore::DebugIgnore;
 use lsp_types::{
-    InitializeParams, NumberOrString, ProgressParams, ProgressParamsValue, WorkDoneProgress,
-    WorkDoneProgressBegin, WorkDoneProgressCreateParams, WorkDoneProgressEnd,
+    InitializeParams, LspAny, ProgressParams, ProgressToken, WorkDoneProgressBegin,
+    WorkDoneProgressCreateParams, WorkDoneProgressEnd,
 };
 
 const DOWNLOADING_TOKEN: &str = "downloading-dependencies";
@@ -35,10 +38,10 @@ impl<'a> ConnectionProgressReporter<'a> {
         }
     }
 
-    fn send_notification(&self, token: &str, work_done: WorkDoneProgress) {
+    fn send_notification(&self, token: &str, work_done: LspAny) {
         let params = ProgressParams {
-            token: NumberOrString::String(token.to_string()),
-            value: ProgressParamsValue::WorkDone(work_done),
+            token: ProgressToken::String(token.to_string()),
+            value: work_done,
         };
         let notification = lsp_server::Notification {
             method: "$/progress".into(),
@@ -47,7 +50,7 @@ impl<'a> ConnectionProgressReporter<'a> {
         self.connection
             .sender
             .send(lsp_server::Message::Notification(notification))
-            .expect("send_work_done_notification send")
+            .expect("send_work_done_notification send");
     }
 }
 
@@ -72,22 +75,24 @@ impl ProgressReporter for ConnectionProgressReporter<'_> {
     }
 }
 
-fn end_message() -> WorkDoneProgress {
-    WorkDoneProgress::End(WorkDoneProgressEnd { message: None })
+fn end_message() -> LspAny {
+    serde_json::to_value(WorkDoneProgressEnd { message: None })
+        .expect("Failed to serialize WorkDoneProgressEnd")
 }
 
-fn begin_message(title: &str) -> WorkDoneProgress {
-    WorkDoneProgress::Begin(WorkDoneProgressBegin {
+fn begin_message(title: &str) -> LspAny {
+    serde_json::to_value(WorkDoneProgressBegin {
         title: title.into(),
         cancellable: Some(false),
         message: None,
         percentage: None,
     })
+    .expect("Failed to serialize WorkDoneProgressBegin")
 }
 
 fn create_token(token: &str, connection: &lsp_server::Connection) {
     let params = WorkDoneProgressCreateParams {
-        token: NumberOrString::String(token.into()),
+        token: ProgressToken::String(token.into()),
     };
     let request = lsp_server::Request {
         id: format!("create-token--{token}").into(),

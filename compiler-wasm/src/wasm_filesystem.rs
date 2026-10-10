@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use camino::{Utf8Path, Utf8PathBuf};
 use gleam_core::{
     Error, Result,
     io::{
-        BeamCompiler, Command, CommandExecutor, FileSystemReader, FileSystemWriter, ReadDir, Stdio,
-        WrappedReader, memory::InMemoryFileSystem,
+        BeamCompilerIO, Command, CommandExecutor, FileSystemReader, FileSystemWriter, ReadDir,
+        Stdio, WrappedReader, memory::InMemoryFileSystem,
     },
 };
 use std::collections::HashSet;
@@ -25,15 +28,15 @@ impl CommandExecutor for WasmFileSystem {
     }
 }
 
-impl BeamCompiler for WasmFileSystem {
+impl BeamCompilerIO for WasmFileSystem {
     fn compile_beam(
         &self,
         _out: &Utf8Path,
         _lib: &Utf8Path,
         _modules: &HashSet<Utf8PathBuf>,
         _stdio: Stdio,
-    ) -> Result<Vec<String>, Error> {
-        Ok(Vec::new()) // Always succeed.
+    ) -> Result<(), Error> {
+        Ok(()) // Always succeed.
     }
 }
 
@@ -119,5 +122,9 @@ impl FileSystemReader for WasmFileSystem {
 
     fn canonicalise(&self, path: &Utf8Path) -> Result<Utf8PathBuf, Error> {
         self.imfs.canonicalise(path)
+    }
+
+    fn is_same_file(&self, _left: &Utf8Path, _right: &Utf8Path) -> Result<bool, Error> {
+        unreachable!("is_same_file unimplemented")
     }
 }

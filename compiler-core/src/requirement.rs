@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 use std::fmt;
 use std::str::FromStr;
 
@@ -27,15 +30,19 @@ pub enum Requirement {
         git: EcoString,
         #[serde(rename = "ref")]
         ref_: EcoString,
+        #[serde(default)]
+        path: Option<Utf8PathBuf>,
     },
 }
 
 impl Requirement {
     pub fn hex(range: &str) -> Result<Requirement> {
         Ok(Requirement::Hex {
-            version: Range::new(range.to_string()).map_err(|e| Error::InvalidVersionFormat {
-                input: range.to_string(),
-                error: e.to_string(),
+            version: Range::new(range.to_string()).map_err(|error| {
+                Error::InvalidVersionFormat {
+                    input: range.to_string(),
+                    error: error.to_string(),
+                }
             })?,
         })
     }
@@ -48,6 +55,15 @@ impl Requirement {
         Requirement::Git {
             git: url.into(),
             ref_: ref_.into(),
+            path: None,
+        }
+    }
+
+    pub fn git_with_path(url: &str, ref_: &str, path: &str) -> Requirement {
+        Requirement::Git {
+            git: url.into(),
+            ref_: ref_.into(),
+            path: Some(path.into()),
         }
     }
 
@@ -62,9 +78,17 @@ impl Requirement {
                     make_relative(root_path, path).as_str().replace('\\', "/")
                 )
             }
-            Requirement::Git { git: url, ref_ } => {
-                format!(r#"{{ git = "{url}", ref = "{ref_}" }}"#)
-            }
+            Requirement::Git {
+                git: url,
+                ref_,
+                path,
+            } => match path {
+                Some(path) => {
+                    let path = path.as_str().replace('\\', "/");
+                    format!(r#"{{ git = "{url}", ref = "{ref_}", path = "{path}" }}"#)
+                }
+                None => format!(r#"{{ git = "{url}", ref = "{ref_}" }}"#),
+            },
         }
     }
 }
@@ -80,9 +104,16 @@ impl Serialize for Requirement {
         match self {
             Requirement::Hex { version: range } => map.serialize_entry("version", range)?,
             Requirement::Path { path } => map.serialize_entry("path", path)?,
-            Requirement::Git { git: url, ref_ } => {
+            Requirement::Git {
+                git: url,
+                ref_,
+                path,
+            } => {
                 map.serialize_entry("git", url)?;
                 map.serialize_entry("ref", ref_)?;
+                if let Some(path) = path {
+                    map.serialize_entry("path", path)?;
+                }
             }
         }
         map.end()
@@ -142,7 +173,17 @@ impl<'de> Deserialize<'de> for Requirement {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(RequirementVisitor)
+        let requirement = deserializer.deserialize_any(RequirementVisitor)?;
+        if let Requirement::Git {
+            path: Some(path), ..
+        } = &requirement
+        {
+            if path.as_str().is_empty() {
+                return Err(de::Error::custom("git dependency path must not be empty"));
+            }
+            crate::io::validate_safe_relative_path(path).map_err(de::Error::custom)?;
+        }
+        Ok(requirement)
     }
 }
 
@@ -178,6 +219,27 @@ mod tests {
 
         let error =
             toml::from_str::<HashMap<String, Requirement>>(toml).expect_err("invalid version");
+        insta::assert_snapshot!(error.to_string());
+    }
+
+    #[test]
+    fn read_git_requirement_with_escaping_path() {
+        let toml = r#"
+            monorepo = { git = "https://github.com/gleam-lang/gleam.git", ref = "main", path = "../escape" }
+        "#;
+
+        let error =
+            toml::from_str::<HashMap<String, Requirement>>(toml).expect_err("escaping path");
+        insta::assert_snapshot!(error.to_string());
+    }
+
+    #[test]
+    fn read_git_requirement_with_empty_path() {
+        let toml = r#"
+            monorepo = { git = "https://github.com/gleam-lang/gleam.git", ref = "main", path = "" }
+        "#;
+
+        let error = toml::from_str::<HashMap<String, Requirement>>(toml).expect_err("empty path");
         insta::assert_snapshot!(error.to_string());
     }
 }

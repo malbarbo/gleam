@@ -79,10 +79,12 @@ jobs:
             run-integration-tests: true
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install musl-tools incl. musl-gcc
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
           # musl-tools provide `musl-gcc` which is required for `ring` which is required for `rustls` et al.
           packages: musl-tools
@@ -90,40 +92,40 @@ jobs:
         if: ${{ matrix.target == 'x86_64-unknown-linux-musl'}}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: ${{ matrix.toolchain }}
           target: ${{ matrix.target }}
 
       - name: Install Erlang
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
-          otp-version: "28.0.1"
-          elixir-version: "1.18"
+          otp-version: "29"
+          elixir-version: "1.19"
           rebar3-version: "3"
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "20"
+          node-version: "25"
 
       - name: Setup Deno
-        uses: denoland/setup-deno@v2
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: "2.2"
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.2"
 
       - name: Handle Rust dependencies caching
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: v1-${{ matrix.target }}
 
       - name: Install Gleam
-        uses: clechasseur/rs-cargo@v4
+        uses: clechasseur/rs-cargo@a12d4742fa9b832ccb29dc394a68ab577b0c9fb8 # v5.1.0
         with:
           command: install
           args: "--path gleam-bin --target ${{ matrix.target }} --debug --locked --force"
@@ -148,10 +150,10 @@ jobs:
         if: ${{ matrix.run-integration-tests }}
 
       - name: Run tests
-        uses: clechasseur/rs-cargo@v4
+        uses: clechasseur/rs-cargo@a12d4742fa9b832ccb29dc394a68ab577b0c9fb8 # v5.1.0
         with:
           command: test
-          # We only want to run the `test-output` when running integration tests.
+          # We only want to run `test-{output,commands}` when running integration tests.
           # There's a caveat though: when `cargo-tool` is `cross` it uses a container
           # and would result in these integration tests failing due to not finding
           # the escript binary. So, in case `cargo-tool != cargo` we'll skip the
@@ -161,7 +163,7 @@ jobs:
             --target ${{ matrix.target }}
             ${{ ((matrix.run-integration-tests && matrix.cargo-tool == 'cargo')
                   && ' ')
-                  || '--exclude test-output' }}
+                  || '--exclude test-output --exclude test-commands' }}
           tool: ${{ matrix.cargo-tool }}
 
       - name: test/project_erlang (non-windows)
@@ -238,6 +240,13 @@ jobs:
         env:
           GLEAM_COMMAND: gleam
 
+      - name: test/erlang_shipment_no_dev_deps
+        run: ./test.sh
+        working-directory: ./test/erlang_shipment_no_dev_deps
+        if: ${{ matrix.run-integration-tests }}
+        env:
+          GLEAM_COMMAND: gleam
+
       - name: test/project_javascript
         run: |
           gleam run
@@ -260,6 +269,13 @@ jobs:
           gleam check
         working-directory: ./test/project_git_deps
         if: ${{ matrix.run-integration-tests }}
+
+      - name: test/project_git_deps_path
+        run: ./test.sh
+        working-directory: ./test/project_git_deps_path
+        if: ${{ matrix.run-integration-tests }}
+        env:
+          GLEAM_COMMAND: gleam
 
       - name: Test project generation
         run: |
@@ -303,6 +319,7 @@ jobs:
           ls build/dev/docs/lib_project/fonts/ubuntu-mono-v15-regular-greek.woff2
           ls build/dev/docs/lib_project/fonts/ubuntu-mono-v15-regular-latin-ext.woff2
           ls build/dev/docs/lib_project/fonts/ubuntu-mono-v15-regular-latin.woff2
+          ls build/dev/docs/lib_project/fonts/ubuntu-mono-v15-regular-box.woff2
         if: ${{ matrix.run-integration-tests }}
 
   test-wasm:
@@ -310,17 +327,19 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
           target: wasm32-unknown-unknown
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "20"
+          node-version: "25"
 
       - name: Install wasm-pack
         run: |
@@ -335,10 +354,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
           components: rustfmt
@@ -351,16 +372,18 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Ensure no merge commits
-        uses: NexusPHP/no-merge-commits@v2.2.1
+        uses: NexusPHP/no-merge-commits@109a3342781ddcf26b2fa739f29e8ee9f68b7d8e # v2.4.1
         if: github.event_name == 'pull_request'
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
 
@@ -380,16 +403,18 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
           components: clippy
 
       - name: Handle Rust dependencies caching
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: v1-linux-gnu
 
@@ -399,7 +424,7 @@ jobs:
       - run: cargo build
 
       - name: Upload artifact (Ubuntu)
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gleam
           path: target/debug/gleam
@@ -411,25 +436,27 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Deno
-        uses: denoland/setup-deno@v2
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: v2.x
 
       - name: Install Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
       - name: Install Erlang
-        uses: erlef/setup-beam@v1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
-          otp-version: "26.1"
-          elixir-version: "1.16.1"
+          otp-version: "29"
+          elixir-version: "1.19"
           rebar3-version: "3"
 
       - name: Download Gleam binary from previous job
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: gleam
           path: ./test
@@ -470,11 +497,15 @@ jobs:
         run: make
         working-directory: ./test/javascript_prelude
 
+      - name: Test generated TypeScript declarations
+        run: make test
+        working-directory: ./test/typescript_declarations
+
       - name: Test export of hex tarball
         run: make test
         working-directory: ./test/hextarball
 
-      - name: Test running modules
+      - name: test/running_modules
         run: make test-all
         working-directory: ./test/running_modules
 
@@ -482,7 +513,7 @@ jobs:
         run: ./test.sh
         working-directory: ./test/multi_namespace
 
-      - name: Test multi namespace bug
+      - name: test/multi_namespace_not_top_level
         run: ./test.sh
         working-directory: ./test/multi_namespace_not_top_level
 
@@ -501,3 +532,11 @@ jobs:
       - name: Test publishing with default main
         run: ./test.sh
         working-directory: ./test/publishing_default_main
+
+      - name: Test publishing with src symlink escape
+        run: ./test.sh
+        working-directory: ./test/publishing_src_symlink_escape
+
+      - name: Test publishing with priv symlink escape
+        run: ./test.sh
+        working-directory: ./test/publishing_priv_symlink_escape

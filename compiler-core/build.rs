@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2018 The Gleam contributors
+
 use camino::Utf8Path;
 use std::process::Command;
 
@@ -5,12 +8,6 @@ const BUILTINS: &str = "builtins-wasm";
 
 fn main() {
     println!("cargo:rerun-if-changed=../{BUILTINS}/src/lib.rs");
-
-    capnpc::CompilerCommand::new()
-        .file("schema.capnp")
-        .output_path("generated/")
-        .run()
-        .expect("compiling schema.capnp");
 
     assert!(
         Command::new("cargo")

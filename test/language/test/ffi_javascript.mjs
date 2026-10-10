@@ -1,4 +1,7 @@
-import { UtfCodepoint } from "./gleam.mjs";
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
+import { UtfCodepoint, BitArray$BitArray$data } from "./gleam.mjs";
 
 let fs;
 
@@ -55,4 +58,8 @@ export function toDynamic(a) {
 
 export function toCodepoint(x) {
   return new UtfCodepoint(x);
+}
+
+export function readUint16FromBitArray(bitArray) {
+  return BitArray$BitArray$data(bitArray).getUint16(0);
 }

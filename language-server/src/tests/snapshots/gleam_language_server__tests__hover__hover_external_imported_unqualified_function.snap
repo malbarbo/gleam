@@ -2,6 +2,7 @@
 source: language-server/src/tests/hover.rs
 expression: "\nimport example_module.{my_fn}\nfn main() {\n  my_fn\n}\n"
 ---
+
 import example_module.{my_fn}
 fn main() {
   my_fn
@@ -14,4 +15,4 @@ fn main() {
 fn() -> Nil
 ```
 
-View on [HexDocs](https://hexdocs.pm/hex/example_module.html#my_fn)
+View on [HexDocs](https://hex.hexdocs.pm/example_module.html#my_fn)

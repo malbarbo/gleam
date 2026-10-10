@@ -1,5 +1,13 @@
-use camino::Utf8Path;
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2022 The Gleam contributors
+
+use std::io::Cursor;
+
+use camino::{Utf8Path, Utf8PathBuf};
+use gleam_core::io::{Content, OutputFile};
 use itertools::Itertools;
+
+use crate::fs::create_tar_archive;
 
 #[test]
 fn is_inside_git_work_tree_ok() {
@@ -186,4 +194,94 @@ HOME_URL=\"https://www.ubuntu.com/\"
         super::extract_distro_id("\nID=\"id first\"\nID=another_id".to_string()),
         "id first"
     );
+}
+
+#[test]
+fn hardlink_dir_copies_files_and_directories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+    let src = base.join("src");
+    let dest = base.join("dest");
+
+    super::mkdir(&src).unwrap();
+    super::mkdir(&src.join("sub")).unwrap();
+    super::write(&src.join("a.txt"), "hello").unwrap();
+    super::write(&src.join("sub").join("b.txt"), "world").unwrap();
+
+    super::mkdir(&dest).unwrap();
+    super::hardlink_dir(&src, &dest).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(dest.join("a.txt")).unwrap(),
+        "hello"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dest.join("sub").join("b.txt")).unwrap(),
+        "world"
+    );
+}
+
+#[test]
+fn hardlink_dir_empty_source_creates_empty_dest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+    let src = base.join("src");
+    let dest = base.join("dest");
+
+    super::mkdir(&src).unwrap();
+    super::mkdir(&dest).unwrap();
+    super::hardlink_dir(&src, &dest).unwrap();
+
+    assert!(dest.exists());
+    assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn hardlink_dir_skips_symlinks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+    let src = base.join("src");
+    let dest = base.join("dest");
+    let outside = base.join("outside");
+
+    super::mkdir(&src).unwrap();
+    super::mkdir(&dest).unwrap();
+    super::mkdir(&outside).unwrap();
+    super::write(&src.join("real.txt"), "kept").unwrap();
+    super::write(&outside.join("secret.txt"), "stolen").unwrap();
+
+    std::os::unix::fs::symlink(outside.as_std_path(), src.join("escape").as_std_path()).unwrap();
+
+    super::hardlink_dir(&src, &dest).unwrap();
+
+    assert!(dest.join("real.txt").exists());
+    assert!(!dest.join("escape").exists());
+}
+
+// https://github.com/gleam-lang/gleam/issues/5992
+#[test]
+fn create_tar_archive_sets_proper_permissions() {
+    let compressed_archive = create_tar_archive(vec![
+        OutputFile {
+            content: Content::Text("Hello".into()),
+            path: "./wibble.txt".into(),
+        },
+        OutputFile {
+            content: Content::Binary(vec![11, 6, 7]),
+            path: "./wobble.bin".into(),
+        },
+    ])
+    .expect("should create archive");
+
+    let decoder = flate2::read::GzDecoder::new(Cursor::new(compressed_archive));
+    let mut archive = tar::Archive::new(decoder);
+
+    for entry in archive.entries().expect("archive entries") {
+        let entry = entry.expect("archive entry");
+        let mode = entry.header().mode().expect("entry mode");
+        let entry_path = entry.path().expect("entry path");
+        let path_str = entry_path.to_str().expect("path string");
+        assert_eq!(mode, 0o600, "entry {path_str} has unexpected mode")
+    }
 }

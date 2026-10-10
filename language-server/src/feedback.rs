@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 use gleam_core::{Error, Warning, diagnostic::Diagnostic};
 use std::collections::{HashMap, HashSet};
 
@@ -25,7 +28,7 @@ impl Feedback {
     /// No feedback at all.
     ///
     pub fn none() -> Feedback {
-        Default::default()
+        Feedback::default()
     }
 
     /// Add all the content of another feedback to this feedback.
@@ -60,6 +63,24 @@ impl Feedback {
 pub struct FeedbackBookKeeper {
     files_with_warnings: HashSet<Utf8PathBuf>,
     files_with_errors: HashSet<Utf8PathBuf>,
+    /// Skipped files need special handling: a compile will skip a file if it
+    /// depends on some other file that couldn't be compiled.
+    /// This means that skipped files will not have regular type errors, but a
+    /// single error telling the developer to go fix the wrong file they depend
+    /// on.
+    ///
+    /// However, we don't want those errors to always be displayed, it would be
+    /// quite annoying having to browse through them in the IDE while the only
+    /// error that really matters is the one in the wrong module they depend on.
+    /// But it's really important that this is displayed on files that are open
+    /// in the IDE so that a developer is not confused by the total lack of
+    /// errors and can go fix them.
+    ///
+    /// For each file skipped during compilation we keep track of that error
+    /// message and make sure to present it to the developer if the file is
+    /// open.
+    skipped_files_diagnostics: HashMap<Utf8PathBuf, Diagnostic>,
+    open_files: HashSet<Utf8PathBuf>,
 }
 
 impl FeedbackBookKeeper {
@@ -86,6 +107,7 @@ impl FeedbackBookKeeper {
             // We don't limit this to files that have been compiled as a previous
             // cached version could be used instead of a recompile.
             self.unset_errors(&mut feedback);
+            self.unset_skipped_files(&mut feedback);
         }
 
         for warning in warnings {
@@ -100,6 +122,12 @@ impl FeedbackBookKeeper {
         // removed with the errors here. We will need to store the warnings and
         // re-send them.
         for path in self.files_with_errors.drain() {
+            feedback.unset_existing_diagnostics(path);
+        }
+    }
+
+    fn unset_skipped_files(&mut self, feedback: &mut Feedback) {
+        for (path, _) in self.skipped_files_diagnostics.drain() {
             feedback.unset_existing_diagnostics(path);
         }
     }
@@ -119,7 +147,9 @@ impl FeedbackBookKeeper {
         let diagnostics = error.to_diagnostics();
         let mut feedback = self.response(compilation, warnings);
 
-        // A new error means that any existing errors are no longer valid. Unset them.
+        // A new error means that any existing errors are no longer valid.
+        // Unset them.
+        self.unset_skipped_files(&mut feedback);
         self.unset_errors(&mut feedback);
 
         for diagnostic in diagnostics {
@@ -132,6 +162,13 @@ impl FeedbackBookKeeper {
                 None => {
                     feedback.append_message(diagnostic);
                 }
+            }
+        }
+
+        self.skipped_files_diagnostics = error.skipped_files_diagnostics();
+        for open_file in self.open_files.iter() {
+            if let Some(diagnostic) = self.skipped_files_diagnostics.get(open_file) {
+                feedback.append_diagnostic(open_file.clone(), diagnostic.clone());
             }
         }
 
@@ -149,6 +186,24 @@ impl FeedbackBookKeeper {
             feedback.append_diagnostic(path, diagnostic);
         }
     }
+
+    pub fn open_file(&mut self, file: Utf8PathBuf) -> Feedback {
+        let _ = self.open_files.insert(file.clone());
+        let mut feedback = Feedback::none();
+        if let Some(diagnostic) = self.skipped_files_diagnostics.get(&file) {
+            feedback.append_diagnostic(file, diagnostic.clone());
+        }
+        feedback
+    }
+
+    pub fn close_file(&mut self, file: &Utf8PathBuf) -> Feedback {
+        let _ = self.open_files.remove(file);
+        let mut feedback = Feedback::none();
+        if self.skipped_files_diagnostics.contains_key(file) {
+            feedback.unset_existing_diagnostics(file.clone());
+        }
+        feedback
+    }
 }
 
 #[cfg(test)]
@@ -158,11 +213,11 @@ mod tests {
 
     use super::*;
     use gleam_core::{
-        ast::SrcSpan,
         diagnostic::Level,
         parse::error::{ParseError, ParseErrorType},
         type_,
     };
+    use src_span::SrcSpan;
 
     #[test]
     fn feedback() {
@@ -174,16 +229,16 @@ mod tests {
         let warning1 = Warning::Type {
             path: file1.clone(),
             src: "src".into(),
-            warning: type_::Warning::NoFieldsRecordUpdate {
+            warning: Box::new(type_::Warning::NoFieldsRecordUpdate {
                 location: SrcSpan::new(1, 2),
-            },
+            }),
         };
         let warning2 = Warning::Type {
             path: file2.clone(),
             src: "src".into(),
-            warning: type_::Warning::NoFieldsRecordUpdate {
+            warning: Box::new(type_::Warning::NoFieldsRecordUpdate {
                 location: SrcSpan::new(1, 2),
-            },
+            }),
         };
 
         let feedback = book_keeper.response(
@@ -235,9 +290,9 @@ mod tests {
         let warning1 = Warning::Type {
             path: file1.clone(),
             src: "src".into(),
-            warning: type_::Warning::NoFieldsRecordUpdate {
+            warning: Box::new(type_::Warning::NoFieldsRecordUpdate {
                 location: SrcSpan::new(1, 2),
-            },
+            }),
         };
 
         let locationless_error = Error::Gzip("Hello!".into());
@@ -269,9 +324,9 @@ mod tests {
         let warning1 = Warning::Type {
             path: file1.clone(),
             src: "src".into(),
-            warning: type_::Warning::NoFieldsRecordUpdate {
+            warning: Box::new(type_::Warning::NoFieldsRecordUpdate {
                 location: SrcSpan::new(1, 2),
-            },
+            }),
         };
         let error = Error::Parse {
             path: file3.clone(),

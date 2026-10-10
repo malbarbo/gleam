@@ -1,10 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use camino::{Utf8Path, Utf8PathBuf};
+use std::fmt::Write as _;
 
 use gleam_core::{
     Error, Result,
-    error::{FileIoAction, FileKind},
+    error::{FileIoAction, FileIoCause, FileKind},
     paths::ProjectPaths,
 };
+use hexpm::version::{Identifier, Version};
 
 use crate::{
     cli,
@@ -15,9 +20,7 @@ use crate::{
 pub fn command(paths: &ProjectPaths, packages_to_add: Vec<String>, dev: bool) -> Result<()> {
     let config = crate::config::root_config(paths)?;
     if packages_to_add.iter().any(|name| name == &config.name) {
-        return Err(Error::CannotAddSelfAsDependency {
-            name: config.name.clone(),
-        });
+        return Err(Error::CannotAddSelfAsDependency { name: config.name });
     }
 
     let mut new_package_requirements = Vec::with_capacity(packages_to_add.len());
@@ -59,15 +62,13 @@ pub fn command(paths: &ProjectPaths, packages_to_add: Vec<String>, dev: bool) ->
         // Produce a version requirement locked to the major version.
         // i.e. if 1.2.3 is selected we want >= 1.2.3 and < 2.0.0
         let range = format!(
-            ">= {}.{}.{} and < {}.0.0",
-            version.major,
-            version.minor,
-            version.patch,
+            ">= {} and < {}.0.0",
+            version_to_string(version),
             version.major + 1
         );
 
         // False positive. This package doesn't use the indexing API correctly.
-        #[allow(clippy::indexing_slicing)]
+        #[expect(clippy::indexing_slicing)]
         {
             if dev {
                 let canonical_name = "dev_dependencies";
@@ -88,7 +89,7 @@ pub fn command(paths: &ProjectPaths, packages_to_add: Vec<String>, dev: bool) ->
                     gleam_toml["dependencies"] = toml_edit::table();
                 }
                 gleam_toml["dependencies"][&added_package] = toml_edit::value(range.clone());
-            };
+            }
             manifest_toml["requirements"][&added_package]["version"] = range.into();
         }
     }
@@ -103,10 +104,71 @@ pub fn command(paths: &ProjectPaths, packages_to_add: Vec<String>, dev: bool) ->
 fn read_toml_edit(name: &Utf8Path) -> Result<toml_edit::DocumentMut, Error> {
     fs::read(name)?
         .parse::<toml_edit::DocumentMut>()
-        .map_err(|e| Error::FileIo {
+        .map_err(|error| Error::FileIo {
             kind: FileKind::File,
             action: FileIoAction::Parse,
-            path: Utf8PathBuf::from("gleam.toml"),
-            err: Some(e.to_string()),
+            path: Utf8PathBuf::from(name),
+            cause: FileIoCause::Other(error.to_string()),
         })
+}
+
+fn version_to_string(version: &Version) -> String {
+    let mut text = String::new();
+    write!(
+        text,
+        "{}.{}.{}",
+        version.major, version.minor, version.patch
+    )
+    .expect("write to a string");
+
+    if !version.pre.is_empty() {
+        text.push('-');
+        for (i, identifier) in version.pre.iter().enumerate() {
+            if i != 0 {
+                text.push('.');
+            }
+            match *identifier {
+                Identifier::Numeric(ref id) => text.push_str(&id.to_string()),
+                Identifier::AlphaNumeric(ref id) => text.push_str(id),
+            }
+        }
+    }
+    if let Some(build) = version.build.as_ref() {
+        text.push('+');
+        text.push_str(build);
+    }
+    text
+}
+
+#[test]
+fn displays_simple_version_correctly() {
+    let version = Version {
+        major: 1,
+        minor: 23,
+        patch: 4,
+        pre: vec![],
+        build: None,
+    };
+
+    let displayed = version_to_string(&version);
+
+    assert_eq!(displayed, "1.23.4");
+}
+
+#[test]
+fn displays_full_version_correctly() {
+    let version = Version {
+        major: 1,
+        minor: 23,
+        patch: 4,
+        pre: vec![
+            Identifier::Numeric(123),
+            Identifier::AlphaNumeric("123abc".to_string()),
+        ],
+        build: Some("12345abc".to_string()),
+    };
+
+    let displayed = version_to_string(&version);
+
+    assert_eq!(displayed, "1.23.4-123.123abc+12345abc");
 }

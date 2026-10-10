@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use super::*;
 use std::ops::Deref;
 use std::{
@@ -102,7 +105,7 @@ impl InMemoryFileSystem {
                 kind: FileKind::File,
                 action: FileIoAction::Open,
                 path: path.to_path_buf(),
-                err: None,
+                cause: FileIoCause::Other("file not found".into()),
             })?
             .modification_time = time;
         Ok(())
@@ -118,7 +121,7 @@ impl FileSystemWriter for InMemoryFileSystem {
                 kind: FileKind::Directory,
                 action: FileIoAction::Delete,
                 path: path.to_path_buf(),
-                err: None,
+                cause: FileIoCause::NotFound,
             });
         }
 
@@ -165,7 +168,7 @@ impl FileSystemWriter for InMemoryFileSystem {
                     kind: FileKind::Directory,
                     action: FileIoAction::Create,
                     path: ancestor.to_path_buf(),
-                    err: None,
+                    cause: FileIoCause::NotFound,
                 });
             }
             let dir = InMemoryFile::directory();
@@ -175,8 +178,18 @@ impl FileSystemWriter for InMemoryFileSystem {
         Ok(())
     }
 
-    fn hardlink(&self, _: &Utf8Path, _: &Utf8Path) -> Result<(), Error> {
-        panic!("unimplemented") // TODO
+    fn hardlink(&self, left: &Utf8Path, right: &Utf8Path) -> Result<(), Error> {
+        let mut files = self.files.deref().borrow_mut();
+        let Some(file) = files.get(left).cloned() else {
+            return Err(Error::FileIo {
+                kind: FileKind::File,
+                action: FileIoAction::ReadMetadata,
+                path: left.to_path_buf(),
+                cause: FileIoCause::NotFound,
+            });
+        };
+        let _ = files.insert(right.into(), file);
+        Ok(())
     }
 
     fn symlink_dir(&self, _: &Utf8Path, _: &Utf8Path) -> Result<(), Error> {
@@ -190,7 +203,7 @@ impl FileSystemWriter for InMemoryFileSystem {
                 kind: FileKind::File,
                 action: FileIoAction::Delete,
                 path: path.to_path_buf(),
-                err: None,
+                cause: FileIoCause::NotFound,
             });
         }
         let _ = files.remove(path);
@@ -237,14 +250,14 @@ impl FileSystemReader for InMemoryFileSystem {
                 kind: FileKind::File,
                 action: FileIoAction::Open,
                 path: path.clone(),
-                err: None,
+                cause: FileIoCause::NotFound,
             })?;
         let bytes = buffer.borrow();
-        let unicode = String::from_utf8(bytes.clone()).map_err(|err| Error::FileIo {
+        let unicode = String::from_utf8(bytes.clone()).map_err(|error| Error::FileIo {
             kind: FileKind::File,
             action: FileIoAction::Read,
             path: path.clone(),
-            err: Some(err.to_string()),
+            cause: FileIoCause::Other(format!("invalid path, {error}")),
         })?;
         Ok(unicode)
     }
@@ -259,7 +272,7 @@ impl FileSystemReader for InMemoryFileSystem {
                 kind: FileKind::File,
                 action: FileIoAction::Open,
                 path: path.clone(),
-                err: None,
+                cause: FileIoCause::NotFound,
             })?;
         let bytes = buffer.borrow().clone();
         Ok(bytes)
@@ -282,7 +295,6 @@ impl FileSystemReader for InMemoryFileSystem {
     }
 
     fn reader(&self, _path: &Utf8Path) -> Result<WrappedReader, Error> {
-        // TODO
         unreachable!("Memory reader unimplemented")
     }
 
@@ -307,9 +319,13 @@ impl FileSystemReader for InMemoryFileSystem {
             kind: FileKind::File,
             action: FileIoAction::ReadMetadata,
             path: path.to_path_buf(),
-            err: None,
+            cause: FileIoCause::NotFound,
         })?;
         Ok(file.modification_time)
+    }
+
+    fn is_same_file(&self, _left: &Utf8Path, _right: &Utf8Path) -> Result<bool, Error> {
+        unreachable!("is_same_file unimplemented")
     }
 }
 
@@ -365,7 +381,7 @@ impl InMemoryFile {
     pub fn directory() -> Self {
         Self {
             node: InMemoryFileNode::Directory,
-            ..Default::default()
+            ..Self::default()
         }
     }
 
@@ -402,7 +418,7 @@ impl InMemoryFile {
 impl Default for InMemoryFile {
     fn default() -> Self {
         Self {
-            node: InMemoryFileNode::File(Default::default()),
+            node: InMemoryFileNode::File(Rc::new(RefCell::new(vec![]))),
             // We use a fixed time here so that the tests are deterministic. In
             // future we may want to inject this in some fashion.
             modification_time: SystemTime::UNIX_EPOCH + Duration::from_secs(663112800),
@@ -436,15 +452,35 @@ impl CommandExecutor for InMemoryFileSystem {
     }
 }
 
-impl BeamCompiler for InMemoryFileSystem {
+impl BeamCompilerIO for InMemoryFileSystem {
     fn compile_beam(
         &self,
-        _out: &Utf8Path,
+        out: &Utf8Path,
         _lib: &Utf8Path,
-        _modules: &HashSet<Utf8PathBuf>,
+        modules: &HashSet<Utf8PathBuf>,
         _stdio: Stdio,
-    ) -> Result<Vec<String>, Error> {
-        Ok(Vec::new()) // Always succeed.
+    ) -> Result<(), Error> {
+        // Always succeed, pretending to have compiled every given module. We
+        // write out an (empty) `.beam` file per module, mirroring the real
+        // compiler, since callers may look for these in `ebin` afterwards.
+        let ebin = out.join("ebin");
+        for path in modules {
+            let name = if path.extension() == Some("ex") {
+                // Real Elixir names the module after its `defmodule`, which
+                // we don't parse, so we follow the path convention instead:
+                // `app/login/user.ex` is `Elixir.App.Login.User`.
+                let segments = path
+                    .with_extension("")
+                    .components()
+                    .map(|component| crate::strings::to_upper_camel_case(component.as_str()))
+                    .collect::<Vec<_>>();
+                format!("Elixir.{}", segments.join("."))
+            } else {
+                path.file_stem().unwrap_or_default().to_string()
+            };
+            self.write_bytes(&ebin.join(format!("{name}.beam")), &[])?;
+        }
+        Ok(())
     }
 }
 
@@ -453,6 +489,28 @@ fn test_empty_in_memory_fs_has_root() {
     let imfs = InMemoryFileSystem::new();
 
     assert!(imfs.exists(Utf8Path::new("/")));
+}
+
+#[test]
+fn test_compile_beam_names_modules() -> Result<(), Error> {
+    let imfs = InMemoryFileSystem::new();
+    let modules = HashSet::from([
+        Utf8PathBuf::from("app/login/user.ex"),
+        Utf8PathBuf::from("wibble.ex"),
+        Utf8PathBuf::from("nested/thing.erl"),
+    ]);
+    imfs.compile_beam(
+        Utf8Path::new("/out"),
+        Utf8Path::new("/lib"),
+        &modules,
+        Stdio::Null,
+    )?;
+
+    assert!(imfs.exists(Utf8Path::new("/out/ebin/Elixir.App.Login.User.beam")));
+    assert!(imfs.exists(Utf8Path::new("/out/ebin/Elixir.Wibble.beam")));
+    assert!(imfs.exists(Utf8Path::new("/out/ebin/thing.beam")));
+
+    Ok(())
 }
 
 #[test]

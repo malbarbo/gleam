@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2024 The Gleam contributors
+
 use gleam_core::{
     Result,
     error::{Error, ShellCommandFailureReason},
@@ -17,35 +20,32 @@ use camino::{Utf8Path, Utf8PathBuf};
 use itertools::Itertools;
 
 #[derive(Debug)]
-struct BeamCompilerInner {
+pub struct BeamCompilerInstance {
     process: Child,
-    stdin: ChildStdin,
+    stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
+    // A guard held for cleaning up the temporary file used to start the BEAM instance.
+    _source: tempfile::NamedTempFile,
 }
 
-#[derive(Debug, Default)]
-pub struct BeamCompiler {
-    inner: Option<BeamCompilerInner>,
-}
-
-impl BeamCompiler {
-    pub fn compile<IO: FileSystemWriter>(
+impl BeamCompilerInstance {
+    pub fn compile(
         &mut self,
-        io: &IO,
         out: &Utf8Path,
         lib: &Utf8Path,
         modules: &HashSet<Utf8PathBuf>,
         stdio: Stdio,
-    ) -> Result<Vec<String>, Error> {
-        let inner = match self.inner {
-            Some(ref mut inner) => match inner.process.try_wait() {
-                Ok(None) => inner,
-                _ => self.inner.insert(self.spawn(io, out)?),
-            },
+    ) -> Result<(), Error> {
+        // Check that the BEAM instance is still alive before attempting to use it.
+        let exit_status = self
+            .process
+            .try_wait()
+            .expect("access BEAM instance exit state");
+        if let Some(status) = exit_status {
+            panic!("BEAM compiler instance exited: {status}");
+        }
 
-            None => self.inner.insert(self.spawn(io, out)?),
-        };
-
+        // Prepare work to send to the BEAM instance.
         let args = format!(
             "{{\"{}\", \"{}\", [\"{}\"]}}",
             escape_path(lib),
@@ -58,18 +58,18 @@ impl BeamCompiler {
 
         tracing::debug!(args=?args, "call_beam_compiler");
 
-        writeln!(inner.stdin, "{args}.").map_err(|e| Error::ShellCommand {
-            program: "escript".into(),
-            reason: ShellCommandFailureReason::IoError(e.kind()),
+        writeln!(self.stdin.as_ref().expect("stdin present"), "{args}.").map_err(|error| {
+            Error::ShellCommand {
+                program: "escript".into(),
+                reason: ShellCommandFailureReason::IoError(error.kind()),
+            }
         })?;
 
         let mut buf = String::new();
-        let mut accumulated_modules: Vec<String> = Vec::new();
-        while let (Ok(_), Ok(None)) = (inner.stdout.read_line(&mut buf), inner.process.try_wait()) {
+        while let (Ok(_), Ok(None)) = (self.stdout.read_line(&mut buf), self.process.try_wait()) {
             match buf.trim() {
                 "gleam-compile-result-ok" => {
-                    // Return Ok with the accumulated modules
-                    return Ok(accumulated_modules);
+                    return Ok(());
                 }
                 "gleam-compile-result-error" => {
                     return Err(Error::ShellCommand {
@@ -77,18 +77,13 @@ impl BeamCompiler {
                         reason: ShellCommandFailureReason::Unknown,
                     });
                 }
-                s if s.starts_with("gleam-compile-module:") => {
-                    if let Some(module_content) = s.strip_prefix("gleam-compile-module:") {
-                        accumulated_modules.push(module_content.to_string());
-                    }
-                }
                 _ => match stdio {
                     Stdio::Inherit => print!("{buf}"),
                     Stdio::Null => {}
                 },
             }
 
-            buf.clear()
+            buf.clear();
         }
 
         // if we get here, stdout got closed before we got an "ok" or "err".
@@ -98,16 +93,15 @@ impl BeamCompiler {
         })
     }
 
-    fn spawn<IO: FileSystemWriter>(
-        &self,
-        io: &IO,
-        out: &Utf8Path,
-    ) -> Result<BeamCompilerInner, Error> {
-        let escript_path = out
-            .join(paths::ARTEFACT_DIRECTORY_NAME)
-            .join("gleam@@compile.erl");
-
+    pub fn new<IO: FileSystemWriter>(io: &IO) -> Result<Self, Error> {
         let escript_source = std::include_str!("../templates/gleam@@compile.erl");
+        let escript_file =
+            tempfile::NamedTempFile::new().map_err(|error| Error::CouldNotCreateTempFile {
+                error: error.to_string(),
+            })?;
+        let escript_path =
+            Utf8PathBuf::from_path_buf(escript_file.path().to_path_buf()).expect("UTF8 temp");
+
         io.write(&escript_path, escript_source)?;
 
         tracing::trace!(escript_path=?escript_path, "spawn_beam_compiler");
@@ -117,7 +111,7 @@ impl BeamCompiler {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| match e.kind() {
+            .map_err(|error| match error.kind() {
                 io::ErrorKind::NotFound => Error::ShellProgramNotFound {
                     program: "escript".into(),
                     os: get_os(),
@@ -131,24 +125,64 @@ impl BeamCompiler {
         let stdin = process.stdin.take().expect("could not get child stdin");
         let stdout = process.stdout.take().expect("could not get child stdout");
 
-        Ok(BeamCompilerInner {
+        Ok(Self {
             process,
-            stdin,
+            stdin: Some(stdin),
             stdout: BufReader::new(stdout),
+            _source: escript_file,
         })
     }
 }
 
-impl Drop for BeamCompiler {
+impl Drop for BeamCompilerInstance {
     fn drop(&mut self) {
-        if let Some(mut inner) = self.inner.take() {
-            // closing stdin will cause the erlang process to exit.
-            drop(inner.stdin);
-            let _ = inner.process.wait();
-        }
+        // closing stdin will cause the BEAM instance to exit.
+        drop(self.stdin.take());
+        let _ = self.process.wait();
     }
 }
 
 fn escape_path<T: AsRef<str>>(path: T) -> String {
-    path.as_ref().replace("\\", "\\\\")
+    path.as_ref().replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_path;
+
+    #[test]
+    fn escape_path_plain() {
+        assert_eq!(
+            escape_path("/build/packages/wibble/src/bar.erl"),
+            "/build/packages/wibble/src/bar.erl"
+        );
+    }
+
+    #[test]
+    fn escape_path_backslash() {
+        assert_eq!(
+            escape_path("C:\\Users\\wibble\\bar.erl"),
+            "C:\\\\Users\\\\wibble\\\\bar.erl"
+        );
+    }
+
+    #[test]
+    fn escape_path_double_quote() {
+        assert_eq!(
+            escape_path(r#"a", "/tmp/other.erl"#),
+            r#"a\", \"/tmp/other.erl"#
+        );
+    }
+
+    #[test]
+    fn escape_path_double_quote_does_not_break_erlang_string() {
+        // A double-quote in a path must not close the surrounding Erlang string
+        // literal and produce extra elements in the module list.
+        let path = r#"a", "/tmp/other"#;
+        let escaped = escape_path(path);
+        assert!(
+            !escaped.contains("\", \""),
+            "unescaped quote still present: {escaped}"
+        );
+    }
 }

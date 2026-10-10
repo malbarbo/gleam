@@ -1,4 +1,23 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use crate::assert_erl;
+
+#[test]
+fn simple_variable() {
+    assert_erl!(
+        r#"
+pub fn wibble() {
+  let x = 1
+  let y = {
+    let a = 1
+    a
+  }
+  y
+}
+"#
+    );
+}
 
 #[test]
 fn shadow_let() {

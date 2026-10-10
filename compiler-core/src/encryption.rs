@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2024 The Gleam contributors
+
 use thiserror::Error;
 
 pub fn encrypt_with_passphrase(
@@ -5,7 +8,7 @@ pub fn encrypt_with_passphrase(
     passphrase: &str,
 ) -> Result<String, age::EncryptError> {
     let passphrase = age::secrecy::SecretString::from(passphrase);
-    let recipient = age::scrypt::Recipient::new(passphrase.clone());
+    let recipient = age::scrypt::Recipient::new(passphrase);
 
     let encrypted = age::encrypt_and_armor(&recipient, message)?;
 

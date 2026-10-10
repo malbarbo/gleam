@@ -1,0 +1,95 @@
+---
+source: compiler-core/src/javascript/tests/sourcemaps.rs
+expression: "\npub fn unwrap_or_panic(result) {\n    let assert Ok(value) = result\n    value\n}\n"
+---
+----- SOURCE CODE
+0 |
+1 |pub fn unwrap_or_panic(result) {
+2 |    let assert Ok(value) = result
+3 |    value
+4 |}
+
+----- COMPILED JAVASCRIPT
+0 |//# sourceMappingURL=mod.mjs.map
+1 |import { Ok, makeError } from "../gleam.mjs";
+2 |
+3 |const FILEPATH = "src/module.gleam";
+4 |
+5 |export function unwrap_or_panic(result) {
+6 |  let value;
+7 |  if (result instanceof Ok) {
+8 |    value = result[0];
+9 |  } else {
+10 |    throw makeError(
+11 |      "let_assert",
+12 |      FILEPATH,
+13 |      "my/mod",
+14 |      3,
+15 |      "unwrap_or_panic",
+16 |      "Pattern match failed, no pattern matched the value.",
+17 |      { value: result, start: 38, end: 67, pattern_start: 49, pattern_end: 58 }
+18 |    )
+19 |  }
+20 |  return value;
+21 |}
+
+----- SOURCE MAP
+File: my/mod.mjs
+Sources: mod.gleam
+Mappings:
+----- 
+
+
+⏷
+//# sourceMappingURL=mod.mjs.map
+import { Ok, makeError } from "../gleam.mjs";
+
+const FILEPATH = "src/module.gleam";
+
+
+----- 
+pub fn unwrap_or_panic(result) {
+    
+⏷
+export function unwrap_or_panic(result) {
+  
+----- 
+let assert Ok(value) = 
+⏷
+let value;
+  if (result instanceof Ok) {
+    
+----- 
+result
+    
+⏷
+value = result[0];
+  } else {
+    
+----- 
+let assert Ok(value) = 
+⏷
+throw makeError(
+      "let_assert",
+      FILEPATH,
+      "my/mod",
+      3,
+      "unwrap_or_panic",
+      "Pattern match failed, no pattern matched the value.",
+      { value: result, start: 38, end: 67, pattern_start: 49, pattern_end: 58 }
+    )
+  }
+  
+----- 
+value
+}
+⏷
+return value;
+}
+----- 
+
+
+⏷
+
+
+-----

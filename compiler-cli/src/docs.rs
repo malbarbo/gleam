@@ -1,7 +1,7 @@
-use std::{
-    collections::HashMap,
-    time::{Instant, SystemTime},
-};
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
+use std::{collections::HashMap, time::SystemTime};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use ecow::EcoString;
@@ -10,7 +10,7 @@ use crate::{cli, fs::ProjectIO, http::HttpClient};
 use gleam_core::{
     Result,
     analyse::TargetSupport,
-    build::{Codegen, Compile, Mode, Options, Package, Target},
+    build::{Codegen, Compile, ErlangOutput, Mode, Options, Package, Target},
     config::{DocsPage, PackageConfig},
     docs::{Dependency, DependencyKind, DocContext},
     error::Error,
@@ -23,14 +23,19 @@ use gleam_core::{
 
 pub fn remove(package: String, version: String) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().expect("Unable to start Tokio async runtime");
-    let hex_config = hexpm::Config::new();
-    let api_key =
-        crate::hex::HexAuthentication::new(&runtime, hex_config.clone()).get_or_create_api_key()?;
     let http = HttpClient::new();
+    let hex_config = hexpm::Config::new();
+    let credentials = crate::hex::HexAuthentication::new(&runtime, &http, hex_config.clone())
+        .get_or_create_api_credentials()?;
 
     // Remove docs from API
-    let request = hexpm::api_remove_docs_request(&package, &version, &api_key, &hex_config)
-        .map_err(Error::hex)?;
+    let request = hexpm::api_remove_docs_request(
+        &package,
+        &version,
+        &crate::hex::write_credentials(&credentials)?,
+        &hex_config,
+    )
+    .map_err(Error::hex)?;
     let response = runtime.block_on(http.send(request))?;
     hexpm::api_remove_docs_response(response).map_err(Error::hex)?;
 
@@ -49,8 +54,16 @@ pub struct BuildOptions {
 pub fn build(paths: &ProjectPaths, options: BuildOptions) -> Result<()> {
     let config = crate::config::root_config(paths)?;
 
-    // Reset the build directory so we know the state of the project
-    crate::fs::delete_directory(&paths.build_directory_for_target(Mode::Prod, config.target))?;
+    // Reset the build directory for the root package so that's recompiled and
+    // the docs can be up to date for all modules.
+    // Note how this doesn't delete the entire build directory, this way we can
+    // avoid recompiling all the dependencies every time we're building the
+    // documentation for our package.
+    crate::fs::delete_directory(&paths.build_directory_for_package(
+        Mode::Prod,
+        options.target.unwrap_or(config.target),
+        &config.name,
+    ))?;
 
     let out = paths.build_documentation_directory(&config.name);
 
@@ -78,11 +91,15 @@ pub fn build(paths: &ProjectPaths, options: BuildOptions) -> Result<()> {
         Options {
             mode: Mode::Prod,
             target: options.target,
-            codegen: Codegen::All,
+            // Code generation is not needed when building docs, this can speed
+            // up the docs building process quite drastically, especially on the
+            // Erlang target where we can avoid calling erlc.
+            codegen: Codegen::None,
             compile: Compile::All,
             warnings_as_errors: false,
             root_target_support: TargetSupport::Enforced,
             no_print_progress: false,
+            erlang_output: ErlangOutput::Binary,
         },
         manifest,
     )?;
@@ -134,14 +151,14 @@ pub(crate) fn build_documentation(
     dependencies: HashMap<EcoString, Dependency>,
     compiled: &mut Package,
     is_hex_publish: DocContext,
-    cached_modules: &im::HashMap<EcoString, type_::ModuleInterface>,
+    cached_modules: &imbl::HashMap<EcoString, type_::ModuleInterface>,
 ) -> Result<Vec<gleam_core::io::OutputFile>, Error> {
     compiled.attach_doc_and_module_comments();
     cli::print_generating_documentation();
     let mut pages = vec![DocsPage {
         title: "README".into(),
         path: "index.html".into(),
-        source: paths.readme(), // TODO: support non markdown READMEs. Or a default if there is none.
+        source: paths.readme(),
     }];
     pages.extend(config.documentation.pages.iter().cloned());
     let mut outputs = gleam_core::docs::generate_html(
@@ -155,7 +172,7 @@ pub(crate) fn build_documentation(
             context: is_hex_publish,
         },
         ProjectIO::new(),
-    );
+    )?;
 
     outputs.push(gleam_core::docs::generate_json_package_interface(
         Utf8PathBuf::from("package-interface.json"),
@@ -167,11 +184,11 @@ pub(crate) fn build_documentation(
 
 pub fn publish(paths: &ProjectPaths) -> Result<()> {
     let config = crate::config::root_config(paths)?;
-
+    let http = HttpClient::new();
     let runtime = tokio::runtime::Runtime::new().expect("Unable to start Tokio async runtime");
     let hex_config = hexpm::Config::new();
-    let api_key =
-        crate::hex::HexAuthentication::new(&runtime, hex_config.clone()).get_or_create_api_key()?;
+    let credentials = crate::hex::HexAuthentication::new(&runtime, &http, hex_config.clone())
+        .get_or_create_api_credentials()?;
 
     // Reset the build directory so we know the state of the project
     crate::fs::delete_directory(&paths.build_directory_for_target(Mode::Prod, config.target))?;
@@ -205,6 +222,7 @@ pub fn publish(paths: &ProjectPaths) -> Result<()> {
             mode: Mode::Prod,
             target: None,
             no_print_progress: false,
+            erlang_output: ErlangOutput::Binary,
         },
         manifest,
     )?;
@@ -218,16 +236,15 @@ pub fn publish(paths: &ProjectPaths) -> Result<()> {
     )?;
     let archive = crate::fs::create_tar_archive(outputs)?;
 
-    let start = Instant::now();
     cli::print_publishing_documentation();
     runtime.block_on(hex::publish_documentation(
         &config.name,
         &config.version,
         archive,
-        &api_key,
+        &crate::hex::write_credentials(&credentials)?,
         &hex_config,
-        &HttpClient::new(),
+        &http,
     ))?;
-    cli::print_published(start.elapsed());
+    cli::print_published("documentation");
     Ok(())
 }

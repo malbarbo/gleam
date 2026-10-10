@@ -1,3 +1,8 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  SPDX-FileCopyrightText: 2024 The Gleam contributors
+-->
+
 # Contributing to Gleam
 
 Thanks for contributing to Gleam!
@@ -43,13 +48,25 @@ Code changes to Gleam are welcomed via the process below.
 5. Once the changes have been approved the code will be rebased into the
    `main` branch.
 
+We do not accept contributions from AI agents.
+
+
+## Communication with contributions
+
+Open source software development is a social exercise as much as a technical
+one. Bug reports, pull request descriptions, and comments must be written by a
+human, not by AI. We want your knowledge and opinions in your tone of voice; we
+do not want generated text or AI summaries.
+
+You may use software to help you with your English spelling and grammar. If
+your message is translated into English from another language please disclose
+that in your message, so that we understand.
+
+
 ## Local development
 
 To run the compiler tests. This will require a recent stable version of Rust,
 Erlang, Elixir, NodeJS, Deno, and Bun to be installed.
-
-If you are using the Nix package manager, there's a [gleam-nix flake](https://github.com/vic/gleam-nix)
-you can use for running any Gleam version or quickly obtaining a development environment for Gleam.
 
 ```sh
 cargo test
@@ -66,8 +83,8 @@ version of Rust, Erlang, and NodeJS to be installed.
 make language-test
 ```
 
-If you don't have Rust or Cargo installed you can run the above command in a docker sandbox.
-Run the command below from this directory.
+If you don't have Rust or Cargo installed you can run the above command in a
+docker sandbox. Run the command below from this directory.
 
 ```sh
 docker run -v $(pwd):/opt/app -it -w /opt/app rust:latest bash
@@ -97,15 +114,13 @@ latest stable.
 rustup upgrade stable
 ```
 
-## Cap'n Proto schema
+## Operating system specific code
 
-The compiler uses a Cap'n Proto schema to serialize/deserialize module information.
-Occasionally, the schema needs to change. After modifying `compiler-core/schema.capnp`
-you need to re-generate `compiler-core/generated/schema_capnp.rs`. To do that,
-[install Cap'n Proto](https://capnproto.org/install.html) and un-comment appropriate lines
-in `compiler-core/build.rs`. Then you should be able to re-generate that file with:
-
-```sh
-cd compiler-core
-cargo build
-```
+This project is used on FreeBSD, Linux, MacOS, OpenBSD, Windows, and presumably
+other operating systems, so there is some amount of code that needs to be
+different depending on which is it running on. So far this is hidden inside
+dependencies, with the exception of some code for working with file paths in
+tests and for setting file permissions, which is different on Windows. If you
+are working in this area then you may get a CI failure relating to this for
+your first attempt. If you need help resolving any issues do not hesitate to
+ask.

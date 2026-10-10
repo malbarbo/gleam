@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 use pubgrub::Range;
 
 use crate::{
@@ -19,7 +22,7 @@ pub struct EnvironmentArguments<'a> {
     pub gleam_version: Option<Range<Version>>,
     pub current_module: EcoString,
     pub target: Target,
-    pub importable_modules: &'a im::HashMap<EcoString, ModuleInterface>,
+    pub importable_modules: &'a imbl::HashMap<EcoString, ModuleInterface>,
     pub target_support: TargetSupport,
     pub current_origin: Origin,
     pub dev_dependencies: &'a HashSet<EcoString>,
@@ -29,6 +32,18 @@ impl<'a> EnvironmentArguments<'a> {
     pub fn build(self) -> Environment<'a> {
         Environment::new(self)
     }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct UnqualifiedImport {
+    /// The location of the import. For example:
+    /// ```gleam
+    /// import gleam/result.{type Result as MyResult}
+    /// //                   ^^^^^^^^^^^^^^^^^^^^^^^
+    /// ```
+    pub location: SrcSpan,
+    /// Whether the unqualified import has been aliased.
+    pub has_alias: bool,
 }
 
 #[derive(Debug)]
@@ -44,22 +59,23 @@ pub struct Environment<'a> {
     pub target: Target,
     pub ids: UniqueIdGenerator,
     previous_id: u64,
-    /// Names of types or values that have been imported an unqualified fashion
-    /// from other modules. Used to prevent multiple imports using the same name.
-    pub unqualified_imported_names: HashMap<EcoString, SrcSpan>,
-    pub unqualified_imported_types: HashMap<EcoString, SrcSpan>,
-    pub importable_modules: &'a im::HashMap<EcoString, ModuleInterface>,
+    /// Names of types or values that have been imported in unqualified fashion
+    /// from other modules. Used to prevent multiple imports using the same
+    /// name and to check if an item has an import alias.
+    pub unqualified_imported_names: HashMap<EcoString, UnqualifiedImport>,
+    pub unqualified_imported_types: HashMap<EcoString, UnqualifiedImport>,
+    pub importable_modules: &'a imbl::HashMap<EcoString, ModuleInterface>,
 
     /// Modules that have been imported by the current module, along with the
     /// location of the import statement where they were imported.
     pub imported_modules: HashMap<EcoString, (SrcSpan, &'a ModuleInterface)>,
 
     /// Values defined in the current function (or the prelude)
-    pub scope: im::HashMap<EcoString, ValueConstructor>,
+    pub scope: imbl::HashMap<EcoString, ValueConstructor>,
 
     // The names of all the ignored variables and arguments in scope:
     // `let _var = 10` `pub fn main(_var) { todo }`.
-    pub discarded_names: im::HashMap<EcoString, SrcSpan>,
+    pub discarded_names: imbl::HashMap<EcoString, SrcSpan>,
 
     /// Types defined in the current module (or the prelude)
     pub module_types: HashMap<EcoString, TypeConstructor>,
@@ -86,8 +102,12 @@ pub struct Environment<'a> {
 
     pub names: Names,
 
-    /// Wether we ran into an `echo` or not while analysing the current module.
-    pub echo_found: bool,
+    /// Deferred type variable aliases: `(source_generic_id, instantiated_type)`.
+    /// During `instantiate`, when a generic type variable is replaced with a new
+    /// unbound var, we record the pair here. After type checking, we resolve
+    /// these by following link chains in the types to find the final unbound var
+    /// IDs and register the original names for them.
+    pub deferred_type_variable_aliases: Vec<(u64, Arc<Type>)>,
 
     pub references: ReferenceTracker,
 
@@ -98,6 +118,14 @@ pub struct Environment<'a> {
 pub struct VariableUsage {
     origin: VariableOrigin,
     location: SrcSpan,
+    /// Alternative patterns where this variables is defined, along with its
+    /// origin:
+    ///
+    /// ```gleam
+    /// [x] | [0, x] | [0, 1, x]
+    /// //        ^           ^
+    /// ```
+    alternatives: Vec<(VariableOrigin, SrcSpan)>,
     usages: usize,
     recursive_usages: usize,
 }
@@ -137,14 +165,14 @@ impl<'a> Environment<'a> {
             unqualified_imported_types: HashMap::new(),
             accessors: prelude.accessors.clone(),
             scope: prelude.values.clone().into(),
-            discarded_names: im::HashMap::new(),
+            discarded_names: imbl::HashMap::new(),
             importable_modules,
             current_module,
             local_variable_usages: vec![HashMap::new()],
             target_support,
             names,
+            deferred_type_variable_aliases: Vec::new(),
             module_type_aliases: HashMap::new(),
-            echo_found: false,
             references: ReferenceTracker::new(),
             dev_dependencies,
         }
@@ -152,7 +180,7 @@ impl<'a> Environment<'a> {
 
     fn build_names(
         prelude: &ModuleInterface,
-        importable_modules: &im::HashMap<EcoString, ModuleInterface>,
+        importable_modules: &imbl::HashMap<EcoString, ModuleInterface>,
     ) -> Names {
         let mut names = Names::new();
 
@@ -189,8 +217,8 @@ impl<'a> Environment<'a> {
 
 #[derive(Debug)]
 pub struct ScopeResetData {
-    local_values: im::HashMap<EcoString, ValueConstructor>,
-    discarded_names: im::HashMap<EcoString, SrcSpan>,
+    local_values: imbl::HashMap<EcoString, ValueConstructor>,
+    discarded_names: imbl::HashMap<EcoString, SrcSpan>,
 }
 
 impl Environment<'_> {
@@ -256,6 +284,38 @@ impl Environment<'_> {
 
     pub fn previous_uid(&self) -> u64 {
         self.previous_id
+    }
+
+    /// Resolve deferred type variable aliases. During `instantiate`, generic
+    /// type variables are replaced with new unbound vars, but those vars may
+    /// later get linked to other vars during unification. This method follows
+    /// the link chains to find the final unbound var IDs and registers the
+    /// original names for them.
+    pub fn resolve_deferred_type_variable_aliases(&mut self) {
+        for (source_id, type_) in self.deferred_type_variable_aliases.drain(..) {
+            if let Some(alias) = self.names.get_type_variable(source_id) {
+                let final_id = Self::resolve_type_var_id(&type_);
+                if let Some(id) = final_id {
+                    // Only register if the target doesn't already have a name.
+                    // This avoids overwriting user-provided names (e.g. from
+                    // annotations) with names from instantiated type parameters.
+                    if self.names.get_type_variable(id).is_none() {
+                        self.names.type_variable_in_scope(id, alias.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Follow link chains in a type to find the final unbound or generic var ID.
+    fn resolve_type_var_id(type_: &Type) -> Option<u64> {
+        match type_ {
+            Type::Var { type_ } => match type_.borrow().deref() {
+                TypeVar::Unbound { id } | TypeVar::Generic { id } => Some(*id),
+                TypeVar::Link { type_ } => Self::resolve_type_var_id(type_),
+            },
+            Type::Named { .. } | Type::Fn { .. } | Type::Tuple { .. } => None,
+        }
     }
 
     /// Create a new unbound type that is a specific type, we just don't
@@ -427,15 +487,28 @@ impl Environment<'_> {
                     }
                 })?;
                 self.references
-                    .register_module_reference(module_name.clone());
-                module.get_public_type(name).ok_or_else(|| {
-                    UnknownTypeConstructorError::ModuleType {
+                    .register_module_reference_by_alias(module_name.clone());
+
+                match module.types.get(name) {
+                    Some(type_info) if type_info.publicity.is_importable() => Ok(type_info),
+                    // If the type belongs to current package, but isn't importable,
+                    // then we produce error message about usage of private type.
+                    Some(_) if self.current_package == module.package => {
+                        Err(UnknownTypeConstructorError::PrivateModuleType {
+                            name: name.clone(),
+                            module_name: module.name.clone(),
+                        })
+                    }
+                    // Otherwise, the type either doesn't exist or is from another
+                    // module, where we do not want to expose information, we produce
+                    // error message about usage of unknown type.
+                    Some(_) | None => Err(UnknownTypeConstructorError::ModuleType {
                         name: name.clone(),
                         module_name: module.name.clone(),
                         type_constructors: module.public_type_names(),
                         imported_type_as_value: false,
-                    }
-                })
+                    }),
+                }
             }
         }
     }
@@ -494,14 +567,15 @@ impl Environment<'_> {
         name: &EcoString,
     ) -> Result<&ValueConstructor, UnknownValueConstructorError> {
         match module {
-            None => self.scope.get(name).ok_or_else(|| {
-                let type_with_name_in_scope = self.module_types.keys().any(|type_| type_ == name);
-                UnknownValueConstructorError::Variable {
+            None => self
+                .scope
+                .get(name)
+                .ok_or_else(|| UnknownValueConstructorError::Variable {
                     name: name.clone(),
                     variables: self.local_value_names(),
-                    type_with_name_in_scope,
-                }
-            }),
+                    type_with_name_in_scope: self.module_types.contains_key(name),
+                    possible_modules: self.get_possible_modules_with_value(name),
+                }),
 
             Some(module_name) => {
                 let (_, module) = self.imported_modules.get(module_name).ok_or_else(|| {
@@ -512,8 +586,8 @@ impl Environment<'_> {
                     }
                 })?;
                 self.references
-                    .register_module_reference(module_name.clone());
-                module.get_public_value(name).ok_or_else(|| {
+                    .register_module_reference_by_alias(module_name.clone());
+                module.get_importable_value(name).ok_or_else(|| {
                     UnknownValueConstructorError::ModuleValue {
                         name: name.clone(),
                         module_name: module.name.clone(),
@@ -523,6 +597,48 @@ impl Environment<'_> {
                 })
             }
         }
+    }
+
+    /// Get the name of modules with a value that can be suggested and matches
+    /// the given `name`
+    ///
+    pub fn get_possible_modules_with_value(&self, name: &EcoString) -> Vec<EcoString> {
+        self.imported_modules
+            .iter()
+            .filter_map(|(module_name, (_, module))| {
+                if module.package == self.current_package {
+                    module.get_importable_value(name).map(|_| module_name)
+                } else {
+                    module.get_public_value(name).map(|_| module_name)
+                }
+            })
+            .cloned()
+            .sorted()
+            .collect_vec()
+    }
+
+    /// Get the name of modules with a function that can be suggested and
+    /// matches the given `name` and `arity`
+    ///
+    pub fn get_possible_modules_with_function(
+        &self,
+        name: &EcoString,
+        arity: usize,
+    ) -> Vec<EcoString> {
+        self.imported_modules
+            .iter()
+            .filter_map(|(module_name, (_, module))| {
+                if module.package == self.current_package {
+                    module
+                        .get_importable_function(name, arity)
+                        .map(|_| module_name)
+                } else {
+                    module.get_public_function(name, arity).map(|_| module_name)
+                }
+            })
+            .cloned()
+            .sorted()
+            .collect_vec()
     }
 
     pub fn get_type_variants_fields(
@@ -551,7 +667,7 @@ impl Environment<'_> {
             self.scope.get(&variant.name)
         } else {
             let (_, module) = self.imported_modules.get(module)?;
-            module.get_public_value(&variant.name)
+            module.get_importable_value(&variant.name)
         }
     }
 
@@ -564,7 +680,7 @@ impl Environment<'_> {
     pub fn instantiate(
         &mut self,
         t: Arc<Type>,
-        ids: &mut im::HashMap<u64, Arc<Type>>,
+        ids: &mut imbl::HashMap<u64, Arc<Type>>,
         hydrator: &Hydrator,
     ) -> Arc<Type> {
         match t.deref() {
@@ -609,6 +725,12 @@ impl Environment<'_> {
                                 // Check this in the hydrator, i.e. is it a created type
                                 let v = self.new_unbound_var();
                                 let _ = ids.insert(*id, v.clone());
+
+                                // Record this pairing so that after type checking
+                                // we can resolve any link chains and register the
+                                // original name for the final unbound variable.
+                                self.deferred_type_variable_aliases.push((*id, v.clone()));
+
                                 return v;
                             }
                         }
@@ -651,6 +773,7 @@ impl Environment<'_> {
             location,
             usages: 0,
             recursive_usages,
+            alternatives,
         }) = self
             .local_variable_usages
             .last_mut()
@@ -660,6 +783,7 @@ impl Environment<'_> {
                 VariableUsage {
                     origin,
                     location,
+                    alternatives: vec![],
                     usages: 0,
                     recursive_usages: 0,
                 },
@@ -672,11 +796,35 @@ impl Environment<'_> {
                 VariableUsage {
                     origin,
                     location,
+                    alternatives,
                     usages: 0,
                     recursive_usages,
                 },
             );
             self.handle_unused_variables(unused, problems);
+        }
+    }
+
+    /// Push new alternative pattern to variable usage, so that we can mark all
+    /// alternatives as unused. For example,
+    ///
+    /// ```gleam
+    /// [x] | [0, x] | [0, 1, x]
+    /// //        ^           ^ These can be pushed with this method
+    /// ```
+    pub fn push_alternative(
+        &mut self,
+        name: &EcoString,
+        alternative_origin: VariableOrigin,
+        alternative_location: SrcSpan,
+    ) {
+        if let Some(VariableUsage { alternatives, .. }) = self
+            .local_variable_usages
+            .iter_mut()
+            .rev()
+            .find_map(|scope| scope.get_mut(name))
+        {
+            alternatives.push((alternative_origin, alternative_location));
         }
     }
 
@@ -822,12 +970,18 @@ impl Environment<'_> {
         for VariableUsage {
             origin,
             location,
+            alternatives,
             usages,
             recursive_usages,
         } in unused.into_values()
         {
             if usages == 0 {
                 problems.warning(Warning::UnusedVariable { location, origin });
+
+                // Produce warning for declarations in each alternative pattern
+                for (origin, location) in alternatives {
+                    problems.warning(Warning::UnusedVariable { location, origin });
+                }
             }
             // If the function parameter is actually used somewhere, but all the
             // usages are just passing it along in a recursive call, then it
@@ -994,7 +1148,7 @@ pub fn unify(t1: Arc<Type>, t2: Arc<Type>) -> Result<(), UnifyError> {
                 // of the function, in which case accept the extra link.
                 if let Ok(mut type_) = type_.try_borrow_mut() {
                     *type_ = TypeVar::Link {
-                        type_: collapse_links(t.clone()),
+                        type_: collapse_links(t),
                     }
                 }
                 Ok(())
@@ -1067,7 +1221,7 @@ pub fn unify(t1: Arc<Type>, t2: Arc<Type>) -> Result<(), UnifyError> {
                     arguments1.len(),
                     &t2,
                     arguments2.len(),
-                ))?
+                ))?;
             }
 
             for (i, (a, b)) in arguments1.iter().zip(arguments2).enumerate() {

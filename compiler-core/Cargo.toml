@@ -1,6 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 [package]
 name = "gleam-core"
-version = "1.14.0"
+version = "1.19.1"
 authors = ["Louis Pilfold <louis@lpil.uk>"]
 edition = "2024"
 license = "Apache-2.0"
@@ -10,8 +13,6 @@ license = "Apache-2.0"
 codespan-reporting = "0"
 # Graph data structures
 petgraph = "0.8"
-# Cap'n Proto binary format runtime
-capnp = "0"
 # Template rendering
 askama = "0"
 # Markdown parsing
@@ -23,47 +24,49 @@ dirs-next = "2"
 # SPDX license parsing
 spdx = "0"
 # Binary format de-serialization
-bincode = { version = "2", features = ["alloc", "serde"] }
+bitcode = { version = "0.6", features = ["serde"] }
 # cross platform single glob and glob set matching
 globset = { version = "0", features = ["serde1"] }
 # Checksums
-xxhash-rust = { version = "0", features = ["xxh3"] }
+xxhash-rust.workspace = true
 # Pubgrub dependency resolution algorithm
 pubgrub = "0.3"
 # Used for converting absolute path to relative path
 pathdiff = { version = "0", features = ["camino"] }
 # Memory arena using ids rather than references
 id-arena = "2"
-# Unicode grapheme traversal
-unicode-segmentation = "1.12.0"
 # Bijective (bi-directional) hashmap
-bimap = "0.6.3"
-# Parsing of arbitrary width int values
-num-bigint = { version = "0.4.6", features = ["serde"] }
-num-traits = "0.2.19"
+bimap = { version = "0.6.3", features = ["serde"] }
 # Encryption
-age = { version = "0.11", features = ["armor"] }
+age = { version = "0.12", features = ["armor"] }
 radix_trie = "0.3"
 # Ensuring recursive type-checking doesn't stack overflow
 stacker = "0.1.21"
 # Manipulating bit arrays
 bitvec = { version = "1", features = ["serde"] }
+# Sourcemap generation
+sourcemap = "9"
+indexmap = "2.12.1"
 # Generate and edit wasm modules
 walrus = "0.26.1"
 wasmparser = "0.240.0"
-# Insertion-order preserving hashmap
-indexmap = "2"
 
+src-span.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
 async-trait.workspace = true
 base16.workspace = true
 camino = { workspace = true, features = ["serde1"] }
+clap = { workspace = true, features = ["derive"] }
 debug-ignore.workspace = true
 ecow = { workspace = true, features = ["serde"] }
 flate2.workspace = true
 futures.workspace = true
 hexpm = { path = "../hexpm" }
+pretty-arena = { path = "../pretty-arena" }
+erlang-generation = { path = "../erlang-generation" }
 http.workspace = true
-im.workspace = true
+imbl.workspace = true
 itertools.workspace = true
 lsp-server.workspace = true
 lsp-types.workspace = true
@@ -77,16 +80,18 @@ thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
 vec1.workspace = true
-
-[build-dependencies]
-# Data (de)serialisation
-serde_derive = "1"
-# Cap'n Proto binary format codegen
-capnpc = "0"
-camino = { workspace = true, features = ["serde1"] }
+unicode-segmentation.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
 insta.workspace = true
 # Random value generation
-rand = "0.9"
+rand = "0.10"
+# Time types
+time = "0.3"
+ignore.workspace = true
+
+[build-dependencies]
+# Data (de)serialisation
+serde_derive = "1"
+camino = { workspace = true, features = ["serde1"] }

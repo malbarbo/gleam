@@ -1,17 +1,20 @@
-use ecow::{EcoString, eco_format};
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
+use ecow::EcoString;
 use hexpm::version::Version;
+use src_span::LineNumbers;
 
 use super::*;
 use crate::{
     Warning,
     build::SourceFingerprint,
+    build::package_compiler::CacheMetadata,
     io::{FileSystemWriter, memory::InMemoryFileSystem},
-    line_numbers,
-    parse::extra::ModuleExtra,
-    warning::NullWarningEmitterIO,
+    type_::References,
 };
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[derive(Debug)]
 struct LoaderTestOutput {
@@ -36,7 +39,7 @@ fn write_cache(
     deps: Vec<(EcoString, SrcSpan)>,
     src: &str,
 ) {
-    let line_numbers = line_numbers::LineNumbers::new(src);
+    let line_numbers = LineNumbers::new(src);
     let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
     let cache_metadata = CacheMetadata {
         mtime,
@@ -50,42 +53,46 @@ fn write_cache(
     let path = Utf8Path::new("/artefact").join(format!("{artefact_name}.cache_meta"));
     fs.write_bytes(&path, &cache_metadata.to_binary()).unwrap();
 
-    let cache = crate::type_::ModuleInterface {
+    let cache = type_::ModuleInterface {
         name: name.into(),
         origin: Origin::Src,
         package: "my_package".into(),
-        types: Default::default(),
-        types_value_constructors: Default::default(),
-        values: Default::default(),
-        accessors: Default::default(),
+        types: HashMap::new(),
+        types_value_constructors: HashMap::new(),
+        values: HashMap::new(),
+        accessors: HashMap::new(),
         line_numbers: line_numbers.clone(),
         is_internal: false,
         src_path: Utf8PathBuf::from(format!("/src/{}.gleam", name)),
         warnings: vec![],
         minimum_required_version: Version::new(0, 1, 0),
-        type_aliases: Default::default(),
-        documentation: Default::default(),
-        contains_echo: false,
-        references: Default::default(),
-        inline_functions: Default::default(),
+        type_aliases: HashMap::new(),
+        documentation: vec![],
+        references: References::default(),
     };
     let path = Utf8Path::new("/artefact").join(format!("{artefact_name}.cache"));
-    fs.write_bytes(
-        &path,
-        &metadata::ModuleEncoder::new(&cache).encode().unwrap(),
-    )
-    .unwrap();
+    fs.write_bytes(&path, &metadata::encode(&cache).unwrap())
+        .unwrap();
 }
 
 fn run_loader(fs: InMemoryFileSystem, root: &Utf8Path, artefact: &Utf8Path) -> LoaderTestOutput {
-    let mut defined = im::HashMap::new();
+    run_loader_with_mode(fs, root, artefact, Mode::Dev)
+}
+
+fn run_loader_with_mode(
+    fs: InMemoryFileSystem,
+    root: &Utf8Path,
+    artefact: &Utf8Path,
+    mode: Mode,
+) -> LoaderTestOutput {
+    let mut defined = imbl::HashMap::new();
     let ids = UniqueIdGenerator::new();
     let (emitter, warnings) = WarningEmitter::vector();
 
     let loader = PackageLoader {
         io: fs.clone(),
         ids,
-        mode: Mode::Dev,
+        mode,
         paths: ProjectPaths::new(root.into()),
         warnings: &emitter,
         codegen: CodegenRequired::Yes,
@@ -131,28 +138,40 @@ fn one_src_module() {
 }
 
 #[test]
-fn one_test_module() {
+fn all_folders_are_compiled_in_dev_mode() {
     let fs = InMemoryFileSystem::new();
     let root = Utf8Path::new("/");
     let artefact = Utf8Path::new("/artefact");
 
-    write_src(&fs, "/test/main.gleam", 0, "const x = 1");
+    write_src(&fs, "/src/one.gleam", 0, "const x = 1");
+    write_src(&fs, "/test/two.gleam", 0, "const x = 1");
+    write_src(&fs, "/dev/three.gleam", 0, "const x = 1");
 
-    let loaded = run_loader(fs, root, artefact);
-    assert_eq!(loaded.to_compile, vec![EcoString::from("main")]);
+    let mut loaded = run_loader_with_mode(fs, root, artefact, Mode::Dev);
+    loaded.to_compile.sort();
+    assert_eq!(
+        loaded.to_compile,
+        vec![
+            EcoString::from("one"),
+            EcoString::from("three"),
+            EcoString::from("two"),
+        ]
+    );
     assert!(loaded.cached.is_empty());
 }
 
 #[test]
-fn one_dev_module() {
+fn only_src_modules_are_compiled_in_prod_mode() {
     let fs = InMemoryFileSystem::new();
     let root = Utf8Path::new("/");
     let artefact = Utf8Path::new("/artefact");
 
-    write_src(&fs, "/dev/main.gleam", 0, "const x = 1");
+    write_src(&fs, "/src/one.gleam", 0, "const x = 1");
+    write_src(&fs, "/test/two.gleam", 0, "const x = 1");
+    write_src(&fs, "/dev/three.gleam", 0, "const x = 1");
 
-    let loaded = run_loader(fs, root, artefact);
-    assert_eq!(loaded.to_compile, vec![EcoString::from("main")]);
+    let loaded = run_loader_with_mode(fs, root, artefact, Mode::Prod);
+    assert_eq!(loaded.to_compile, vec![EcoString::from("one")]);
     assert!(loaded.cached.is_empty());
 }
 

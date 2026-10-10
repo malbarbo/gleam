@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 #![allow(clippy::unwrap_used)]
 use std::panic::PanicHookInfo;
 
 pub fn add_handler() {
     std::panic::set_hook(Box::new(move |info: &PanicHookInfo<'_>| {
-        print_compiler_bug_message(info)
+        print_compiler_bug_message(info);
     }));
 }
 

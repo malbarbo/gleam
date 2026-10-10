@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
 use crate::{
-    ast::SrcSpan,
     build,
     config::{PackageConfig, Repository},
-    line_numbers::LineNumbers,
     paths::ProjectPaths,
 };
+use src_span::{LineNumbers, SrcSpan};
 
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 
@@ -64,7 +65,7 @@ impl SourceLinker {
                     "-".into(),
                 )),
                 Repository::Tangled { user, repo, .. } => Some((
-                    format!("https://tangled.sh/{user}/{repo}/tree/{tag}/{path_in_repo}#L"),
+                    format!("https://tangled.org/{user}/{repo}/blob/{tag}/{path_in_repo}#L"),
                     "-".into(),
                 )),
                 Repository::Gitea {

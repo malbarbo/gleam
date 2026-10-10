@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2022 The Gleam contributors
+
 use crate::{assert_error, assert_infer, assert_module_error, assert_module_infer, assert_warning};
 
 #[test]
@@ -490,6 +493,22 @@ use <- x()
 1 + 2.0
 3.0 + 4
 5
+"#
+    );
+}
+
+#[test]
+fn discard_pattern_type_annotation_is_checked() {
+    assert_module_error!(
+        r#"
+fn wibble(f: fn(Int, String) -> Nil) -> Nil {
+  f(1, "")
+}
+
+pub fn main() {
+  use _a: Int, _b: Float <- wibble()
+  Nil
+}
 "#
     );
 }

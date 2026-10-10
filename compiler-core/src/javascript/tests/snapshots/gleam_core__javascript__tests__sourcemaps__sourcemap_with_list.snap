@@ -1,0 +1,61 @@
+---
+source: compiler-core/src/javascript/tests/sourcemaps.rs
+expression: "\npub fn go(x) {\n  [1, 2, 3]\n}\n"
+---
+----- SOURCE CODE
+0 |
+1 |pub fn go(x) {
+2 |  [1, 2, 3]
+3 |}
+
+----- COMPILED JAVASCRIPT
+0 |//# sourceMappingURL=mod.mjs.map
+1 |import { List$Empty$const as $List$Empty$const, prepend as listPrepend } from "../gleam.mjs";
+2 |
+3 |export function go(x) {
+4 |  return listPrepend(1, listPrepend(2, listPrepend(3, $List$Empty$const)));
+5 |}
+
+----- SOURCE MAP
+File: my/mod.mjs
+Sources: mod.gleam
+Mappings:
+----- 
+
+
+⏷
+//# sourceMappingURL=mod.mjs.map
+import { List$Empty$const as $List$Empty$const, prepend as listPrepend } from "../gleam.mjs";
+
+
+----- 
+pub fn go(x) {
+  
+⏷
+export function go(x) {
+  
+----- 
+[
+⏷
+return listPrepend(
+----- 
+1, 
+⏷
+1, listPrepend(
+----- 
+2, 
+⏷
+2, listPrepend(
+----- 
+3]
+}
+⏷
+3, $List$Empty$const)));
+}
+----- 
+
+
+⏷
+
+
+-----

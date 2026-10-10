@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2025 The Gleam contributors
+
 use ecow::EcoString;
 use futures::future;
 use gleam_core::{
@@ -19,8 +22,9 @@ use crate::{
 
 use super::{
     CheckMajorVersions, LocalPackages, UseManifest, add_missing_packages, is_same_requirements,
-    lookup_package, provide_git_package, provide_local_package, read_manifest_from_disc,
-    remove_extra_packages, unlock_packages,
+    lookup_hex_package, path_dependency_configs_unchanged, provide_git_package,
+    provide_local_package, read_manifest_from_disc, remove_extra_packages, unlock_packages,
+    verified_releases,
 };
 
 /// Verifies that all specified packages exist in the manifest.
@@ -108,16 +112,20 @@ where
         let (requirements_changed, manifest_for_resolver) = match self.use_manifest {
             UseManifest::No => (true, None),
             UseManifest::Yes => {
+                let config_dependencies = config.all_direct_dependencies()?;
                 let same_requirements = is_same_requirements(
                     &existing_manifest.requirements,
-                    &config.all_direct_dependencies()?,
+                    &config_dependencies,
                     paths.root(),
                 )?;
 
                 // If the manifest is to be used and the requirements have not changed then there's
                 // no point in performing resolution, it'll always result in the same versions
                 // already specified in the manifest.
-                if packages_to_update.is_empty() && same_requirements {
+                if packages_to_update.is_empty()
+                    && same_requirements
+                    && path_dependency_configs_unchanged(&config_dependencies, paths)?
+                {
                     return Ok(Resolved::no_change(existing_manifest));
                 }
 
@@ -163,15 +171,58 @@ where
         let mut config = crate::config::read(paths.root_config())?;
         let project_name = config.name.clone();
 
-        // Insert the new packages to add, if it exists
-        if let Some((packages, dev)) = new_package {
-            for (package, requirement) in packages {
-                if dev {
-                    _ = config.dev_dependencies.insert(package, requirement);
-                } else {
-                    _ = config.dependencies.insert(package, requirement);
-                };
+        // Insert the new packages to add, if there's any
+        match new_package {
+            Some((packages_to_add, false)) => {
+                let mut already_existing_dev_packages = vec![];
+                for (package, requirement) in packages_to_add {
+                    if config.dev_dependencies.contains_key(&package) {
+                        already_existing_dev_packages.push(package);
+                    } else {
+                        _ = config.dependencies.insert(package, requirement);
+                    }
+                }
+
+                // If a dependency we want to add is a dev dependency already,
+                // then we want the whole process to fail and show an error
+                // message explaining why.
+                if !already_existing_dev_packages.is_empty() {
+                    return Err(Error::AddedDependenciesAreAlreadyDevDependencies {
+                        packages: already_existing_dev_packages,
+                    });
+                }
             }
+
+            Some((packages_to_add, true)) => {
+                let mut already_existing_packages = vec![];
+
+                for (package, requirement) in packages_to_add {
+                    match config.dependencies.get(&package) {
+                        // If the package exists already as a regular dependency
+                        // and it has the exact same requirement, then we can safely
+                        // ignore it. For example, we might have ran `gleam add wibble@1`
+                        // and later on run `gleam add wibble@1 --dev`.
+                        // This would do nothing!
+                        Some(existing_requirement) if *existing_requirement == requirement => (),
+
+                        // However, if the requirement is incompatible, we do want
+                        // to show an error. We can't just silently ignore it
+                        Some(_) => already_existing_packages.push(package),
+
+                        // If the package is not a dependency already we add it.
+                        None => {
+                            _ = config.dev_dependencies.insert(package, requirement);
+                        }
+                    }
+                }
+
+                if !already_existing_packages.is_empty() {
+                    return Err(Error::AddedDevDependenciesAreAlreadyDependencies {
+                        packages: already_existing_packages,
+                    });
+                }
+            }
+            None => (),
         }
 
         // Determine what versions we need
@@ -203,8 +254,9 @@ where
         self.telemetry
             .resolved_package_versions(&resolved.package_changes);
 
-        // If requested to do so, check if there are major upgrades that could be performed with
-        // more relaxed version requirements, and inform the user if so.
+        // If requested to do so, check if there are major upgrades that could
+        // be performed with more relaxed version requirements, and inform the
+        // user if so.
         if let CheckMajorVersions::Yes = self.check_major_versions {
             let major_versions_available = dependency::check_for_major_version_updates(
                 &resolved.manifest,
@@ -252,7 +304,7 @@ where
                     &mut provided_packages,
                     &mut vec![],
                 )?,
-                Requirement::Git { git, ref_ } => {
+                Requirement::Git { git, ref_, path } => {
                     // If this package is locked and we already resolved a commit
                     // hash for it, we want to use that hash rather than pulling
                     // the latest commit.
@@ -275,6 +327,7 @@ where
                         name.clone(),
                         &git,
                         ref_to_use,
+                        path,
                         project_paths,
                         &mut provided_packages,
                         &mut Vec::new(),
@@ -298,12 +351,30 @@ where
             &locked,
         )?;
 
+        let verified_releases =
+            verified_releases(&self.package_fetcher, &resolved, &provided_packages)?;
+
         // Convert the hex packages and local packages into manifest packages
-        let manifest_packages = self.runtime.block_on(future::try_join_all(
-            resolved
-                .into_iter()
-                .map(|(name, version)| lookup_package(name, version, &provided_packages)),
-        ))?;
+        let credentials = crate::hex::read_env_readonly_api_key();
+        let manifest_packages =
+            self.runtime
+                .block_on(future::try_join_all(resolved.into_iter().map(
+                    |(name, version)| async {
+                        // Local and git packages are provided directly; hex packages
+                        // are looked up and pinned to their signed release metadata.
+                        match provided_packages.get(name.as_str()) {
+                            Some(package) => Ok(package.to_manifest_package(name.as_str())),
+                            None => {
+                                let verified = verified_releases
+                                    .get(&name)
+                                    .cloned()
+                                    .expect("verified_releases covers every resolved hex package");
+                                lookup_hex_package(name, version, verified, credentials.as_ref())
+                                    .await
+                            }
+                        }
+                    },
+                )))?;
 
         let manifest = Manifest {
             packages: manifest_packages,

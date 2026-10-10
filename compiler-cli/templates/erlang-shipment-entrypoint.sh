@@ -1,4 +1,5 @@
 #!/bin/sh
+
 set -eu
 
 PACKAGE=$PACKAGE_NAME_FROM_GLEAM

@@ -2,6 +2,7 @@
 source: language-server/src/tests/hover.rs
 expression: "\nimport wibble\n"
 ---
+
 import wibble
 ▔▔▔▔▔▔▔↑▔▔▔▔▔
 
@@ -14,4 +15,4 @@ wibble
  Here is some documentation about it.
  This module does stuff
 
-View on [HexDocs](https://hexdocs.pm/hex/wibble.html)
+View on [HexDocs](https://hex.hexdocs.pm/wibble.html)

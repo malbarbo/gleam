@@ -1,8 +1,6 @@
 ---
 source: compiler-core/src/javascript/tests/case_clause_guards.rs
-assertion_line: 524
 expression: "pub fn func(x) {\n    case [] {\n        _ if [] == [ Ok ] -> True\n        _ -> False\n    }\n}\n    "
-snapshot_kind: text
 ---
 ----- SOURCE CODE
 pub fn func(x) {
@@ -14,11 +12,18 @@ pub fn func(x) {
     
 
 ----- COMPILED JAVASCRIPT
-import { Ok, toList, isEqual } from "../gleam.mjs";
+import {
+  Ok,
+  Empty as $Empty,
+  List$Empty$const as $List$Empty$const,
+  prepend as listPrepend,
+} from "../gleam.mjs";
 
 export function func(x) {
-  let $ = toList([]);
-  if (isEqual(toList([]), toList([(var0) => { return new Ok(var0); }]))) {
+  let $ = $List$Empty$const;
+  if (
+    listPrepend((var0) => { return new Ok(var0); }, $List$Empty$const) instanceof $Empty
+  ) {
     return true;
   } else {
     return false;

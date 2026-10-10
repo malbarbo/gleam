@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Gleam contributors
+
+name = "shipment_test"
+version = "0.1.0"
+
+[dependencies]
+gleam_stdlib = "~> 0.34"
+# hpack_erl has otp_app = "hpack" (different from package name)
+# This tests that packages with different OTP app names are included correctly
+hpack_erl = "~> 0.3"
+
+[dev_dependencies]
+gleeunit = "~> 1.0"

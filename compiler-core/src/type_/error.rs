@@ -1,21 +1,24 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 use super::{
     FieldAccessUsage,
     expression::{ArgumentKind, CallKind},
 };
 use crate::{
-    ast::{BinOp, BitArraySegmentTruncation, Layer, SrcSpan, TodoKind},
+    ast::{BinOp, BitArraySegmentTruncation, Layer, TodoKind},
     build::Target,
     exhaustiveness::ImpossibleBitArraySegmentPattern,
     parse::LiteralFloatValue,
-    type_::{Type, expression::ComparisonOutcome},
+    type_::{Type, expression::ComparisonOutcome, printer::Names},
 };
 
-use camino::Utf8PathBuf;
 use ecow::EcoString;
 use hexpm::version::Version;
 use num_bigint::BigInt;
 #[cfg(test)]
 use pretty_assertions::assert_eq;
+use src_span::SrcSpan;
 use std::sync::Arc;
 
 /// Errors and warnings discovered when compiling a module.
@@ -28,26 +31,27 @@ pub struct Problems {
 
 impl Problems {
     pub fn new() -> Self {
-        Default::default()
+        Self::default()
     }
 
     /// Sort the warnings and errors by their location.
     ///
     pub fn sort(&mut self) {
-        self.errors.sort_by_key(|e| e.start_location());
-        self.warnings.sort_by_key(|w| w.location().start);
+        self.errors.sort_by_key(|error| error.start_location());
+        self.warnings
+            .sort_by_key(|warning| warning.location().start);
     }
 
     /// Register an error.
     ///
     pub fn error(&mut self, error: Error) {
-        self.errors.push(error)
+        self.errors.push(error);
     }
 
     /// Register a warning.
     ///
     pub fn warning(&mut self, warning: Warning) {
-        self.warnings.push(warning)
+        self.warnings.push(warning);
     }
 
     /// Take all the errors, leaving an empty vector in its place.
@@ -167,12 +171,22 @@ pub enum Error {
         /// this will contain its location.
         discarded_location: Option<SrcSpan>,
         type_with_name_in_scope: bool,
+        /// Filled with the name of imported modules when the module has public value
+        /// with the same name as this variable
+        possible_modules: Vec<EcoString>,
     },
 
     UnknownType {
         location: SrcSpan,
         name: EcoString,
         hint: UnknownTypeHint,
+        parameter_names: Vec<EcoString>,
+    },
+
+    /// This happens when someone writes `module_name.` with no type name after
+    /// it.
+    QualifiedTypeMissingName {
+        location: SrcSpan,
     },
 
     UnknownModule {
@@ -680,6 +694,59 @@ pub enum Error {
     LowercaseBoolPattern {
         location: SrcSpan,
     },
+
+    /// When we try writing a record update using a variant that has no
+    /// labelled fields.
+    ///
+    /// ```gleam
+    /// pub type Wibble {
+    ///   Wibble(Int, String)
+    /// }
+    ///
+    /// Wibble(..one)
+    /// //^^^^ Wibble has no fields, record update makes no sense here!
+    /// ```
+    ///
+    RecordUpdateVariantWithNoFields {
+        location: SrcSpan,
+    },
+    /// When a constant contains a todo.
+    /// Unlike todo _expressions_, todo constants are a compile time error: we
+    /// want the developer to take care of them before they can run their code.
+    TodoConstant {
+        location: SrcSpan,
+    },
+    /// This happens when we use an invalid binary operator in a constant.
+    /// For example as of Gleam 1.18 float addition is not supported:
+    ///
+    /// ```gleam
+    /// pub const wibble = 1.1 +. 1.3
+    /// //                     ^^ Error!
+    /// ```
+    InvalidConstantBinaryOperator {
+        operator_start: u32,
+        operator: BinOp,
+    },
+
+    /// This happens when we try to use a private value from another module
+    /// from the same package. From another package an "unknown value"
+    /// error is unsed instead, to avoid sharing information about the
+    /// internals of the other package.
+    PrivateValueUse {
+        location: SrcSpan,
+        name: EcoString,
+        module_name: EcoString,
+    },
+
+    /// This happens when we try to use a private type from another module
+    /// from the same package. From another package an "unknown type"
+    /// error is unsed instead, to avoid sharing information about the
+    /// internals of the other package.
+    PrivateTypeUse {
+        location: SrcSpan,
+        name: EcoString,
+        module_name: EcoString,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -777,8 +844,25 @@ pub enum VariableSyntax {
     Variable(EcoString),
     /// A variable from label shorthand syntax, which can be ignored with an underscore: `label: _`
     LabelShorthand(EcoString),
-    /// A variable from an assignment pattern, which can be ignored by removing `as name`,
-    AssignmentPattern,
+    /// A variable from an assignment pattern, which can be ignored by removing `as name`.
+    AssignmentPattern {
+        /// Assignment name.
+        name: EcoString,
+        /// Location of assignment from the end of the pattern to the end of
+        /// assignment itself, so it includes the `as` keyword.
+        /// For example,
+        ///
+        /// ```gleam
+        /// case x {
+        ///   []     as wibble -> todo
+        ///   //^^^^^^^^^^^^^^ This is location
+        ///
+        ///   [..] as wibble -> todo
+        ///   //  ^^^^^^^^^^ This is location
+        /// }
+        /// ```
+        location: SrcSpan,
+    },
     /// A variable generated by the compiler. This should never need to be ignored
     Generated,
 }
@@ -810,7 +894,9 @@ impl VariableOrigin {
             VariableSyntax::LabelShorthand(label) => Some(format!(
                 "You can ignore it with an underscore: `{label}: _`."
             )),
-            VariableSyntax::AssignmentPattern => Some("You can safely remove it.".to_string()),
+            VariableSyntax::AssignmentPattern { .. } => {
+                Some("You can safely remove it.".to_string())
+            }
             VariableSyntax::Generated => None,
         }
     }
@@ -819,6 +905,16 @@ impl VariableOrigin {
         Self {
             syntax: VariableSyntax::Generated,
             declaration: VariableDeclaration::Generated,
+        }
+    }
+
+    pub fn is_generated(&self) -> bool {
+        match self.syntax {
+            VariableSyntax::Generated => true,
+
+            VariableSyntax::Variable(..)
+            | VariableSyntax::LabelShorthand(..)
+            | VariableSyntax::AssignmentPattern { .. } => false,
         }
     }
 
@@ -832,6 +928,17 @@ impl VariableOrigin {
             | VariableDeclaration::Generated => false,
         }
     }
+
+    /// Return name of variable. If it was generated, `None` is returned.
+    pub fn name(&self) -> Option<EcoString> {
+        match &self.syntax {
+            VariableSyntax::Variable(name)
+            | VariableSyntax::LabelShorthand(name)
+            | VariableSyntax::AssignmentPattern { name, location: _ } => Some(name.clone()),
+
+            VariableSyntax::Generated => None,
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -840,6 +947,7 @@ pub enum Warning {
         kind: TodoKind,
         location: SrcSpan,
         type_: Arc<Type>,
+        names: Box<Names>,
     },
 
     ImplicitlyDiscardedResult {
@@ -858,7 +966,20 @@ pub enum Warning {
     },
 
     AllFieldsRecordUpdate {
+        /// The location of the entire redundant record expression.
         location: SrcSpan,
+        /// The location covering the record spread, including any comma that
+        /// might come after it:
+        ///
+        /// ```gleam
+        /// Wibble(..wibble, a: 1)
+        /// //     ^^^^^^^^^ This!
+        /// ```
+        ///
+        /// You might wonder why include the comma location as well, that's
+        /// what's most handy for the language server to suggest automatic
+        /// fixes to remove the record!
+        record_location: SrcSpan,
     },
 
     UnusedType {
@@ -990,23 +1111,6 @@ pub enum Warning {
         location: SrcSpan,
     },
 
-    /// This happens when an internal type is accidentally exposed in the public
-    /// API. Since internal types are excluded from documentation, completions
-    /// and the package interface, this would lead to poor developer experience.
-    ///
-    /// ```gleam
-    /// @internal type Wibble
-    ///
-    /// pub fn wibble(thing: Wibble) { todo }
-    /// //            ^^^^^^^^^^^^^ There would be no documentation
-    /// //                          explaining what `Wibble` is in the
-    /// //                          package's doc site.
-    /// ```
-    InternalTypeLeak {
-        location: SrcSpan,
-        leaked: Type,
-    },
-
     RedundantAssertAssignment {
         location: SrcSpan,
     },
@@ -1133,6 +1237,27 @@ pub enum Warning {
     UnusedRecursiveArgument {
         location: SrcSpan,
     },
+    /// This happens when destructuring a bit array integer segment with a size
+    /// that is bigger than 52 bits.
+    /// ```gleam
+    /// <<n:size(125)>>
+    /// ```
+    /// On the JS target this would try and build an integer with 152 bits,
+    /// while the maximum size is 52 bits, resulting in some confusing
+    /// truncations.
+    ///
+    JavaScriptBitArrayUnsafeInt {
+        location: SrcSpan,
+        size: BigInt,
+    },
+
+    PipeIntoCallWhichReturnsFunction {
+        location: SrcSpan,
+    },
+
+    EmptyStringBitArraySegment {
+        location: SrcSpan,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -1178,6 +1303,7 @@ pub enum FeatureKind {
     ExternalCustomType,
     ConstantRecordUpdate,
     ExpressionInSegmentSize,
+    ConstantListWithTail,
 }
 
 impl FeatureKind {
@@ -1216,6 +1342,8 @@ impl FeatureKind {
             FeatureKind::ExternalCustomType | FeatureKind::ConstantRecordUpdate => {
                 Version::new(1, 14, 0)
             }
+
+            FeatureKind::ConstantListWithTail => Version::new(1, 16, 0),
         }
     }
 }
@@ -1334,10 +1462,16 @@ impl Error {
             | Error::PrivateOpaqueType { location }
             | Error::SrcImportingDevDependency { location, .. }
             | Error::ExternalTypeWithConstructors { location, .. }
-            | Error::LowercaseBoolPattern { location } => location.start,
+            | Error::RecordUpdateVariantWithNoFields { location }
+            | Error::QualifiedTypeMissingName { location }
+            | Error::TodoConstant { location }
+            | Error::LowercaseBoolPattern { location }
+            | Error::PrivateValueUse { location, .. }
+            | Error::PrivateTypeUse { location, .. } => location.start,
             Error::UnknownLabels { unknown, .. } => {
                 unknown.iter().map(|(_, s)| s.start).min().unwrap_or(0)
             }
+            Error::InvalidConstantBinaryOperator { operator_start, .. } => *operator_start,
             Error::ReservedModuleName { .. } => 0,
             Error::KeywordInModuleName { .. } => 0,
         }
@@ -1357,14 +1491,6 @@ impl Error {
 }
 
 impl Warning {
-    pub fn into_warning(self, path: Utf8PathBuf, src: EcoString) -> crate::Warning {
-        crate::Warning::Type {
-            path,
-            src,
-            warning: self,
-        }
-    }
-
     pub(crate) fn location(&self) -> SrcSpan {
         match self {
             Warning::Todo { location, .. }
@@ -1390,7 +1516,6 @@ impl Warning {
             | Warning::CaseMatchOnLiteralCollection { location, .. }
             | Warning::CaseMatchOnLiteralValue { location, .. }
             | Warning::OpaqueExternalType { location, .. }
-            | Warning::InternalTypeLeak { location, .. }
             | Warning::RedundantAssertAssignment { location, .. }
             | Warning::AssertAssignmentOnImpossiblePattern { location, .. }
             | Warning::TodoOrPanicUsedAsFunction { location, .. }
@@ -1406,7 +1531,10 @@ impl Warning {
                 second: location, ..
             }
             | Warning::RedundantComparison { location, .. }
-            | Warning::UnusedRecursiveArgument { location, .. } => *location,
+            | Warning::JavaScriptBitArrayUnsafeInt { location, .. }
+            | Warning::UnusedRecursiveArgument { location, .. }
+            | Warning::PipeIntoCallWhichReturnsFunction { location }
+            | Warning::EmptyStringBitArraySegment { location } => *location,
         }
     }
 
@@ -1421,6 +1549,7 @@ pub enum UnknownValueConstructorError {
         name: EcoString,
         variables: Vec<EcoString>,
         type_with_name_in_scope: bool,
+        possible_modules: Vec<EcoString>,
     },
 
     Module {
@@ -1446,12 +1575,14 @@ pub fn convert_get_value_constructor_error(
             name,
             variables,
             type_with_name_in_scope,
+            possible_modules,
         } => Error::UnknownVariable {
             location,
             name,
             variables,
             discarded_location: None,
             type_with_name_in_scope,
+            possible_modules,
         },
 
         UnknownValueConstructorError::Module { name, suggestions } => Error::UnknownModule {
@@ -1524,18 +1655,25 @@ pub enum UnknownTypeConstructorError {
         type_constructors: Vec<EcoString>,
         imported_type_as_value: bool,
     },
+
+    PrivateModuleType {
+        name: EcoString,
+        module_name: EcoString,
+    },
 }
 
 pub fn convert_get_type_constructor_error(
-    e: UnknownTypeConstructorError,
+    error: UnknownTypeConstructorError,
     location: &SrcSpan,
     module_location: Option<SrcSpan>,
+    parameter_names: Vec<EcoString>,
 ) -> Error {
-    match e {
+    match error {
         UnknownTypeConstructorError::Type { name, hint } => Error::UnknownType {
             location: *location,
             name,
             hint,
+            parameter_names,
         },
 
         UnknownTypeConstructorError::Module { name, suggestions } => Error::UnknownModule {
@@ -1556,6 +1694,14 @@ pub fn convert_get_type_constructor_error(
             type_constructors,
             value_with_same_name: imported_type_as_value,
         },
+
+        UnknownTypeConstructorError::PrivateModuleType { name, module_name } => {
+            Error::PrivateTypeUse {
+                location: *location,
+                name,
+                module_name,
+            }
+        }
     }
 }
 

@@ -1,0 +1,278 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Gleam contributors
+
+use camino::Utf8PathBuf;
+use gleam_cli::{Command, CompilePackage, Docs, ExportTarget, fs};
+use std::{collections::HashMap, process};
+
+fn package(package: &str) -> Utf8PathBuf {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("packages")
+        .join(package);
+    Utf8PathBuf::from_path_buf(path).unwrap()
+}
+
+fn escript_compile(package: &str) -> Result<Utf8PathBuf, gleam_core::Error> {
+    let working_directory = Utf8PathBuf::from(&format!("./packages/{package}"));
+    let escript_path = working_directory.join(package);
+    fs::delete_file(&escript_path)
+        .and(fs::delete_file(&escript_path.with_extension("cmd")))
+        .expect("must be able to reset test directory");
+
+    Command::Export(ExportTarget::Escript)
+        .run(working_directory.clone())
+        .map(|_| escript_path)
+}
+
+fn assert_escript_compile(case: &str) -> Utf8PathBuf {
+    let escript_path = escript_compile(case).expect("should compile successfully");
+    assert!(
+        escript_path.exists() && escript_path.is_file(),
+        "escript should have been created"
+    );
+    escript_path
+}
+
+#[test]
+fn escript_success() {
+    let escript = assert_escript_compile("hello_joe");
+    let status = process::Command::new("escript")
+        .arg(&escript)
+        .status()
+        .expect("executable escript");
+    assert!(status.success(), "escript should run OK");
+
+    let cmd = escript.with_extension("cmd");
+    if cfg!(windows) {
+        assert!(cmd.exists(), "*.cmd should exist on Windows");
+        let code = std::fs::read_to_string(cmd).expect("read cmd file");
+        let expected = "@echo off\r\nescript.exe \"%~dpn0\" %*\r\n";
+        assert_eq!(code, expected, "cmd wrapper should run the escript");
+    } else {
+        assert!(!cmd.exists(), "{cmd} should only exist on Windows");
+    }
+}
+
+#[test]
+fn escript_success_with_dependency() {
+    let escript = assert_escript_compile("with_dependency");
+    let status = process::Command::new("escript")
+        .arg(escript)
+        .status()
+        .expect("executable escript");
+    assert!(status.success(), "escript should run OK");
+}
+
+#[test]
+fn escript_without_main_function() {
+    let error = escript_compile("without_main_function")
+        .expect_err("escripts require a main function")
+        .pretty_string();
+    insta::assert_snapshot!(error);
+}
+
+#[test]
+fn escript_with_wrong_arity_main_function() {
+    let error = escript_compile("with_wrong_arity_main_function")
+        .expect_err("escripts require a main function")
+        .pretty_string();
+    insta::assert_snapshot!(error);
+}
+
+#[test]
+fn javascript_prelude() {
+    let out = tempfile::NamedTempFile::new().unwrap();
+    let path = Utf8PathBuf::from(out.path().as_os_str().to_str().unwrap());
+    Command::Export(ExportTarget::JavaScriptPrelude {
+        output: Some(path.clone()),
+    })
+    .run(package("hello_joe"))
+    .unwrap();
+    let contents = std::fs::read_to_string(path).unwrap();
+    assert_eq!(contents, gleam_core::javascript::PRELUDE);
+}
+
+#[test]
+fn typescript_prelude() {
+    let out = tempfile::NamedTempFile::new().unwrap();
+    let path = Utf8PathBuf::from(out.path().as_os_str().to_str().unwrap());
+    Command::Export(ExportTarget::TypeScriptPrelude {
+        output: Some(path.clone()),
+    })
+    .run(package("hello_joe"))
+    .unwrap();
+    let contents = std::fs::read_to_string(path).unwrap();
+    assert_eq!(contents, gleam_core::javascript::PRELUDE_TS_DEF);
+}
+
+#[test]
+fn package_information() {
+    let out = tempfile::NamedTempFile::new().unwrap();
+    let path = Utf8PathBuf::from(out.path().as_os_str().to_str().unwrap());
+    Command::Export(ExportTarget::PackageInformation {
+        output: Some(path.clone()),
+    })
+    .run(package("hello_joe"))
+    .unwrap();
+    let contents = std::fs::read_to_string(path).unwrap();
+    insta::assert_snapshot!(contents);
+}
+
+#[test]
+fn package_interface() {
+    let out = tempfile::NamedTempFile::new().unwrap();
+    let path = Utf8PathBuf::from(out.path().as_os_str().to_str().unwrap());
+    Command::Export(ExportTarget::PackageInterface {
+        output: Some(path.clone()),
+    })
+    .run(package("hello_joe"))
+    .unwrap();
+    let contents = std::fs::read_to_string(path).unwrap();
+    insta::assert_snapshot!(contents);
+}
+
+#[test]
+fn compile_package_no_beam() {
+    let temporary_directory = tempfile::TempDir::new().unwrap();
+    let output_directory =
+        Utf8PathBuf::from(temporary_directory.path().as_os_str().to_str().unwrap());
+
+    let package_directory = package("compile_package");
+
+    Command::CompilePackage(CompilePackage {
+        target: gleam_core::build::Target::Erlang,
+        package_directory: package_directory.clone(),
+        output_directory: output_directory.clone(),
+        libraries_directory: package_directory.clone(),
+        javascript_prelude: None,
+        skip_beam_compilation: true,
+        no_dev: false,
+        otp_app_names: HashMap::new(),
+    })
+    .run(package_directory)
+    .unwrap();
+
+    assert!(
+        output_directory
+            .join("_gleam_artefacts")
+            .join("compile_package.erl")
+            .exists(),
+        "When --no-beam is given then .erl files should be produced"
+    );
+    assert!(
+        !output_directory
+            .join("_gleam_artefacts")
+            .join("compile_package.abstr")
+            .exists(),
+        "When --no-beam is given then .abstr files should not be produced"
+    );
+    assert!(
+        !output_directory.join("ebin").exists(),
+        "When --no-beam is given then the ebin directory should not be produced"
+    );
+}
+
+#[test]
+fn compile_package_beam() {
+    let temporary_directory = tempfile::TempDir::new().unwrap();
+    let output_directory =
+        Utf8PathBuf::from(temporary_directory.path().as_os_str().to_str().unwrap());
+
+    let package_directory = package("compile_package");
+
+    Command::CompilePackage(CompilePackage {
+        target: gleam_core::build::Target::Erlang,
+        package_directory: package_directory.clone(),
+        output_directory: output_directory.clone(),
+        libraries_directory: package_directory.clone(),
+        javascript_prelude: None,
+        skip_beam_compilation: false,
+        no_dev: false,
+        otp_app_names: HashMap::new(),
+    })
+    .run(package_directory)
+    .unwrap();
+
+    let ebin = output_directory.join("ebin");
+    // BEAM files should be created for all modules
+    assert!(ebin.join("compile_package.beam").exists(),);
+    assert!(ebin.join("compile_package_dev.beam").exists(),);
+    assert!(ebin.join("compile_package_test.beam").exists(),);
+    // .erl should not be created when compiling to BEAM
+    assert!(
+        !output_directory
+            .join("_gleam_artefacts")
+            .join("compile_package.erl")
+            .exists(),
+    );
+
+    let path = output_directory.join("ebin").join("compile_package.app");
+    let app = std::fs::read_to_string(path).expect("reading out/ebin/compile_package.app");
+    assert!(app.contains("regular_dependency"));
+    assert!(app.contains("dev_dependency"));
+    insta::assert_snapshot!(app);
+}
+
+#[test]
+fn compile_package_beam_no_dev() {
+    let temporary_directory = tempfile::TempDir::new().unwrap();
+    let output_directory =
+        Utf8PathBuf::from(temporary_directory.path().as_os_str().to_str().unwrap());
+
+    let package_directory = package("compile_package");
+
+    Command::CompilePackage(CompilePackage {
+        target: gleam_core::build::Target::Erlang,
+        package_directory: package_directory.clone(),
+        output_directory: output_directory.clone(),
+        libraries_directory: package_directory.clone(),
+        javascript_prelude: None,
+        skip_beam_compilation: false,
+        no_dev: true,
+        otp_app_names: HashMap::new(),
+    })
+    .run(package_directory)
+    .unwrap();
+
+    let ebin = output_directory.join("ebin");
+    assert!(
+        ebin.join("compile_package.beam").exists(),
+        "src .beam should be created"
+    );
+    // Dev and test files should not be created
+    assert!(!ebin.join("compile_package_dev.beam").exists(),);
+    assert!(!ebin.join("compile_package_test.beam").exists(),);
+    // .erl should not be created when compiling to BEAM
+    assert!(
+        !output_directory
+            .join("_gleam_artefacts")
+            .join("compile_package.erl")
+            .exists(),
+    );
+
+    let path = output_directory.join("ebin").join("compile_package.app");
+    let app = std::fs::read_to_string(path).expect("reading out/ebin/compile_package.app");
+    // dependencies included but dev_dependencies are not
+    assert!(app.contains("regular_dependency"));
+    assert!(!app.contains("dev_dependency"));
+    insta::assert_snapshot!(app);
+}
+
+#[test]
+fn docs_build_with_invalid_symlink() {
+    let package_directory = package("docs_invalid_symlink");
+
+    let error = Command::Docs(Docs::Build {
+        open: false,
+        target: None,
+    })
+    .run(package_directory)
+    .expect_err("This should fail due to invalid symlink")
+    .pretty_string();
+    assert!(error.contains(
+        "This documentation page source path falls outside the package directory, so
+it could not be read."
+    ));
+    assert!(error.contains("All documentation pages files must be inside the package itself."));
+}

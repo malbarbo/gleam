@@ -1,8 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 mod action;
 mod compilation;
 mod completion;
 mod definition;
+mod document_highlight;
 mod document_symbols;
+mod folding_range;
 mod hover;
 mod reference;
 mod rename;
@@ -20,20 +25,21 @@ use hexpm::version::{Range, Version};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use itertools::Itertools;
-use lsp_types::{Position, TextDocumentIdentifier, TextDocumentPositionParams, Url};
+use lsp_types::{Position, TextDocumentIdentifier, TextDocumentPositionParams, Uri as Url};
 
 use gleam_core::{
     Result,
+    build::Origin,
     config::PackageConfig,
     io::{
-        BeamCompiler, Command, CommandExecutor, FileSystemReader, FileSystemWriter, ReadDir,
+        BeamCompilerIO, Command, CommandExecutor, FileSystemReader, FileSystemWriter, ReadDir,
         WrappedReader, memory::InMemoryFileSystem,
     },
-    line_numbers::LineNumbers,
     manifest::{Base16Checksum, Manifest, ManifestPackage, ManifestPackageSource},
     paths::ProjectPaths,
     requirement::Requirement,
 };
+use src_span::LineNumbers;
 
 use super::{
     DownloadDependencies, LockGuard, Locker, MakeLocker, engine::LanguageServerEngine,
@@ -63,10 +69,10 @@ struct LanguageServerTestIO {
 
 fn default_manifest_package() -> ManifestPackage {
     ManifestPackage {
-        name: Default::default(),
-        build_tools: Default::default(),
-        otp_app: Default::default(),
-        requirements: Default::default(),
+        name: EcoString::new(),
+        build_tools: vec![],
+        otp_app: None,
+        requirements: vec![],
         version: Version::new(1, 0, 0),
         source: ManifestPackageSource::Hex {
             outer_checksum: Base16Checksum(vec![]),
@@ -77,8 +83,8 @@ fn default_manifest_package() -> ManifestPackage {
 impl LanguageServerTestIO {
     fn new() -> Self {
         Self {
-            io: Default::default(),
-            actions: Default::default(),
+            io: InMemoryFileSystem::default(),
+            actions: Arc::new(Mutex::new(vec![])),
             paths: ProjectPaths::at_filesystem_root(),
             manifest: Manifest {
                 requirements: HashMap::new(),
@@ -182,6 +188,10 @@ impl FileSystemReader for LanguageServerTestIO {
     fn canonicalise(&self, path: &Utf8Path) -> Result<Utf8PathBuf, gleam_core::Error> {
         self.io.canonicalise(path)
     }
+
+    fn is_same_file(&self, _left: &Utf8Path, _right: &Utf8Path) -> Result<bool, gleam_core::Error> {
+        unreachable!("is_same_file unimplemented")
+    }
 }
 
 impl FileSystemWriter for LanguageServerTestIO {
@@ -246,14 +256,14 @@ impl CommandExecutor for LanguageServerTestIO {
     }
 }
 
-impl BeamCompiler for LanguageServerTestIO {
+impl BeamCompilerIO for LanguageServerTestIO {
     fn compile_beam(
         &self,
         out: &Utf8Path,
         lib: &Utf8Path,
         modules: &HashSet<Utf8PathBuf>,
         stdio: gleam_core::io::Stdio,
-    ) -> Result<Vec<String>> {
+    ) -> Result<()> {
         panic!("compile_beam({out:?}, {lib:?}, {modules:?}, {stdio:?}) is not implemented")
     }
 }
@@ -330,9 +340,11 @@ fn add_package_from_manifest<B>(
             ManifestPackageSource::Git {
                 ref repo,
                 ref commit,
+                ..
             } => Requirement::Git {
                 git: repo.clone(),
                 ref_: commit.clone(),
+                path: None,
             },
         },
     );
@@ -355,9 +367,11 @@ fn add_dev_package_from_manifest<B>(
             ManifestPackageSource::Git {
                 ref repo,
                 ref commit,
+                ..
             } => Requirement::Git {
                 git: repo.clone(),
                 ref_: commit.clone(),
+                path: None,
             },
         },
     );
@@ -451,7 +465,7 @@ impl<'a> TestProject<'a> {
     pub fn src_from_module_url(&self, url: &Url) -> Option<&str> {
         let module_name: EcoString = self.module_name_from_url(url)?.into();
 
-        if module_name == "app" {
+        if module_name == LSP_TEST_ROOT_PACKAGE_NAME {
             return Some(self.src);
         }
 
@@ -468,6 +482,31 @@ impl<'a> TestProject<'a> {
             .or_else(|| find_module(&self.hex_modules))
             .or_else(|| find_module(&self.dev_hex_modules))
             .or_else(|| find_module(&self.indirect_hex_modules))
+    }
+
+    pub fn src_from_origin_and_module_name(
+        &self,
+        origin: Origin,
+        module_name: &str,
+    ) -> Option<&str> {
+        let find_module = |modules: &Vec<(&'a str, &'a str)>| {
+            modules
+                .iter()
+                .find(|(name, _)| *name == module_name)
+                .map(|(_, src)| *src)
+        };
+
+        match origin {
+            Origin::Src => {
+                if module_name == LSP_TEST_ROOT_PACKAGE_NAME {
+                    return Some(self.src);
+                }
+
+                find_module(&self.root_package_modules)
+            }
+            Origin::Test => find_module(&self.test_modules),
+            Origin::Dev => find_module(&self.dev_modules),
+        }
     }
 
     pub fn add_module(mut self, name: &'a str, src: &'a str) -> Self {
@@ -610,6 +649,18 @@ impl<'a> TestProject<'a> {
         TextDocumentPositionParams::new(TextDocumentIdentifier::new(url), position)
     }
 
+    pub fn build_src_path(&self, position: Position, module: &str) -> TextDocumentPositionParams {
+        let path = Utf8PathBuf::from(if cfg!(target_family = "windows") {
+            format!(r"\\?\C:\src\{module}.gleam")
+        } else {
+            format!("/src/{module}.gleam")
+        });
+
+        let url = Url::from_file_path(path).unwrap();
+
+        TextDocumentPositionParams::new(TextDocumentIdentifier::new(url), position)
+    }
+
     pub fn build_test_path(
         &self,
         position: Position,
@@ -653,11 +704,32 @@ impl<'a> TestProject<'a> {
         let mut engine = self.build_engine(&mut io);
 
         // Add the final module we're going to be positioning the cursor in.
-        _ = io.src_module("app", self.src);
+        _ = io.src_module(LSP_TEST_ROOT_PACKAGE_NAME, self.src);
 
         let _response = engine.compile_please();
 
         let param = self.build_path(position);
+
+        (engine, param)
+    }
+
+    pub fn positioned_with_io_in_src(
+        &self,
+        position: Position,
+        module: &str,
+    ) -> (
+        LanguageServerEngine<LanguageServerTestIO, LanguageServerTestIO>,
+        TextDocumentPositionParams,
+    ) {
+        let mut io = LanguageServerTestIO::new();
+        let mut engine = self.build_engine(&mut io);
+
+        // Add the final module we're going to be positioning the cursor in.
+        _ = io.src_module(LSP_TEST_ROOT_PACKAGE_NAME, self.src);
+
+        let _response = engine.compile_please();
+
+        let param = self.build_src_path(position, module);
 
         (engine, param)
     }
@@ -674,10 +746,9 @@ impl<'a> TestProject<'a> {
         let mut engine = self.build_engine(&mut io);
 
         // Add the final module we're going to be positioning the cursor in.
-        _ = io.src_module("app", self.src);
+        _ = io.src_module(LSP_TEST_ROOT_PACKAGE_NAME, self.src);
 
-        let response = engine.compile_please();
-        assert!(response.result.is_ok());
+        let _response = engine.compile_please();
 
         let param = self.build_test_path(position, test_name);
 
@@ -696,10 +767,9 @@ impl<'a> TestProject<'a> {
         let mut engine = self.build_engine(&mut io);
 
         // Add the final module we're going to be positioning the cursor in.
-        _ = io.src_module("app", self.src);
+        _ = io.src_module(LSP_TEST_ROOT_PACKAGE_NAME, self.src);
 
-        let response = engine.compile_please();
-        assert!(response.result.is_ok());
+        let _response = engine.compile_please();
 
         let param = self.build_dev_path(position, test_name);
 
@@ -718,6 +788,44 @@ impl<'a> TestProject<'a> {
         let (mut engine, params) = self.positioned_with_io(position);
 
         executor(&mut engine, params, self.src.into())
+    }
+
+    pub fn in_module_at<T>(
+        &self,
+        origin: Origin,
+        module: &str,
+        position: Position,
+        executor: impl FnOnce(
+            &mut LanguageServerEngine<LanguageServerTestIO, LanguageServerTestIO>,
+            TextDocumentPositionParams,
+            EcoString,
+        ) -> T,
+    ) -> T {
+        let (mut engine, params) = match origin {
+            Origin::Src => self.positioned_with_io_in_src(position, module),
+            Origin::Test => self.positioned_with_io_in_test(position, module),
+            Origin::Dev => self.positioned_with_io_in_dev(position, module),
+        };
+
+        let code = self
+            .src_from_origin_and_module_name(origin, module)
+            .expect("Module doesn't exist");
+
+        executor(&mut engine, params, code.into())
+    }
+
+    /// Run a test in a project without a specific position (for workspace-wide
+    /// actions).
+    pub fn run<T>(
+        &self,
+        executor: impl FnOnce(
+            &mut LanguageServerEngine<LanguageServerTestIO, LanguageServerTestIO>,
+        ) -> T,
+    ) -> T {
+        // Use a throwaway position and ignore it
+        let (mut engine, _) = self.positioned_with_io(Position::default());
+
+        executor(&mut engine)
     }
 }
 

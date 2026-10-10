@@ -1,0 +1,19 @@
+---
+source: compiler-core/src/javascript/tests/consts.rs
+expression: "\npub const wibble = [0, 1, ..[2, 3, 4]]\n"
+---
+----- SOURCE CODE
+
+pub const wibble = [0, 1, ..[2, 3, 4]]
+
+
+----- COMPILED JAVASCRIPT
+import { List$Empty$const as $List$Empty$const, prepend as listPrepend } from "../gleam.mjs";
+
+export const wibble = /* @__PURE__ */ listPrepend(
+  0,
+  listPrepend(
+    1,
+    listPrepend(2, listPrepend(3, listPrepend(4, $List$Empty$const))),
+  ),
+);

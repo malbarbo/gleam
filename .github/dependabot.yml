@@ -1,11 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2024 The Gleam contributors
+
 version: 2
 updates:
 - package-ecosystem: github-actions
-  directory: "/"
+  directories:
+  - "/"
+  - "/.github/actions/*"
   labels: []
   schedule:
     interval: monthly
   open-pull-requests-limit: 10
+  cooldown:
+    default-days: 7
 
 # Rust:
 - package-ecosystem: "cargo"
@@ -13,21 +20,29 @@ updates:
   labels: []
   schedule:
     interval: "monthly"
+  cooldown:
+    default-days: 7
 - package-ecosystem: "cargo"
   directory: "/compiler-cli"
   labels: []
   schedule:
     interval: "monthly"
+  cooldown:
+    default-days: 7
 - package-ecosystem: "cargo"
   directory: "/compiler-core"
   labels: []
   schedule:
     interval: "monthly"
+  cooldown:
+    default-days: 7
 - package-ecosystem: "cargo"
   directory: "/compiler-wasm"
   labels: []
   schedule:
     interval: "monthly"
+  cooldown:
+    default-days: 7
 - package-ecosystem: "cargo"
   # Does not have any custom deps right now,
   # but can add them in the future:
@@ -35,3 +50,5 @@ updates:
   labels: []
   schedule:
     interval: "monthly"
+  cooldown:
+    default-days: 7

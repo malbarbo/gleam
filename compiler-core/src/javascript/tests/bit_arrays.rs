@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use hexpm::version::Version;
 use pubgrub::Range;
 
@@ -2597,6 +2600,133 @@ pub fn main() {
 }
 
 #[test]
+fn subtraction_in_pattern_size_is_left_associative() {
+    assert_js!(
+        "
+pub fn main() {
+  let a = 10
+  let b = 3
+  let c = 2
+  let assert <<_:bytes-size(a - b - c)>> = <<>>
+}
+"
+    );
+}
+
+#[test]
+fn subtraction_chain_in_pattern_size_is_left_associative() {
+    assert_js!(
+        "
+pub fn main() {
+  let a = 10
+  let b = 3
+  let c = 2
+  let d = 1
+  let assert <<_:bytes-size(a - b - c - d)>> = <<>>
+}
+"
+    );
+}
+
+#[test]
+fn division_in_pattern_size_is_left_associative() {
+    assert_js!(
+        "
+pub fn main() {
+  let a = 100
+  let b = 5
+  let c = 2
+  let assert <<_:bytes-size(a / b / c)>> = <<>>
+}
+"
+    );
+}
+
+#[test]
+fn multiplication_in_pattern_size_is_left_associative() {
+    assert_js!(
+        "
+pub fn main() {
+  let a = 2
+  let b = 3
+  let c = 4
+  let assert <<_:bytes-size(a * b * c)>> = <<>>
+}
+"
+    );
+}
+
+#[test]
+fn mixed_mul_div_in_pattern_size_is_left_associative() {
+    assert_js!(
+        "
+pub fn main() {
+  let a = 100
+  let b = 5
+  let c = 2
+  let assert <<_:bytes-size(a * b / c)>> = <<>>
+}
+"
+    );
+}
+
+#[test]
+fn mul_binds_tighter_than_add_in_pattern_size() {
+    assert_js!(
+        "
+pub fn main() {
+  let a = 10
+  let b = 3
+  let c = 2
+  let assert <<_:bytes-size(a + b * c)>> = <<>>
+}
+"
+    );
+}
+
+#[test]
+fn mul_binds_tighter_than_sub_in_pattern_size() {
+    assert_js!(
+        "
+pub fn main() {
+  let a = 10
+  let b = 3
+  let c = 2
+  let assert <<_:bytes-size(a * b + c)>> = <<>>
+}
+"
+    );
+}
+
+#[test]
+fn add_and_sub_chain_in_pattern_size_is_left_associative() {
+    assert_js!(
+        "
+pub fn main() {
+  let a = 10
+  let b = 3
+  let c = 2
+  let assert <<_:bytes-size(a + b - c)>> = <<>>
+}
+"
+    );
+}
+
+#[test]
+fn remainder_in_pattern_size_is_left_associative() {
+    assert_js!(
+        "
+pub fn main() {
+  let a = 10
+  let b = 3
+  let c = 2
+  let assert <<_:bytes-size(a % b % c)>> = <<>>
+}
+"
+    );
+}
+
+#[test]
 fn block_in_pattern_size() {
     assert_js!(
         "
@@ -2674,4 +2804,120 @@ pub fn main(x) {
 }
         "#
     )
+}
+
+// https://github.com/gleam-lang/gleam/issues/5600
+#[test]
+fn bit_array_size_constant() {
+    assert_js!(
+        r#"
+const some_size = 2
+
+pub fn run(data) {
+  case data {
+    <<x:bytes-size(some_size), _:bits>> -> x
+    _ -> data
+  }
+}
+        "#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5208
+#[test]
+fn unit_option_ignores_bytes() {
+    assert_js!(
+        "
+pub fn main() {
+  let assert <<x:unit(2)-bytes-size(3)>> = <<1:6>>
+  x
+}
+"
+    );
+}
+
+#[test]
+fn unit_option_ignores_bytes_regardless_of_order() {
+    assert_js!(
+        "
+pub fn main() {
+  let assert <<x:bytes-unit(2)-size(3)>> = <<1:6>>
+  x
+}
+"
+    );
+}
+
+#[test]
+fn zero_size_int_segment() {
+    assert_js!(
+        r#"
+pub fn go() {
+  <<0:size(0), 1:size(8)>>
+}
+"#,
+    );
+}
+
+#[test]
+fn zero_size_int_segment_with_variable_value() {
+    assert_js!(
+        r#"
+pub fn go(x: Int) {
+  <<x:size(0), 1:size(8)>>
+}
+"#,
+    );
+}
+
+#[test]
+fn zero_size_int_segment_constant() {
+    assert_js!(
+        r#"
+pub const value = <<0:size(0), 1:size(8)>>
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6182
+#[test]
+fn match_on_empty_bit_array_string() {
+    assert_js!(
+        r#"
+pub fn main(x) {
+  let assert <<"":utf8>> = x
+  Nil
+}
+"#
+    );
+}
+
+#[test]
+fn bit_array_slice_assignment_inside_a_nested_pattern_after_a_guard() {
+    assert_js!(
+        r#"
+pub fn go(b: Bool, flag: Bool, r: Result(BitArray, Nil)) -> BitArray {
+  case b, r {
+    True, _ if flag -> <<1>>
+    _, Ok(<<x:bits>>) -> x
+    _, _ -> <<>>
+  }
+}
+"#,
+    );
+}
+
+#[test]
+fn bit_array_segment_assignment_proved_by_a_guarded_clause() {
+    assert_js!(
+        r#"
+pub fn go(bits: BitArray, flag: Bool) -> Int {
+  case bits {
+    <<_:8, 2>> if flag -> 0
+    <<1, 2 as y>> -> y
+    _ -> -1
+  }
+}
+"#,
+    );
 }

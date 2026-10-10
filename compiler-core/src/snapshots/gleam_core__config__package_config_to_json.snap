@@ -30,6 +30,7 @@ extra_applications = ["inets", "ssl"]
 
 [javascript]
 typescript_declarations = true
+source_maps = true
 runtime = "node"
 
 [javascript.deno]
@@ -38,9 +39,6 @@ allow_ffi = true
 allow_env = ["DATABASE_URL"]
 allow_net = ["example.com:443"]
 allow_read = ["./database.sqlite"]
-
-[tools.my-tool]
-enable = true
 
 
 --- EXPORTED JSON
@@ -99,6 +97,7 @@ enable = true
   },
   "javascript": {
     "typescript_declarations": true,
+    "source_maps": true,
     "runtime": "nodejs",
     "deno": {
       "allow_env": [
@@ -128,10 +127,5 @@ enable = true
   "target": "erlang",
   "internal_modules": [
     "my_app/internal"
-  ],
-  "tools": {
-    "my-tool": {
-      "enable": true
-    }
-  }
+  ]
 }

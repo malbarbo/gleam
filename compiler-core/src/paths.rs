@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use crate::{
     build::{Mode, Target},
     manifest::Base16Checksum,
@@ -63,6 +66,14 @@ impl ProjectPaths {
         self.build_directory().join("packages")
     }
 
+    pub fn build_git_directory(&self) -> Utf8PathBuf {
+        self.build_directory().join("git")
+    }
+
+    pub fn build_git_repo(&self, name: &str) -> Utf8PathBuf {
+        self.build_git_directory().join(name)
+    }
+
     pub fn build_packages_toml(&self) -> Utf8PathBuf {
         self.build_packages_directory().join("packages.toml")
     }
@@ -125,20 +136,36 @@ impl ProjectPaths {
             .join("ebin")
     }
 
-    /// A path to a special file that contains the version of gleam that last built
-    /// the artifacts. If this file does not match the current version of gleam we
+    /// A path to a special file that contains the version of gleam
+    /// that last built the artefacts along with build-impacting
+    /// configuration, such as whether to generate source maps. If
+    /// this file does not match the current version of gleam we
     /// will rebuild from scratch
-    pub fn build_gleam_version(&self, mode: Mode, target: Target) -> Utf8PathBuf {
+    pub fn build_configuration_fingerprint(&self, mode: Mode, target: Target) -> Utf8PathBuf {
         self.build_directory_for_target(mode, target)
-            .join("gleam_version")
+            .join("fingerprint")
+    }
+
+    /// The path to the source gleam.toml file for a path dependency.
+    pub fn path_dependency_gleam_toml_path(&self, dependency_path: &Utf8Path) -> Utf8PathBuf {
+        self.root().join(dependency_path).join("gleam.toml")
+    }
+
+    pub fn dependency_gleam_toml_fingerprint_path(&self, dependency_name: &str) -> Utf8PathBuf {
+        self.build_packages_directory()
+            .join(format!("{}.config_fingerprint", dependency_name))
     }
 }
 
 pub fn global_package_cache_package_tarball(checksum: &Base16Checksum) -> Utf8PathBuf {
-    global_packages_cache().join(format!("{}.tar", checksum.to_string()))
+    global_packages_cache().join(format!("{}.tar", checksum.base_16_encoded_string()))
 }
 
-pub fn global_hexpm_credentials_path() -> Utf8PathBuf {
+pub fn global_hexpm_oauth_credentials_path() -> Utf8PathBuf {
+    global_hexpm_cache().join("credentials.toml")
+}
+
+pub fn global_hexpm_legacy_credentials_path() -> Utf8PathBuf {
     global_hexpm_cache().join("credentials")
 }
 
@@ -162,7 +189,7 @@ pub fn default_global_gleam_cache() -> Utf8PathBuf {
 pub fn unnest(within: &Utf8Path) -> Utf8PathBuf {
     let mut path = Utf8PathBuf::new();
     for _ in within {
-        path = path.join("..")
+        path = path.join("..");
     }
     path
 }

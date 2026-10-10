@@ -1,4 +1,6 @@
-use crate::ast::SrcSpan;
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use crate::parse::error::{
     InvalidUnicodeEscapeError, LexicalError, LexicalErrorType, ParseError, ParseErrorType,
 };
@@ -6,6 +8,7 @@ use crate::parse::lexer::make_tokenizer;
 use crate::parse::token::Token;
 use crate::warning::WarningEmitter;
 use camino::Utf8PathBuf;
+use src_span::SrcSpan;
 
 use ecow::EcoString;
 use itertools::Itertools;
@@ -351,6 +354,161 @@ fn triple_equals_with_whitespace() {
     );
 }
 
+#[test]
+fn invalid_assignment_shorthand_plus_equals() {
+    assert_error!(
+        "let wobble: Int = 32
+wobble += 1"
+    );
+}
+
+#[test]
+fn invalid_assignment_shorthand_plus_plus() {
+    assert_error!(
+        "let wobble: Int = 32
+wobble++"
+    );
+}
+
+#[test]
+fn invalid_assignment_shorthand_minus_equals() {
+    assert_error!(
+        "let wobble: Int = 32
+wobble -= 1"
+    );
+}
+
+#[test]
+fn invalid_assignment_shorthand_times_equals() {
+    assert_error!(
+        "let wobble: Int = 32
+wobble *= 1"
+    );
+}
+
+#[test]
+fn invalid_assignment_shorthand_divide_equals() {
+    assert_error!(
+        "let wobble: Int = 32
+wobble /= 1"
+    );
+}
+
+#[test]
+fn invalid_assignment_shorthand_modulo_equals() {
+    assert_error!(
+        "let wobble: Int = 32
+wobble %= 1"
+    );
+}
+
+#[test]
+fn merge_conflict_full() {
+    assert_error!(
+        "<<<<<<< HEAD
+  io.println(\"Hello Wibble!\")
+=======
+  io.println(\"Hello Wobble!\")
+>>>>>>> main"
+    );
+}
+
+#[test]
+fn merge_conflict_equals() {
+    assert_error!(
+        "let wobble: Int = 32
+======="
+    );
+}
+
+#[test]
+fn six_equals_not_merge_conflict() {
+    assert_error!(
+        "let wobble: Int = 32
+======"
+    );
+}
+
+#[test]
+fn merge_conflict_lt() {
+    assert_error!(
+        "let wobble: Int = 32
+<<<<<<<"
+    );
+}
+
+#[test]
+fn merge_conflict_lt_with_head() {
+    assert_error!(
+        "let wobble: Int = 32
+<<<<<<< HEAD"
+    );
+}
+
+#[test]
+fn four_lt_not_merge_conflict() {
+    assert_error!(
+        "let wobble: Int = 32
+<<<<"
+    );
+}
+
+#[test]
+fn five_lt_not_merge_conflict() {
+    assert_error!(
+        "let wobble: Int = 32
+<<<<<"
+    );
+}
+
+#[test]
+fn six_lt_not_merge_conflict() {
+    assert_error!(
+        "let wobble: Int = 32
+<<<<<<"
+    );
+}
+
+#[test]
+fn merge_conflict_gt() {
+    assert_error!(
+        "let wobble: Int = 32
+>>>>>>>"
+    );
+}
+
+#[test]
+fn merge_conflict_gt_with_branch_name() {
+    assert_error!(
+        "let wobble: Int = 32
+>>>>>>> main"
+    );
+}
+
+#[test]
+fn four_gt_not_merge_conflict() {
+    assert_error!(
+        "let wobble: Int = 32
+>>>>"
+    );
+}
+
+#[test]
+fn five_gt_not_merge_conflict() {
+    assert_error!(
+        "let wobble: Int = 32
+>>>>>"
+    );
+}
+
+#[test]
+fn six_gt_not_merge_conflict() {
+    assert_error!(
+        "let wobble: Int = 32
+>>>>>>"
+    );
+}
+
 // https://github.com/gleam-lang/gleam/issues/1231
 #[test]
 fn pointless_spread() {
@@ -634,6 +792,33 @@ fn assign_left_hand_side_of_concat_pattern() {
     );
 }
 
+#[test]
+fn discard_infix_and_match_suffix_of_concat_pattern() {
+    assert_error!(
+        r#"case "" {
+    "prefix" <> _ <> "suffix" -> Nil
+}"#
+    );
+}
+
+#[test]
+fn assign_infix_and_match_suffix_of_concat_pattern() {
+    assert_error!(
+        r#"case "" {
+    "prefix" <> infix <> "suffix" -> infix
+}"#
+    );
+}
+
+#[test]
+fn incomplete_suffix_match_in_concat_pattern() {
+    assert_error!(
+        r#"case "" {
+    "prefix" <> wibble <> -> wibble
+}"#
+    );
+}
+
 // https://github.com/gleam-lang/gleam/issues/1890
 #[test]
 fn valueless_list_spread_expression() {
@@ -718,6 +903,17 @@ pub fn one(x: Int) -> Int {
 }
 
 #[test]
+fn external_with_no_arguments() {
+    assert_module_error!(
+        r#"
+@external
+pub fn one(x: Int) -> Int {
+  todo
+}"#
+    );
+}
+
+#[test]
 fn unknown_target() {
     assert_module_error!(
         r#"
@@ -765,6 +961,32 @@ fn multiple_deprecation_attributes() {
 @deprecated("2")
 pub fn main() -> Nil {
   Nil
+}
+"#
+    );
+}
+
+#[test]
+fn deprecation_with_no_message() {
+    assert_module_error!(
+        r#"
+@deprecated
+pub fn main() -> Nil {
+  Nil
+}
+"#
+    );
+}
+
+#[test]
+fn deprecation_with_no_message_on_constructor() {
+    assert_module_error!(
+        r#"
+pub type HashAlgorithm {
+  @deprecated
+  Md5
+  Sha224
+  Sha512
 }
 "#
     );
@@ -1408,6 +1630,148 @@ fn newline_tokens() {
     );
 }
 
+#[test]
+fn crlf_source_exact_tokens() {
+    let src = "pub fn add(_x) {\r\n  Wibble\r\n}\r\n";
+    assert_eq!(
+        make_tokenizer(src).collect_vec(),
+        [
+            Ok((0, Token::Pub, 3)),
+            Ok((4, Token::Fn, 6)),
+            Ok((7, Token::Name { name: "add".into() }, 10)),
+            Ok((10, Token::LeftParen, 11)),
+            Ok((11, Token::DiscardName { name: "_x".into() }, 13)),
+            Ok((13, Token::RightParen, 14)),
+            Ok((15, Token::LeftBrace, 16)),
+            Ok((16, Token::NewLine, 18)),
+            Ok((
+                20,
+                Token::UpName {
+                    name: "Wibble".into()
+                },
+                26
+            )),
+            Ok((26, Token::NewLine, 28)),
+            Ok((28, Token::RightBrace, 29)),
+            Ok((29, Token::NewLine, 31)),
+        ]
+    );
+}
+
+#[test]
+fn lone_carriage_return_exact_tokens() {
+    assert_eq!(
+        make_tokenizer("a\rb").collect_vec(),
+        [
+            Ok((0, Token::Name { name: "a".into() }, 1)),
+            Ok((1, Token::NewLine, 2)),
+            Ok((2, Token::Name { name: "b".into() }, 3)),
+        ]
+    );
+    assert_eq!(
+        make_tokenizer("a\r").collect_vec(),
+        [
+            Ok((0, Token::Name { name: "a".into() }, 1)),
+            Ok((1, Token::NewLine, 2)),
+        ]
+    );
+}
+
+#[test]
+fn unrecognized_non_ascii_char_error() {
+    let src = "let é = 1";
+    assert_eq!(
+        make_tokenizer(src).take(2).collect_vec(),
+        [
+            Ok((0, Token::Let, 3)),
+            Err(LexicalError {
+                error: LexicalErrorType::UnrecognizedToken { token: 'é' },
+                location: SrcSpan { start: 4, end: 4 },
+            }),
+        ]
+    );
+}
+
+#[test]
+fn doc_comment_with_multibyte_char_at_eof() {
+    let src = "/// café";
+    assert_eq!(
+        make_tokenizer(src).collect_vec(),
+        [Ok((
+            3,
+            Token::CommentDoc {
+                content: " café".into()
+            },
+            9
+        ))]
+    );
+}
+
+#[test]
+fn string_containing_crlf_collapses_to_newline() {
+    let src = "\"a\r\nb\"";
+    assert_eq!(
+        make_tokenizer(src).collect_vec(),
+        [Ok((
+            0,
+            Token::String {
+                value: "a\nb".into()
+            },
+            6
+        ))]
+    );
+}
+
+#[test]
+fn string_containing_lone_carriage_return_collapses_to_newline() {
+    let src = "\"a\rb\"";
+    assert_eq!(
+        make_tokenizer(src).collect_vec(),
+        [Ok((
+            0,
+            Token::String {
+                value: "a\nb".into()
+            },
+            5
+        ))]
+    );
+}
+
+#[test]
+fn string_starting_with_crlf_collapses_to_newline() {
+    let src = "\"\r\nfoo\"";
+    assert_eq!(
+        make_tokenizer(src).collect_vec(),
+        [Ok((
+            0,
+            Token::String {
+                value: "\nfoo".into()
+            },
+            7
+        ))]
+    );
+}
+
+#[test]
+fn non_ascii_source_exact_tokens() {
+    let src = "let x = \"héllo\"";
+    assert_eq!(
+        make_tokenizer(src).collect_vec(),
+        [
+            Ok((0, Token::Let, 3)),
+            Ok((4, Token::Name { name: "x".into() }, 5)),
+            Ok((6, Token::Equal, 7)),
+            Ok((
+                8,
+                Token::String {
+                    value: "héllo".into()
+                },
+                16
+            )),
+        ]
+    );
+}
+
 // https://github.com/gleam-lang/gleam/issues/1756
 #[test]
 fn arithmetic_in_guards() {
@@ -1479,6 +1843,22 @@ let my_string = "hello "
 case my_string {
     _ if my_string <> "world" == "hello world" -> io.debug("ok")
 }"#
+    );
+}
+
+#[test]
+fn constant_record_with_empty_arguments_is_record() {
+    assert_parse_module!("pub const wibble = Wibble()");
+}
+
+#[test]
+fn calling_module_constant_as_constructor() {
+    assert_module_error!(
+        "
+pub type Wibble { Wibble(Int) }
+pub const wibble = Wibble
+pub const a = wibble(1)
+"
     );
 }
 
@@ -1749,20 +2129,6 @@ pub fn main() {
   }
 }
 "#
-    );
-}
-
-// https://github.com/gleam-lang/gleam/issues/3730
-#[test]
-fn missing_constructor_arguments() {
-    assert_module_error!(
-        "
-pub type A {
-  A(Int)
-}
-
-const a = A()
-"
     );
 }
 
@@ -2088,5 +2454,508 @@ fn const_record_update_with_module() {
         r#"
 const local_const = other.Record(..other.base, field: value)
 "#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5391
+#[test]
+fn byte_order_mark() {
+    assert_parse!("\u{feff}todo");
+}
+
+// https://github.com/gleam-lang/gleam/issues/5391
+#[test]
+fn byte_order_mark_module() {
+    assert_parse_module!(
+        "\u{feff}
+const local_const = other.Record(..other.base, field: value)
+"
+    );
+}
+
+#[test]
+fn prepend_to_const_list_without_comma() {
+    // While this is valid (but deprecated) syntax for expressions, prepending to
+    // constant lists wasn't added until after the deprecation, so it was never
+    // valid in the first place.
+    assert_module_error!(
+        "
+const wibble = [2, 3]
+const wobble = [1 ..wibble]
+"
+    );
+}
+
+#[test]
+fn prepend_to_const_list_with_multiple_spreads() {
+    assert_module_error!(
+        "
+const wibble = [2, 3]
+const wobble = [0, 1]
+const wubble = [..wobble, ..wibble]
+"
+    );
+}
+
+#[test]
+fn prepend_to_const_list_with_no_tail() {
+    assert_module_error!(
+        "
+const wibble = [1, 2, ..]
+"
+    );
+}
+
+#[test]
+fn prepend_no_elements_to_const_list() {
+    assert_module_error!(
+        "
+const wibble = [2, 3]
+const wobble = [..wibble]
+"
+    );
+}
+
+#[test]
+fn parse_negative_binary_number() {
+    assert_parse_module!("pub fn main() { -0b101 }");
+}
+
+#[test]
+fn parse_negative_octal_number() {
+    assert_parse_module!("pub fn main() { -0o157 }");
+}
+
+#[test]
+fn parse_negative_hexadecimal_number() {
+    assert_parse_module!("pub fn main() { -0x6f }");
+}
+
+#[test]
+fn append_to_const_list() {
+    assert_module_error!(
+        "
+const wibble = [2, 3]
+const wobble = [..wibble, 4, 5]
+"
+    );
+}
+
+#[test]
+fn parse_error_for_greater_sign_after_invalid_qualified_type() {
+    assert_module_error!("pub fn main() -> wibble.<a> { todo }");
+}
+
+#[test]
+fn parse_error_for_type_list_after_invalid_qualified_type_1() {
+    assert_module_error!("pub fn main() -> wibble.() { todo }");
+}
+
+#[test]
+fn parse_error_for_type_list_after_invalid_qualified_type_2() {
+    assert_module_error!("pub fn main() -> wibble.(a, b) { todo }");
+}
+
+#[test]
+fn unicode_left_double_quotation_mark() {
+    assert_module_error!("pub fn main() { \u{201C}hello\u{201D} }");
+}
+
+#[test]
+fn unicode_right_double_quotation_mark() {
+    assert_module_error!("pub fn main() { \u{201D}hello }");
+}
+
+#[test]
+fn unicode_left_single_quotation_mark() {
+    assert_module_error!("pub fn main() { \u{2018}hello\u{2019} }");
+}
+
+#[test]
+fn unicode_right_single_quotation_mark() {
+    assert_module_error!("pub fn main() { \u{2019}hello }");
+}
+
+#[test]
+fn unicode_en_dash() {
+    assert_module_error!("pub fn main() { 1\u{2013}2 }");
+}
+
+#[test]
+fn unicode_em_dash() {
+    assert_module_error!("pub fn main() { 1\u{2014}2 }");
+}
+
+#[test]
+fn unicode_asterisk_operator() {
+    assert_module_error!("pub fn main() { 1\u{2217}2 }");
+}
+
+#[test]
+fn unicode_division_slash() {
+    assert_module_error!("pub fn main() { 1\u{2215}2 }");
+}
+
+#[test]
+fn unicode_non_breaking_space() {
+    assert_module_error!("pub fn main() { let\u{00A0}x = 1\n  x }");
+}
+
+#[test]
+fn unicode_zero_width_space() {
+    assert_module_error!("pub fn main() { let\u{200B}x = 1\n  x }");
+}
+
+#[test]
+fn unicode_cyrillic_a() {
+    assert_module_error!("pub fn main() { \u{0430} }");
+}
+
+#[test]
+fn unicode_cyrillic_e() {
+    assert_module_error!("pub fn main() { \u{0435} }");
+}
+
+#[test]
+fn unicode_cyrillic_o() {
+    assert_module_error!("pub fn main() { \u{043E} }");
+}
+
+#[test]
+fn unicode_cyrillic_p() {
+    assert_module_error!("pub fn main() { \u{0440} }");
+}
+
+#[test]
+fn unicode_modifier_letter_capital_i() {
+    assert_module_error!("pub fn main() { \u{1D35} }");
+}
+
+#[test]
+fn unicode_low_single_comma_quotation_mark() {
+    assert_module_error!("pub fn main() { #(1\u{201A} 2) }");
+}
+
+#[test]
+fn unicode_fullwidth_comma() {
+    assert_module_error!("pub fn main() { #(1\u{FF0C} 2) }");
+}
+
+#[test]
+fn unicode_ideographic_comma() {
+    assert_module_error!("pub fn main() { #(1\u{3001} 2) }");
+}
+
+#[test]
+fn unicode_fullwidth_exclamation_mark() {
+    assert_module_error!("pub fn main() { \u{FF01}= True }");
+}
+
+#[test]
+fn unicode_fullwidth_left_square_bracket() {
+    assert_module_error!("pub fn main() { \u{FF3B}1, 2] }");
+}
+
+#[test]
+fn unicode_fullwidth_right_square_bracket() {
+    assert_module_error!("pub fn main() { [1, 2\u{FF3D} }");
+}
+
+#[test]
+fn unicode_fullwidth_left_parenthesis() {
+    assert_module_error!("pub fn main\u{FF08}) { Nil }");
+}
+
+#[test]
+fn unicode_fullwidth_right_parenthesis() {
+    assert_module_error!("pub fn main(\u{FF09} { Nil }");
+}
+
+#[test]
+fn unicode_fullwidth_full_stop() {
+    assert_module_error!("pub fn main() { io\u{FF0E}println(\"hi\") }");
+}
+
+#[test]
+fn unicode_ideographic_full_stop() {
+    assert_module_error!("pub fn main() { io\u{3002}println(\"hi\") }");
+}
+
+#[test]
+fn unicode_fullwidth_less_than_sign() {
+    assert_module_error!("pub fn main() { 1 \u{FF1C} 2 }");
+}
+
+#[test]
+fn unicode_fullwidth_greater_than_sign() {
+    assert_module_error!("pub fn main() { 1 \u{FF1E} 2 }");
+}
+
+#[test]
+fn unicode_fullwidth_vertical_line() {
+    assert_module_error!("pub fn main() { True \u{FF5C}\u{FF5C} False }");
+}
+
+#[test]
+fn unicode_fullwidth_at_sign() {
+    assert_module_error!("\u{FF20}deprecated(\"old\")\npub fn main() { Nil }");
+}
+
+#[test]
+fn unicode_fullwidth_caret() {
+    assert_module_error!("pub fn main() { 0b1 \u{FF3E} 0b1 }");
+}
+
+#[test]
+fn unicode_fullwidth_colon() {
+    assert_module_error!("pub fn wibble(x\u{FF1A} Int) { x }");
+}
+
+#[test]
+fn missing_todo_constant_message() {
+    assert_module_error!("pub const wibble = todo as");
+}
+
+#[test]
+fn missing_todo_constant_message_2() {
+    assert_module_error!(
+        "pub const wibble = todo as
+pub fn wibble() {}"
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5711
+#[test]
+fn parsing_bit_array_constant_with_non_integer_size() {
+    assert_module_error!("pub const wibble = <<1:size(something)>>");
+}
+
+#[test]
+fn parsing_bit_array_constant_with_non_integer_unit() {
+    assert_module_error!("pub const wibble = <<1:unit(something)>>");
+}
+
+#[test]
+fn parsing_bit_array_expression_with_invalid_size() {
+    assert_module_error!(
+        "pub fn wibble() {
+  let assert <<1:size(Upname)>> = todo
+}"
+    );
+}
+
+#[test]
+fn parsing_bit_array_expression_with_invalid_unit() {
+    assert_module_error!(
+        "pub fn wibble() {
+  <<1:unit(Upname)>>
+}"
+    );
+}
+
+#[test]
+fn parsing_bit_array_pattern_with_invalid_unit() {
+    assert_module_error!(
+        "pub fn wibble() {
+  let assert <<1:unit(Upname)>> = todo
+}"
+    );
+}
+
+#[test]
+fn parsing_bit_array_constant_with_invalid_segment_type() {
+    assert_module_error!("pub const wibble = <<1:Upname>>");
+}
+
+#[test]
+fn parsing_invalid_external_module_name() {
+    assert_module_error!(
+        "
+@external(erlang, Upname, [])
+fn wibble() -> Nil
+"
+    );
+}
+
+#[test]
+fn parsing_invalid_external_function_name() {
+    assert_module_error!(
+        r#"
+@external(erlang, "module", Upname)
+fn wibble() -> Nil
+"#
+    );
+}
+
+#[test]
+fn parsing_invalid_deprecation_message() {
+    assert_module_error!(
+        r#"
+@deprecated(Upname)
+fn wibble() -> Nil
+"#
+    );
+}
+
+#[test]
+fn error_message_when_using_discard_pattern_for_function_name() {
+    assert_module_error!("fn _wibble() -> Nil");
+}
+
+#[test]
+fn error_message_when_using_discard_pattern_for_constant_name() {
+    assert_module_error!("const _wibble = 1");
+}
+
+#[test]
+fn error_message_when_using_discard_pattern_for_module_name() {
+    assert_module_error!("import _wibble");
+}
+
+#[test]
+fn error_message_when_using_discard_pattern_for_as_pattern() {
+    assert_module_error!(
+        "pub fn main() {
+  case todo {
+    wibble as _wobble -> todo
+  }
+}"
+    );
+}
+
+#[test]
+fn missing_constructor_name_with_multiple_fields() {
+    assert_module_error!(
+        r#"
+pub type Wibble(a) {
+  field: Int,
+  other: a
+}
+"#
+    );
+}
+
+#[test]
+fn lowercase_constructor_name_in_custom_type() {
+    assert_module_error!(
+        r#"
+pub type Wibble {
+  wibble(Int, String)
+}
+"#
+    );
+}
+
+#[test]
+fn record_trailing_update_const() {
+    assert_module_error!(
+        "
+pub type Wibble {
+    Wibble(field1: Int, field2: Int)
+}
+
+const wibble = Wibble(1, 2)
+const wobble = Wibble(field1: 0, ..wibble)
+        "
+    );
+}
+
+#[test]
+fn record_trailing_update_no_close_paran_const() {
+    assert_module_error!(
+        "
+pub type Wibble {
+    Wibble(field1: Int, field2: Int)
+}
+
+const wibble = Wibble(1, 2)
+const wobble = Wibble(field1: 0, ..wibble
+
+pub fn main() {
+  todo
+}
+        "
+    );
+}
+
+#[test]
+fn record_trailing_dot_dot_const() {
+    assert_module_error!(
+        "
+pub type Wibble {
+    Wibble(field1: Int, field2: Int)
+}
+
+const wibble = Wibble(1, 2)
+const wobble = Wibble(field1: 0, ..)
+        "
+    );
+}
+
+#[test]
+fn record_trailing_update_variable() {
+    assert_module_error!(
+        "
+pub type Wibble {
+    Wibble(field1: Int, field2: Int)
+}
+
+pub fn main() {
+  let wibble = Wibble(1, 2)
+  let wobble = Wibble(field1: 0, ..wibble)
+}
+        "
+    );
+}
+
+#[test]
+fn record_trailing_dot_dot_variable() {
+    assert_module_error!(
+        "
+pub type Wibble {
+    Wibble(field1: Int, field2: Int)
+}
+
+pub fn main() {
+  let wibble = Wibble(1, 2)
+  let wobble = Wibble(field1: 0, ..)
+}
+        "
+    );
+}
+
+#[test]
+fn record_trailing_update_no_close_paran_variable() {
+    assert_module_error!(
+        "
+pub type Wibble {
+    Wibble(field1: Int, field2: Int)
+}
+
+pub fn main() {
+  let wibble = Wibble(1, 2)
+  let wobble = Wibble(field1: 0, ..wibble
+}
+        "
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6192
+#[test]
+fn pipeline_in_constant_does_not_panic() {
+    assert_module_error!("pub const wibble = 1 |> wobble");
+}
+
+#[test]
+fn module_constant_called_as_record_constructor() {
+    assert_module_error!(
+        "
+pub type Wibble {
+  Wibble(Int)
+}
+
+pub const wibble = Wibble
+pub const invalid = wibble(1)
+"
     );
 }

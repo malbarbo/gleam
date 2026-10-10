@@ -1,6 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2024 The Gleam contributors
+
 use super::*;
 use lsp_types::{
-    ParameterInformation, ParameterLabel, SignatureHelp, SignatureHelpParams, SignatureInformation,
+    ActiveParameter, ParameterInformation, ParameterInformationLabel, SignatureHelp,
+    SignatureHelpParams, SignatureInformation, WorkDoneProgressParams,
 };
 
 fn signature_help(tester: TestProject<'_>, position: Position) -> Option<SignatureHelp> {
@@ -8,7 +12,7 @@ fn signature_help(tester: TestProject<'_>, position: Position) -> Option<Signatu
         let params = SignatureHelpParams {
             context: None,
             text_document_position_params: param,
-            work_done_progress_params: Default::default(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
         };
         let response = engine.signature_help(params);
 
@@ -42,11 +46,11 @@ fn pretty_signature_help(signature_help: SignatureHelp) -> String {
     };
 
     let label = match active_parameter {
-        None => label.to_string(),
-        Some(i) => match parameters.get(i as usize) {
+        None | Some(ActiveParameter::Null) => label.to_string(),
+        Some(ActiveParameter::Int(i)) => match parameters.get(i as usize) {
             None => label.to_string(),
             Some(ParameterInformation {
-                label: ParameterLabel::LabelOffsets([start, end]),
+                label: ParameterInformationLabel::Tuple((start, end)),
                 ..
             }) => {
                 let spaces = " ".repeat(*start as usize);
@@ -449,5 +453,47 @@ pub fn main() {
 }
     "#,
         find_position_of(r#"Pokemon(name: "Jirachi",)"#).under_last_char()
+    );
+}
+
+#[test]
+pub fn help_for_use_function_call_uses_generic_names_when_missing_all_arguments() {
+    assert_signature_help!(
+        r#"
+pub fn wibble(x: something, y: fn() -> something, z: anything) { Nil }
+pub fn main() {
+    wibble( )
+}
+"#,
+        find_position_of("wibble( ").under_last_char()
+    );
+}
+
+#[test]
+pub fn help_for_use_function_call_uses_concrete_types_when_possible_or_generic_names_when_unbound()
+{
+    assert_signature_help!(
+        r#"
+pub fn wibble(x: something, y: fn() -> something, z: anything) { Nil }
+pub fn main() {
+    wibble(1, )
+}
+"#,
+        find_position_of("wibble(1, )").under_last_char()
+    );
+}
+
+#[test]
+pub fn help_for_use_function_call_uses_concrete_types_when_late_ubound() {
+    assert_signature_help!(
+        r#"
+fn identity(x: a) -> a { x }
+
+fn main() {
+  let a = Ok(10)
+  identity( a)
+}
+"#,
+        find_position_of("identity( ").under_last_char()
     );
 }

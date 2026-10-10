@@ -2,6 +2,7 @@
 source: language-server/src/tests/completion.rs
 expression: "\npub fn main() {\n  {\n    s\n    let something = 10\n  }\n}\n"
 ---
+
 pub fn main() {
   {
     s|
@@ -14,27 +15,27 @@ pub fn main() {
 Error
   kind:   Constructor
   detail: gleam
-  sort:   4_Error
+  sort:   5_Error
 False
   kind:   EnumMember
   detail: gleam
-  sort:   4_False
+  sort:   5_False
 Nil
   kind:   EnumMember
   detail: gleam
-  sort:   4_Nil
+  sort:   5_Nil
 Ok
   kind:   Constructor
   detail: gleam
-  sort:   4_Ok
+  sort:   5_Ok
 True
   kind:   EnumMember
   detail: gleam
-  sort:   4_True
+  sort:   5_True
 main
   kind:   Function
   detail: fn() -> Int
-  sort:   2_main
+  sort:   3_main
   desc:   app
   edits:
     [3:4-3:5]: "main"

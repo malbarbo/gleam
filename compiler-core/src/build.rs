@@ -1,4 +1,5 @@
-#![allow(warnings)]
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
 
 mod elixir_libraries;
 mod module_loader;
@@ -17,37 +18,39 @@ pub use self::project_compiler::{Built, Options, ProjectCompiler};
 pub use self::telemetry::{NullTelemetry, Telemetry};
 
 use crate::ast::{
-    self, CallArg, CustomType, DefinitionLocation, TypeAst, TypedArg, TypedClauseGuard,
-    TypedConstant, TypedCustomType, TypedDefinitions, TypedExpr, TypedFunction, TypedImport,
-    TypedModuleConstant, TypedPattern, TypedRecordConstructor, TypedStatement, TypedTypeAlias,
+    self, CustomType, DefinitionLocation, TypeAst, TypedArg, TypedClauseGuard, TypedConstant,
+    TypedCustomType, TypedDefinitions, TypedExpr, TypedFunction, TypedImport, TypedModuleConstant,
+    TypedPattern, TypedRecordConstructor, TypedStatement, TypedTypeAlias,
 };
+use crate::reference;
+use crate::type_::error::Named;
 use crate::type_::{Type, TypedCallArg};
 use crate::{
-    ast::{Definition, SrcSpan, TypedModule},
-    config::{self, PackageConfig},
-    erlang,
-    error::{Error, FileIoAction, FileKind},
-    io::OutputFile,
+    ast::TypedModule,
+    config::PackageConfig,
     parse::extra::{Comment, ModuleExtra},
     type_,
 };
 use camino::Utf8PathBuf;
+use clap::ValueEnum;
 use ecow::EcoString;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::fmt::{Debug, Display};
+use src_span::SrcSpan;
+use std::fmt::Debug;
+
 use std::sync::Arc;
 use std::time::SystemTime;
-use std::{collections::HashMap, ffi::OsString, fs::DirEntry, iter::Peekable, process};
-use strum::{Display, EnumIter, EnumString, EnumVariantNames, VariantNames};
-use vec1::Vec1;
+use std::{collections::HashMap, iter::Peekable};
+use strum::{Display, EnumIter, EnumString, VariantNames};
 
 #[derive(
     Debug,
     Serialize,
     Deserialize,
+    ValueEnum,
     EnumString,
-    EnumVariantNames,
+    VariantNames,
     EnumIter,
     Clone,
     Copy,
@@ -55,12 +58,16 @@ use vec1::Vec1;
     Eq,
 )]
 #[strum(serialize_all = "lowercase")]
+#[clap(rename_all = "lower")]
+#[serde(rename_all = "lowercase")]
 pub enum Target {
-    #[strum(serialize = "erlang", serialize = "erl")]
-    #[serde(rename = "erlang", alias = "erl")]
+    #[strum(serialize = "erl")]
+    #[serde(alias = "erl")]
+    #[clap(alias = "erl")]
     Erlang,
-    #[strum(serialize = "javascript", serialize = "js")]
-    #[serde(rename = "javascript", alias = "js")]
+    #[strum(serialize = "js")]
+    #[serde(alias = "js")]
+    #[clap(alias = "js")]
     JavaScript,
     #[strum(serialize = "webassembly", serialize = "wasm")]
     #[serde(rename = "webassembly", alias = "wasm")]
@@ -129,17 +136,28 @@ impl Codegen {
 }
 
 #[derive(
-    Debug, Serialize, Deserialize, EnumString, EnumVariantNames, Clone, Copy, PartialEq, Eq,
+    Default,
+    Debug,
+    Serialize,
+    Deserialize,
+    EnumString,
+    VariantNames,
+    ValueEnum,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
 )]
+#[clap(rename_all = "lower")]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum Runtime {
-    #[strum(serialize = "nodejs", serialize = "node")]
-    #[serde(rename = "nodejs", alias = "node")]
+    #[strum(serialize = "node")]
+    #[serde(alias = "node")]
+    #[clap(alias = "node")]
+    #[default]
     NodeJs,
-    #[strum(serialize = "deno")]
-    #[serde(rename = "deno")]
     Deno,
-    #[strum(serialize = "bun")]
-    #[serde(rename = "bun")]
     Bun,
 }
 
@@ -153,26 +171,32 @@ impl Runtime {
     }
 }
 
-impl Default for Runtime {
-    fn default() -> Self {
-        Self::NodeJs
-    }
-}
-
 #[derive(Debug)]
 pub enum TargetCodegenConfiguration {
     JavaScript {
         emit_typescript_definitions: bool,
+        emit_source_maps: bool,
         prelude_location: Utf8PathBuf,
     },
     Erlang {
         app_file: Option<ErlangAppCodegenConfiguration>,
+        output: ErlangOutput,
     },
     WebAssembly {
         int: crate::config::WasmInt,
         float: crate::config::WasmFloat,
         opt_level: crate::config::WasmOptLevel,
     },
+}
+
+/// Which Erlang format is used when compiling Gleam code for the
+/// Erlang target.
+#[derive(Debug, Clone, PartialEq, Copy, serde::Deserialize, serde::Serialize)]
+pub enum ErlangOutput {
+    /// Erlang abstract forms, using the .absr extension.
+    Binary,
+    /// Erlang source code, using the .erl extension.
+    Textual,
 }
 
 impl TargetCodegenConfiguration {
@@ -200,7 +224,7 @@ pub struct ErlangAppCodegenConfiguration {
     Deserialize,
     Display,
     EnumString,
-    EnumVariantNames,
+    VariantNames,
     EnumIter,
     Clone,
     Copy,
@@ -247,7 +271,7 @@ pub struct Package {
 
 impl Package {
     pub fn attach_doc_and_module_comments(&mut self) {
-        for mut module in &mut self.modules {
+        for module in &mut self.modules {
             module.attach_doc_and_module_comments();
         }
     }
@@ -320,7 +344,16 @@ impl Module {
         module_erlang_name(&self.name)
     }
 
+    /// This is where the compiled binary `.abstr` file can be found.
     pub fn compiled_erlang_path(&self) -> Utf8PathBuf {
+        let mut path = Utf8PathBuf::from(&module_erlang_name(&self.name));
+        assert!(path.set_extension("abstr"), "Couldn't set file extension");
+        path
+    }
+
+    /// If compiling to textual Erlang files, this is where the compiled `.erl`
+    /// file can be found.
+    pub fn compiled_textual_erlang_path(&self) -> Utf8PathBuf {
         let mut path = Utf8PathBuf::from(&module_erlang_name(&self.name));
         assert!(path.set_extension("erl"), "Couldn't set file extension");
         path
@@ -413,19 +446,82 @@ pub fn module_erlang_name(gleam_name: &EcoString) -> EcoString {
 pub struct UnqualifiedImport<'a> {
     pub name: &'a EcoString,
     pub module: &'a EcoString,
-    pub is_type: bool,
     pub location: &'a SrcSpan,
+    /// The position of the original name. For example, in `type Wibble as
+    /// Wobble`, it points to the start of `Wibble`.
+    pub name_position: u32,
+    pub as_name: Option<&'a EcoString>,
+}
+
+impl<'a> UnqualifiedImport<'a> {
+    /// The location of the original name, excluding the potential `as ...`
+    /// clause or the `type` keyword. For example, in `type Wibble as Wobble`,
+    /// it covers `Wibble`.
+    pub fn name_location(&self) -> SrcSpan {
+        SrcSpan::new(
+            self.name_position,
+            self.name_position + self.name.len() as u32,
+        )
+    }
+
+    /// If the import is aliased, it is the start of the alias. Otherwise, it is
+    /// the start of the imported name.
+    ///
+    /// For example, in `type Wibble as Wobble`, the used name will start at
+    /// `Wobble`. In `type Wibble`, it will start at `Wibble`.
+    pub fn used_name_position(&self) -> u32 {
+        match self.as_name {
+            // For aliases, the location span will cover the whole of `type
+            // Wibble as Wobble`.
+            // So, the used name will start 6 chars (length of `Wobble`) before
+            // the span ends.
+            Some(as_name) => self.location.end - as_name.len() as u32,
+            // For non-aliased imports, use the start of the imported name
+            // location. It covers `Wibble` in `type Wibble as Wobble`.
+            None => self.name_position,
+        }
+    }
+
+    pub fn name_kind(&self) -> Named {
+        let is_upname = match self.name.chars().next() {
+            Some(c) => c.is_uppercase(),
+            None => false,
+        };
+
+        if is_upname {
+            Named::CustomTypeVariant
+        } else {
+            Named::Function
+        }
+    }
+
+    pub fn is_type(&self) -> bool {
+        // If the position is not at the start location then that means
+        // that there is a `type` keyword before it, along with an amount of
+        // whitespace and optional comments
+        self.name_position != self.location.start
+    }
 }
 
 /// The position of a located expression. Used to determine extra context,
 /// such as whether to provide label completions if the expression is in
 /// argument position.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ExpressionPosition<'a> {
     Expression,
     ArgumentOrLabel {
         called_function: &'a TypedExpr,
         function_arguments: &'a [TypedCallArg],
+    },
+    /// This is for an expression that is used in a record update spread:
+    /// ```gleam
+    /// Wibble(..wibble, a: 1)
+    /// //     ^^^^^^^^ This!
+    /// ```
+    UpdatedRecord {
+        /// These are all the record fields that are not being updated in the
+        /// update.
+        unchanged_record_fields: Vec<(EcoString, Arc<Type>)>,
     },
 }
 
@@ -436,9 +532,39 @@ pub enum Located<'a> {
         spread_location: SrcSpan,
         pattern: &'a TypedPattern,
     },
-    // A prefix alias or a suffix variable defined in a string prefix pattern:
-    // "prefix" as alias <> suffix
-    StringPrefixPatternVariable {
+    /// A prefix alias defined in a string prefix pattern:
+    ///
+    /// ```gleam
+    /// "prefix" as alias <> suffix
+    /// //       ^^^^^^^^
+    /// ```
+    StringPrefixPatternPrefixAlias {
+        /// Start position of the name:
+        /// ```gleam
+        /// "prefix" as alias <> suffix
+        /// //          ^
+        /// ```
+        name_start_position: u32,
+        /// Full location of the binding:
+        /// ```gleam
+        /// "prefix" as alias <> suffix
+        /// //      ^^^^^^^^^
+        /// ```
+        location: SrcSpan,
+        name: &'a EcoString,
+    },
+    /// A suffix variable defined in a string prefix pattern:
+    ///
+    /// ```gleam
+    /// "prefix" as alias <> suffix
+    /// //                   ^^^^^^
+    /// ```
+    StringPrefixPatternSuffix {
+        /// Location of the name:
+        /// ```gleam
+        /// "prefix" as alias <> suffix
+        /// //                   ^^^^^^
+        /// ```
         location: SrcSpan,
         name: &'a EcoString,
     },
@@ -452,10 +578,75 @@ pub enum Located<'a> {
     Arg(&'a TypedArg),
     Annotation {
         ast: &'a TypeAst,
-        type_: std::sync::Arc<Type>,
+        type_: Arc<Type>,
+    },
+    TypeVariable {
+        name: EcoString,
+        location: SrcSpan,
     },
     UnqualifiedImport(UnqualifiedImport<'a>),
-    Label(SrcSpan, std::sync::Arc<Type>),
+    /// The label of a labelled argument in a function call.
+    Label {
+        location: SrcSpan,
+        /// The type of the labelled argument's value (used for hover).
+        field_type: Arc<Type>,
+    },
+    /// An argument label at its definition in a function.
+    FunctionLabelDefinition {
+        location: SrcSpan,
+        /// The type of the argument (used for hover).
+        field_type: Arc<Type>,
+        label: EcoString,
+        /// The name of the function this label belongs to. The function is
+        /// being defined in the module being analysed, so only its name is
+        /// needed.
+        function_name: EcoString,
+    },
+    /// An argument label used in a call to a module function.
+    FunctionLabelUsage {
+        location: SrcSpan,
+        /// The type of the labelled argument's value (used for hover).
+        field_type: Arc<Type>,
+        label: EcoString,
+        /// The module the function this label belongs to is defined in.
+        function_module: EcoString,
+        /// The name of the function this label belongs to.
+        function_name: EcoString,
+    },
+    /// A record field label at its definition in a custom type variant.
+    RecordLabelDefinition {
+        location: SrcSpan,
+        /// The type of the field (used for hover).
+        field_type: Arc<Type>,
+        label: EcoString,
+        /// The name of the custom type this field belongs to. The type is
+        /// being defined in the module being analysed, so only its name is
+        /// needed.
+        type_name: EcoString,
+    },
+    /// A record field label used in a record constructor call or pattern, or
+    /// in a record update.
+    RecordLabelUsage {
+        location: SrcSpan,
+        /// The type of the field's value (used for hover).
+        field_type: Arc<Type>,
+        label: EcoString,
+        /// The record type the field belongs to.
+        record_type: Arc<Type>,
+        /// The name of the variant the field was used with.
+        variant: EcoString,
+    },
+    /// The label of a record field access: `record.label`.
+    RecordAccessLabel {
+        location: SrcSpan,
+        /// The type of the field (used for hover).
+        field_type: Arc<Type>,
+        label: EcoString,
+        /// The record type the field belongs to.
+        record_type: Arc<Type>,
+        /// The documentation of the field (used for hover).
+        documentation: Option<EcoString>,
+    },
     ModuleName {
         location: SrcSpan,
         module_name: EcoString,
@@ -463,6 +654,7 @@ pub enum Located<'a> {
         layer: ast::Layer,
     },
     Constant(&'a TypedConstant),
+    ClauseGuard(&'a TypedClauseGuard),
 
     // A module's top level definitions
     ModuleFunction(&'a TypedFunction),
@@ -476,8 +668,8 @@ impl<'a> Located<'a> {
     // Looks up the type constructor for the given type and then create the location.
     fn type_location(
         &self,
-        importable_modules: &'a im::HashMap<EcoString, type_::ModuleInterface>,
-        type_: std::sync::Arc<Type>,
+        importable_modules: &'a imbl::HashMap<EcoString, type_::ModuleInterface>,
+        type_: Arc<Type>,
     ) -> Option<DefinitionLocation> {
         type_constructor_from_modules(importable_modules, type_).map(|t| DefinitionLocation {
             module: Some(t.module.clone()),
@@ -485,19 +677,64 @@ impl<'a> Located<'a> {
         })
     }
 
+    /// Looks up the location at which a label was defined, using the label
+    /// definitions gathered during analysis.
+    fn label_definition_location(
+        &self,
+        importable_modules: &'a imbl::HashMap<EcoString, type_::ModuleInterface>,
+        owner: reference::LabelOwner,
+        label: &EcoString,
+        variant: Option<&EcoString>,
+    ) -> Option<DefinitionLocation> {
+        let module_name = owner.module().clone();
+        let module = importable_modules.get(&module_name)?;
+        let key = reference::LabelKey {
+            owner,
+            label: label.clone(),
+        };
+        let definitions = module.references.label_definitions.get(&key)?;
+        // A record field can be defined in multiple variants of the same type.
+        // If we know which variant the label was used with we jump to its
+        // definition in that variant. Otherwise we jump to the first
+        // definition. Either the label comes from a `record.field` access,
+        // which works across all the variants defining it, or a function
+        // which only defines labels once anyway.
+        let definition = match variant {
+            None => definitions.first()?,
+            Some(variant) => definitions
+                .iter()
+                .find(|definition| definition.variant.as_ref() == Some(variant))?,
+        };
+        Some(DefinitionLocation {
+            module: Some(module_name),
+            span: definition.location,
+        })
+    }
+
     pub fn definition_location(
         &self,
-        importable_modules: &'a im::HashMap<EcoString, type_::ModuleInterface>,
+        importable_modules: &'a imbl::HashMap<EcoString, type_::ModuleInterface>,
     ) -> Option<DefinitionLocation> {
         match self {
             Self::PatternSpread { .. } => None,
             Self::Pattern(pattern) => pattern.definition_location(),
-            Self::StringPrefixPatternVariable { location, .. } => Some(DefinitionLocation {
+            Self::StringPrefixPatternPrefixAlias {
+                name_start_position,
+                location,
+                ..
+            } => {
+                let name_location = SrcSpan::new(*name_start_position, location.end);
+                Some(DefinitionLocation {
+                    module: None,
+                    span: name_location,
+                })
+            }
+            Self::StringPrefixPatternSuffix { location, .. } => Some(DefinitionLocation {
                 module: None,
                 span: *location,
             }),
             Self::Statement(statement) => statement.definition_location(),
-            Self::FunctionBody(statement) => None,
+            Self::FunctionBody(_statement) => None,
             Self::Expression { expression, .. } => expression.definition_location(),
 
             Self::ModuleImport(import) => Some(DefinitionLocation {
@@ -525,44 +762,96 @@ impl<'a> Located<'a> {
                 module: None,
                 span: record.location,
             }),
-            Self::UnqualifiedImport(UnqualifiedImport {
-                module,
-                name,
-                is_type,
-                ..
-            }) => importable_modules.get(*module).and_then(|m| {
-                if *is_type {
-                    m.types.get(*name).map(|t| DefinitionLocation {
-                        module: Some((*module).clone()),
-                        span: t.origin,
-                    })
-                } else {
-                    m.values.get(*name).map(|v| DefinitionLocation {
-                        module: Some((*module).clone()),
-                        span: v.definition_location().span,
-                    })
-                }
-            }),
+            Self::UnqualifiedImport(import @ UnqualifiedImport { module, name, .. }) => {
+                importable_modules.get(*module).and_then(|m| {
+                    if import.is_type() {
+                        m.types.get(*name).map(|t| DefinitionLocation {
+                            module: Some((*module).clone()),
+                            span: t.origin,
+                        })
+                    } else {
+                        m.values.get(*name).map(|v| DefinitionLocation {
+                            module: Some((*module).clone()),
+                            span: v.definition_location().span,
+                        })
+                    }
+                })
+            }
             Self::Arg(_) => None,
             Self::Annotation { type_, .. } => self.type_location(importable_modules, type_.clone()),
-            Self::Label(_, _) => None,
+            Self::Label { .. } => None,
+            Self::RecordLabelUsage {
+                record_type,
+                label,
+                variant,
+                ..
+            } => {
+                let (module, name) = record_type.named_type_name()?;
+                self.label_definition_location(
+                    importable_modules,
+                    reference::LabelOwner::Record { module, name },
+                    label,
+                    Some(variant),
+                )
+            }
+            Self::RecordAccessLabel {
+                record_type, label, ..
+            } => {
+                let (module, name) = record_type.named_type_name()?;
+                self.label_definition_location(
+                    importable_modules,
+                    reference::LabelOwner::Record { module, name },
+                    label,
+                    None,
+                )
+            }
+            // Already at the definition; go-to-definition jumps to itself.
+            Self::RecordLabelDefinition { location, .. }
+            | Self::FunctionLabelDefinition { location, .. } => Some(DefinitionLocation {
+                module: None,
+                span: *location,
+            }),
+            Self::FunctionLabelUsage {
+                function_module,
+                function_name,
+                label,
+                ..
+            } => self.label_definition_location(
+                importable_modules,
+                reference::LabelOwner::Function {
+                    module: function_module.clone(),
+                    name: function_name.clone(),
+                },
+                label,
+                None,
+            ),
+            Self::TypeVariable { .. } => None,
             Self::ModuleName { module_name, .. } => Some(DefinitionLocation {
                 module: Some(module_name.clone()),
                 span: SrcSpan::new(0, 0),
             }),
             Self::Constant(constant) => constant.definition_location(),
+            Self::ClauseGuard(guard) => guard.definition_location(),
         }
     }
 
     pub(crate) fn type_(&self) -> Option<Arc<Type>> {
         match self {
             Located::Pattern(pattern) => Some(pattern.type_()),
-            Located::StringPrefixPatternVariable { .. } => Some(type_::string()),
+            Located::StringPrefixPatternPrefixAlias { .. }
+            | Located::StringPrefixPatternSuffix { .. } => Some(type_::string()),
             Located::Statement(statement) => Some(statement.type_()),
             Located::Expression { expression, .. } => Some(expression.type_()),
             Located::Arg(arg) => Some(arg.type_.clone()),
-            Located::Label(_, type_) | Located::Annotation { type_, .. } => Some(type_.clone()),
+            Located::Label { field_type, .. }
+            | Located::RecordLabelDefinition { field_type, .. }
+            | Located::RecordLabelUsage { field_type, .. }
+            | Located::RecordAccessLabel { field_type, .. }
+            | Located::FunctionLabelDefinition { field_type, .. }
+            | Located::FunctionLabelUsage { field_type, .. } => Some(field_type.clone()),
+            Located::Annotation { type_, .. } => Some(type_.clone()),
             Located::Constant(constant) => Some(constant.type_()),
+            Located::ClauseGuard(guard) => Some(guard.type_()),
 
             Located::PatternSpread { .. }
             | Located::ModuleConstant(_)
@@ -573,13 +862,14 @@ impl<'a> Located<'a> {
             | Located::VariantConstructorDefinition(_)
             | Located::FunctionBody(_)
             | Located::UnqualifiedImport(_)
-            | Located::ModuleName { .. } => None,
+            | Located::ModuleName { .. }
+            | Located::TypeVariable { .. } => None,
         }
     }
 
     pub fn type_definition_locations(
         &self,
-        importable_modules: &im::HashMap<EcoString, type_::ModuleInterface>,
+        importable_modules: &imbl::HashMap<EcoString, type_::ModuleInterface>,
     ) -> Option<Vec<DefinitionLocation>> {
         let type_ = self.type_()?;
         Some(type_to_definition_locations(type_, importable_modules))
@@ -596,9 +886,9 @@ impl<'a> Located<'a> {
 /// This is what powers the "go to type definition" capability of the language
 /// server.
 ///
-fn type_to_definition_locations<'a>(
+fn type_to_definition_locations(
     type_: Arc<Type>,
-    importable_modules: &'a im::HashMap<EcoString, type_::ModuleInterface>,
+    importable_modules: &imbl::HashMap<EcoString, type_::ModuleInterface>,
 ) -> Vec<DefinitionLocation> {
     match type_.as_ref() {
         // For named types we start with the location of the named type itself
@@ -618,7 +908,7 @@ fn type_to_definition_locations<'a>(
                 return vec![];
             };
 
-            let Some(type_) = module.get_public_type(&name) else {
+            let Some(type_) = module.get_importable_type(name) else {
                 return vec![];
             };
 
@@ -668,19 +958,19 @@ fn type_to_definition_locations<'a>(
 
 // Looks up the type constructor for the given type
 pub fn type_constructor_from_modules(
-    importable_modules: &im::HashMap<EcoString, type_::ModuleInterface>,
-    type_: std::sync::Arc<Type>,
+    importable_modules: &imbl::HashMap<EcoString, type_::ModuleInterface>,
+    type_: Arc<Type>,
 ) -> Option<&type_::TypeConstructor> {
     let type_ = type_::collapse_links(type_);
     match type_.as_ref() {
         Type::Named { name, module, .. } => importable_modules
             .get(module)
             .and_then(|i| i.types.get(name)),
-        _ => None,
+        Type::Fn { .. } | Type::Var { .. } | Type::Tuple { .. } => None,
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Origin {
     Src,
     Test,
@@ -753,12 +1043,16 @@ fn doc_comments_before<'a>(
     (comment_start, comments)
 }
 
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub struct SourceFingerprint(u64);
 
 impl SourceFingerprint {
     pub fn new(source: &str) -> Self {
         SourceFingerprint(xxhash_rust::xxh3::xxh3_64(source.as_bytes()))
+    }
+
+    pub fn to_numerical_string(&self) -> String {
+        self.0.to_string()
     }
 }
 

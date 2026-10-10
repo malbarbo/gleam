@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2022 The Gleam contributors
+
 use crate::assert_erl;
 
 #[test]
@@ -490,5 +493,30 @@ pub fn main() {
   cute_cute_bee_buzz
 }
 "#
+    );
+}
+
+#[test]
+fn concat_with_block_with_single_string_expr() {
+    assert_erl!(
+        r#"
+pub fn concat(name) {
+  name <> { "/" } <> name
+}
+"#,
+    );
+}
+
+#[test]
+fn concat_with_block_with_multiple_expr() {
+    assert_erl!(
+        r#"
+pub fn concat(name) {
+  name <> {
+    let x = "/"
+    x
+  } <> name
+}
+"#,
     );
 }

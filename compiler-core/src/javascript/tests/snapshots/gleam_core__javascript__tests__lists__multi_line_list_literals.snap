@@ -1,8 +1,6 @@
 ---
 source: compiler-core/src/javascript/tests/lists.rs
-assertion_line: 31
 expression: "\npub fn go(x) {\n    [{True 1}]\n}\n"
-snapshot_kind: text
 ---
 ----- SOURCE CODE
 
@@ -12,13 +10,14 @@ pub fn go(x) {
 
 
 ----- COMPILED JAVASCRIPT
-import { toList } from "../gleam.mjs";
+import { List$Empty$const as $List$Empty$const, prepend as listPrepend } from "../gleam.mjs";
 
 export function go(x) {
-  return toList([
+  return listPrepend(
     (() => {
       true;
       return 1;
     })(),
-  ]);
+    $List$Empty$const,
+  );
 }

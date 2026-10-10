@@ -1,12 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Gleam contributors
+
 use ecow::EcoString;
 use std::{cell::RefCell, collections::HashMap, ptr, rc::Rc, sync::Arc};
 use walrus::{FunctionId, GlobalId, LocalId, ValType};
 
 use crate::{
     ast::{
-        AssignName, AssignmentKind, BinOp, ClauseGuard, SrcSpan, TypedArg, TypedAssignment,
-        TypedClause, TypedClauseGuard, TypedExpr, TypedPattern, TypedPipelineAssignment,
-        TypedStatement,
+        AssignName, AssignmentKind, BinOp, ClauseGuard, StringPrefixLeftSideAssignment, TypedArg,
+        TypedAssignment, TypedClause, TypedClauseGuard, TypedExpr, TypedPattern,
+        TypedPipelineAssignment, TypedStatement,
         visit::{
             Visit, visit_typed_assignment, visit_typed_clause_guard, visit_typed_expr,
             visit_typed_expr_bin_op, visit_typed_expr_call, visit_typed_expr_case,
@@ -15,6 +18,7 @@ use crate::{
     },
     type_::{self, Type, TypedCallArg},
 };
+use src_span::SrcSpan;
 
 use super::{Generator, monomorphize::set_ubound_or_generic};
 
@@ -370,6 +374,20 @@ impl Locals {
         );
     }
 
+    fn insert_record_update(&mut self, generator: &mut Generator<'_>, record: &TypedExpr) {
+        self._insert(
+            generator,
+            record,
+            &record.type_(),
+            "record",
+            record.location(),
+        );
+    }
+
+    pub(super) fn for_record_update(&self, record: &TypedExpr) -> LocalId {
+        self._get(record)
+    }
+
     pub(super) fn for_pipeline_assignment(&self, assignment: &TypedPipelineAssignment) -> LocalId {
         self._get(assignment)
     }
@@ -408,7 +426,7 @@ impl Locals {
         let index = generator.wasm_module.locals.add(val_type);
         let lc = generator
             .line_numbers
-            .line_and_column_number(location.start);
+            .line_and_utf8_column_number(location.start);
         let name: EcoString = format!("{prefix}@{}:{}", lc.line, lc.column).into();
         let name = {
             let count = self.names.entry(name.clone()).or_insert(0);
@@ -464,15 +482,15 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
         &mut self,
         location: &'ast SrcSpan,
         type_: &'ast Arc<Type>,
-        name: &'ast BinOp,
-        name_location: &'ast SrcSpan,
+        operator: &'ast BinOp,
+        operator_start: &'ast u32,
         left: &'ast TypedExpr,
         right: &'ast TypedExpr,
     ) {
-        if matches!(name, BinOp::DivInt | BinOp::DivFloat) {
+        if matches!(operator, BinOp::DivInt | BinOp::DivFloat) {
             self.locals.insert_div(self.generator, left, right);
         }
-        visit_typed_expr_bin_op(self, location, type_, name, name_location, left, right);
+        visit_typed_expr_bin_op(self, location, type_, operator, operator_start, left, right);
     }
 
     fn visit_typed_expr_call(
@@ -481,9 +499,10 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
         type_: &'ast Arc<Type>,
         fun: &'ast TypedExpr,
         arguments: &'ast [TypedCallArg],
+        open_parenthesis: &'ast Option<u32>,
     ) {
         self.locals.insert_call(self.generator, fun);
-        visit_typed_expr_call(self, location, type_, fun, arguments);
+        visit_typed_expr_call(self, location, type_, fun, arguments, open_parenthesis);
     }
 
     fn visit_typed_expr_case(
@@ -520,7 +539,7 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
         &mut self,
         _location: &'ast SrcSpan,
         left_location: &'ast SrcSpan,
-        left_side_assignment: &'ast Option<(EcoString, SrcSpan)>,
+        left_side_assignment: &'ast Option<StringPrefixLeftSideAssignment>,
         right_location: &'ast SrcSpan,
         _left_side_string: &'ast EcoString,
         right_side_assignment: &'ast AssignName,
@@ -543,8 +562,16 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
     }
 
     fn visit_typed_expr(&mut self, expr: &'ast TypedExpr) {
-        if let echo @ TypedExpr::Echo { .. } = expr {
-            self.locals.insert_echo(self.generator, echo);
+        match expr {
+            TypedExpr::Echo { .. } => self.locals.insert_echo(self.generator, expr),
+            TypedExpr::RecordUpdate {
+                updated_record,
+                updated_record_assigned_name: Some(_),
+                ..
+            } => self
+                .locals
+                .insert_record_update(self.generator, updated_record),
+            _ => {}
         }
         visit_typed_expr(self, expr);
     }

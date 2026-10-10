@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2018 The Gleam contributors
+
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::ValueEnum;
 use gleam_core::{
-    Result, erlang, error,
-    error::{Error, FileIoAction, FileKind, InvalidProjectNameReason},
+    Result, erlang,
+    error::{self, Error, FileIoAction, FileIoCause, FileKind, InvalidProjectNameReason},
     parse,
 };
 use serde::{Deserialize, Serialize};
@@ -15,9 +18,9 @@ mod tests;
 
 use crate::{NewOptions, fs::get_current_directory};
 
-const GLEAM_STDLIB_REQUIREMENT: &str = ">= 0.44.0 and < 2.0.0";
+const GLEAM_STDLIB_REQUIREMENT: &str = ">= 1.0.0 and < 2.0.0";
 const GLEEUNIT_REQUIREMENT: &str = ">= 1.0.0 and < 2.0.0";
-const ERLANG_OTP_VERSION: &str = "28";
+const ERLANG_OTP_VERSION: &str = "29";
 const REBAR3_VERSION: &str = "3";
 const ELIXIR_VERSION: &str = "1";
 
@@ -84,34 +87,7 @@ impl FileToCreate {
         };
 
         match self {
-            Self::Readme => Some(format!(
-                r#"# {project_name}
-
-[![Package Version](https://img.shields.io/hexpm/v/{project_name})](https://hex.pm/packages/{project_name})
-[![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://hexdocs.pm/{project_name}/)
-
-```sh
-gleam add {project_name}@1
-```
-```gleam
-import {project_name}
-
-pub fn main() -> Nil {{
-  // TODO: An example of the project in use
-}}
-```
-
-Further documentation can be found at <https://hexdocs.pm/{project_name}>.
-
-## Development
-
-```sh
-gleam run   # Run the project
-gleam test  # Run the tests
-```
-"#,
-            )),
-
+            Self::Readme => Some(default_readme(project_name)),
             Self::Gitignore if !skip_git => Some(
                 "*.beam
 *.ez
@@ -185,7 +161,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: erlef/setup-beam@v1
         with:
           otp-version: "{ERLANG_OTP_VERSION}"
@@ -200,6 +176,38 @@ jobs:
             Self::GithubCi | Self::Gitignore => None,
         }
     }
+}
+
+pub fn default_readme(project_name: &str) -> String {
+    let project_name_with_dashes = project_name.replace('_', "-");
+
+    format!(
+        r#"# {project_name}
+
+[![Package Version](https://img.shields.io/hexpm/v/{project_name})](https://hex.pm/packages/{project_name})
+[![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://{project_name_with_dashes}.hexdocs.pm/)
+
+```sh
+gleam add {project_name}@1
+```
+```gleam
+import {project_name}
+
+pub fn main() -> Nil {{
+  // TODO: An example of the project in use
+}}
+```
+
+Further documentation can be found at <https://{project_name_with_dashes}.hexdocs.pm/>.
+
+## Development
+
+```sh
+gleam run   # Run the project
+gleam test  # Run the tests
+```
+"#,
+    )
 }
 
 impl Creator {
@@ -222,7 +230,7 @@ impl Creator {
         let github = root.join(".github");
         let workflows = github.join("workflows");
         let me = Self {
-            root: root.clone(),
+            root,
             src,
             test,
             github,
@@ -289,19 +297,19 @@ The project can be compiled and tested by running these commands:
 }
 
 fn write(path: Utf8PathBuf, contents: &str) -> Result<()> {
-    let mut f = File::create(&path).map_err(|err| Error::FileIo {
+    let mut f = File::create(&path).map_err(|error| Error::FileIo {
         kind: FileKind::File,
         path: path.clone(),
         action: FileIoAction::Create,
-        err: Some(err.to_string()),
+        cause: FileIoCause::std_io(error),
     })?;
 
     f.write_all(contents.as_bytes())
-        .map_err(|err| Error::FileIo {
+        .map_err(|error| Error::FileIo {
             kind: FileKind::File,
             path,
             action: FileIoAction::WriteTo,
-            err: Some(err.to_string()),
+            cause: FileIoCause::std_io(error),
         })?;
     Ok(())
 }
@@ -342,7 +350,7 @@ fn validate_name(name: &str) -> Result<(), Error> {
             name: name.to_string(),
             reason: InvalidProjectNameReason::ErlangStandardLibraryModule,
         })
-    } else if parse::lexer::str_to_keyword(name).is_some() {
+    } else if parse::lexer::string_to_keyword(name).is_some() {
         Err(Error::InvalidProjectName {
             name: name.to_string(),
             reason: InvalidProjectNameReason::GleamReservedWord,

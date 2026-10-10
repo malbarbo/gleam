@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 use std::{
     collections::{HashMap, HashSet},
     time::SystemTime,
@@ -11,12 +14,13 @@ use super::{
 };
 use crate::{
     build::{
-        self, Mode, NullTelemetry, Origin, PackageCompiler, StaleTracker,
+        self, ErlangOutput, Mode, NullTelemetry, Origin, PackageCompiler, StaleTracker,
         TargetCodegenConfiguration,
     },
     config::{DocsPage, PackageConfig, Repository},
     docs::{DocContext, search_item_for_module, search_item_for_type, search_item_for_value},
     io::{FileSystemWriter, memory::InMemoryFileSystem},
+    parse::extra::ModuleExtra,
     paths::ProjectPaths,
     type_,
     uid::UniqueIdGenerator,
@@ -43,7 +47,7 @@ fn compile_with_markdown_pages(
 ) -> EcoString {
     let fs = InMemoryFileSystem::new();
     for (name, src) in modules {
-        fs.write(&Utf8PathBuf::from(format!("/src/{name}")), src)
+        fs.write(&Utf8PathBuf::from(format!("src/{name}")), src)
             .unwrap();
     }
 
@@ -60,12 +64,15 @@ fn compile_with_markdown_pages(
     }
 
     let ids = UniqueIdGenerator::new();
-    let mut type_manifests = im::HashMap::new();
-    let mut defined_modules = im::HashMap::new();
+    let mut type_manifests = imbl::HashMap::new();
+    let mut defined_modules = imbl::HashMap::new();
     let warnings = WarningEmitter::null();
-    let target = TargetCodegenConfiguration::Erlang { app_file: None };
+    let target = TargetCodegenConfiguration::Erlang {
+        app_file: None,
+        output: ErlangOutput::Binary,
+    };
 
-    let root = Utf8PathBuf::from("/");
+    let root = Utf8PathBuf::from("");
     let build = root.join("build");
     let lib = root.join("lib");
     let paths = ProjectPaths::new(root.clone());
@@ -73,7 +80,6 @@ fn compile_with_markdown_pages(
         PackageCompiler::new(&config, Mode::Dev, &root, &build, &lib, &target, ids, fs);
     compiler.write_entrypoint = false;
     compiler.write_metadata = false;
-    compiler.compile_beam_bytecode = true;
     let mut modules = compiler
         .compile(
             &warnings,
@@ -94,7 +100,7 @@ fn compile_with_markdown_pages(
         .into_iter()
         .map(|(title, _)| DocsPage {
             title: (*title).into(),
-            path: format!("{title}.html"),
+            path: Utf8PathBuf::from(format!("{title}.html")),
             source: format!("{title}.md").into(),
         })
         .collect_vec();
@@ -115,6 +121,7 @@ fn compile_with_markdown_pages(
         },
         pages_fs,
     )
+    .unwrap()
     .into_iter()
     .filter(|file| file.path.extension() == Some("html"))
     .sorted_by(|a, b| a.path.cmp(&b.path))
@@ -161,8 +168,8 @@ fn compile_documentation(
         input_path: "/".into(),
         origin: Origin::Src,
         ast: module,
-        extra: Default::default(),
-        dependencies: Default::default(),
+        extra: ModuleExtra::new(),
+        dependencies: vec![],
     };
 
     let source_links = SourceLinker::new(&paths, &config, &build_module);
@@ -196,7 +203,11 @@ fn compile_documentation(
 
     output.push_str("---- SOURCE CODE\n");
     for (_package, name, src) in modules {
-        output.push_str(&format!("-- {name}.gleam\n{src}\n\n"));
+        output.push_str("-- ");
+        output.push_str(name);
+        output.push_str(".gleam\n");
+        output.push_str(src);
+        output.push_str("\n\n");
     }
     output.push_str("-- ");
     output.push_str(module_name);
@@ -1294,8 +1305,8 @@ fn generate_search_data(module_name: &str, module_src: &str) -> EcoString {
         input_path: "/".into(),
         origin: Origin::Src,
         ast: module,
-        extra: Default::default(),
-        dependencies: Default::default(),
+        extra: ModuleExtra::new(),
+        dependencies: vec![],
     };
 
     let source_links = SourceLinker::new(&paths, &config, &build_module);

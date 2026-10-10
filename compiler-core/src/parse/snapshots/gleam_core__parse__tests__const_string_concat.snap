@@ -60,11 +60,13 @@ Parsed {
                             end: 35,
                         },
                         annotation: None,
-                        value: StringConcatenation {
+                        value: BinaryOperator {
                             location: SrcSpan {
                                 start: 38,
                                 end: 51,
                             },
+                            operator_start: 43,
+                            operator: Concatenate,
                             left: Var {
                                 location: SrcSpan {
                                     start: 38,
@@ -82,6 +84,7 @@ Parsed {
                                 },
                                 value: "bee",
                             },
+                            type_: (),
                         },
                         type_: (),
                         deprecation: NotDeprecated,

@@ -1,300 +1,171 @@
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  SPDX-FileCopyrightText: 2020 The Gleam contributors
+-->
+
 # Changelog
 
 ## Unreleased
 
 ### Compiler
 
-- The compiler now reports an error when integer and float binary operators are
-  used incorrectly in case expression guards.
-  ([Adi Salimgereyev](https://github.com/abs0luty))
-
-- The compiler now supports string concatenation in clause guards:
-
-  ```gleam
-  case message {
-    #(version, action) if version <> ":" <> action == "v1:delete" ->
-      handle_delete()
-    _ -> ignore()
-  }
-  ```
-
-  ([Adi Salimgereyev](https://github.com/abs0luty))
-
-- Improved the code generated on the Erlang target when dividing a `Float`
-  number by the literal number `0.0`.
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
+- The compiler will now show "Unused variable" warning for each of alternative
+  patterns.
+  ([Andrey Kozhev](https://github.com/ankddev))
 
 ### Build tool
 
-- When adding a package that does not exist on Hex, the message is a bit
-  friendlier.
-  ([Ameen Radwan](https://github.com/Acepie))
+- `gleam remove` now rejects invalid package names with an error explaining
+  naming rules, instead of stating that the package is not a dependency.
+  Trying to remove `gleam_otp@1` now suggests the matching dependency
+  `gleam_otp`, if there is one.
+  ([Tom Voet](https://github.com/tomvoet))
 
-- The `gleam.toml` format is now consistent. The two sausage-case fields
-  (`dev-dependencies` and `tag-prefix`) have been replaced by snake_case
-  versions. Files using the old names will continue to work.
-  ([Louis Pilfold](https://github.com/lpil))
-
-- The password used for encrypting new local Hex API keys must now be at least
-  8 characters in length.
-  ([Louis Pilfold](https://github.com/lpil))
-
-- The build tool now emits errors for unknown fields in package config,
-  except ones under `[tools]`. For example, with this:
-
-  ```toml
-  name = "hello"
-  version = "1.0.0"
-
-  [tools.my-tool]
-  my-awesome-setting = true
-  ```
-
-  Building the project won't give any errors. But with this:
-
-  ```toml
-  name = "hello"
-  version = "1.0.0"
-  my-awesome-setting = true
-  ```
-
-  Building the project will emit error.
-
-  ([Andrey Kozhev](https://github.com/ankddev))
-
-- When attempting to publish a package on Hex with an already taken name,
-  the message is clearer.
-  ([vyacheslavhere](https://github.com/vyacheslavhere))
-
-- The build tool now shows better error message on passing unexpected labeled
-  arguments by taking into account, whether it's a function or a constructor.
-  ([Andrey Kozhev](https://github.com/ankddev))
+- When Hex dependencies change version the build tool now prints a link to the
+  diff on Hex, making it easier to review and audit dependency updates.
+  ([Manas Ganesh Dasari](https://github.com/ManasDasri))
 
 ### Language server
 
-- The language server now allows extracting the start of a pipeline into a
-  variable.
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
+- The language server will now offer "Discard unused variable" on each of
+  alternative patterns.
+  ([Andrey Kozhev](https://github.com/ankddev))
 
-- The language server is now smarter when producing autocompletions. Imagine
-  you're updating your code to fully qualify the uses of the `Json` type:
-
-  ```gleam
-  pub fn payload() -> js|Json
-  //                    ^ typing the module name
-  ```
-
-  Accepting the `json.Json` completion will now produce the correct `json.Json`
-  annotation rather than generating invalid code: `json.JsonJson`.
-
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
-
-- The language server now suggests adding missing type parameters
-  to custom generic types.
-  ([Andi Pabst](https://github.com/andipabst))
-
-- The `Extract function` code action now provides more ergonomic/idiomatic
-  refactorings when used on anonymous functions.
-  ([Hari Mohan](https://github.com/seafoamteal))
-
-- It's now possible to find references and rename variables in string prefix
-  patterns.
+- The language server now allows to find references of `echo`. For example,
 
   ```gleam
-  case wibble {
-    "1" as digit <> rest -> digit <> rest
-    //     ^^^^^    ^^^^
-    // You can now trigger "Find references" and "Rename" from here
+  pub fn wibble(woo) {
+    echo woo
+  //^^^^
+    echo wobble(woo)
+  //^^^^
+  }
+
+  pub fn wobble(woo) {
+    echo woo
+  //^^^^
   }
   ```
 
-  ([Igor Castejón](https://github.com/IgorCastejon))
+  When triggering on any of denoted places, it will show all usages.
+  ([Andrey Kozhev](https://github.com/ankddev))
 
-- The language server now offers a rename for module when the cursor is placed
-  over its import statement or when placed on its name or alias somewhere. For
-  example,
+- The language server now allows to highlight all `echo` in file. For example,
 
   ```gleam
-  import lustre/element
-  import lustre/element/html
-  import lustre/event
+  pub fn wibble(woo) {
+    echo woo
+  //^^^^
+    echo wobble(woo)
+  //^^^^
+  }
 
-  fn view(model: Int) -> element.Element(Msg) {
-    //                     ^  Renaming module to `el` here
-    let count = int.to_string(model)
-
-    html.div([], [
-      html.button([event.on_click(Incr)], [element.text(" + ")]),
-      html.p([], [element.text(count)]),
-      html.button([event.on_click(Decr)], [element.text(" - ")]),
-    ])
+  pub fn wobble(woo) {
+    echo woo
+  //^^^^
   }
   ```
 
-  Using renaming when hovering on module name will would result in the
-  following code:
+  If this feature is enabled in your editor, hovering any of denoted places will
+  highlight all of them.
+  ([Andrey Kozhev](https://github.com/ankddev))
+
+- The language server now allows to find references of `todo`. For example,
 
   ```gleam
-  import lustre/element as el
-  import lustre/element/html
-  import lustre/event
+  pub const wubble = todo
+  //                 ^^^^
 
-  fn view(model: Int) -> el.Element(Msg) {
-    let count = int.to_string(model)
+  pub fn wibble() {
+    todo as "unimplemented yet"
+  //^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  }
 
-    html.div([], [
-      html.button([event.on_click(Incr)], [el.text(" + ")]),
-      html.p([], [el.text(count)]),
-      html.button([event.on_click(Decr)], [el.text(" - ")]),
-    ])
+  pub fn empty() {}
+  //^^^^^^^^^^^^ Empty functions are shown too!
+
+  pub fn block() {
+    {}
+  //^^ And empty blocks too!
   }
   ```
 
-  ([Vladislav Shakitskiy](https://github.com/vshakitskiy))
+  When triggering on any of denoted places, it will show all usages.
+  ([Andrey Kozhev](https://github.com/ankddev))
 
-- The "Fill labels" code action now uses variables from scope when they match
-  the label name and expected type, using shorthand syntax (`name:`) instead of
-  `name: todo`.
+- The language server now allows to highlight all `todo` in file. For example,
 
-  ([Vladislav Shakitskiy](https://github.com/vshakitskiy))
+  ```gleam
+  pub const wubble = todo
+  //                 ^^^^
 
-- The "Interpolate String" code action now lets the user "cut out" any portion
-  of a string, regardless of whether it is a valid Gleam identifier or not.
-  ([Hari Mohan](https://github.com/seafoamteal))
+  pub fn wibble() {
+    todo as "unimplemented yet"
+  //^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  }
 
-- When interpolating an expression at the very start or the very end
-  of a string, redundant empty strings are no longer added before/after the
-  interpolated expression.
-  ([Hari Mohan](https://github.com/seafoamteal))
+  pub fn empty() {}
+  //^^^^^^^^^^^^ Empty functions are highlighted too!
 
-- The language server now performs best-effort zero value generation for
-  `decode.failure` when using the `Generate Dynamic Decoder` code action.
-  ([Hari Mohan](https://github.com/seafoamteal))
+  pub fn block() {
+    {}
+  //^^ And empty blocks too!
+  }
+  ```
 
-- The `Generate Dynamic Decoder` and `Generate To-JSON Function` code action
-  now generate a decoder and an encoder, respectively, for `Nil` values.
-  ([Hari Mohan](https://github.com/seafoamteal))
+  If this feature is enabled in your editor, hovering any of denoted places will
+  highlight all of them.
+  ([Andrey Kozhev](https://github.com/ankddev))
 
-### Formatter
+- The language server now allows to find references of `panic`. For example,
+
+  ```gleam
+  pub fn wibble() {
+    panic
+  //^^^^^
+  }
+
+  pub fn wobble() {
+    panic as "unimplemented"
+  //^^^^^^^^^^^^^^^^^^^^^^^^
+  }
+  ```
+
+  When triggering on any of denoted places, it will show all usages.
+  ([Andrey Kozhev](https://github.com/ankddev))
+
+- The language server now allows to highlight all `panic` in file. For example,
+
+  ```gleam
+  pub fn wibble() {
+    panic
+  //^^^^^
+  }
+
+  pub fn wobble() {
+    panic as "unimplemented"
+  //^^^^^^^^^^^^^^^^^^^^^^^^
+  }
+  ```
+
+  If this feature is enabled in your editor, hovering any of denoted places will
+  highlight all of them.
+  ([Andrey Kozhev](https://github.com/ankddev))
 
 ### Bug fixes
 
-- Fixed a bug where some bit array patterns would erroneously be marked as
-  unreachable.
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
-
-- Fixed a bug where the Gleam standard library's `dict.each` function would
-  incorrectly be assumed to be pure.
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
-
-- The compiler now correctly tracks the minimum required version for constant
-  record updates to be `>= 1.14.0`.
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
-
-- The compiler now correctly tracks the minimum required version for
-  expressions in `BitArray`s' `size` option to be `>= 1.12.0`.
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
-
-- Fixed a bug where the formatter would not properly format some function calls
-  if the last argument was followed by a trailing comment.
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
-
-- Fixed a bug where the compiler would generate invalid code on the JavaScript
-  target when using a `case` expression as the right hand side of an equality
-  check in an `assert`.
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
-
-- Fixed a bug where the compiler would generate invalid code on the JavaScript
-  target for some `case` expressions using clause guards.
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
-
-- The formatter no longer stack overflows trying to format lists with many
-  items.
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
-
-- Fixed a bug where the formatter would not be able to consistently format a
-  constant list with an `@internal` attribute.
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
-
-- The "convert to pipe" code action now works on nested function calls as well,
-  rather than always being applied to the outermost one.
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
-
-- The language server no longer recommends the deprecated `@target` attribute.
-  ([Hari Mohan](https://github.com/seafoamteal))
-
-- The compiler no longer crashes when trying to pattern match on a
-  `UtfCodepoint`.
-  ([Hari Mohan](https://github.com/seafoamteal))
-
-- Fixed a bug that would result in not being able to rename an aliased pattern.
-  ([Giacomo Cavalieri](https://github.com/giacomocavalieri))
-
-- Fixed JavaScript codegen bug for `assert` when using `&&` with comparison
-  operators on the right side.
-  ([vyacheslavhere](https://github.com/vyacheslavhere))
-
-- Added an error message when attempting to update packages that are not
-  dependencies of the project, instead of failing silently.
-  ([Etienne Boutet](https://github.com/EtienneBoutet),
-  [Vladislav Shakitskiy](https://github.com/vshakitskiy))
-
-- The build tool now doesn't perform code generation when exporting package
-  interface.
+- Fixed a bug where the language server "Generate variant" code action would
+  duplicate module name when triggered on qualified values.
   ([Andrey Kozhev](https://github.com/ankddev))
 
-- The "Extract constant" code action now correctly places new constant when
-  function has documentation. For example,
-
-  ```gleam
-  /// Wibble does some wobbling
-  pub fn wibble() {
-    let x = "wobble"
-    //  ^ Trigger "Extract constant" here
-    x
-  }
-  ```
-
-  Previously, it would incorrectly place it below doc comment:
-
-  ```gleam
-  /// Wibble does some wobbling
-  const x = "wobble"
-
-  pub fn wibble() {
-    x
-  }
-  ```
-
-  Now it will correctly place constant above doc comment:
-
-  ```gleam
-  const x = "wobble"
-
-  /// Wibble does some wobbling
-  pub fn wibble() {
-    x
-  }
-  ```
-
+- Fixed a bug where bad error message would be shown when trying to publish
+  package with no README on Windows.
   ([Andrey Kozhev](https://github.com/ankddev))
 
-- Fixed a bug where renaming would not work properly if there was an error in
-  target file.
-  ([Surya Rose](https://github.com/GearsDatapacks))
+## v1.19.1 - 2026-10-07
 
-- Fixed a bug where generics in custom types would not be properly generated
-  when emitting TypeScript declarations.
-  ([Surya Rose](https://github.com/GearsDatapacks))
+### Bug fixes
 
-- Fixed a bug where the package cache would not properly be reset when a version
-  of a package was replaced on Hex.
-  ([Surya Rose](https://github.com/GearsDatapacks))
-
-- Fixed a crash (`bad_generator`) that could occur when a linked OTP process
-  exits with a non-standard exit reason.
-  ([John Downey](https://github.com/jtdowney))
-
-- Fixed a bug where diagnostic about incorrect `size` and `unit` options would
-  use incorrect error location.
-  ([Andrey Kozhev](https://github.com/ankddev))
+- Fixed a bug where the `export javascript-prelude` and `export
+  typescript-prelude` commands would not run.
+  ([Louis Pilfold](https://github.com/lpil))

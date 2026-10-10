@@ -2,6 +2,7 @@
 source: language-server/src/tests/hover.rs
 expression: "\nimport wibble/wobble.{type Wibble as Wobble, Wobble}\n"
 ---
+
 import wibble/wobble.{type Wibble as Wobble, Wobble}
                                              ↑▔▔▔▔▔ 
 
@@ -11,4 +12,4 @@ import wibble/wobble.{type Wibble as Wobble, Wobble}
 Wobble
 ```
 
-View on [HexDocs](https://hexdocs.pm/hex/wibble/wobble.html#Wobble)
+View on [HexDocs](https://hex.hexdocs.pm/wibble/wobble.html#Wobble)

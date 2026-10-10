@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use crate::assert_erl;
 use crate::erlang::*;
 use crate::type_;
@@ -7,8 +10,8 @@ fn basic() {
     insta::assert_snapshot!(record_definition(
         "PetCat",
         &[
-            ("name", type_::tuple(vec![])),
-            ("is_cute", type_::tuple(vec![]))
+            (SrcSpan::default(), "name", type_::tuple(vec![])),
+            (SrcSpan::default(), "is_cute", type_::tuple(vec![]))
         ]
     ));
 }
@@ -19,9 +22,9 @@ fn reserve_words() {
     insta::assert_snapshot!(record_definition(
         "div",
         &[
-            ("receive", type_::int()),
-            ("catch", type_::tuple(vec![])),
-            ("unreserved", type_::tuple(vec![]))
+            (SrcSpan::default(), "receive", type_::int()),
+            (SrcSpan::default(), "catch", type_::tuple(vec![])),
+            (SrcSpan::default(), "unreserved", type_::tuple(vec![]))
         ]
     ));
 }
@@ -32,9 +35,9 @@ fn type_vars() {
     insta::assert_snapshot!(record_definition(
         "PetCat",
         &[
-            ("name", type_::generic_var(1)),
-            ("is_cute", type_::unbound_var(1)),
-            ("linked", type_::link(type_::int()))
+            (SrcSpan::default(), "name", type_::generic_var(1)),
+            (SrcSpan::default(), "is_cute", type_::unbound_var(1)),
+            (SrcSpan::default(), "linked", type_::link(type_::int()))
         ]
     ));
 }
@@ -46,6 +49,7 @@ fn module_types() {
     insta::assert_snapshot!(record_definition(
         "PetCat",
         &[(
+            SrcSpan::default(),
             "name",
             Arc::new(Type::Named {
                 publicity: Publicity::Public,
@@ -65,10 +69,11 @@ fn long_definition_formatting() {
     insta::assert_snapshot!(record_definition(
         "PetCat",
         &[
-            ("name", type_::generic_var(1)),
-            ("is_cute", type_::unbound_var(1)),
-            ("linked", type_::link(type_::int())),
+            (SrcSpan::default(), "name", type_::generic_var(1)),
+            (SrcSpan::default(), "is_cute", type_::unbound_var(1)),
+            (SrcSpan::default(), "linked", type_::link(type_::int())),
             (
+                SrcSpan::default(),
                 "whatever",
                 type_::list(type_::tuple(vec![
                     type_::nil(),
@@ -466,4 +471,10 @@ pub fn main() {
 }
 "#
     );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6180
+#[test]
+fn type_called_record_does_not_overwrite_erlang_builtin_record_type() {
+    assert_erl!("pub type Record { Record(Int) }")
 }

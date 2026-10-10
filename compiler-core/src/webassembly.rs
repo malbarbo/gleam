@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2025 The Gleam contributors
+
 #![allow(clippy::todo)]
 mod builtins;
 mod instructions;
@@ -37,17 +40,17 @@ use walrus::{
 use crate::{
     ast::{
         AssignName, AssignmentKind, BinOp, ClauseGuard, Constant, OperatorKind, Pattern, Publicity,
-        SrcSpan, Statement, TypeAst, TypeAstVar, TypedArg, TypedAssignment, TypedClause,
-        TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr, TypedFunction, TypedModule,
-        TypedModuleConstant, TypedPattern, TypedRecordConstructor, TypedRecordConstructorArg,
-        TypedStatement, visit::Visit,
+        Statement, StringPrefixLeftSideAssignment, TypeAst, TypeAstVar, TypedArg, TypedAssignment,
+        TypedClause, TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr, TypedFunction,
+        TypedModule, TypedModuleConstant, TypedPattern, TypedRecordConstructor,
+        TypedRecordConstructorArg, TypedStatement, visit::Visit,
     },
-    line_numbers::LineNumbers,
     type_::{
         self, ModuleValueConstructor, PRELUDE_MODULE_NAME, Type, TypeVar, ValueConstructorVariant,
         printer::{Names, Printer},
     },
 };
+use src_span::{LineNumbers, SrcSpan};
 
 const BUILTINS_WASM: &[u8] =
     include_bytes!("../../builtins-wasm/target/wasm32-unknown-unknown/release/builtins_wasm.wasm");
@@ -576,17 +579,15 @@ impl<'a> Generator<'a> {
                 &mut self,
                 location: &'ast SrcSpan,
                 _type_: &'ast Arc<Type>,
-                value: &'ast EcoString,
+                _value: &'ast EcoString,
+                int_value: &'ast BigInt,
             ) {
                 if self.error.is_some() {
                     return;
                 }
-                let Some(int_value) = crate::parse::parse_int_value(value) else {
-                    return;
-                };
                 let err = match self.int {
-                    IntType::I32 => i32::try_from(&int_value).err().map(|_| ()),
-                    IntType::I64 => i64::try_from(&int_value).err().map(|_| ()),
+                    IntType::I32 => i32::try_from(int_value).err().map(|_| ()),
+                    IntType::I64 => i64::try_from(int_value).err().map(|_| ()),
                 };
                 if err.is_some() {
                     self.error = Some(Error::IntLiteralOutOfRange {
@@ -1709,7 +1710,7 @@ impl<'a> Generator<'a> {
                 let (custom_type, args) = self.custom_type_expect(type_);
                 match custom_type {
                     CustomType::Enum { values } => {
-                        assert!(arguments.is_empty());
+                        assert!(arguments.as_ref().is_none_or(Vec::is_empty));
                         let value = Self::enum_value_index(&values, name);
                         self.add_const(
                             const_name,
@@ -1737,7 +1738,12 @@ impl<'a> Generator<'a> {
                             global_index: id.global_id(),
                             type_index,
                             tag: None,
-                            elements: arguments.iter().map(|e| &e.value).cloned().collect(),
+                            elements: arguments
+                                .iter()
+                                .flatten()
+                                .map(|e| &e.value)
+                                .cloned()
+                                .collect(),
                         });
                         id
                     }
@@ -1763,7 +1769,12 @@ impl<'a> Generator<'a> {
                             global_index: id.global_id(),
                             type_index,
                             tag: Some(index.into()),
-                            elements: arguments.iter().map(|e| &e.value).cloned().collect(),
+                            elements: arguments
+                                .iter()
+                                .flatten()
+                                .map(|e| &e.value)
+                                .cloned()
+                                .collect(),
                         });
                         id
                     }
@@ -1809,7 +1820,10 @@ impl<'a> Generator<'a> {
             Constant::RecordUpdate { .. } => {
                 panic!("record update constants should not reach code generation")
             }
-            Constant::StringConcatenation { .. } => {
+            Constant::BinaryOperator { operator, .. } => {
+                if *operator != BinOp::Concatenate {
+                    todo!("{operator:?} constants are not yet supported");
+                }
                 let id = self.add_const(
                     const_name,
                     self.string.val_type_nullable(),
@@ -1822,6 +1836,9 @@ impl<'a> Generator<'a> {
                     value: Box::new(module_constant.value.as_ref().clone()),
                 });
                 id
+            }
+            Constant::Todo { .. } => {
+                panic!("todo constants should not reach code generation")
             }
             Constant::Invalid { .. } => {
                 panic!("invalid constants should not reach code generation")
@@ -1841,7 +1858,7 @@ impl<'a> Generator<'a> {
             }
             Constant::Int { .. } | Constant::Float { .. } => {}
             Constant::Record { arguments, .. } => {
-                for arg in arguments {
+                for arg in arguments.iter().flatten() {
                     self.register_string_const(&arg.value)
                 }
             }
@@ -1850,9 +1867,12 @@ impl<'a> Generator<'a> {
             Constant::RecordUpdate { .. } => {
                 panic!("record update constants should not reach code generation")
             }
-            Constant::StringConcatenation { left, right, .. } => {
+            Constant::BinaryOperator { left, right, .. } => {
                 self.register_string_const(left);
                 self.register_string_const(right);
+            }
+            Constant::Todo { .. } => {
+                panic!("todo constants should not reach code generation")
             }
             Constant::Invalid { .. } => {
                 panic!("invalid constants should not reach code generation")
@@ -1910,12 +1930,16 @@ impl<'a> Generator<'a> {
                         .expect("named type information");
                     let variant = self.variant_expect(module, name.clone());
                     let id = self.variant_constructor(
-                        arguments.iter().map(|arg| arg.value.type_()).collect(),
+                        arguments
+                            .iter()
+                            .flatten()
+                            .map(|arg| arg.value.type_())
+                            .collect(),
                         type_.clone(),
                         variant,
                     );
                     let _ = instructions
-                        .constants(self, arguments.iter().map(|arg| &arg.value))
+                        .constants(self, arguments.iter().flatten().map(|arg| &arg.value))
                         .call(id);
                 }
             }
@@ -1927,13 +1951,24 @@ impl<'a> Generator<'a> {
             Constant::RecordUpdate { .. } => {
                 panic!("record update constants should not reach code generation")
             }
-            Constant::StringConcatenation { left, right, .. } => {
+            Constant::BinaryOperator {
+                operator,
+                left,
+                right,
+                ..
+            } => {
+                if *operator != BinOp::Concatenate {
+                    todo!("{operator:?} constants are not yet supported");
+                }
                 let concat =
                     self.get_function_builtin_external(BuiltinFunctionExternal::StringConcat);
                 let _ = instructions
                     .constant(self, left)
                     .constant(self, right)
                     .call(concat);
+            }
+            Constant::Todo { .. } => {
+                panic!("todo constants should not reach code generation")
             }
             Constant::Invalid { .. } => {
                 panic!("invalid constants should not reach code generation")
@@ -2382,9 +2417,12 @@ impl<'a> Generator<'a> {
                 }
             }
             TypedExpr::BinOp {
-                name, left, right, ..
+                operator,
+                left,
+                right,
+                ..
             } => {
-                self.expression_bin_op(locals, scope, instructions, name, left, right);
+                self.expression_bin_op(locals, scope, instructions, operator, left, right);
             }
             TypedExpr::NegateInt { value, .. } => {
                 let _ = instructions
@@ -2543,15 +2581,18 @@ impl<'a> Generator<'a> {
             }
             TypedExpr::RecordUpdate {
                 type_,
-                record_assignment,
+                updated_record,
+                updated_record_assigned_name,
                 constructor,
                 arguments,
                 ..
             } => {
-                let scope = if let Some(assignment) = record_assignment {
-                    let scope = self.assignment(locals, scope, instructions, assignment);
-                    let _ = instructions.drop();
-                    scope
+                let scope = if let Some(name) = updated_record_assigned_name {
+                    let local = locals.for_record_update(updated_record);
+                    let _ = instructions
+                        .expression(self, locals, scope.clone(), updated_record)
+                        .local_set(local);
+                    scope.insert_local(name.clone(), local)
                 } else {
                     scope
                 };
@@ -3241,7 +3282,7 @@ impl<'a> Generator<'a> {
                     .bool_not()
                     .br_if(fail_target);
 
-                if let Some((name, _)) = left_side_assignment {
+                if let Some(StringPrefixLeftSideAssignment { name, .. }) = left_side_assignment {
                     let local = locals._get(left_location);
                     scope = scope.insert_local(name.clone(), local);
                     let _ = instructions
@@ -3531,6 +3572,9 @@ impl<'a> Generator<'a> {
             }
             ClauseGuard::ModuleSelect { literal, .. } => {
                 let _ = instructions.constant(self, literal);
+            }
+            ClauseGuard::Invalid { .. } => {
+                panic!("invalid guards should not reach code generation")
             }
         }
     }

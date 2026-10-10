@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 use crate::{
     assert_error, assert_internal_module_error, assert_js_module_error, assert_module_error,
     assert_module_syntax_error,
@@ -398,6 +401,11 @@ fn wrong_number_of_subjects() {
 #[test]
 fn wrong_number_of_subjects_alternative_patterns() {
     assert_error!("case 1 { _, _ | _ | _, _, _ -> 1 }");
+}
+
+#[test]
+fn wrong_number_of_subjects_multiple_subjects() {
+    assert_error!("case 1, 2 { _ -> 1 }");
 }
 
 #[test]
@@ -2885,6 +2893,45 @@ pub fn want_result(wibble: fn() -> Result(Int, Bool)) {
     );
 }
 
+// https://github.com/gleam-lang/gleam/issues/5914
+#[test]
+fn do_not_suggest_wrapping_in_ok_if_expected_ok_type_is_unbound() {
+    assert_module_error!(
+        "
+pub fn main() {
+  wibble(wobble(todo))
+}
+
+pub fn wobble(arg: a) -> Result(a, String) {
+  todo
+}
+
+pub fn wibble(arg: Result(a, Int)) -> a {
+  todo
+}"
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5914
+#[test]
+fn do_not_suggest_wrapping_in_error_if_expected_error_type_is_unbound() {
+    assert_module_error!(
+        "
+pub fn main() {
+  wibble(wobble(todo))
+}
+
+pub fn wobble(arg: a) -> Result(Int, a) {
+  todo
+}
+
+pub fn wibble(arg: Result(Float, a)) -> a {
+  todo
+}
+"
+    );
+}
+
 #[test]
 // https://github.com/gleam-lang/gleam/issues/4195
 fn let_assert_binding_cannot_be_used_in_panic_message() {
@@ -3421,6 +3468,1146 @@ pub fn main() {
   let w = Wibble(1, 2, 3)
   Wibble(..w, c: False)
 }
+"
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5296
+#[test]
+fn no_crash_on_record_update_when_constructor_definition_is_invalid() {
+    assert_module_error!(
+        "
+pub type Wibble {
+  Wibble(a: Int, b: Int, Bool)
+}
+
+pub fn main() {
+  let one = Wibble(False, a: 5, b: 6)
+  let two = Wibble(..one, b: 1)
+}
+        "
+    );
+}
+
+#[test]
+fn incomplete_pattern_does_not_show_structure_of_internal_type_outside_of_its_module() {
+    assert_module_error!(
+        (
+            "wibble",
+            "@internal
+            pub type Wibble { Wibble Wobble Woo }"
+        ),
+        "import wibble.{type Wibble}
+
+pub fn go(wibble: Wibble) {
+  case wibble {}
+}"
+    );
+}
+
+#[test]
+fn incomplete_pattern_does_not_show_structure_of_internal_type_outside_of_its_module_2() {
+    assert_module_error!(
+        (
+            "wibble",
+            "@internal
+            pub type Wibble { Wibble Wobble Woo }"
+        ),
+        "import wibble.{type Wibble}
+
+pub type Type {
+  Type(wibble: Wibble, list: List(Int))
+}
+
+pub fn go(value: Type) {
+  case value {}
+}"
+    );
+}
+
+#[test]
+fn record_update_does_not_stop_at_first_invalid_field_1() {
+    assert_module_error!(
+        "
+pub type Wibble {
+  Wibble(a: Int, b: Bool)
+}
+
+pub fn go(wibble: Wibble) {
+    Wibble(..wibble, c: 1, a: 1.0)
+}"
+    );
+}
+
+#[test]
+fn record_update_does_not_stop_at_first_invalid_field_2() {
+    assert_module_error!(
+        "
+pub type Wibble {
+  Wibble(a: Int, b: Bool)
+}
+
+pub fn go(wibble: Wibble) {
+    Wibble(..wibble, a: 1.0, a: 2, c: 2)
+}"
+    );
+}
+
+#[test]
+fn record_update_does_not_stop_at_first_invalid_field_3() {
+    assert_module_error!(
+        "
+pub type Wibble {
+  Wibble(a: Int, b: Bool)
+}
+
+pub fn go(wibble: Wibble) {
+    Wibble(..wibble, a: 1.0, a: 2)
+}"
+    );
+}
+
+#[test]
+fn record_update_does_not_stop_at_first_invalid_field_4() {
+    assert_module_error!(
+        "
+pub type Wibble {
+  Wibble(a: Int, b: Bool)
+}
+
+pub fn go(wibble: Wibble) {
+    Wibble(..wibble, a: 2, a: 3, b: 1)
+}"
+    );
+}
+
+#[test]
+fn record_update_does_not_stop_at_first_invalid_field_5() {
+    assert_module_error!(
+        "
+pub type Wibble {
+  Wibble(a: Int, b: Bool)
+}
+
+pub fn go(wibble: Wibble) {
+    Wibble(..wibble, b: 1, a: True, c: 2)
+}"
+    );
+}
+
+#[test]
+fn record_update_with_constructor_with_no_labelled_fields() {
+    assert_module_error!(
+        "
+pub type Wibble {
+  Wibble(Int, Bool)
+}
+
+pub fn go(wibble: Wibble) {
+    Wibble(..wibble, b: 1)
+}"
+    );
+}
+
+#[test]
+fn const_record_update_with_constructor_with_no_labelled_fields() {
+    assert_module_error!(
+        "
+pub type Wibble {
+  Wibble(Int, Bool)
+}
+
+pub const wibble = Wibble(1, True)
+pub const wobble = Wibble(..wobble)
+"
+    );
+}
+
+#[test]
+fn qualified_type_with_no_name_results_in_an_error() {
+    assert_module_error!("pub fn main() -> wibble. { todo }");
+}
+
+#[test]
+fn can_infer_record_fields_even_if_updated_record_does_not_exist() {
+    assert_module_error!(
+        "
+pub type Wibble { Wibble(a: Int, b: Int) }
+
+pub fn main() {
+  //                       v should see an error here
+  Wibble(..does_not_exist, a: True)
+}
+"
+    );
+}
+
+#[test]
+fn todo_in_a_constant_produces_an_error() {
+    assert_module_error!("pub const wibble = todo");
+}
+
+#[test]
+fn todo_constant_does_not_stop_analysis() {
+    assert_module_error!(
+        "pub const wibble = [todo, todo]
+
+pub fn main() -> List(Int) {
+  // This is not an error!!
+  wibble
+}"
+    );
+}
+
+#[test]
+fn todo_constant_does_not_stop_analysis_2() {
+    assert_module_error!(
+        "pub const wibble = [todo, todo]
+
+pub fn main() -> Int {
+  // This is an error!!
+  wibble
+}"
+    );
+}
+
+#[test]
+fn non_string_in_todo_constant_message() {
+    assert_module_error!("pub const wibble = todo as [1, 2, 3]");
+}
+
+#[test]
+fn string_variable_in_todo_constant_message() {
+    assert_module_error!(
+        r#"
+pub const message = "hello"
+pub const wibble = todo as message
+"#
+    );
+}
+
+#[test]
+fn non_string_variable_in_todo_constant_message() {
+    assert_module_error!(
+        r#"
+pub const message = 1
+pub const wibble = todo as message
+"#
+    );
+}
+
+#[test]
+fn unknown_variable_do_not_suggest_modules_from_another_package_with_internal_function() {
+    assert_module_error!(
+        (
+            "anotherpackage",
+            "module",
+            "
+@internal
+pub fn add(x: Int, y: Int) {
+    x + y
+}"
+        ),
+        "
+// Internal function from another modules in another package should not be
+// suggested.
+
+import module
+pub fn main() {
+        add(1, 1)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_do_not_suggest_modules_from_another_package_with_internal_record_constructor() {
+    assert_module_error!(
+        (
+            "anotherpackage",
+            "module",
+            "
+@internal
+pub type MyType {
+    MyRecord(x: Int, y: Int)
+}"
+        ),
+        "
+// Internal record constructor from another modules in another package should
+// not be suggested.
+
+import module
+pub fn main() {
+    MyRecord(1, 2)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_do_not_suggest_modules_from_another_package_with_internal_type() {
+    assert_module_error!(
+        (
+            "anotherpackage",
+            "module",
+            "
+@internal
+pub type OneOrTwo {
+    One
+    Two
+}"
+        ),
+        "
+// Internal type from another modules in another package should not be
+// suggested.
+
+import module
+pub fn main() {
+    One
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_do_not_suggest_modules_from_another_package_with_internal_value() {
+    assert_module_error!(
+        (
+            "anotherpackage",
+            "module",
+            "
+@internal
+pub const one = 1"
+        ),
+        "
+// Internal value from another modules in another package should not be
+// suggested.
+
+import module
+pub fn main() {
+    one
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_do_not_suggest_modules_with_private_function() {
+    assert_module_error!(
+        (
+            "module",
+            "
+fn add(x: Int, y: Int) {
+    x + y
+}"
+        ),
+        "
+// Private function from another module should not be suggested.
+
+import module
+pub fn main() {
+    add(1, 1)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_do_not_suggest_modules_with_private_record_constructor() {
+    assert_module_error!(
+        (
+            "module",
+            "
+type MyType {
+    MyRecord(x: Int)
+}"
+        ),
+        "
+// Private record constructor from another module should not be suggested.
+
+import module
+pub fn main() {
+    MyRecord(1)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_do_not_suggest_modules_with_private_type() {
+    assert_module_error!(
+        (
+            "module",
+            "
+type OneOrTwo {
+    One
+    Two
+}"
+        ),
+        "
+// Private type from another module should not be suggested.
+
+import module
+pub fn main() {
+    One
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_do_not_suggest_modules_with_private_value() {
+    assert_module_error!(
+        (
+            "module",
+            "
+const one = 1"
+        ),
+        "
+// Private value from another module should not be suggested.
+
+import module
+pub fn main() {
+    one
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_do_not_suggest_modules_with_public_function_with_incorrect_arity_1() {
+    assert_module_error!(
+        (
+            "module",
+            "
+pub fn add(x: Int) {
+    x + 1
+}"
+        ),
+        "
+// For functions, we only check the arity and not the type of arguments or the
+// return value.
+// Function with incorrect arity from another module should not be suggested.
+
+import module
+pub fn main() {
+    add(1, 1)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_do_not_suggest_modules_with_public_function_with_incorrect_arity_2() {
+    assert_module_error!(
+        (
+            "module",
+            "
+pub fn add(x: Int) {
+    fn(y: Int) { x + y }
+}"
+        ),
+        "
+// For functions, we only check the arity and not the type of arguments or the
+// return value.
+// In pipelines, function calls are considered to have arity arguments.len() + 1.
+// Function with incorrect arity from another module should not be suggested.
+
+import module
+pub fn main() {
+    1 |> add(2)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_do_not_suggest_modules_with_public_function_with_incorrect_arity_3() {
+    assert_module_error!(
+        (
+            "module",
+            "
+pub fn add(x: Int) {
+    fn(y: Int, z: Int) { x + y + z }
+}"
+        ),
+        "
+// For functions, we only check the arity and not the type of arguments or the
+// return value.
+// In pipelines, function calls are considered to have arity arguments.len() + 1.
+// Function with incorrect arity from another module should not be suggested.
+
+import module
+pub fn main() {
+    1 |> add(2)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_modules_from_the_same_package_with_internal_function() {
+    assert_module_error!(
+        (
+            "module",
+            "
+@internal
+pub fn add(x: Int, y: Int) {
+    x + y
+}"
+        ),
+        "
+// Internal function with correct arity from another module in the same package
+// should be suggested.
+
+import module
+pub fn main() {
+    add(1, 1)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_modules_from_the_same_package_with_internal_record_constructor() {
+    assert_module_error!(
+        (
+            "module",
+            "
+@internal
+pub type MyType {
+    MyRecord(x: Int, y: Int)
+}"
+        ),
+        "
+// Internal record constructor with correct arity from another module in the
+// same package should be suggested.
+
+import module
+pub fn main() {
+    MyRecord(1, 2)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_modules_from_the_same_package_with_internal_type() {
+    assert_module_error!(
+        (
+            "module",
+            "
+@internal
+pub type OneOrTwo {
+    One
+    Two
+}"
+        ),
+        "
+// Internal type from another module in the same package should be suggested.
+
+import module
+pub fn main() {
+    One
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_modules_from_the_same_package_with_internal_value() {
+    assert_module_error!(
+        (
+            "module",
+            "
+@internal
+pub const one = 1"
+        ),
+        "
+// Internal value from another module in the same package should be suggested.
+
+import module
+pub fn main() {
+    one
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_modules_imported_using_an_alias() {
+    assert_module_error!(
+        (
+            "module",
+            "
+pub fn add(x: Int, y: Int) {
+    x + y
+}"
+        ),
+        "
+// Module aliases should be taken into account in the suggestion.
+// Public function with correct arity from another module should be suggested.
+
+import module as wibble
+pub fn main() {
+    add(1, 1)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_modules_with_multiple_segments() {
+    assert_module_error!(
+        (
+            "gleam/module",
+            "
+pub fn add(x: Int, y: Int) {
+    x + y
+}"
+        ),
+        "
+// Module with multiple segments should be taken into account in the suggestion.
+// Public function with correct arity from another module should be suggested.
+
+import gleam/module
+pub fn main() {
+    add(1, 1)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_modules_with_public_function_with_correct_arity_1() {
+    assert_module_error!(
+        (
+            "module",
+            "
+pub fn add(x: Int, y: Int) {
+    x + y
+}"
+        ),
+        "
+// Public function with correct arity from another module should be suggested.
+
+import module
+pub fn main() {
+    add(1, 1)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_modules_with_public_function_with_correct_arity_2() {
+    assert_module_error!(
+        (
+            "module",
+            "
+pub fn add(x: Int) {
+    x + 1
+}"
+        ),
+        "
+// Public function with correct arity from another module should be suggested.
+
+import module
+pub fn main() {
+    1 |> add
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_modules_with_public_function_with_correct_arity_3() {
+    assert_module_error!(
+        (
+            "module",
+            "
+pub fn add(x: Int, y: Int) {
+    x + y
+}"
+        ),
+        "
+// Public function with correct arity from another module should be suggested.
+
+import module
+pub fn main() {
+    1 |> add(2)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_modules_with_public_function_with_correct_arity_4() {
+    assert_module_error!(
+        (
+            "module",
+            "
+pub fn wibble(_) {
+    1
+}"
+        ),
+        "
+// Public function with correct arity from another module should be suggested.
+
+import module
+pub fn main() {
+    use <- wibble
+    1
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_modules_with_public_function_with_correct_arity_even_if_arguments_type_mismatch()
+ {
+    assert_module_error!(
+        (
+            "module",
+            "
+pub fn add(x: Float, y: Float) {
+    x +. y
+}"
+        ),
+        "
+// Public function with correct arity from another module should be suggested.
+
+import module
+pub fn main() {
+    add(1, 1)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_modules_with_public_record_constructor_with_correct_arity() {
+    assert_module_error!(
+        (
+            "moduleone",
+            "
+pub type MyType {
+    MyRecord(x: Int, y: Int)
+}"
+        ),
+        (
+            "moduletwo",
+            "
+pub type AnotherType {
+    MyRecord(x: Int)
+}"
+        ),
+        "
+// Public record constructor with correct arity from another module should be
+// suggested.
+
+import moduleone
+import moduletwo
+pub fn main() {
+    MyRecord(1)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_modules_with_public_type() {
+    assert_module_error!(
+        (
+            "module",
+            "
+pub type OneOrTwo {
+    One
+    Two
+}"
+        ),
+        "
+// Public type from another module should be suggested.
+
+import module
+pub fn main() {
+    One
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_modules_with_public_value_1() {
+    assert_module_error!(
+        (
+            "module",
+            "
+pub const one = 1"
+        ),
+        "
+// Public value from another module should be suggested.
+
+import module
+pub fn main() {
+    one
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_modules_with_public_value_2() {
+    assert_module_error!(
+        (
+            "module",
+            "
+pub const add = private_add
+fn private_add(x: Int, y: Int) {
+    x + y
+}"
+        ),
+        "
+// Public value from another module should be suggested.
+
+import module
+pub fn main() {
+    add(1, 1)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_two_modules() {
+    assert_module_error!(
+        (
+            "wibble",
+            "
+pub fn add(x: Int, y: Int) {
+    x + y
+}"
+        ),
+        (
+            "wobble",
+            "
+pub fn add(x: Int, y: Int) {
+    x + y
+}"
+        ),
+        "
+// When multiple modules export a matching value the suggestion should be
+// pluralised.
+
+import wibble
+import wobble
+pub fn main() {
+    add(1, 1)
+}"
+    );
+}
+
+#[test]
+fn unknown_variable_suggest_three_modules() {
+    assert_module_error!(
+        (
+            "wibble",
+            "
+pub fn add(x: Int, y: Int) {
+    x + y
+}"
+        ),
+        (
+            "wobble",
+            "
+pub fn add(x: Int, y: Int) {
+    x + y
+}"
+        ),
+        (
+            "wabble",
+            "
+pub fn add(x: Int, y: Int) {
+    x + y
+}"
+        ),
+        "
+// When multiple modules export a matching value the suggestion should be
+// pluralised.
+
+import wibble
+import wobble
+import wabble
+pub fn main() {
+    add(1, 1)
+}"
+    );
+}
+
+#[test]
+pub fn clause_guard_is_fault_tolerant() {
+    assert_module_error!(
+        r#"
+pub fn main(x: Int) {
+  case x {
+    _ if x == "" && wibble -> 2
+    _ -> 1
+  }
+}
+"#
+    );
+}
+
+#[test]
+pub fn clause_guard_is_fault_tolerant_with_record_access() {
+    assert_module_error!(
+        r#"
+pub type Wibble { Wibble(field: Int) }
+
+pub fn main(wibble: Wibble) {
+  case wibble {
+    _ if wibble.field == "" && wibble -> 2
+    _ -> 1
+  }
+}
+"#
+    );
+}
+
+#[test]
+pub fn clause_guard_is_fault_tolerant_with_int_binop() {
+    assert_module_error!(
+        r#"
+pub fn main(x: Int) {
+  case x {
+    _ if x + "" -> 2
+    _ -> 1
+  }
+}
+"#
+    );
+}
+
+#[test]
+pub fn clause_guard_is_fault_tolerant_with_not_equals() {
+    assert_module_error!(
+        r#"
+pub fn main(x: Int) {
+  case x {
+    _ if x != "" || False -> 2
+    _ -> 1
+  }
+}
+"#
+    );
+}
+
+#[test]
+pub fn clause_guard_is_fault_tolerant_with_not_equals_and_binop() {
+    assert_module_error!(
+        r#"
+pub fn main(x: Int) {
+  case x {
+    _ if { x != "" } +. 2.0 -> 2
+    _ -> 1
+  }
+}
+"#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/3730
+#[test]
+fn missing_constructor_arguments() {
+    assert_module_error!(
+        "
+pub type A {
+  A(Int)
+}
+
+const a = A()
+"
+    );
+}
+
+#[test]
+fn constant_calling_constructor_with_no_arguments() {
+    assert_module_error!(
+        "
+pub type A { A }
+const a = A()
+"
+    );
+}
+
+#[test]
+fn constant_unsupported_binop() {
+    assert_module_error!("const a = 1 > 2");
+}
+
+#[test]
+fn constant_unsupported_binop_2() {
+    assert_module_error!("const a = 1 <=. 2");
+}
+
+#[test]
+fn multiple_constant_unsupported_binops() {
+    assert_module_error!(
+        "const a = [
+  1 + 2,
+  1 - 2,
+  \"this is ok\" <> \"no error here!\",
+  1 * 2,
+  1 >=. 3.0,
+]"
+    );
+}
+
+#[test]
+fn invalid_operator_in_constants_does_not_stop_analysis() {
+    assert_module_error!(
+        "
+// We will see an error here
+const a = 1 + 2
+// And an error here!
+const b = 1 - 2
+// And an error here!
+const c = 1 - does_not_exist
+"
+    );
+}
+
+#[test]
+fn import_of_private_value_in_the_same_package() {
+    assert_module_error!(
+        ("wibble", "const wobble = 0"),
+        "
+import wibble.{wobble}
+"
+    );
+}
+
+#[test]
+fn use_of_private_value_in_the_same_package() {
+    assert_module_error!(
+        ("wibble", "const wobble = 0"),
+        "
+import wibble
+
+pub fn go() {
+  wibble.wobble
+}
+"
+    );
+}
+
+#[test]
+fn import_of_private_value_in_other_package() {
+    assert_module_error!(
+        ("anotherpackage", "wibble", "const wobble = 0"),
+        "
+// Import of private value from another package should give error about unknown
+// module value.
+import wibble.{wobble}
+"
+    );
+}
+
+#[test]
+fn use_of_private_value_in_other_package() {
+    assert_module_error!(
+        ("anotherpackage", "wibble", "const wobble = 0"),
+        "
+import wibble
+
+pub fn go() {
+  // Use of private value from another package should give error about unknown
+  // module value.
+  wibble.wobble
+}
+"
+    );
+}
+
+#[test]
+fn import_of_private_type_in_the_same_package() {
+    assert_module_error!(
+        (
+            "wibble",
+            "
+type Wibble {
+  Wibble
+}
+"
+        ),
+        "
+import wibble.{type Wibble}
+"
+    );
+}
+
+#[test]
+fn use_of_private_type_in_the_same_package() {
+    assert_module_error!(
+        (
+            "wibble",
+            "
+type Wibble {
+  Wibble
+}
+"
+        ),
+        "
+import wibble
+
+pub fn go() -> wibble.Wibble {
+  todo
+}
+"
+    );
+}
+
+#[test]
+fn import_of_private_type_in_other_package() {
+    assert_module_error!(
+        (
+            "anotherpackage",
+            "wibble",
+            "
+type Wibble {
+  Wibble
+}
+"
+        ),
+        "
+// Import of private type from another package should give error about unknown
+// module value.
+import wibble.{type Wibble}
+"
+    );
+}
+
+#[test]
+fn use_of_private_type_in_other_package() {
+    assert_module_error!(
+        (
+            "anotherpackage",
+            "wibble",
+            "
+type Wibble {
+  Wibble
+}
+"
+        ),
+        "
+import wibble
+
+// Use of private type from another package should give error about unknown
+// module value.
+pub fn go() -> wibble.Wibble {
+  todo
+}
+"
+    );
+}
+
+#[test]
+fn cannot_update_constant_using_record_constructor() {
+    assert_module_error!(
+        "
+pub type Wibble { Wibble(a: Int, b: Int) }
+
+pub const wibble = Wibble
+
+pub const wobble = Wibble(..wibble)
+"
+    );
+}
+
+#[test]
+fn update_constant_depending_on_invalid_constant_does_not_panic() {
+    assert_module_error!(
+        "
+type Wibble {
+    Wibble(wibble: Int, wobble: Int)
+}
+
+const a = Wibble(wibble: 0)
+const b = Wibble(..a, wobble: 8)
 "
     );
 }

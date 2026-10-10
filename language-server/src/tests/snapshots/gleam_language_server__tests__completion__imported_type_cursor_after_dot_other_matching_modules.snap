@@ -16,4 +16,6 @@ pub fn wibble(
 dep.Zoo
   kind:   Class
   detail: Type
-  sort:   3_dep.Zoo
+  sort:   4_dep.Zoo
+  edits:
+    [4:5-4:12]: "dep.Zoo"

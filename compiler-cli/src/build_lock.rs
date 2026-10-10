@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2022 The Gleam contributors
+
 use camino::Utf8PathBuf;
 use gleam_core::{
     Error, Result,
     build::{Mode, Target, Telemetry},
-    error::{FileIoAction, FileKind},
+    error::{FileIoAction, FileIoCause, FileKind},
     paths::ProjectPaths,
 };
 use strum::IntoEnumIterator;
@@ -51,16 +54,24 @@ impl BuildLock {
 
         crate::fs::mkdir(&self.directory)?;
 
-        let mut file = fslock::LockFile::open(lock_path.as_str()).map_err(|e| Error::FileIo {
-            kind: FileKind::File,
-            path: lock_path.clone(),
-            action: FileIoAction::Create,
-            err: Some(e.to_string()),
-        })?;
+        let mut file =
+            fslock::LockFile::open(lock_path.as_str()).map_err(|error| Error::FileIo {
+                kind: FileKind::File,
+                path: lock_path.clone(),
+                action: FileIoAction::Create,
+                cause: FileIoCause::std_io(error),
+            })?;
 
-        if !file.try_lock_with_pid().expect("Trying directory locking") {
+        let lock_error = |error: fslock::Error| Error::FileIo {
+            kind: FileKind::File,
+            action: FileIoAction::Lock,
+            path: lock_path.clone(),
+            cause: FileIoCause::std_io(error),
+        };
+
+        if !file.try_lock_with_pid().map_err(lock_error)? {
             telemetry.waiting_for_build_directory_lock();
-            file.lock_with_pid().expect("Directory locking")
+            file.lock_with_pid().map_err(lock_error)?;
         }
 
         Ok(Guard(file))
@@ -86,7 +97,7 @@ impl BuildLock {
 pub(crate) struct Guard(
     // False positive. This is used in `drop`. Presumably the lint error is a
     // bug in clippy.
-    #[allow(dead_code)] fslock::LockFile,
+    #[expect(dead_code)] fslock::LockFile,
 );
 
 #[test]

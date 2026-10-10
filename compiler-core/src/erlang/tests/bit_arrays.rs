@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use crate::assert_erl;
 
 #[test]
@@ -291,6 +294,34 @@ pub fn main() {
 }
 
 #[test]
+fn subtraction_in_pattern_size_is_left_associative() {
+    assert_erl!(
+        "
+pub fn main() {
+  let a = 10
+  let b = 3
+  let c = 2
+  let assert <<_:bytes-size(a - b - c)>> = <<>>
+}
+"
+    );
+}
+
+#[test]
+fn multiplication_in_pattern_size_is_left_associative() {
+    assert_erl!(
+        "
+pub fn main() {
+  let a = 2
+  let b = 3
+  let c = 4
+  let assert <<_:bytes-size(a * b * c)>> = <<>>
+}
+"
+    );
+}
+
+#[test]
 fn block_in_pattern_size() {
     assert_erl!(
         "
@@ -329,4 +360,211 @@ pub fn main() -> Nil {
 }
 "#
     );
+}
+
+#[test]
+fn size_8_literal_test() {
+    assert_erl!(
+        "pub fn size_8_literal_test() {
+  <<257:size(8)>>
+}"
+    );
+}
+
+#[test]
+fn size_8_variable_test() {
+    assert_erl!(
+        "pub fn size_8_variable_test() {
+  let i = 257
+  <<i:size(8)>>
+}"
+    );
+}
+
+#[test]
+fn size_16_literal_test() {
+    assert_erl!(
+        "pub fn size_16_literal_test() {
+  <<257:size(16)>>
+}"
+    );
+}
+
+#[test]
+fn size_16_variable_test() {
+    assert_erl!(
+        "pub fn size_16_variable_test() {
+  let i = 257
+  <<i:size(16)>>
+}"
+    );
+}
+
+#[test]
+fn size_unit_test() {
+    assert_erl!(
+        "pub fn size_16_variable_test() {
+  let i = 257
+  <<i:size(4)-unit(16)>>
+}"
+    );
+}
+
+#[test]
+fn negative_size_test() {
+    assert_erl!(
+        "pub fn size_16_variable_test() {
+  let i = 257
+  <<i:size(-1)>>
+}"
+    );
+}
+
+#[test]
+fn literal_utf8_string() {
+    assert_erl!(
+        r#"
+pub fn go() {
+  <<"wibble":utf8>>
+}
+"#
+    )
+}
+
+#[test]
+fn variable_utf8_string() {
+    assert_erl!(
+        r#"
+pub fn go(wibble: String) {
+  <<wibble:utf8>>
+}
+"#
+    )
+}
+
+#[test]
+fn literal_utf16_little_string() {
+    assert_erl!(
+        r#"
+pub fn go() {
+  <<"wibble":utf16-little>>
+}
+"#
+    )
+}
+
+#[test]
+fn variable_utf16_little_string() {
+    assert_erl!(
+        r#"
+pub fn go(wibble: String) {
+  <<wibble:utf16-little>>
+}
+"#
+    )
+}
+
+#[test]
+fn literal_utf16_big_string() {
+    assert_erl!(
+        r#"
+pub fn go() {
+  <<"wibble":utf16-big>>
+}
+"#
+    )
+}
+
+#[test]
+fn variable_utf16_big_string() {
+    assert_erl!(
+        r#"
+pub fn go(wibble: String) {
+  <<wibble:utf16-big>>
+}
+"#
+    )
+}
+
+#[test]
+fn literal_utf32_little_string() {
+    assert_erl!(
+        r#"
+pub fn go() {
+  <<"wibble":utf32-little>>
+}
+"#
+    )
+}
+
+#[test]
+fn variable_utf32_little_string() {
+    assert_erl!(
+        r#"
+pub fn go(wibble: String) {
+  <<wibble:utf32-little>>
+}
+"#
+    )
+}
+
+#[test]
+fn literal_utf32_big_string() {
+    assert_erl!(
+        r#"
+pub fn go() {
+  <<"wibble":utf32-big>>
+}
+"#
+    )
+}
+
+#[test]
+fn variable_utf32_big_string() {
+    assert_erl!(
+        r#"
+pub fn go(wibble: String) {
+  <<wibble:utf32-big>>
+}
+"#
+    )
+}
+
+// https://github.com/gleam-lang/gleam/issues/5208
+#[test]
+fn unit_option_ignores_bytes() {
+    assert_erl!(
+        "
+pub fn main() {
+  let assert <<x:unit(2)-bytes-size(3)>> = <<1:6>>
+  x
+}
+"
+    );
+}
+
+#[test]
+fn unit_option_ignores_bytes_regardless_of_order() {
+    assert_erl!(
+        "
+pub fn main() {
+  let assert <<x:bytes-unit(2)-size(3)>> = <<1:6>>
+  x
+}
+"
+    );
+}
+
+#[test]
+// https://github.com/gleam-lang/gleam/issues/6020
+fn bit_array_segment_inside_block_with_size() {
+    assert_erl!(
+        "
+pub fn main() {
+  let a = 1
+  let b = 2
+  <<{ a + b }, { a + b }:size(16)>>
+}
+"
+    )
 }

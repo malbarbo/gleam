@@ -1,4 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2024 The Gleam contributors
+
 use super::*;
+use insta::assert_debug_snapshot;
 use insta::assert_snapshot;
 
 #[test]
@@ -34,4 +38,445 @@ fn test_shell_program_not_found_error() {
             }
         }
     }
+}
+
+#[test]
+fn hex_session_revoked() {
+    let err = Error::HexSessionRevoked.to_diagnostics();
+    assert_debug_snapshot!(err[0]);
+}
+
+#[test]
+fn hex_error_conversion() {
+    assert_eq!(
+        Error::hex(hexpm::ApiError::OAuthRefreshTokenRejected),
+        Error::HexSessionRevoked
+    );
+}
+
+#[test]
+fn test_output_files_already_exist() {
+    let file_names = vec![
+        ("singular", vec![Utf8PathBuf::from("wibble")]),
+        (
+            "multiple",
+            vec![Utf8PathBuf::from("wibble"), Utf8PathBuf::from("wobble")],
+        ),
+    ];
+    for (group, file_names) in file_names {
+        let err = Error::OutputFilesAlreadyExist { file_names };
+        assert_snapshot!(
+            format!("output_files_already_exist_{group}"),
+            err.pretty_string(),
+        );
+    }
+}
+
+#[test]
+fn removed_package_names_invalid_with_suggestion() {
+    let error = Error::RemovedPackageNamesInvalid {
+        packages: vec!["gleam_otp@1".to_string()],
+        dependencies: vec!["gleam_stdlib".into(), "gleam_otp".into(), "lustre".into()],
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn removed_package_names_invalid_with_multiple_suggestions() {
+    let error = Error::RemovedPackageNamesInvalid {
+        packages: vec![
+            "gleam_otp@1".to_string(),
+            "lustre@4".to_string(),
+            "Wibble".to_string(),
+        ],
+        dependencies: vec!["gleam_stdlib".into(), "gleam_otp".into(), "lustre".into()],
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn removed_package_names_invalid_without_suggestions() {
+    let error = Error::RemovedPackageNamesInvalid {
+        packages: vec!["Wibble".to_string()],
+        dependencies: vec!["gleam_stdlib".into(), "gleam_otp".into(), "lustre".into()],
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+// There are 2 separate tests for Windows and for Unix, because on Windows note
+// about inability to create symlinks without Developer Mode is shown, so
+// snapshots differ.
+
+#[cfg(windows)]
+#[test]
+fn io_link_file_error_windows() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::Link("/dest".into()),
+        path: "/src".into(),
+        cause: FileIoCause::Other("Critical error!".to_owned()),
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[cfg(windows)]
+#[test]
+fn io_link_file_error_not_found_windows() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::Link("/dest".into()),
+        path: "/src".into(),
+        cause: FileIoCause::NotFound,
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn io_link_file_error_not_windows() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::Link("/dest".into()),
+        path: "/src".into(),
+        cause: FileIoCause::Other("Critical error!".to_owned()),
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn io_link_file_error_not_found_not_windows() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::Link("/dest".into()),
+        path: "/src".into(),
+        cause: FileIoCause::NotFound,
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_copy_directory_error() {
+    let error = Error::FileIo {
+        kind: FileKind::Directory,
+        action: FileIoAction::Copy(Some("/dest".into())),
+        path: "/src".into(),
+        cause: FileIoCause::Other("Critical error!".to_owned()),
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_copy_directory_not_found_error() {
+    let error = Error::FileIo {
+        kind: FileKind::Directory,
+        action: FileIoAction::Copy(Some("/dest".into())),
+        path: "/src".into(),
+        cause: FileIoCause::NotFound,
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_delete_file_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::Delete,
+        path: "/file".into(),
+        cause: FileIoCause::Other("Critical error!".to_owned()),
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_delete_file_not_found_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::Delete,
+        path: "/file".into(),
+        cause: FileIoCause::NotFound,
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_open_file_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::Open,
+        path: "/file".into(),
+        cause: FileIoCause::Other("Critical error!".to_owned()),
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_open_file_not_found_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::Open,
+        path: "/file".into(),
+        cause: FileIoCause::NotFound,
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_parse_file_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::Parse,
+        path: "/file".into(),
+        cause: FileIoCause::Other("Critical error!".to_owned()),
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_parse_file_not_found_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::Parse,
+        path: "/file".into(),
+        cause: FileIoCause::NotFound,
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_read_file_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::Read,
+        path: "/file".into(),
+        cause: FileIoCause::Other("Critical error!".to_owned()),
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_read_file_not_found_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::Read,
+        path: "/file".into(),
+        cause: FileIoCause::NotFound,
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_create_directory_error() {
+    let error = Error::FileIo {
+        kind: FileKind::Directory,
+        action: FileIoAction::Create,
+        path: "/dir".into(),
+        cause: FileIoCause::Other("Critical error!".to_owned()),
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_create_directory_not_found_error() {
+    let error = Error::FileIo {
+        kind: FileKind::Directory,
+        action: FileIoAction::Create,
+        path: "/dir".into(),
+        cause: FileIoCause::NotFound,
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_write_to_file_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::WriteTo,
+        path: "/file".into(),
+        cause: FileIoCause::Other("Critical error!".to_owned()),
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_write_to_file_not_found_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::WriteTo,
+        path: "/file".into(),
+        cause: FileIoCause::NotFound,
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_find_parent_of_directory_error() {
+    let error = Error::FileIo {
+        kind: FileKind::Directory,
+        action: FileIoAction::FindParent,
+        path: "/dir".into(),
+        cause: FileIoCause::Other("Critical error!".to_owned()),
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_find_parent_of_directory_not_found_error() {
+    let error = Error::FileIo {
+        kind: FileKind::Directory,
+        action: FileIoAction::FindParent,
+        path: "/dir".into(),
+        cause: FileIoCause::NotFound,
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_canonicalise_file_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::Canonicalise,
+        path: "/file".into(),
+        cause: FileIoCause::Other("Critical error!".to_owned()),
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_canonicalise_file_not_found_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::Canonicalise,
+        path: "/file".into(),
+        cause: FileIoCause::NotFound,
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_update_file_permissions_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::UpdatePermissions,
+        path: "/file".into(),
+        cause: FileIoCause::Other("Critical error!".to_owned()),
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_update_file_permissions_not_found_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::UpdatePermissions,
+        path: "/file".into(),
+        cause: FileIoCause::NotFound,
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_read_metadata_of_file_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::ReadMetadata,
+        path: "/file".into(),
+        cause: FileIoCause::Other("Critical error!".to_owned()),
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_read_metadata_of_file_not_found_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::ReadMetadata,
+        path: "/file".into(),
+        cause: FileIoCause::NotFound,
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn wrap_with_multibyte_char_at_width_boundary() {
+    let input = format!("{}é", "a".repeat(74));
+    let wrapped = wrap(&input);
+    assert_eq!(wrapped.replace('\n', ""), input);
+}
+
+#[test]
+fn lsp_message_send_failed() {
+    let error = Error::LspMessageSendFailed {
+        error: "sending on a disconnected channel".into(),
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn lsp_message_receive_failed() {
+    let error = Error::LspMessageReceiveFailed {
+        error: "disconnected channel".into(),
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn added_dependencies_are_already_dev_dependencies() {
+    let error = Error::AddedDependenciesAreAlreadyDevDependencies {
+        packages: vec!["wibble".into(), "wobble".into(), "woo".into()],
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn added_dev_dependencies_are_already_dependencies() {
+    let error = Error::AddedDevDependenciesAreAlreadyDependencies {
+        packages: vec!["wibble".into(), "wobble".into(), "woo".into()],
+    }
+    .pretty_string();
+    assert_snapshot!(error);
+}
+
+#[test]
+fn io_metadata_cache_error() {
+    let error = Error::FileIo {
+        kind: FileKind::File,
+        action: FileIoAction::Parse,
+        path: "wibble/wobble.cache_meta".into(),
+        cause: FileIoCause::CacheMetadataFormatIncorrect,
+    }
+    .pretty_string();
+    assert_snapshot!(error);
 }

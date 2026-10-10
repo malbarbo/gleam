@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2018 The Gleam contributors
+
 mod constant;
 mod typed;
 mod untyped;
@@ -17,6 +20,7 @@ use crate::bit_array;
 use crate::build::{ExpressionPosition, Located, Target, module_erlang_name};
 use crate::exhaustiveness::CompiledCase;
 use crate::parse::{LiteralFloatValue, SpannedString};
+use crate::reference::LabelSyntax;
 use crate::type_::error::VariableOrigin;
 use crate::type_::expression::{Implementations, Purity};
 use crate::type_::printer::Names;
@@ -34,6 +38,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::{One, ToPrimitive};
 #[cfg(test)]
 use pretty_assertions::assert_eq;
+use src_span::SrcSpan;
 use vec1::Vec1;
 
 pub const PIPE_VARIABLE: &str = "_pipe";
@@ -209,6 +214,12 @@ pub struct Arg<T> {
     pub type_: T,
 }
 
+impl HasType for Arg<Arc<Type>> {
+    fn type_(&self) -> Arc<Type> {
+        self.type_.clone()
+    }
+}
+
 impl<A> Arg<A> {
     pub fn set_type<B>(self, t: B) -> Arg<B> {
         Arg {
@@ -274,14 +285,23 @@ pub enum ArgNames {
 }
 
 impl ArgNames {
-    pub fn get_label(&self) -> Option<&EcoString> {
+    pub fn get_label(&self) -> Option<(&EcoString, &SrcSpan)> {
         match self {
             ArgNames::Discard { .. } | ArgNames::Named { .. } => None,
-            ArgNames::LabelledDiscard { label, .. } | ArgNames::NamedLabelled { label, .. } => {
-                Some(label)
+
+            ArgNames::LabelledDiscard {
+                label,
+                label_location,
+                ..
             }
+            | ArgNames::NamedLabelled {
+                label,
+                label_location,
+                ..
+            } => Some((label, label_location)),
         }
     }
+
     pub fn get_variable_name(&self) -> Option<&EcoString> {
         match self {
             ArgNames::Discard { .. } | ArgNames::LabelledDiscard { .. } => None,
@@ -328,11 +348,112 @@ impl<T: PartialEq> RecordConstructorArg<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeAstConstructor {
     pub location: SrcSpan,
-    pub name_location: SrcSpan,
-    pub module: Option<(EcoString, SrcSpan)>,
-    pub name: EcoString,
+    pub name: TypeAstConstructorName,
     pub arguments: Vec<TypeAst>,
     pub start_parentheses: Option<u32>,
+}
+
+/// This represents a type constructor name, that can either be qualified, or
+/// unqualified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeAstConstructorName {
+    /// ```gleam
+    /// pub fn wibble() -> wibble.Wibble
+    /// //                 ^^^^^^ module
+    /// //                        ^^^^^^ name
+    /// ```
+    Qualified {
+        module: EcoString,
+        module_location: SrcSpan,
+        dot_location: u32,
+        /// Notice how the name could be missing, this is an error! However, instead
+        /// of treating it like a syntax error we allow parsing it and report it
+        /// later. This way the language server can provide better help!
+        name: Option<(EcoString, SrcSpan)>,
+    },
+
+    /// ```gleam
+    /// pub fn wibble() -> Wibble
+    /// //                 ^^^^^^ name
+    /// ```
+    Unqualified { name: EcoString, location: SrcSpan },
+}
+
+impl TypeAstConstructorName {
+    pub fn is_qualified(&self) -> bool {
+        match self {
+            TypeAstConstructorName::Qualified { .. } => true,
+            TypeAstConstructorName::Unqualified { .. } => false,
+        }
+    }
+
+    pub fn module_name(&self) -> Option<&EcoString> {
+        match self {
+            TypeAstConstructorName::Qualified { module, .. } => Some(module),
+            TypeAstConstructorName::Unqualified { .. } => None,
+        }
+    }
+
+    pub fn name(&self) -> Option<&EcoString> {
+        match self {
+            TypeAstConstructorName::Unqualified { name, .. }
+            | TypeAstConstructorName::Qualified {
+                name: Some((name, _)),
+                ..
+            } => Some(name),
+
+            TypeAstConstructorName::Qualified { name: None, .. } => None,
+        }
+    }
+
+    pub fn name_location(&self) -> Option<SrcSpan> {
+        match self {
+            TypeAstConstructorName::Unqualified { location, .. }
+            | TypeAstConstructorName::Qualified {
+                name: Some((_, location)),
+                ..
+            } => Some(*location),
+
+            TypeAstConstructorName::Qualified { name: None, .. } => None,
+        }
+    }
+
+    fn is_logically_equal(&self, other: &TypeAstConstructorName) -> bool {
+        match (self, other) {
+            (
+                TypeAstConstructorName::Qualified { module, name, .. },
+                TypeAstConstructorName::Qualified {
+                    module: other_module,
+                    name: other_name,
+                    ..
+                },
+            ) => {
+                module == other_module
+                    && match (name, other_name) {
+                        (Some((name, _)), Some((other_name, _))) => name == other_name,
+                        (None, Some(_)) | (Some(_), None) => false,
+                        (None, None) => true,
+                    }
+            }
+
+            (
+                TypeAstConstructorName::Unqualified { name, location: _ },
+                TypeAstConstructorName::Unqualified {
+                    name: other_name,
+                    location: _,
+                },
+            ) => name == other_name,
+
+            (
+                TypeAstConstructorName::Qualified { .. },
+                TypeAstConstructorName::Unqualified { .. },
+            )
+            | (
+                TypeAstConstructorName::Unqualified { .. },
+                TypeAstConstructorName::Qualified { .. },
+            ) => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -383,30 +504,23 @@ impl TypeAst {
     pub fn is_logically_equal(&self, other: &TypeAst) -> bool {
         match self {
             TypeAst::Constructor(TypeAstConstructor {
-                module,
                 name,
                 arguments,
                 location: _,
-                name_location: _,
                 start_parentheses: _,
             }) => match other {
                 TypeAst::Constructor(TypeAstConstructor {
-                    module: o_module,
-                    name: o_name,
-                    arguments: o_arguments,
+                    name: other_name,
+                    arguments: other_arguments,
                     location: _,
-                    name_location: _,
                     start_parentheses: _,
                 }) => {
-                    let module_name =
-                        |m: &Option<(EcoString, _)>| m.as_ref().map(|(m, _)| m.clone());
-                    module_name(module) == module_name(o_module)
-                        && name == o_name
-                        && arguments.len() == o_arguments.len()
+                    name.is_logically_equal(other_name)
+                        && arguments.len() == other_arguments.len()
                         && arguments
                             .iter()
-                            .zip(o_arguments)
-                            .all(|a| a.0.is_logically_equal(a.1))
+                            .zip(other_arguments)
+                            .all(|argument| argument.0.is_logically_equal(argument.1))
                 }
                 TypeAst::Fn(_) | TypeAst::Var(_) | TypeAst::Tuple(_) | TypeAst::Hole(_) => false,
             },
@@ -485,7 +599,7 @@ impl TypeAst {
                     if let Some(arg) = arguments
                         .iter()
                         .zip(arg_types)
-                        .find_map(|(arg, arg_type)| arg.find_node(byte_index, arg_type.clone()))
+                        .find_map(|(arg, arg_type)| arg.find_node(byte_index, arg_type))
                     {
                         return Some(arg);
                     }
@@ -497,39 +611,46 @@ impl TypeAst {
                 })
                 .or(Some(Located::Annotation { ast: self, type_ })),
             TypeAst::Constructor(TypeAstConstructor {
-                arguments, module, ..
-            }) => type_
-                .named_type_information()
-                .and_then(|(module_name, _, arg_types)| {
-                    if let Some(arg) = arguments
-                        .iter()
-                        .zip(arg_types)
-                        .find_map(|(arg, arg_type)| arg.find_node(byte_index, arg_type.clone()))
-                    {
-                        return Some(arg);
-                    }
+                arguments, name, ..
+            }) => {
+                //
+                type_
+                    .named_type_information()
+                    .and_then(|(module_name, _, arg_types)| {
+                        if let Some(arg) = arguments
+                            .iter()
+                            .zip(arg_types)
+                            .find_map(|(arg, arg_type)| arg.find_node(byte_index, arg_type))
+                        {
+                            return Some(arg);
+                        }
 
-                    if let Some((module_alias, location)) = module
-                        && location.contains(byte_index)
-                    {
-                        return Some(Located::ModuleName {
-                            location: *location,
-                            module_name,
-                            module_alias: module_alias.clone(),
-                            layer: Layer::Type,
-                        });
-                    }
+                        if let TypeAstConstructorName::Qualified {
+                            module_location,
+                            module: module_alias,
+                            ..
+                        } = name
+                            && module_location.contains(byte_index)
+                        {
+                            return Some(Located::ModuleName {
+                                location: *module_location,
+                                module_name,
+                                module_alias: module_alias.clone(),
+                                layer: Layer::Type,
+                            });
+                        }
 
-                    None
-                })
-                .or(Some(Located::Annotation { ast: self, type_ })),
+                        None
+                    })
+                    .or(Some(Located::Annotation { ast: self, type_ }))
+            }
             TypeAst::Tuple(TypeAstTuple { elements, .. }) => type_
                 .tuple_types()
                 .and_then(|elem_types| {
                     if let Some(e) = elements
                         .iter()
                         .zip(elem_types)
-                        .find_map(|(e, e_type)| e.find_node(byte_index, e_type.clone()))
+                        .find_map(|(e, e_type)| e.find_node(byte_index, e_type))
                     {
                         return Some(e);
                     }
@@ -554,7 +675,7 @@ impl TypeAst {
                         buffer.push_str(", ");
                     }
                 }
-                buffer.push(')')
+                buffer.push(')');
             }
             TypeAst::Fn(func) => {
                 buffer.push_str("fn(");
@@ -569,11 +690,17 @@ impl TypeAst {
                 func.return_.print(buffer);
             }
             TypeAst::Constructor(constructor) => {
-                if let Some((module, _)) = &constructor.module {
-                    buffer.push_str(module);
-                    buffer.push('.');
+                match &constructor.name {
+                    TypeAstConstructorName::Unqualified { name, .. } => buffer.push_str(name),
+                    TypeAstConstructorName::Qualified { module, name, .. } => {
+                        buffer.push_str(module);
+                        buffer.push('.');
+                        if let Some((name, _name_location)) = name {
+                            buffer.push_str(name);
+                        }
+                    }
                 }
-                buffer.push_str(&constructor.name);
+
                 if !constructor.arguments.is_empty() {
                     buffer.push('(');
                     for (i, argument) in constructor.arguments.iter().enumerate() {
@@ -617,10 +744,13 @@ fn type_ast_print_fn() {
 fn type_ast_print_constructor() {
     let mut buffer = EcoString::new();
     let ast = TypeAst::Constructor(TypeAstConstructor {
-        name: "SomeType".into(),
-        module: Some(("some_module".into(), SrcSpan { start: 1, end: 1 })),
+        name: TypeAstConstructorName::Qualified {
+            module: "some_module".into(),
+            dot_location: 1,
+            module_location: SrcSpan { start: 1, end: 1 },
+            name: Some(("SomeType".into(), SrcSpan { start: 1, end: 1 })),
+        },
         location: SrcSpan { start: 1, end: 1 },
-        name_location: SrcSpan { start: 1, end: 1 },
         arguments: vec![
             TypeAst::Var(TypeAstVar {
                 location: SrcSpan { start: 1, end: 1 },
@@ -644,10 +774,13 @@ fn type_ast_print_tuple() {
         location: SrcSpan { start: 1, end: 1 },
         elements: vec![
             TypeAst::Constructor(TypeAstConstructor {
-                name: "SomeType".into(),
-                module: Some(("some_module".into(), SrcSpan { start: 1, end: 1 })),
+                name: TypeAstConstructorName::Qualified {
+                    module: "some_module".into(),
+                    module_location: SrcSpan { start: 1, end: 1 },
+                    dot_location: 1,
+                    name: Some(("SomeType".into(), SrcSpan { start: 1, end: 1 })),
+                },
                 location: SrcSpan { start: 1, end: 1 },
-                name_location: SrcSpan { start: 1, end: 1 },
                 arguments: vec![
                     TypeAst::Var(TypeAstVar {
                         location: SrcSpan { start: 1, end: 1 },
@@ -783,13 +916,27 @@ impl TypedFunction {
             return Some(found);
         }
 
-        if let Some(found_arg) = self
+        if let Some(argument) = self
             .arguments
             .iter()
-            .find_map(|arg| arg.find_node(byte_index))
+            .find(|argument| argument.location.contains(byte_index))
         {
-            return Some(found_arg);
-        };
+            if let Some((_, function_name)) = &self.name
+                && let Some((label, label_location)) = argument.names.get_label()
+                && label_location.contains(byte_index)
+            {
+                return Some(Located::FunctionLabelDefinition {
+                    location: *label_location,
+                    field_type: argument.type_.clone(),
+                    label: label.clone(),
+                    function_name: function_name.clone(),
+                });
+            }
+
+            if let Some(found_argument) = argument.find_node(byte_index) {
+                return Some(found_argument);
+            }
+        }
 
         if let Some(found_statement) = self
             .body
@@ -797,7 +944,7 @@ impl TypedFunction {
             .find(|statement| statement.location().contains(byte_index))
         {
             return Some(Located::Statement(found_statement));
-        };
+        }
 
         // Check if location is within the return annotation.
         if let Some(located) = self
@@ -806,7 +953,7 @@ impl TypedFunction {
             .find_map(|annotation| annotation.find_node(byte_index, self.return_type.clone()))
         {
             return Some(located);
-        };
+        }
 
         // Note that the fn `.location` covers the function head, not
         // the entire statement.
@@ -885,32 +1032,44 @@ impl TypedImport {
             return None;
         }
 
-        if let Some(unqualified) = self
+        if let Some(UnqualifiedImport {
+            location,
+            name_position,
+            name,
+            as_name,
+        }) = self
             .unqualified_values
             .iter()
             .find(|unqualified_value| unqualified_value.location.contains(byte_index))
         {
             return Some(Located::UnqualifiedImport(
                 crate::build::UnqualifiedImport {
-                    name: &unqualified.name,
+                    name,
                     module: &self.module,
-                    is_type: false,
-                    location: &unqualified.location,
+                    location,
+                    name_position: *name_position,
+                    as_name: as_name.as_ref(),
                 },
             ));
         }
 
-        if let Some(unqualified) = self
+        if let Some(UnqualifiedImport {
+            location,
+            name_position,
+            name,
+            as_name,
+        }) = self
             .unqualified_types
             .iter()
             .find(|unqualified_value| unqualified_value.location.contains(byte_index))
         {
             return Some(Located::UnqualifiedImport(
                 crate::build::UnqualifiedImport {
-                    name: &unqualified.name,
+                    name,
                     module: &self.module,
-                    is_type: true,
-                    location: &unqualified.location,
+                    location,
+                    name_position: *name_position,
+                    as_name: as_name.as_ref(),
                 },
             ));
         }
@@ -919,8 +1078,8 @@ impl TypedImport {
     }
 }
 
-pub type UntypedModuleConstant = ModuleConstant<(), ()>;
-pub type TypedModuleConstant = ModuleConstant<Arc<Type>, EcoString>;
+pub type UntypedModuleConstant = ModuleConstant<()>;
+pub type TypedModuleConstant = ModuleConstant<Arc<Type>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// A certain fixed value that can be used in multiple places
@@ -931,7 +1090,7 @@ pub type TypedModuleConstant = ModuleConstant<Arc<Type>, EcoString>;
 /// pub const start_year = 2101
 /// pub const end_year = 2111
 /// ```
-pub struct ModuleConstant<T, ConstantRecordTag> {
+pub struct ModuleConstant<T> {
     pub documentation: Option<(u32, EcoString)>,
     /// The location of the constant, starting at the "(pub) const" keywords and
     /// ending after the ": Type" annotation, or (without an annotation) after its name.
@@ -940,7 +1099,7 @@ pub struct ModuleConstant<T, ConstantRecordTag> {
     pub name: EcoString,
     pub name_location: SrcSpan,
     pub annotation: Option<TypeAst>,
-    pub value: Box<Constant<T, ConstantRecordTag>>,
+    pub value: Box<Constant<T>>,
     pub type_: T,
     pub deprecation: Deprecation,
     pub implementations: Implementations,
@@ -1017,19 +1176,41 @@ impl<T> CustomType<T> {
 
 impl TypedCustomType {
     pub fn find_node(&self, byte_index: u32) -> Option<Located<'_>> {
+        for (location, name) in self.parameters.iter() {
+            if location.contains(byte_index) {
+                return Some(Located::TypeVariable {
+                    name: name.clone(),
+                    location: *location,
+                });
+            }
+        }
+
         // Check if location is within the type of one of the arguments of a constructor.
         if let Some(constructor) = self
             .constructors
             .iter()
             .find(|constructor| constructor.location.contains(byte_index))
         {
-            if let Some(annotation) = constructor
+            if let Some(argument) = constructor
                 .arguments
                 .iter()
-                .find(|arg| arg.location.contains(byte_index))
-                .and_then(|arg| arg.ast.find_node(byte_index, arg.type_.clone()))
+                .find(|argument| argument.location.contains(byte_index))
             {
-                return Some(annotation);
+                if let Some((label_location, label)) = &argument.label
+                    && label_location.contains(byte_index)
+                {
+                    return Some(Located::RecordLabelDefinition {
+                        location: *label_location,
+                        field_type: argument.type_.clone(),
+                        label: label.clone(),
+                        type_name: self.name.clone(),
+                    });
+                }
+
+                if let Some(annotation) = argument.ast.find_node(byte_index, argument.type_.clone())
+                {
+                    return Some(annotation);
+                }
             }
 
             return Some(Located::VariantConstructorDefinition(constructor));
@@ -1071,6 +1252,15 @@ pub struct TypeAlias<T> {
 
 impl TypedTypeAlias {
     pub fn find_node(&self, byte_index: u32) -> Option<Located<'_>> {
+        for (location, name) in self.parameters.iter() {
+            if location.contains(byte_index) {
+                return Some(Located::TypeVariable {
+                    name: name.clone(),
+                    location: *location,
+                });
+            }
+        }
+
         // Check if location is within the type being aliased.
         if let Some(located) = self.type_ast.find_node(byte_index, self.type_.clone()) {
             return Some(located);
@@ -1084,18 +1274,18 @@ impl TypedTypeAlias {
     }
 }
 
-pub type UntypedDefinition = Definition<(), UntypedExpr, (), ()>;
+pub type UntypedDefinition = Definition<(), UntypedExpr, ()>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Definition<T, Expr, ConstantRecordTag, PackageName> {
+pub enum Definition<T, Expr, PackageName> {
     Function(Function<T, Expr>),
     TypeAlias(TypeAlias<T>),
     CustomType(CustomType<T>),
     Import(Import<PackageName>),
-    ModuleConstant(ModuleConstant<T, ConstantRecordTag>),
+    ModuleConstant(ModuleConstant<T>),
 }
 
-impl<A, B, C, E> Definition<A, B, C, E> {
+impl<A, B, C> Definition<A, B, C> {
     pub fn location(&self) -> SrcSpan {
         match self {
             Definition::Function(Function { location, .. })
@@ -1164,15 +1354,26 @@ impl<A, B, C, E> Definition<A, B, C, E> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnqualifiedImport {
     pub location: SrcSpan,
-    /// The location excluding the potential `as ...` clause, or the `type` keyword
-    pub imported_name_location: SrcSpan,
     pub name: EcoString,
+    /// The position of the original name. For example, in `type Wibble as
+    /// Wobble`, it points to the start of `Wibble`.
+    pub name_position: u32,
     pub as_name: Option<EcoString>,
 }
 
 impl UnqualifiedImport {
     pub fn used_name(&self) -> &EcoString {
         self.as_name.as_ref().unwrap_or(&self.name)
+    }
+
+    /// The location of the original name, excluding the potential `as ...`
+    /// clause or the `type` keyword. For example, in `type Wibble as Wobble`,
+    /// it covers `Wibble`.
+    pub fn name_location(&self) -> SrcSpan {
+        SrcSpan::new(
+            self.name_position,
+            self.name_position + self.name.len() as u32,
+        )
     }
 }
 
@@ -1190,7 +1391,7 @@ impl Layer {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BinOp {
     // Boolean logic
     And,
@@ -1456,9 +1657,38 @@ impl BinOp {
             | BinOp::Concatenate => None,
         }
     }
+
+    /// This returns how many characters this operator takes.
+    pub fn size(&self) -> u32 {
+        match self {
+            BinOp::LtInt
+            | BinOp::GtInt
+            | BinOp::RemainderInt
+            | BinOp::MultInt
+            | BinOp::AddInt
+            | BinOp::SubInt
+            | BinOp::DivInt => 1,
+
+            BinOp::And
+            | BinOp::Or
+            | BinOp::Eq
+            | BinOp::NotEq
+            | BinOp::LtEqInt
+            | BinOp::GtEqInt
+            | BinOp::LtFloat
+            | BinOp::GtFloat
+            | BinOp::AddFloat
+            | BinOp::SubFloat
+            | BinOp::MultFloat
+            | BinOp::DivFloat
+            | BinOp::Concatenate => 2,
+
+            BinOp::LtEqFloat | BinOp::GtEqFloat => 3,
+        }
+    }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CallArg<A> {
     pub label: Option<EcoString>,
     pub location: SrcSpan,
@@ -1466,7 +1696,7 @@ pub struct CallArg<A> {
     pub implicit: Option<ImplicitCallArgOrigin>,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum ImplicitCallArgOrigin {
     /// The implicit callback argument passed as the last argument to the
     /// function on the right hand side of `use`.
@@ -1554,10 +1784,45 @@ impl CallArg<TypedExpr> {
                 }
                 Some(located) => Some(located),
                 None => {
-                    if self.location.contains(byte_index) && self.label.is_some() {
-                        Some(Located::Label(self.location, self.value.type_()))
+                    if !self.location.contains(byte_index) {
+                        return None;
+                    }
+                    let label = self.label.as_ref()?;
+
+                    let label_location = self
+                        .label_location()
+                        .filter(|location| location.contains(byte_index));
+
+                    if let Some(label_location) = label_location
+                        && let Some(variant) = called_function.record_constructor_variant_name()
+                    {
+                        let record_type = called_function
+                            .type_()
+                            .return_type()
+                            .expect("record constructors with arguments are functions");
+                        Some(Located::RecordLabelUsage {
+                            location: label_location,
+                            field_type: self.value.type_(),
+                            label: label.clone(),
+                            record_type,
+                            variant: variant.clone(),
+                        })
+                    } else if let Some(label_location) = label_location
+                        && let Some((function_module, function_name)) =
+                            called_function.module_function_name()
+                    {
+                        Some(Located::FunctionLabelUsage {
+                            location: label_location,
+                            field_type: self.value.type_(),
+                            label: label.clone(),
+                            function_module: function_module.clone(),
+                            function_name: function_name.clone(),
+                        })
                     } else {
-                        None
+                        Some(Located::Label {
+                            location: self.location,
+                            field_type: self.value.type_(),
+                        })
                     }
                 }
             },
@@ -1606,14 +1871,39 @@ impl CallArg<TypedExpr> {
 }
 
 impl CallArg<TypedPattern> {
-    pub fn find_node(&self, byte_index: u32) -> Option<Located<'_>> {
+    /// `record_type` is the type of the record this pattern is matching on,
+    /// and `variant` is the name of the variant being matched. They are used
+    /// to resolve the definition of the field if the cursor is on this
+    /// argument's label.
+    pub fn find_node(
+        &self,
+        byte_index: u32,
+        record_type: &Arc<Type>,
+        variant: &EcoString,
+    ) -> Option<Located<'_>> {
         match self.value.find_node(byte_index) {
             Some(located) => Some(located),
             _ => {
-                if self.location.contains(byte_index) && self.label.is_some() {
-                    Some(Located::Label(self.location, self.value.type_()))
+                if !self.location.contains(byte_index) {
+                    return None;
+                }
+                let label = self.label.as_ref()?;
+
+                if let Some(label_location) = self.label_location()
+                    && label_location.contains(byte_index)
+                {
+                    Some(Located::RecordLabelUsage {
+                        location: label_location,
+                        field_type: self.value.type_(),
+                        label: label.clone(),
+                        record_type: record_type.clone(),
+                        variant: variant.clone(),
+                    })
                 } else {
-                    None
+                    Some(Located::Label {
+                        location: self.location,
+                        field_type: self.value.type_(),
+                    })
                 }
             }
         }
@@ -1621,14 +1911,39 @@ impl CallArg<TypedPattern> {
 }
 
 impl CallArg<TypedConstant> {
-    pub fn find_node(&self, byte_index: u32) -> Option<Located<'_>> {
+    /// `record_type` is the type of the record this constant is building, and
+    /// `variant` is the name of the variant being built. They are used to
+    /// resolve the definition of the field if the cursor is on this
+    /// argument's label.
+    pub fn find_node(
+        &self,
+        byte_index: u32,
+        record_type: &Arc<Type>,
+        variant: &EcoString,
+    ) -> Option<Located<'_>> {
         match self.value.find_node(byte_index) {
             Some(located) => Some(located),
             _ => {
-                if self.location.contains(byte_index) && self.label.is_some() {
-                    Some(Located::Label(self.location, self.value.type_()))
+                if !self.location.contains(byte_index) {
+                    return None;
+                }
+                let label = self.label.as_ref()?;
+
+                if let Some(label_location) = self.label_location()
+                    && label_location.contains(byte_index)
+                {
+                    Some(Located::RecordLabelUsage {
+                        location: label_location,
+                        field_type: self.value.type_(),
+                        label: label.clone(),
+                        record_type: record_type.clone(),
+                        variant: variant.clone(),
+                    })
                 } else {
-                    None
+                    Some(Located::Label {
+                        location: self.location,
+                        field_type: self.value.type_(),
+                    })
                 }
             }
         }
@@ -1647,7 +1962,7 @@ impl CallArg<UntypedExpr> {
             | UntypedExpr::List { .. }
             | UntypedExpr::Call { .. }
             | UntypedExpr::BinOp { .. }
-            | UntypedExpr::PipeLine { .. }
+            | UntypedExpr::Pipeline { .. }
             | UntypedExpr::Case { .. }
             | UntypedExpr::FieldAccess { .. }
             | UntypedExpr::Tuple { .. }
@@ -1682,6 +1997,30 @@ where
             None
         }
     }
+
+    /// The location of this argument's label, if it has one. For the label
+    /// shorthand syntax this spans the whole `label:`, otherwise it is just
+    /// the label itself.
+    ///
+    pub fn label_location(&self) -> Option<SrcSpan> {
+        let label = self.label.as_ref()?;
+        if self.uses_label_shorthand() {
+            Some(self.location)
+        } else {
+            Some(SrcSpan {
+                start: self.location.start,
+                end: self.location.start + label.len() as u32,
+            })
+        }
+    }
+
+    pub fn label_syntax(&self) -> LabelSyntax {
+        if self.uses_label_shorthand() {
+            LabelSyntax::Shorthand
+        } else {
+            LabelSyntax::Longhand
+        }
+    }
 }
 
 impl<T> HasLocation for CallArg<T> {
@@ -1690,13 +2029,13 @@ impl<T> HasLocation for CallArg<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RecordBeingUpdated<A> {
     pub base: Box<A>,
     pub location: SrcSpan,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RecordUpdateArg<A> {
     pub label: EcoString,
     pub location: SrcSpan,
@@ -1716,6 +2055,28 @@ impl<A: HasLocation> RecordUpdateArg<A> {
     pub fn uses_label_shorthand(&self) -> bool {
         self.value.location() == self.location
     }
+
+    /// The location of this argument's label. For the label shorthand syntax
+    /// this spans the whole `label:`, otherwise it is just the label itself.
+    ///
+    pub fn label_location(&self) -> SrcSpan {
+        if self.uses_label_shorthand() {
+            self.location
+        } else {
+            SrcSpan {
+                start: self.location.start,
+                end: self.location.start + self.label.len() as u32,
+            }
+        }
+    }
+
+    pub fn label_syntax(&self) -> LabelSyntax {
+        if self.uses_label_shorthand() {
+            LabelSyntax::Shorthand
+        } else {
+            LabelSyntax::Longhand
+        }
+    }
 }
 
 pub type MultiPattern<Type> = Vec<Pattern<Type>>;
@@ -1723,20 +2084,20 @@ pub type MultiPattern<Type> = Vec<Pattern<Type>>;
 pub type UntypedMultiPattern = MultiPattern<()>;
 pub type TypedMultiPattern = MultiPattern<Arc<Type>>;
 
-pub type TypedClause = Clause<TypedExpr, Arc<Type>, EcoString>;
+pub type TypedClause = Clause<TypedExpr, Arc<Type>>;
 
-pub type UntypedClause = Clause<UntypedExpr, (), ()>;
+pub type UntypedClause = Clause<UntypedExpr, ()>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Clause<Expr, Type, RecordTag> {
+pub struct Clause<Expr, Type> {
     pub location: SrcSpan,
     pub pattern: MultiPattern<Type>,
     pub alternative_patterns: Vec<MultiPattern<Type>>,
-    pub guard: Option<ClauseGuard<Type, RecordTag>>,
+    pub guard: Option<ClauseGuard<Type>>,
     pub then: Expr,
 }
 
-impl<A, B, C> Clause<A, B, C> {
+impl<A, B> Clause<A, B> {
     pub fn pattern_count(&self) -> usize {
         1 + self.alternative_patterns.len()
     }
@@ -1752,6 +2113,11 @@ impl TypedClause {
                 .unwrap_or_default(),
             end: self.then.location().end,
         }
+    }
+
+    /// Returns an iterator over all the patterns of a case clause.
+    pub fn patterns(&self) -> impl Iterator<Item = &Vec<TypedPattern>> {
+        std::iter::once(&self.pattern).chain(self.alternative_patterns.iter())
     }
 
     pub fn find_node(&self, byte_index: u32) -> Option<Located<'_>> {
@@ -1827,7 +2193,7 @@ impl TypedClause {
             &self.alternative_patterns,
             &other.alternative_patterns,
             |(patterns_one, patterns_other)| {
-                pairwise_all(patterns_one, patterns_other, |(one, other)| -> bool {
+                pairwise_all(patterns_one, patterns_other, |(one, other)| {
                     one.syntactically_eq(other)
                 })
             },
@@ -1933,7 +2299,7 @@ fn pattern_and_expression_are_the_same(pattern: &TypedPattern, expression: &Type
                 ..
             },
             TypedExpr::BinOp {
-                name: BinOp::Concatenate,
+                operator: BinOp::Concatenate,
                 left,
                 right,
                 ..
@@ -1941,9 +2307,14 @@ fn pattern_and_expression_are_the_same(pattern: &TypedPattern, expression: &Type
         ) => {
             let left_side_matches = match (left_side_assignment, left_side_string, left.as_ref()) {
                 (_, left_side_string, TypedExpr::String { value, .. }) => value == left_side_string,
-                (Some((left_side_name, _)), _, TypedExpr::Var { name, .. }) => {
-                    left_side_name == name
-                }
+                (
+                    Some(StringPrefixLeftSideAssignment {
+                        name: left_side_name,
+                        ..
+                    }),
+                    _,
+                    TypedExpr::Var { name, .. },
+                ) => left_side_name == name,
                 (_, _, _) => false,
             };
             let right_side_matches = match (right_side_assignment, right.as_ref()) {
@@ -2136,19 +2507,25 @@ fn pattern_and_expression_are_the_same(pattern: &TypedPattern, expression: &Type
     }
 }
 
-pub type UntypedClauseGuard = ClauseGuard<(), ()>;
-pub type TypedClauseGuard = ClauseGuard<Arc<Type>, EcoString>;
+pub type UntypedClauseGuard = ClauseGuard<()>;
+pub type TypedClauseGuard = ClauseGuard<Arc<Type>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClauseGuard<Type, RecordTag> {
+pub enum ClauseGuard<Type> {
     Block {
         location: SrcSpan,
-        value: Box<ClauseGuard<Type, RecordTag>>,
+        value: Box<ClauseGuard<Type>>,
     },
 
     BinaryOperator {
         location: SrcSpan,
         operator: BinOp,
+        /// This is where the operator starts in the code. For example:
+        /// ```gleam
+        /// _ if 1.0 >=. 2.3 -> todo
+        /// //       ^ Here!
+        /// ```
+        operator_start: u32,
         left: Box<Self>,
         right: Box<Self>,
     },
@@ -2163,6 +2540,7 @@ pub enum ClauseGuard<Type, RecordTag> {
         type_: Type,
         name: EcoString,
         definition_location: SrcSpan,
+        origin: VariableOrigin,
     },
 
     TupleIndex {
@@ -2182,17 +2560,24 @@ pub enum ClauseGuard<Type, RecordTag> {
 
     ModuleSelect {
         location: SrcSpan,
+        field_start: u32,
+        definition_location: SrcSpan,
         type_: Type,
         label: EcoString,
         module_name: EcoString,
         module_alias: EcoString,
-        literal: Constant<Type, RecordTag>,
+        literal: Constant<Type>,
     },
 
-    Constant(Constant<Type, RecordTag>),
+    Constant(Constant<Type>),
+
+    Invalid {
+        location: SrcSpan,
+        type_: Type,
+    },
 }
 
-impl<A, B> ClauseGuard<A, B> {
+impl<A> ClauseGuard<A> {
     pub fn location(&self) -> SrcSpan {
         match self {
             ClauseGuard::Constant(constant) => constant.location(),
@@ -2201,6 +2586,7 @@ impl<A, B> ClauseGuard<A, B> {
             | ClauseGuard::Var { location, .. }
             | ClauseGuard::TupleIndex { location, .. }
             | ClauseGuard::ModuleSelect { location, .. }
+            | ClauseGuard::Invalid { location, .. }
             | ClauseGuard::Block { location, .. } => *location,
             ClauseGuard::FieldAccess {
                 label_location,
@@ -2223,6 +2609,7 @@ impl<A, B> ClauseGuard<A, B> {
             ClauseGuard::BinaryOperator { operator, .. } => Some(*operator),
 
             ClauseGuard::Constant(_)
+            | ClauseGuard::Invalid { .. }
             | ClauseGuard::Var { .. }
             | ClauseGuard::Not { .. }
             | ClauseGuard::TupleIndex { .. }
@@ -2242,6 +2629,7 @@ impl TypedClauseGuard {
             ClauseGuard::ModuleSelect { type_, .. } => type_.clone(),
             ClauseGuard::Constant(constant) => constant.type_(),
             ClauseGuard::Block { value, .. } => value.type_(),
+            ClauseGuard::Invalid { type_, .. } => type_.clone(),
 
             ClauseGuard::Not { .. } => type_::bool(),
 
@@ -2294,7 +2682,7 @@ impl TypedClauseGuard {
                         layer: Layer::Value,
                     })
                 } else {
-                    None
+                    Some(Located::ClauseGuard(self))
                 }
             }
 
@@ -2311,20 +2699,22 @@ impl TypedClauseGuard {
             }
             | ClauseGuard::Block { value, .. } => value.find_node(byte_index),
             ClauseGuard::Constant(constant) => constant.find_node(byte_index),
-            ClauseGuard::Var { .. } => None,
+            ClauseGuard::Var { .. } => Some(Located::ClauseGuard(self)),
+            ClauseGuard::Invalid { .. } => Some(Located::ClauseGuard(self)),
         }
     }
 
-    pub(crate) fn referenced_variables(&self) -> im::HashSet<&EcoString> {
+    pub(crate) fn referenced_variables(&self) -> imbl::HashSet<&EcoString> {
         match self {
-            ClauseGuard::Var { name, .. } => im::hashset![name],
+            ClauseGuard::Var { name, .. } => imbl::hashset![name],
 
             ClauseGuard::Block { value, .. } => value.referenced_variables(),
             ClauseGuard::Not { expression, .. } => expression.referenced_variables(),
             ClauseGuard::TupleIndex { tuple, .. } => tuple.referenced_variables(),
             ClauseGuard::FieldAccess { container, .. } => container.referenced_variables(),
             ClauseGuard::Constant(constant) => constant.referenced_variables(),
-            ClauseGuard::ModuleSelect { .. } => im::HashSet::new(),
+            ClauseGuard::ModuleSelect { .. } => imbl::HashSet::new(),
+            ClauseGuard::Invalid { .. } => imbl::HashSet::new(),
 
             ClauseGuard::BinaryOperator { left, right, .. } => left
                 .referenced_variables()
@@ -2409,65 +2799,37 @@ impl TypedClauseGuard {
                 one.syntactically_eq(other)
             }
             (ClauseGuard::Constant(_), _) => false,
-        }
-    }
-}
 
-#[derive(
-    Debug,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Default,
-    Clone,
-    Copy,
-    serde::Serialize,
-    serde::Deserialize,
-    Hash,
-)]
-pub struct SrcSpan {
-    pub start: u32,
-    pub end: u32,
-}
-
-impl SrcSpan {
-    pub fn new(start: u32, end: u32) -> Self {
-        Self { start, end }
-    }
-
-    pub fn contains(&self, byte_index: u32) -> bool {
-        byte_index >= self.start && byte_index <= self.end
-    }
-
-    pub fn contains_span(&self, span: SrcSpan) -> bool {
-        self.contains(span.start) && self.contains(span.end)
-    }
-
-    /// Merges two spans into a new one that starts at the start of the smaller
-    /// one and ends at the end of the bigger one. For example:
-    ///
-    /// ```txt
-    /// wibble    wobble
-    /// ─┬────    ─┬────
-    ///  │         ╰─ one span
-    ///  ╰─ the other span
-    /// ─┬──────────────
-    ///  ╰─ the span you get by merging the two
-    /// ```
-    pub fn merge(&self, with: &SrcSpan) -> SrcSpan {
-        Self {
-            start: self.start.min(with.start),
-            end: self.end.max(with.end),
+            // An invalid guard is never the same as another one
+            (ClauseGuard::Invalid { .. }, _) => false,
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    pub fn len(&self) -> usize {
-        (self.end - self.start) as usize
+    pub fn definition_location(&self) -> Option<DefinitionLocation> {
+        match self {
+            ClauseGuard::Block { .. }
+            | ClauseGuard::BinaryOperator { .. }
+            | ClauseGuard::Not { .. }
+            | ClauseGuard::TupleIndex { .. }
+            | ClauseGuard::Invalid { .. }
+            | ClauseGuard::FieldAccess { .. } => None,
+            ClauseGuard::Constant(constant) => constant.definition_location(),
+            ClauseGuard::Var {
+                definition_location,
+                ..
+            } => Some(DefinitionLocation {
+                module: None,
+                span: *definition_location,
+            }),
+            ClauseGuard::ModuleSelect {
+                module_name,
+                definition_location,
+                ..
+            } => Some(DefinitionLocation {
+                module: Some(module_name.clone()),
+                span: *definition_location,
+            }),
+        }
     }
 }
 
@@ -2564,7 +2926,7 @@ pub enum Pattern<Type> {
     StringPrefix {
         location: SrcSpan,
         left_location: SrcSpan,
-        left_side_assignment: Option<(EcoString, SrcSpan)>,
+        left_side_assignment: Option<StringPrefixLeftSideAssignment>,
         right_location: SrcSpan,
         left_side_string: EcoString,
         /// The variable on the right hand side of the `<>`.
@@ -2649,10 +3011,15 @@ impl<T> BitArraySize<T> {
     }
 
     pub fn non_zero_compile_time_number(&self) -> bool {
+        self.compile_time_number()
+            .is_some_and(|number| number != BigInt::ZERO)
+    }
+
+    pub fn compile_time_number(&self) -> Option<BigInt> {
         match self {
-            BitArraySize::Int { int_value, .. } => !int_value.is_zero(),
-            BitArraySize::Block { inner, .. } => inner.non_zero_compile_time_number(),
-            BitArraySize::Variable { .. } | BitArraySize::BinaryOperator { .. } => false,
+            BitArraySize::Int { int_value, .. } => Some(int_value.clone()),
+            BitArraySize::Block { inner, .. } => inner.compile_time_number(),
+            BitArraySize::Variable { .. } | BitArraySize::BinaryOperator { .. } => None,
         }
     }
 
@@ -2935,7 +3302,10 @@ impl TypedPattern {
                     match (left_side_assignment, other_left_side_assignment) {
                         (None, None) => true,
                         (None, Some(_)) | (Some(_), None) => false,
-                        (Some((one, _)), Some((other, _))) => one == other,
+                        (
+                            Some(StringPrefixLeftSideAssignment { name: one, .. }),
+                            Some(StringPrefixLeftSideAssignment { name: other, .. }),
+                        ) => one == other,
                     };
                 let right_side_assignments_are_equal =
                     match (right_side_assignment, other_right_side_assignment) {
@@ -3078,20 +3448,30 @@ impl TypedPattern {
                 ..
             } => {
                 // Handle the prefix alias: "prefix" as name
-                if let Some((name, left_side_assignment_location)) = left_side_assignment
-                    && left_side_assignment_location.contains(byte_index)
+                if let Some(StringPrefixLeftSideAssignment {
+                    name,
+                    name_start_position: left_side_assignment_name_start_position,
+                    location: left_side_assignment_location,
+                }) = left_side_assignment
                 {
-                    return Some(Located::StringPrefixPatternVariable {
-                        location: *left_side_assignment_location,
-                        name,
-                    });
+                    let left_side_assignment_name_location = SrcSpan::new(
+                        *left_side_assignment_name_start_position,
+                        left_side_assignment_location.end,
+                    );
+                    if left_side_assignment_name_location.contains(byte_index) {
+                        return Some(Located::StringPrefixPatternPrefixAlias {
+                            name_start_position: *left_side_assignment_name_start_position,
+                            location: *left_side_assignment_location,
+                            name,
+                        });
+                    }
                 }
 
                 // Handle the suffix: <> name
                 if let AssignName::Variable(name) = right_side_assignment
                     && right_location.contains(byte_index)
                 {
-                    return Some(Located::StringPrefixPatternVariable {
+                    return Some(Located::StringPrefixPatternSuffix {
                         location: *right_location,
                         name,
                     });
@@ -3104,35 +3484,37 @@ impl TypedPattern {
                 .or_else(|| Some(Located::Pattern(self))),
 
             Pattern::Constructor {
-                module: Some((module_alias, module_location)),
-                constructor: Inferred::Known(constructor),
+                module,
+                spread,
+                arguments,
+                constructor,
+                type_,
+                name,
                 ..
             } => {
-                if !module_location.contains(byte_index) {
-                    return None;
-                }
-
-                Some(Located::ModuleName {
-                    location: *module_location,
-                    module_name: constructor.module.clone(),
-                    module_alias: module_alias.clone(),
-                    layer: Layer::Value,
-                })
-            }
-            Pattern::Constructor {
-                spread, arguments, ..
-            } => match spread {
-                Some(spread_location) if spread_location.contains(byte_index) => {
+                if let Some((module_alias, module_location)) = module
+                    && let Inferred::Known(constructor) = constructor
+                    && module_location.contains(byte_index)
+                {
+                    Some(Located::ModuleName {
+                        location: *module_location,
+                        module_name: constructor.module.clone(),
+                        module_alias: module_alias.clone(),
+                        layer: Layer::Value,
+                    })
+                } else if let Some(spread_location) = spread
+                    && spread_location.contains(byte_index)
+                {
                     Some(Located::PatternSpread {
                         spread_location: *spread_location,
                         pattern: self,
                     })
+                } else {
+                    arguments
+                        .iter()
+                        .find_map(|argument| argument.find_node(byte_index, type_, name))
                 }
-
-                Some(_) | None => arguments
-                    .iter()
-                    .find_map(|argument| argument.find_node(byte_index)),
-            },
+            }
 
             Pattern::List { elements, tail, .. } => elements
                 .iter()
@@ -3267,8 +3649,8 @@ impl TypedPattern {
                         },
                         location,
                         type_: type_.clone(),
-                    })
-                };
+                    });
+                }
             }
             Pattern::Constructor { arguments, .. } => {
                 for argument in arguments {
@@ -3277,7 +3659,7 @@ impl TypedPattern {
                             name: BoundVariableName::ShorthandLabel { name: name.clone() },
                             location: argument.location,
                             type_: argument.value.type_(),
-                        })
+                        });
                     } else {
                         argument.value.collect_bound_variables(variables);
                     }
@@ -3299,10 +3681,16 @@ impl TypedPattern {
                 right_location,
                 ..
             } => {
-                if let Some((name, location)) = left_side_assignment {
+                if let Some(StringPrefixLeftSideAssignment {
+                    name,
+                    name_start_position,
+                    location,
+                }) = left_side_assignment
+                {
+                    let location = SrcSpan::new(*name_start_position, location.end);
                     variables.push(BoundVariable {
                         name: BoundVariableName::Regular { name: name.clone() },
-                        location: *location,
+                        location,
                         type_: type_::string(),
                     });
                 }
@@ -3332,11 +3720,31 @@ impl<A> HasLocation for Pattern<A> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringPrefixLeftSideAssignment {
+    /// Name of the binding.
+    pub name: EcoString,
+    /// Start position of the name:
+    ///
+    /// ```gleam
+    /// "prefix" as alias <> suffix
+    /// //          ^
+    /// ```
+    pub name_start_position: u32,
+    /// Full location of the binding:
+    ///
+    /// ```gleam
+    /// "prefix" as alias <> suffix
+    /// //      ^^^^^^^^^
+    /// ```
+    pub location: SrcSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssignmentKind<Expression> {
     /// let x = ...
     Let,
-    /// This is a let assignment generated by the compiler for intermediate variables
-    /// needed by record updates and `use`.
+    /// This is a let assignment generated by the compiler for intermediate
+    /// variables needed by record updates and `use`.
     /// Like a regular `Let` assignment this can never fail.
     ///
     Generated,
@@ -3392,7 +3800,7 @@ pub type TypedConstantBitArraySegment = BitArraySegment<TypedConstant, Arc<Type>
 pub type UntypedPatternBitArraySegment = BitArraySegment<UntypedPattern, ()>;
 pub type TypedPatternBitArraySegment = BitArraySegment<TypedPattern, Arc<Type>>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BitArraySegment<Value, Type> {
     pub location: SrcSpan,
     pub value: Box<Value>,
@@ -3516,12 +3924,16 @@ impl<Value, Type> BitArraySegment<Value, Type> {
         })
     }
 
+    /// Returns the unit of `size` in the bit array segment. The `unit` option
+    /// overrides the `bytes` option, so if a segment has both, the unit is what
+    /// is specified in `unit`, not 8.
     pub fn unit(&self) -> u8 {
-        self.options
-            .iter()
-            .find_map(|option| match option {
-                BitArrayOption::Unit { value, .. } => Some(*value),
-                BitArrayOption::Bytes { .. } => Some(8),
+        let mut has_bytes_option = false;
+
+        for option in self.options.iter() {
+            match option {
+                BitArrayOption::Unit { value, .. } => return *value,
+                BitArrayOption::Bytes { .. } => has_bytes_option = true,
                 BitArrayOption::Int { .. }
                 | BitArrayOption::Float { .. }
                 | BitArrayOption::Bits { .. }
@@ -3536,9 +3948,11 @@ impl<Value, Type> BitArraySegment<Value, Type> {
                 | BitArrayOption::Big { .. }
                 | BitArrayOption::Little { .. }
                 | BitArrayOption::Native { .. }
-                | BitArrayOption::Size { .. } => None,
-            })
-            .unwrap_or(1)
+                | BitArrayOption::Size { .. } => {}
+            }
+        }
+
+        if has_bytes_option { 8 } else { 1 }
     }
 
     pub(crate) fn has_bits_option(&self) -> bool {
@@ -3691,7 +4105,7 @@ impl TypedConstantBitArraySegment {
 
 pub type TypedConstantBitArraySegmentOption = BitArrayOption<TypedConstant>;
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
 pub enum BitArrayOption<Value> {
     Bytes {
         location: SrcSpan,
@@ -3926,7 +4340,7 @@ impl<A> BitArrayOption<A> {
 }
 
 impl BitArrayOption<TypedConstant> {
-    fn referenced_variables(&self) -> im::HashSet<&EcoString> {
+    fn referenced_variables(&self) -> imbl::HashSet<&EcoString> {
         match self {
             BitArrayOption::Bytes { .. }
             | BitArrayOption::Int { .. }
@@ -3943,7 +4357,7 @@ impl BitArrayOption<TypedConstant> {
             | BitArrayOption::Big { .. }
             | BitArrayOption::Little { .. }
             | BitArrayOption::Unit { .. }
-            | BitArrayOption::Native { .. } => im::hashset![],
+            | BitArrayOption::Native { .. } => imbl::hashset![],
 
             BitArrayOption::Size { value, .. } => value.referenced_variables(),
         }
@@ -4020,7 +4434,7 @@ impl GroupedDefinitions {
         let mut this = Self::default();
 
         for definition in definitions {
-            this.add(definition)
+            this.add(definition);
         }
 
         this
@@ -4419,6 +4833,30 @@ impl TypedAssert {
 ///
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedPipelineAssignment {
+    /// This is the location of the corresponding pipeline step.
+    ///
+    /// Take this pipeline:
+    ///
+    /// ```gleam
+    /// wibble |> wobble |> woo
+    /// ```
+    ///
+    /// It's made of two steps and a final expression:
+    ///
+    /// ```gleam
+    /// let step_0 = wibble
+    /// let step_1 = wobble(step_0)
+    /// woo(step_1)
+    /// ```
+    ///
+    /// The locations of each step would be the following:
+    ///
+    /// ```gleam
+    /// wibble |> wobble |> woo
+    /// ^^^^^^ location of first step
+    ///           ^^^^^^ location of second step
+    /// ```
+    ///
     pub location: SrcSpan,
     pub name: EcoString,
     pub value: Box<TypedExpr>,

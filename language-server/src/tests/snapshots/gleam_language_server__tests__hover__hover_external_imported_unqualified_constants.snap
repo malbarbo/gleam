@@ -2,6 +2,7 @@
 source: language-server/src/tests/hover.rs
 expression: "\nimport example_module.{my_const}\nfn main() {\n  my_const\n}\n"
 ---
+
 import example_module.{my_const}
 fn main() {
   my_const
@@ -14,4 +15,4 @@ fn main() {
 Int
 ```
 
-View on [HexDocs](https://hexdocs.pm/hex/example_module.html#my_const)
+View on [HexDocs](https://hex.hexdocs.pm/example_module.html#my_const)

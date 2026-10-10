@@ -1,9 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2024 The Gleam contributors
+
 use std::time::SystemTime;
 
 use camino::Utf8PathBuf;
 use ecow::EcoString;
 use globset::GlobBuilder;
 use hexpm::version::Identifier;
+use src_span::LineNumbers;
 
 use crate::{
     analyse::TargetSupport,
@@ -11,7 +15,6 @@ use crate::{
     config::{
         Docs, ErlangConfig, GleamVersion, JavaScriptConfig, PackageConfig, WebAssemblyConfig,
     },
-    line_numbers::LineNumbers,
     type_::PRELUDE_MODULE_NAME,
     uid::UniqueIdGenerator,
     warning::{TypeWarningEmitter, WarningEmitter},
@@ -59,7 +62,7 @@ pub fn compile_package(
     src: &str,
     dep: Option<(&str, &str, &str)>,
 ) -> String {
-    let mut modules = im::HashMap::new();
+    let mut modules = imbl::HashMap::new();
     let ids = UniqueIdGenerator::new();
     // DUPE: preludeinsertion
     // TODO: Currently we do this here and also in the tests. It would be better
@@ -125,8 +128,8 @@ pub fn compile_package(
     .infer_module(ast, LineNumbers::new(src), "".into())
     .expect("should successfully infer");
 
-    // TODO: all the bits above are basically copy pasted from the javascript
-    // and erlang test helpers. A refactor might be due here.
+    // TODO: all the bits above are basically copy pasted from the JavaScript
+    // and Erlang test helpers. A refactor might be due here.
     let mut module = Module {
         name: module_name,
         code: src.into(),
@@ -141,7 +144,7 @@ pub fn compile_package(
     let package: Package = package_from_module(module);
     serde_json::to_string_pretty(&PackageInterface::from_package(
         &package,
-        &Default::default(),
+        &imbl::HashMap::new(),
     ))
     .expect("to json")
 }
@@ -177,7 +180,6 @@ fn package_from_module(module: Module) -> Package {
                     .build()
                     .expect("internals glob"),
             ]),
-            tools: Default::default(),
         },
         cached_module_names: Vec::new(),
         modules: vec![module],
@@ -335,6 +337,31 @@ pub type Wibble {
   Wibble(Int)
   /// This is the Wobble variant. It is a recursive type.
   Wobble(Wibble)
+}
+"#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5957
+#[test]
+pub fn type_alias_with_two_parameters() {
+    assert_package_interface!("pub type Wibble(a, b) = Result(a, b)");
+}
+
+// https://github.com/gleam-lang/gleam/issues/5957
+#[test]
+pub fn type_alias_with_two_parameters_in_reverse() {
+    assert_package_interface!("pub type Wibble(a, b) = Result(b, a)");
+}
+
+#[test]
+pub fn deprecated_constructor() {
+    assert_package_interface!(
+        r#"
+pub type Wibble {
+  @deprecated("Use `Wobble` instead")
+  Wibble
+  Wobble
 }
 "#
     );

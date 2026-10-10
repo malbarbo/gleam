@@ -1,7 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2018 The Gleam contributors
+
+pub(crate) mod constant;
 pub(crate) mod environment;
 pub mod error;
 pub(crate) mod expression;
 pub(crate) mod fields;
+pub(crate) mod guard;
 pub(crate) mod hydrator;
 pub(crate) mod pattern;
 pub(crate) mod pipe;
@@ -21,24 +26,22 @@ pub use fields::FieldMap;
 use hexpm::version::Version;
 pub use prelude::*;
 use printer::Names;
-use serde::Serialize;
 
 use crate::{
     ast::{
         ArgNames, BitArraySegment, CallArg, Constant, DefinitionLocation, Pattern, Publicity,
-        SrcSpan, TypedConstant, TypedExpr, TypedPattern, TypedPatternBitArraySegment,
-        UntypedMultiPattern, UntypedPattern, UntypedRecordUpdateArg,
+        TypedConstant, TypedExpr, TypedPattern, TypedPatternBitArraySegment, UntypedMultiPattern,
+        UntypedPattern, UntypedRecordUpdateArg,
     },
     bit_array,
     build::{Origin, Target},
-    inline::InlinableFunction,
-    line_numbers::LineNumbers,
-    reference::ReferenceMap,
+    reference::{LabelDefinition, LabelKey, LabelReference, ModuleNameReference, ReferenceMap},
     type_::expression::Implementations,
 };
 use error::*;
 use hydrator::Hydrator;
 use itertools::Itertools;
+use src_span::{LineNumbers, SrcSpan};
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -362,6 +365,19 @@ impl Type {
         }
     }
 
+    pub fn named_type_name_and_package(&self) -> Option<(EcoString, EcoString, EcoString)> {
+        match self {
+            Self::Named {
+                package,
+                module,
+                name,
+                ..
+            } => Some((package.clone(), module.clone(), name.clone())),
+            Self::Var { type_ } => type_.borrow().named_type_name_and_package(),
+            Self::Fn { .. } | Self::Tuple { .. } => None,
+        }
+    }
+
     pub fn set_custom_type_variant(&mut self, index: u16) {
         match self {
             Type::Named {
@@ -535,6 +551,15 @@ impl Type {
         }
     }
 
+    /// If the type is named, return its publicity.
+    ///
+    pub fn named_type_publicity(&self) -> Option<Publicity> {
+        match self {
+            Type::Named { publicity, .. } => Some(*publicity),
+            Type::Fn { .. } | Type::Var { .. } | Type::Tuple { .. } => None,
+        }
+    }
+
     #[must_use]
     /// Returns `true` is the two types are the same. This differs from the
     /// standard `Eq` implementation as it also follows all links to check if
@@ -664,7 +689,7 @@ pub fn collapse_links(t: Arc<Type>) -> Arc<Type> {
     t
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AccessorsMap {
     pub publicity: Publicity,
     pub type_: Arc<Type>,
@@ -689,7 +714,7 @@ impl AccessorsMap {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RecordAccessor {
     // TODO: smaller int. Doesn't need to be this big
     pub index: u64,
@@ -698,7 +723,7 @@ pub struct RecordAccessor {
     pub documentation: Option<EcoString>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ValueConstructorVariant {
     /// A locally defined variable or function parameter
     LocalVariable {
@@ -712,7 +737,7 @@ pub enum ValueConstructorVariant {
         location: SrcSpan,
         module: EcoString,
         name: EcoString,
-        literal: Constant<Arc<Type>, EcoString>,
+        literal: Constant<Arc<Type>>,
         implementations: Implementations,
     },
 
@@ -885,6 +910,16 @@ impl ValueConstructorVariant {
             ValueConstructorVariant::Record { field_map, .. } => field_map.as_ref(),
         }
     }
+
+    fn is_record_constructor_function(&self) -> bool {
+        match self {
+            ValueConstructorVariant::LocalVariable { .. }
+            | ValueConstructorVariant::ModuleFn { .. }
+            | ValueConstructorVariant::ModuleConstant { .. } => false,
+            // If it has an arity of zero then it can't be used as a function!
+            ValueConstructorVariant::Record { arity, .. } => *arity > 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -913,7 +948,7 @@ pub enum ModuleValueConstructor {
         ///     pub fn wibble() { Nil }
         ///
         /// This function has module "themodule" and name "wibble"
-        /// and erlang external "other" and "whoop".
+        /// and Erlang external "other" and "whoop".
         ///     @external(erlang, "other", "whoop")
         ///     pub fn wibble() -> Nil
         ///
@@ -986,7 +1021,7 @@ pub struct ModuleFunction {
     pub package: EcoString,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModuleInterface {
     pub name: EcoString,
     pub origin: Origin,
@@ -1009,34 +1044,42 @@ pub struct ModuleInterface {
     pub minimum_required_version: Version,
     pub type_aliases: HashMap<EcoString, TypeAliasConstructor>,
     pub documentation: Vec<EcoString>,
-    /// Wether there's any echo in the module.
-    pub contains_echo: bool,
     pub references: References,
-    /// Functions which can be inlined
-    pub inline_functions: HashMap<EcoString, InlinableFunction>,
 }
 
 impl ModuleInterface {
+    pub fn is_prelude(&self) -> bool {
+        self.name == "gleam"
+    }
+
     pub fn contains_todo(&self) -> bool {
         self.warnings.iter().any(|warning| warning.is_todo())
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct References {
     pub imported_modules: HashSet<EcoString>,
     pub value_references: ReferenceMap,
     pub type_references: ReferenceMap,
+    pub module_references: HashMap<EcoString, Vec<ModuleNameReference>>,
+    pub label_references: HashMap<LabelKey, Vec<LabelReference>>,
+    pub label_definitions: HashMap<LabelKey, Vec<LabelDefinition>>,
+    pub echo_usages: Vec<SrcSpan>,
+    /// Usages of `todo`. It is different from going through warnings about
+    /// `todo`, because this field also covers `todo`s in constants.
+    pub todo_usages: Vec<SrcSpan>,
+    pub panic_usages: Vec<SrcSpan>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Opaque {
     Opaque,
     NotOpaque,
 }
 
 /// Information on the constructors of a custom type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TypeVariantConstructors {
     /// The id of the generic type variables of the generic version of the type that these
     /// constructors belong to.
@@ -1090,14 +1133,15 @@ impl TypeVariantConstructors {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TypeValueConstructor {
     pub name: EcoString,
     pub parameters: Vec<TypeValueConstructorField>,
     pub documentation: Option<EcoString>,
+    pub deprecation: Deprecation,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TypeValueConstructorField {
     /// This type of this parameter
     pub type_: Arc<Type>,
@@ -1106,7 +1150,42 @@ pub struct TypeValueConstructorField {
 }
 
 impl ModuleInterface {
+    /// Search for a public value that matches the given `name`
+    ///
     pub fn get_public_value(&self, name: &str) -> Option<&ValueConstructor> {
+        let value = self.values.get(name)?;
+        if value.publicity.is_public() {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    /// Search for a public value that matches the given `name` and `arity`
+    ///
+    pub fn get_public_function(&self, name: &str, arity: usize) -> Option<&ValueConstructor> {
+        self.get_public_value(name).filter(|value_constructor| {
+            match value_constructor.type_.fn_types() {
+                Some((fn_arguments_type, _)) => fn_arguments_type.len() == arity,
+                None => false,
+            }
+        })
+    }
+
+    /// Search for an importable type that matches the given `name`
+    ///
+    pub fn get_public_type(&self, name: &str) -> Option<&TypeConstructor> {
+        let type_ = self.types.get(name)?;
+        if type_.publicity.is_public() {
+            Some(type_)
+        } else {
+            None
+        }
+    }
+
+    /// Search for an importable value that matches the given `name`
+    ///
+    pub fn get_importable_value(&self, name: &str) -> Option<&ValueConstructor> {
         let value = self.values.get(name)?;
         if value.publicity.is_importable() {
             Some(value)
@@ -1115,7 +1194,20 @@ impl ModuleInterface {
         }
     }
 
-    pub fn get_public_type(&self, name: &str) -> Option<&TypeConstructor> {
+    /// Search for an importable function that matches the given `name` and `arity`
+    ///
+    pub fn get_importable_function(&self, name: &str, arity: usize) -> Option<&ValueConstructor> {
+        self.get_importable_value(name).filter(|value_constructor| {
+            match value_constructor.type_.fn_types() {
+                Some((fn_arguments_type, _)) => fn_arguments_type.len() == arity,
+                None => false,
+            }
+        })
+    }
+
+    /// Search for an importable type that matches the given `name`
+    ///
+    pub fn get_importable_type(&self, name: &str) -> Option<&TypeConstructor> {
         let type_ = self.types.get(name)?;
         if type_.publicity.is_importable() {
             Some(type_)
@@ -1373,6 +1465,13 @@ impl TypeVar {
         }
     }
 
+    pub fn named_type_name_and_package(&self) -> Option<(EcoString, EcoString, EcoString)> {
+        match self {
+            Self::Link { type_ } => type_.named_type_name_and_package(),
+            Self::Unbound { .. } | Self::Generic { .. } => None,
+        }
+    }
+
     pub fn named_type_information(&self) -> Option<(EcoString, EcoString, Vec<Arc<Type>>)> {
         match self {
             Self::Link { type_ } => type_.named_type_information(),
@@ -1395,7 +1494,7 @@ impl TypeVar {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TypeConstructor {
     pub publicity: Publicity,
     pub origin: SrcSpan,
@@ -1413,7 +1512,7 @@ impl TypeConstructor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ValueConstructor {
     pub publicity: Publicity,
     pub deprecation: Deprecation,
@@ -1421,7 +1520,7 @@ pub struct ValueConstructor {
     pub type_: Arc<Type>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Deprecation {
     #[default]
     NotDeprecated,
@@ -1522,7 +1621,7 @@ impl ValueConstructor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TypeAliasConstructor {
     pub publicity: Publicity,
     pub module: EcoString,
@@ -1589,7 +1688,7 @@ fn unify_unbound_type(type_: &Type, own_id: u64) -> Result<(), UnifyError> {
     match type_ {
         Type::Named { arguments, .. } => {
             for argument in arguments {
-                unify_unbound_type(argument, own_id)?
+                unify_unbound_type(argument, own_id)?;
             }
             Ok(())
         }
@@ -1603,7 +1702,7 @@ fn unify_unbound_type(type_: &Type, own_id: u64) -> Result<(), UnifyError> {
 
         Type::Tuple { elements, .. } => {
             for element in elements {
-                unify_unbound_type(element, own_id)?
+                unify_unbound_type(element, own_id)?;
             }
             Ok(())
         }
@@ -1716,6 +1815,15 @@ pub enum FieldAccessUsage {
     ///
     RecordUpdate,
     /// Used as `thing.field`
+    Other,
+}
+
+/// This is used to know when a value is used as a call or not.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ValueUsage {
+    /// Used as `function(..)`, `Record(..)`, `left |> right` or `left |> right(..)`
+    Call { arity: usize },
+    /// Used as `variable`
     Other,
 }
 

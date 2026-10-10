@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 mod dependency_manager;
 
 use std::{
@@ -14,10 +17,10 @@ use ecow::{EcoString, eco_format};
 use flate2::read::GzDecoder;
 use gleam_core::{
     Error, Result,
-    build::{Mode, Target, Telemetry},
+    build::{Mode, SourceFingerprint, Target, Telemetry},
     config::PackageConfig,
     dependency::{self, PackageFetchError},
-    error::{FileIoAction, FileKind, ShellCommandFailureReason, StandardIoAction},
+    error::{FileIoAction, FileIoCause, FileKind, ShellCommandFailureReason, StandardIoAction},
     hex::{self, HEXPM_PUBLIC_KEY},
     io::{HttpClient as _, TarUnpacker, WrappedReader},
     manifest::{Base16Checksum, Manifest, ManifestPackage, ManifestPackageSource, PackageChanges},
@@ -87,7 +90,7 @@ pub fn tree(paths: &ProjectPaths, options: TreeOptions) -> Result<()> {
 
     // Get the manifest packages and add the root package to the vec
     let mut packages = manifest.packages.iter().cloned().collect_vec();
-    packages.append(&mut vec![root_package.clone()]);
+    packages.push(root_package);
 
     list_package_and_dependencies_tree(std::io::stdout(), options, packages.clone(), config.name)
 }
@@ -120,9 +123,9 @@ fn list_manifest_packages<W: std::io::Write>(mut buffer: W, manifest: Manifest) 
         .collect_vec();
     let out = space_table(&["Package", "Version"], packages);
 
-    write!(buffer, "{out}").map_err(|e| Error::StandardIo {
+    write!(buffer, "{out}").map_err(|error| Error::StandardIo {
         action: StandardIoAction::Write,
-        err: Some(e.kind()),
+        err: Some(error.kind()),
     })
 }
 
@@ -145,19 +148,14 @@ fn list_package_and_dependencies_tree<W: std::io::Write>(
 
     if let Some(package) = package {
         let tree = Vec::from([eco_format!("{0} v{1}", package.name, package.version)]);
-        let tree = list_dependencies_tree(
-            tree.clone(),
-            package.clone(),
-            packages,
-            EcoString::new(),
-            invert,
-        );
+        let tree =
+            list_dependencies_tree(tree, package.clone(), packages, EcoString::new(), invert);
 
         tree.iter()
             .try_for_each(|line| writeln!(buffer, "{line}"))
-            .map_err(|e| Error::StandardIo {
+            .map_err(|error| Error::StandardIo {
                 action: StandardIoAction::Write,
-                err: Some(e.kind()),
+                err: Some(error.kind()),
             })
     } else {
         writeln!(buffer, "Package not found. Please check the package name.").map_err(|e| {
@@ -222,14 +220,21 @@ fn list_dependencies_tree(
 pub fn outdated(paths: &ProjectPaths) -> Result<()> {
     let (_, manifest) = get_manifest_details(paths)?;
 
+    let total_packages = manifest
+        .packages
+        .iter()
+        .filter(|package| matches!(package.source, ManifestPackageSource::Hex { .. }))
+        .count();
+
     let runtime = tokio::runtime::Runtime::new().expect("Unable to start Tokio async runtime");
     let package_fetcher = PackageFetcher::new(runtime.handle().clone());
 
     let version_updates = dependency::check_for_version_updates(&manifest, &package_fetcher);
 
-    if !version_updates.is_empty() {
-        print!("{}", pretty_print_version_updates(version_updates));
-    }
+    print!(
+        "{}",
+        pretty_print_outdated_versions(total_packages, version_updates)
+    );
 
     Ok(())
 }
@@ -293,6 +298,25 @@ pub fn cleanup<Telem: Telemetry>(paths: &ProjectPaths, telemetry: Telem) -> Resu
 
     let changes = PackageChanges::between_manifests(&old_manifest, &manifest);
     telemetry.resolved_package_versions(&changes);
+
+    // Cleanup build cache of the root package if there are some changes.
+    // Without this, if a removed dependency is still used, the build will
+    // succeed, resulting in runtime crash due to missing files.
+    if changes.any_changes() {
+        tracing::debug!("cleaning_root_package_build_cache");
+        for mode in Mode::iter() {
+            for target in Target::iter() {
+                let lock = BuildLock::new_target(paths, mode, target)?;
+                let _guard = lock.lock(&telemetry)?;
+
+                let build_directory_path =
+                    paths.build_directory_for_package(mode, target, &config.name);
+                if build_directory_path.exists() {
+                    fs::delete_directory(build_directory_path.as_ref())?;
+                }
+            }
+        }
+    }
 
     Ok(manifest)
 }
@@ -436,6 +460,23 @@ fn pretty_print_version_updates(versions: dependency::PackageVersionDiffs) -> Ec
     space_table(&["Package", "Current", "Latest"], &versions)
 }
 
+fn pretty_print_outdated_versions(
+    total_packages: usize,
+    versions: dependency::PackageVersionDiffs,
+) -> EcoString {
+    let summary = eco_format!(
+        "{} of {} packages have newer versions available.",
+        versions.len(),
+        total_packages
+    );
+
+    if versions.is_empty() {
+        eco_format!("{}\n", summary)
+    } else {
+        eco_format!("{}\n\n{}", summary, pretty_print_version_updates(versions))
+    }
+}
+
 async fn add_missing_packages<Telem: Telemetry>(
     paths: &ProjectPaths,
     fs: Box<ProjectIO>,
@@ -469,17 +510,27 @@ async fn add_missing_packages<Telem: Telemetry>(
     // If we need to download at-least one package
     if missing_hex_packages.peek().is_some() || !missing_git_packages.is_empty() {
         let http = HttpClient::boxed();
-        let downloader = hex::Downloader::new(fs.clone(), fs, http, Untar::boxed(), paths.clone());
+        let downloader = hex::Downloader::new(
+            fs.clone(),
+            fs,
+            http,
+            Untar::boxed(),
+            crate::hex::read_env_readonly_api_key(),
+            paths.clone(),
+        );
         let start = Instant::now();
         telemetry.downloading_package("packages");
         downloader
             .download_hex_packages(missing_hex_packages, &project_name)
             .await?;
         for package in missing_git_packages {
-            let ManifestPackageSource::Git { repo, commit } = &package.source else {
+            let ManifestPackageSource::Git { repo, commit, path } = &package.source else {
                 continue;
             };
-            let _ = download_git_package(&package.name, repo, commit, paths)?;
+
+            let checkout =
+                download_git_package(&package.name, repo, commit, path.as_deref(), paths)?;
+            checkout.cleanup()?;
         }
         telemetry.packages_downloaded(start, num_to_download);
     }
@@ -522,18 +573,48 @@ fn remove_extra_packages<Telem: Telemetry>(
             }
         }
     }
+
+    remove_unused_git_clones(paths, manifest)?;
     Ok(())
 }
 
-fn read_manifest_from_disc(paths: &ProjectPaths) -> Result<Manifest> {
+fn remove_unused_git_clones(paths: &ProjectPaths, manifest: &Manifest) -> Result<()> {
+    let git_directory = paths.build_git_directory();
+    if !git_directory.is_dir() {
+        return Ok(());
+    }
+
+    let expected: HashSet<String> = manifest
+        .packages
+        .iter()
+        .filter_map(|package| match &package.source {
+            ManifestPackageSource::Git {
+                repo,
+                path: Some(_),
+                ..
+            } => Some(git_repo_dir_name(repo)),
+            _ => None,
+        })
+        .collect();
+
+    for entry in fs::read_dir(&git_directory)?.filter_map(Result::ok) {
+        if !expected.contains(entry.file_name()) {
+            tracing::debug!(path=%entry.path(), "removing_unused_git_clone");
+            fs::delete_directory(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn read_manifest_from_disc(paths: &ProjectPaths) -> Result<Manifest> {
     tracing::debug!("reading_manifest_toml");
     let manifest_path = paths.manifest();
     let toml = fs::read(&manifest_path)?;
-    let manifest = toml::from_str(&toml).map_err(|e| Error::FileIo {
+    let manifest = toml::from_str(&toml).map_err(|error| Error::FileIo {
         action: FileIoAction::Parse,
         kind: FileKind::File,
         path: manifest_path.clone(),
-        err: Some(e.to_string()),
+        cause: FileIoCause::Other(error.to_string()),
     })?;
     Ok(manifest)
 }
@@ -547,13 +628,26 @@ fn write_manifest_to_disc(paths: &ProjectPaths, manifest: &Manifest) -> Result<(
 // the `project/build/packages` directory.
 // For descriptions of packages provided by paths and git deps, see the ProvidedPackage struct.
 // The same package may appear in both at different times.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct LocalPackages {
-    packages: HashMap<String, Version>,
+    #[serde(deserialize_with = "gleam_core::config::map_with_package_name_keys::deserialize")]
+    packages: HashMap<EcoString, Version>,
+    // Git packages can resolve to a new commit (or a new sub-path) without
+    // their version changing, so their on-disc freshness is keyed by commit
+    // and path rather than version alone. Absent for hex and local packages.
+    #[serde(default)]
+    git: HashMap<EcoString, GitState>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct GitState {
+    commit: EcoString,
+    #[serde(default)]
+    path: Option<Utf8PathBuf>,
 }
 
 impl LocalPackages {
-    pub fn extra_local_packages(&self, manifest: &Manifest) -> Vec<(String, Version)> {
+    pub fn extra_local_packages(&self, manifest: &Manifest) -> Vec<(EcoString, Version)> {
         let manifest_packages: HashSet<_> = manifest
             .packages
             .iter()
@@ -578,9 +672,22 @@ impl LocalPackages {
             .filter(|p| p.name != root)
             // We don't need to download local packages because we use the linked source directly
             .filter(|p| !p.is_local())
-            // We don't need to download packages which we have the correct version of
-            .filter(|p| self.packages.get(p.name.as_str()) != Some(&p.version))
+            // We don't need to download packages which we already have on disc. For
+            // git packages this means the same commit and path.
+            .filter(|p| !self.has_fresh(p))
             .collect()
+    }
+
+    fn has_fresh(&self, package: &ManifestPackage) -> bool {
+        match &package.source {
+            ManifestPackageSource::Git { commit, path, .. } => match self.git.get(&package.name) {
+                Some(state) => &state.commit == commit && &state.path == path,
+                None => false,
+            },
+            ManifestPackageSource::Hex { .. } | ManifestPackageSource::Local { .. } => {
+                self.packages.get(package.name.as_str()) == Some(&package.version)
+            }
+        }
     }
 
     pub fn read_from_disc(paths: &ProjectPaths) -> Result<Self> {
@@ -588,14 +695,15 @@ impl LocalPackages {
         if !path.exists() {
             return Ok(Self {
                 packages: HashMap::new(),
+                git: HashMap::new(),
             });
         }
         let toml = fs::read(&path)?;
-        toml::from_str(&toml).map_err(|e| Error::FileIo {
+        toml::from_str(&toml).map_err(|error| Error::FileIo {
             action: FileIoAction::Parse,
             kind: FileKind::File,
             path: path.clone(),
-            err: Some(e.to_string()),
+            cause: FileIoCause::Other(error.to_string()),
         })
     }
 
@@ -606,14 +714,60 @@ impl LocalPackages {
     }
 
     pub fn from_manifest(manifest: &Manifest) -> Self {
-        Self {
-            packages: manifest
-                .packages
-                .iter()
-                .map(|p| (p.name.to_string(), p.version.clone()))
-                .collect(),
-        }
+        let packages = manifest
+            .packages
+            .iter()
+            .map(|p| (p.name.clone(), p.version.clone()))
+            .collect();
+        let git = manifest
+            .packages
+            .iter()
+            .filter_map(|p| match &p.source {
+                ManifestPackageSource::Git { commit, path, .. } => Some((
+                    p.name.clone(),
+                    GitState {
+                        commit: commit.clone(),
+                        path: path.clone(),
+                    },
+                )),
+                ManifestPackageSource::Hex { .. } | ManifestPackageSource::Local { .. } => None,
+            })
+            .collect();
+
+        Self { packages, git }
     }
+}
+
+#[test]
+fn local_packages_deserialise_ok() {
+    let toml = r#"
+[packages]
+gleam_stdlib = "1.0.0"
+gleam_otp = "1.1.0"
+"#;
+    let packages: LocalPackages = toml::from_str(toml).unwrap();
+    assert_eq!(
+        packages,
+        LocalPackages {
+            packages: HashMap::from_iter([
+                ("gleam_stdlib".into(), Version::new(1, 0, 0)),
+                ("gleam_otp".into(), Version::new(1, 1, 0)),
+            ]),
+            git: HashMap::new(),
+        }
+    )
+}
+
+#[test]
+fn local_packages_deserialise_invalid_name() {
+    let toml = r#"
+[packages]
+gleam_stdlib = "1.0.0"
+"../../stuff" = "1.1.0"
+"#;
+    let error = toml::from_str::<LocalPackages>(toml)
+        .expect_err("should fail to deserialise because of invalid name");
+    insta::assert_snapshot!(insta::internals::AutoName, error.to_string());
 }
 
 fn is_same_requirements(
@@ -632,6 +786,80 @@ fn is_same_requirements(
     }
 
     Ok(true)
+}
+
+/// Returns true if all path dependency configs are unchanged since last build.
+///
+/// If any of the path dependency configs have changed that means that we need to
+/// re-perform dependency resolution, as their dependencies could have changed
+/// themselves.
+///
+/// We use gleam.toml rather than manifest.toml as:
+///
+/// 1. The dependency requirements could have changed but resolution not have been
+///    run in that package yet, so the manifest would be the same, resulting in us
+///    failing to detect that resolution is required.
+///
+/// 2. Dependency manifests are not used in any way, so a change in the manifest
+///    may not have any impact on this package.
+///
+/// This does mean that changes unrelated to the path dependency's dependencies
+/// will trigger resolution, but gleam.toml is edited rarely, and no-change
+/// resolution is fast enough, so that's OK.
+///
+/// Note: This does not check path dependencies of path dependencies! Changes to
+/// their configs will fail to be picked up. To resolve this we would need to keep
+/// a list of all the path dependencies in the project, instead of only the direct
+/// path dependencies.
+///
+fn path_dependency_configs_unchanged(
+    requirements: &HashMap<EcoString, Requirement>,
+    paths: &ProjectPaths,
+) -> Result<bool> {
+    // Every path dependency is fingerprinted, even once one is known to have
+    // changed. Returning early would leave the rest unfingerprinted, forcing
+    // another resolution (and another round of Hex API requests) on the next
+    // run, one per remaining path dependency.
+    let mut unchanged = true;
+
+    for (name, requirement) in requirements {
+        let Requirement::Path { path } = requirement else {
+            continue;
+        };
+
+        let config_path = paths.path_dependency_gleam_toml_path(path);
+        let fingerprint_path = paths.dependency_gleam_toml_fingerprint_path(name.as_str());
+
+        // Check mtimes before hashing, to avoid extra work
+        if fingerprint_path.exists() {
+            let config_time = fs::modification_time(&config_path)?;
+            let fingerprint_time = fs::modification_time(&fingerprint_path)?;
+            if config_time <= fingerprint_time {
+                continue;
+            }
+        }
+
+        let config_text = fs::read(&config_path)?;
+        let current_fingerprint = SourceFingerprint::new(&config_text).to_numerical_string();
+
+        // If cached hash file doesn't exist, this is the first time we're checking this dependency
+        if !fingerprint_path.exists() {
+            // Save the current hash for future comparisons
+            fs::write(&fingerprint_path, &current_fingerprint)?;
+            unchanged = false;
+            continue;
+        }
+
+        let previous_fingerprint = fs::read(&fingerprint_path)?;
+
+        if previous_fingerprint != current_fingerprint {
+            tracing::debug!("path_dependency_config_changed_forcing_rebuild");
+            fs::write(&fingerprint_path, &current_fingerprint)?;
+            unchanged = false;
+        }
+    }
+
+    Ok(unchanged)
 }
 
 fn same_requirements(
@@ -661,8 +889,14 @@ struct ProvidedPackage {
 
 #[derive(Clone, Eq, Debug)]
 enum ProvidedPackageSource {
-    Git { repo: EcoString, commit: EcoString },
-    Local { path: Utf8PathBuf },
+    Git {
+        repo: EcoString,
+        commit: EcoString,
+        path: Option<Utf8PathBuf>,
+    },
+    Local {
+        path: Utf8PathBuf,
+    },
 }
 
 impl ProvidedPackage {
@@ -687,12 +921,14 @@ impl ProvidedPackage {
             requirements,
             retirement_status: None,
             outer_checksum: vec![],
+            security_advisories: vec![],
             meta: (),
         };
         hexpm::Package {
             name: name.as_str().into(),
             repository: "local".into(),
             releases: vec![release],
+            advisories: vec![],
         }
     }
 
@@ -713,9 +949,10 @@ impl ProvidedPackage {
 impl ProvidedPackageSource {
     fn to_manifest_package_source(&self) -> ManifestPackageSource {
         match self {
-            Self::Git { repo, commit } => ManifestPackageSource::Git {
+            Self::Git { repo, commit, path } => ManifestPackageSource::Git {
                 repo: repo.clone(),
                 commit: commit.clone(),
+                path: path.clone(),
             },
             Self::Local { path } => ManifestPackageSource::Local { path: path.clone() },
         }
@@ -723,9 +960,12 @@ impl ProvidedPackageSource {
 
     fn to_toml(&self) -> String {
         match self {
-            Self::Git { repo, commit } => {
-                format!(r#"{{ repo: "{repo}", commit: "{commit}" }}"#)
-            }
+            Self::Git { repo, commit, path } => match path {
+                Some(path) => {
+                    format!(r#"{{ repo: "{repo}", commit: "{commit}", path: "{path}" }}"#)
+                }
+                None => format!(r#"{{ repo: "{repo}", commit: "{commit}" }}"#),
+            },
             Self::Local { path } => {
                 format!(r#"{{ path: "{path}" }}"#)
             }
@@ -744,16 +984,47 @@ impl PartialEq for ProvidedPackageSource {
                 Self::Git {
                     repo: own_repo,
                     commit: own_commit,
+                    path: own_path,
                 },
                 Self::Git {
                     repo: other_repo,
                     commit: other_commit,
+                    path: other_path,
                 },
-            ) => own_repo == other_repo && own_commit == other_commit,
+            ) => own_repo == other_repo && own_commit == other_commit && own_path == other_path,
 
             (Self::Git { .. }, Self::Local { .. }) | (Self::Local { .. }, Self::Git { .. }) => {
                 false
             }
+        }
+    }
+}
+
+/// Where a provided package came from. Git sources carry the on-disc repository
+/// root so path dependencies can be resolved relative to it.
+enum SourceContext<'a> {
+    Local {
+        path: Utf8PathBuf,
+    },
+    Git {
+        repo: EcoString,
+        commit: EcoString,
+        path: Option<Utf8PathBuf>,
+        repo_root: &'a Utf8Path,
+    },
+}
+
+impl SourceContext<'_> {
+    fn to_provided_source(&self) -> ProvidedPackageSource {
+        match self {
+            Self::Local { path } => ProvidedPackageSource::Local { path: path.clone() },
+            Self::Git {
+                repo, commit, path, ..
+            } => ProvidedPackageSource::Git {
+                repo: repo.clone(),
+                commit: commit.clone(),
+                path: path.clone(),
+            },
         }
     }
 }
@@ -772,17 +1043,49 @@ fn provide_local_package(
     } else {
         fs::canonicalise(&parent_path.join(package_path))?
     };
-    let package_source = ProvidedPackageSource::Local {
-        path: package_path.clone(),
-    };
+
     provide_package(
         package_name,
-        package_path,
-        package_source,
+        package_path.clone(),
+        SourceContext::Local { path: package_path },
         project_paths,
         provided,
         parents,
     )
+}
+
+/// Resolve a path dependency of a git package to its canonical filesystem
+/// location and its repository-relative path.
+fn resolve_git_path_package(
+    package_name: &EcoString,
+    path: &Utf8Path,
+    repo: &EcoString,
+    parent_path: &Utf8Path,
+    repo_root: &Utf8Path,
+) -> Result<(Utf8PathBuf, Utf8PathBuf)> {
+    let location = parent_path.join(path);
+    if !location.is_dir() {
+        return Err(Error::GitDependencyPathNotFound {
+            package: package_name.to_string(),
+            path: path.to_string(),
+            repo: repo.to_string(),
+        });
+    }
+
+    // The path may name a symlink that points outside the repository
+    // checkout, so resolve it and take the repository-relative path from the
+    // canonical location.
+    let package_path = fs::canonicalise(&location)?;
+    let repo_path = package_path
+        .strip_prefix(repo_root)
+        .map_err(|_| Error::GitDependencyPathNotFound {
+            package: package_name.to_string(),
+            path: path.to_string(),
+            repo: repo.to_string(),
+        })?
+        .to_path_buf();
+
+    Ok((package_path, repo_path))
 }
 
 fn execute_command(command: &mut Command) -> Result<std::process::Output> {
@@ -799,22 +1102,83 @@ fn execute_command(command: &mut Command) -> Result<std::process::Output> {
                 reason,
             })
         }
-        Err(error) => Err(match error.kind() {
-            ErrorKind::NotFound => Error::ShellProgramNotFound {
-                program: "git".into(),
-                os: fs::get_os(),
-            },
-
-            other => Error::ShellCommand {
-                program: "git".into(),
-                reason: ShellCommandFailureReason::IoError(other),
-            },
-        }),
+        Err(error) => Err(git_io_error(error)),
     }
 }
 
-/// Downloads a git package from a remote repository. The commands that are run
-/// looks like this:
+/// A `git` command with its working directory set to `dir`.
+fn git_command(dir: &Utf8Path) -> Command {
+    let mut command = Command::new("git");
+    let _ = command.current_dir(dir);
+    command
+}
+
+/// Map an IO error from spawning `git` onto the appropriate `Error`.
+fn git_io_error(error: std::io::Error) -> Error {
+    match error.kind() {
+        ErrorKind::NotFound => Error::ShellProgramNotFound {
+            program: "git".into(),
+            os: fs::get_os(),
+        },
+        other => Error::ShellCommand {
+            program: "git".into(),
+            reason: ShellCommandFailureReason::IoError(other),
+        },
+    }
+}
+
+/// Parse the trimmed UTF-8 stdout of a `git` command.
+fn git_stdout(output: std::process::Output) -> EcoString {
+    String::from_utf8(output.stdout)
+        .expect("Output should be UTF-8")
+        .trim()
+        .into()
+}
+
+fn git_repo_dir_name(repo: &str) -> String {
+    let name = repo
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplit(['/', ':', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("repo");
+    let hash = xxhash_rust::xxh3::xxh3_64(repo.as_bytes());
+    format!("{name}-{hash:016x}")
+}
+
+fn git_staging_path(project_paths: &ProjectPaths, repo: &str, package_name: &str) -> Utf8PathBuf {
+    project_paths.build_git_repo(&format!(
+        "{}-{package_name}-staging",
+        git_repo_dir_name(repo)
+    ))
+}
+
+enum GitCheckout {
+    InPlace {
+        commit: EcoString,
+    },
+    Staged {
+        commit: EcoString,
+        staging_path: Utf8PathBuf,
+    },
+}
+
+impl GitCheckout {
+    fn cleanup(self) -> Result<()> {
+        // The clones dangling worktree registration is left for the next
+        // download to prune before it re-adds the staging worktree.
+        if let Self::Staged { staging_path, .. } = self {
+            fs::delete_directory(&staging_path)?;
+        }
+        Ok(())
+    }
+}
+
+/// Downloads a git package from a remote repository.
+///
+/// For a package at the root of its repository the commands that are run look
+/// like this, cloning directly into `build/packages/<name>`:
 ///
 /// ```sh
 /// git init
@@ -824,6 +1188,25 @@ fn execute_command(command: &mut Command) -> Result<std::process::Output> {
 /// git checkout <ref>
 /// git rev-parse HEAD
 /// ```
+///
+/// For a package in a subdirectory of its repository the repository is
+/// instead cloned into `build/git/<repo-name>-<hash>` as a bare repository
+/// with no work tree, and the package is checked out into a transient staging
+/// worktree which the subdirectory is hard-linked out of:
+///
+/// ```sh
+/// git init --bare
+/// git remote remove origin
+/// git remote add origin <repo>
+/// git fetch origin
+/// git rev-parse --verify --quiet <ref>^{commit}
+/// git worktree prune
+/// git worktree add --force --detach <clone>-<pkg>-staging <commit>
+/// ```
+///
+/// The staging worktree exists only for the duration of one package download.
+/// It is deleted (and the clone's worktree registration pruned) by
+/// `GitCheckout::cleanup` once the package has been hard-linked and read.
 ///
 /// This is somewhat inefficient as we have to fetch the entire git history before
 /// switching to the exact commit we want. There a few alternatives to this:
@@ -847,21 +1230,113 @@ fn download_git_package(
     package_name: &str,
     repo: &str,
     ref_: &str,
+    path: Option<&Utf8Path>,
     project_paths: &ProjectPaths,
-) -> Result<EcoString> {
-    let package_path = project_paths.build_packages_package(package_name);
+) -> Result<GitCheckout> {
+    match path {
+        None => download_git_package_in_place(package_name, repo, ref_, project_paths),
+        Some(subdir) => {
+            download_git_package_to_staged_path(package_name, repo, ref_, project_paths, subdir)
+        }
+    }
+}
 
-    // If the package path exists but is not inside a git work tree, we need to
-    // remove the directory because running `git init` in a non-empty directory
-    // followed by `git checkout ...` is an error. See
-    // https://github.com/gleam-lang/gleam/issues/4488 for details.
-    if !fs::is_git_work_tree_root(&package_path) {
-        fs::delete_directory(&package_path)?;
+fn download_git_package_in_place(
+    package_name: &str,
+    repo: &str,
+    ref_: &str,
+    project_paths: &ProjectPaths,
+) -> Result<GitCheckout, Error> {
+    let clone_path = project_paths.build_packages_package(package_name);
+    prepare_git_clone(&clone_path, repo, CloneFormat::WorkTree)?;
+    let _ = execute_command(git_command(&clone_path).arg("checkout").arg(ref_))?;
+    let output = execute_command(git_command(&clone_path).arg("rev-parse").arg("HEAD"))?;
+    let commit = git_stdout(output);
+
+    Ok(GitCheckout::InPlace { commit })
+}
+
+fn download_git_package_to_staged_path(
+    package_name: &str,
+    repo: &str,
+    ref_: &str,
+    project_paths: &ProjectPaths,
+    subdir: &Utf8Path,
+) -> Result<GitCheckout, Error> {
+    let clone_path = project_paths.build_git_repo(&git_repo_dir_name(repo));
+    prepare_git_clone(&clone_path, repo, CloneFormat::Bare)?;
+
+    let commit = resolve_git_ref(&clone_path, repo, ref_)?;
+
+    // Delete any staging worktree left behind by a previous crash, and prune
+    // its registration from the clone so `git worktree add` can reuse the
+    // path.
+    let staging_path = git_staging_path(project_paths, repo, package_name);
+    fs::delete_directory(&staging_path)?;
+    let _ = git_command(&clone_path)
+        .arg("worktree")
+        .arg("prune")
+        .output();
+
+    let _ = execute_command(
+        git_command(&clone_path)
+            .arg("worktree")
+            .arg("add")
+            .arg("--force")
+            .arg("--detach")
+            .arg(&staging_path)
+            .arg(commit.as_str()),
+    )?;
+
+    let Some(subdir_source) = resolve_git_subdir(&staging_path, subdir) else {
+        return Err(Error::GitDependencyPathNotFound {
+            package: package_name.into(),
+            path: subdir.to_string(),
+            repo: repo.into(),
+        });
+    };
+
+    let package_path = project_paths.build_packages_package(package_name);
+    fs::delete_directory(&package_path)?;
+    fs::mkdir(&package_path)?;
+    fs::hardlink_dir(&subdir_source, &package_path)?;
+
+    Ok(GitCheckout::Staged {
+        commit,
+        staging_path,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum CloneFormat {
+    /// A regular clone with a checked-out work tree.
+    WorkTree,
+    /// A bare repository with no work tree.
+    Bare,
+}
+
+/// Initialise (or reuse) a git clone at the given path and fetch from the
+/// remote repository.
+fn prepare_git_clone(clone_path: &Utf8Path, repo: &str, format: CloneFormat) -> Result<()> {
+    // If the clone path exists but is not the kind of git repo we expect, we
+    // need to remove the directory.
+    let reusable = match format {
+        CloneFormat::Bare => fs::is_bare_git_repo_root(clone_path),
+        CloneFormat::WorkTree => fs::is_git_work_tree_root(clone_path),
+    };
+
+    if !reusable {
+        fs::delete_directory(clone_path)?;
     }
 
-    fs::mkdir(&package_path)?;
+    fs::mkdir(clone_path)?;
 
-    let _ = execute_command(Command::new("git").arg("init").current_dir(&package_path))?;
+    let mut init = git_command(clone_path);
+    let _ = init.arg("init");
+    if matches!(format, CloneFormat::Bare) {
+        let _ = init.arg("--bare");
+    }
+    let _ = execute_command(&mut init)?;
 
     // If this directory already exists, but the remote URL has been edited in
     // `gleam.toml` without a `gleam clean`, `git remote add` will fail, causing
@@ -869,49 +1344,90 @@ fn download_git_package(
     // first, which ensures that `git remote add` properly add the remote each
     // time. If this fails, that means we haven't set the remote in the first
     // place, so we can safely ignore the error.
-    let _ = Command::new("git")
+    let _ = git_command(clone_path)
         .arg("remote")
         .arg("remove")
         .arg("origin")
-        .current_dir(&package_path)
         .output();
 
     let _ = execute_command(
-        Command::new("git")
+        git_command(clone_path)
             .arg("remote")
             .arg("add")
             .arg("origin")
-            .arg(repo)
-            .current_dir(&package_path),
+            .arg(repo),
     )?;
 
     let _ = execute_command(
-        Command::new("git")
+        git_command(clone_path)
+            // Disable the `ext` protocol, which could be used to maliciously
+            // run shell commands by inserting them into the git remote value,
+            // e.g. `"ext::sh -c 'touch /tmp/pwned'"`.
+            // This protocol has been disabled by default in git since 2015,
+            // but it's good to be extra careful.
+            .arg("-c")
+            .arg("protocol.ext.allow=never")
+            // Fetch the remote named "origin"
             .arg("fetch")
-            .arg("origin")
-            .current_dir(&package_path),
+            .arg("origin"),
     )?;
 
-    let _ = execute_command(
-        Command::new("git")
-            .arg("checkout")
-            .arg(ref_)
-            .current_dir(&package_path),
-    )?;
+    Ok(())
+}
 
-    let output = execute_command(
-        Command::new("git")
+/// Resolve a ref (a branch name, tag, or full or partial commit hash) to a
+/// full commit hash using the objects fetched into the clone, without
+/// checking anything out. Branch names only exist as remote-tracking refs in
+/// the never-checked-out clone, so when the ref does not resolve directly we
+/// fall back to `origin/<ref>`.
+fn resolve_git_ref(clone_path: &Utf8Path, repo: &str, ref_: &str) -> Result<EcoString> {
+    let revisions = [
+        format!("{ref_}^{{commit}}"),
+        format!("origin/{ref_}^{{commit}}"),
+    ];
+
+    for revision in revisions {
+        let result = git_command(clone_path)
             .arg("rev-parse")
-            .arg("HEAD")
-            .current_dir(&package_path),
-    )?;
+            .arg("--verify")
+            .arg("--quiet")
+            .arg(&revision)
+            .output();
 
-    let commit = String::from_utf8(output.stdout)
-        .expect("Output should be UTF-8")
-        .trim()
-        .into();
+        match result {
+            // A failed rev-parse is expected when the ref form doesn't match
+            // this pattern, so try the next one.
+            Ok(output) if !output.status.success() => (),
+            Ok(output) => return Ok(git_stdout(output)),
+            Err(error) => return Err(git_io_error(error)),
+        }
+    }
 
-    Ok(commit)
+    Err(Error::ShellCommand {
+        program: "git".into(),
+        reason: ShellCommandFailureReason::ShellCommandError(format!(
+            "Unable to resolve git ref `{ref_}` for repository `{repo}`\n"
+        )),
+    })
+}
+
+/// Resolves a subdirectory within a cloned git repository, ensuring that the
+/// resolved directory (after following any symlinks) is still inside the
+/// repository checkout. Returns `None` if the directory does not exist or
+/// escapes the checkout.
+fn resolve_git_subdir(clone_path: &Utf8Path, subdir: &Utf8Path) -> Option<Utf8PathBuf> {
+    let subdir_source = clone_path.join(subdir);
+    if !subdir_source.is_dir() {
+        return None;
+    }
+
+    let canonical_clone = fs::canonicalise(clone_path).ok()?;
+    let canonical_subdir = fs::canonicalise(&subdir_source).ok()?;
+    if !canonical_subdir.starts_with(&canonical_clone) {
+        return None;
+    }
+
+    Some(canonical_subdir)
 }
 
 /// Provide a package from a git repository
@@ -920,38 +1436,64 @@ fn provide_git_package(
     repo: &str,
     // A git ref, such as a branch name, commit hash or tag name
     ref_: &str,
+    path: Option<Utf8PathBuf>,
     project_paths: &ProjectPaths,
     provided: &mut HashMap<EcoString, ProvidedPackage>,
     parents: &mut Vec<EcoString>,
 ) -> Result<hexpm::version::Range> {
-    let commit = download_git_package(&package_name, repo, ref_, project_paths)?;
-
-    let package_source = ProvidedPackageSource::Git {
-        repo: repo.into(),
-        commit,
+    let checkout = download_git_package(&package_name, repo, ref_, path.as_deref(), project_paths)?;
+    let (commit, staging_path) = match &checkout {
+        GitCheckout::InPlace { commit } => (commit, None),
+        GitCheckout::Staged {
+            commit,
+            staging_path,
+        } => (commit, Some(staging_path)),
     };
 
-    let package_path = fs::canonicalise(&project_paths.build_packages_package(&package_name))?;
+    // Use the package's location in the staging worktree, where its gleam.toml
+    // lives, not build/packages/. A `../sibling` path dep is resolved next to
+    // that gleam.toml, and the sibling is only present in the worktree.
+    let (package_path, repo_root) = match (&path, staging_path) {
+        (Some(subdir), Some(staging_path)) => {
+            let repo_root = fs::canonicalise(staging_path)?;
+            (fs::canonicalise(&staging_path.join(subdir))?, repo_root)
+        }
+        _ => {
+            let package_path =
+                fs::canonicalise(&project_paths.build_packages_package(&package_name))?;
+            (package_path.clone(), package_path)
+        }
+    };
 
-    provide_package(
+    let version = provide_package(
         package_name,
         package_path,
-        package_source,
+        SourceContext::Git {
+            repo: repo.into(),
+            commit: commit.clone(),
+            path,
+            repo_root: &repo_root,
+        },
         project_paths,
         provided,
         parents,
-    )
+    )?;
+
+    checkout.cleanup()?;
+    Ok(version)
 }
 
 /// Adds a gleam project located at a specific path to the list of "provided packages"
 fn provide_package(
     package_name: EcoString,
     package_path: Utf8PathBuf,
-    package_source: ProvidedPackageSource,
+    source: SourceContext<'_>,
     project_paths: &ProjectPaths,
     provided: &mut HashMap<EcoString, ProvidedPackage>,
     parents: &mut Vec<EcoString>,
 ) -> Result<hexpm::version::Range> {
+    let package_source = source.to_provided_source();
+
     // Return early if a package cycle is detected
     if parents.contains(&package_name) {
         let mut last_cycle = parents
@@ -968,7 +1510,7 @@ fn provide_package(
     match provided.get(&package_name) {
         Some(package) if package.source == package_source => {
             // This package has already been provided from this source, return the version
-            let version = hexpm::version::Range::new(format!("== {}", &package.version))
+            let version = hexpm::version::Range::new(format!("== {}", package.version))
                 .expect("== {version} should be a valid range");
             return Ok(version);
         }
@@ -991,33 +1533,76 @@ fn provide_package(
             path: package_path.to_path_buf(),
             found: config.name.into(),
         });
-    };
+    }
     // Walk the requirements of the package
     let mut requirements = HashMap::new();
     parents.push(package_name);
     for (name, requirement) in config.dependencies.into_iter() {
         let version = match requirement {
             Requirement::Hex { version } => version,
-            Requirement::Path { path } => {
-                // Recursively walk local packages
-                provide_local_package(
-                    name.clone(),
-                    &path,
-                    &package_path,
-                    project_paths,
-                    provided,
-                    parents,
-                )?
-            }
-            Requirement::Git { git, ref_ } => {
-                provide_git_package(name.clone(), &git, &ref_, project_paths, provided, parents)?
-            }
+            Requirement::Path { path } => match &source {
+                // A path dependency of a git package points to another
+                // package within the same repository, so lock it as a git
+                // source to keep the manifest portable.
+                SourceContext::Git {
+                    repo,
+                    commit,
+                    repo_root,
+                    ..
+                } => {
+                    let (child_path, child_repo_path) =
+                        resolve_git_path_package(&name, &path, repo, &package_path, repo_root)?;
+                    // A path dependency resolving to the repository root has an
+                    // empty repo-relative path. Normalise it to `None` so it
+                    // matches a package declared directly as a git dependency
+                    // with no path.
+                    let child_repo_path = if child_repo_path.as_str().is_empty() {
+                        None
+                    } else {
+                        Some(child_repo_path)
+                    };
+
+                    provide_package(
+                        name.clone(),
+                        child_path,
+                        SourceContext::Git {
+                            repo: repo.clone(),
+                            commit: commit.clone(),
+                            path: child_repo_path,
+                            repo_root,
+                        },
+                        project_paths,
+                        provided,
+                        parents,
+                    )?
+                }
+                SourceContext::Local { .. } => {
+                    // Recursively walk local packages
+                    provide_local_package(
+                        name.clone(),
+                        &path,
+                        &package_path,
+                        project_paths,
+                        provided,
+                        parents,
+                    )?
+                }
+            },
+            Requirement::Git { git, ref_, path } => provide_git_package(
+                name.clone(),
+                &git,
+                &ref_,
+                path,
+                project_paths,
+                provided,
+                parents,
+            )?,
         };
         let _ = requirements.insert(name, version);
     }
     let _ = parents.pop();
     // Add the package to the provided packages dictionary
-    let version = hexpm::version::Range::new(format!("== {}", &config.version))
+    let version = hexpm::version::Range::new(format!("== {}", config.version))
         .expect("== {version} should be a valid range");
     let _ = provided.insert(
         config.name,
@@ -1084,40 +1669,92 @@ fn find_deps_to_unlock(
         .collect()
 }
 
-/// Determine the information to add to the manifest for a specific package
-async fn lookup_package(
-    name: String,
-    version: Version,
+/// The parts of a resolved Hex package taken from the verified registry
+/// metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerifiedRelease {
+    outer_checksum: Vec<u8>,
+    requirements: Vec<EcoString>,
+}
+
+/// Collect the signed release details for each resolved Hex package. The
+/// verified `hexpm::Package` was fetched and its signature checked during
+/// resolution. Local and git packages are provided directly and carry no Hex
+/// metadata, so they are skipped.
+fn verified_releases(
+    package_fetcher: &impl dependency::PackageFetcher,
+    resolved: &dependency::PackageVersions,
     provided: &HashMap<EcoString, ProvidedPackage>,
-) -> Result<ManifestPackage> {
-    match provided.get(name.as_str()) {
-        Some(provided_package) => Ok(provided_package.to_manifest_package(name.as_str())),
-        None => {
-            let config = hexpm::Config::new();
-            let release =
-                hex::get_package_release(&name, &version, &config, &HttpClient::new()).await?;
-            let build_tools = release
-                .meta
-                .build_tools
+) -> Result<HashMap<String, VerifiedRelease>> {
+    resolved
+        .iter()
+        .filter(|(name, _)| !provided.contains_key(name.as_str()))
+        .map(|(name, version)| {
+            let package = package_fetcher
+                .get_dependencies(name)
+                .map_err(|error| Error::DependencyResolutionError(error.to_string()))?;
+            let release = package
+                .releases
                 .iter()
-                .map(|s| EcoString::from(s.as_str()))
-                .collect_vec();
+                .find(|release| &release.version == version)
+                .ok_or_else(|| {
+                    Error::DependencyResolutionError(format!(
+                        "The signed registry metadata for {name} did not include the release {version}"
+                    ))
+                })?;
+            if release.outer_checksum.is_empty() {
+                return Err(Error::DependencyResolutionError(format!(
+                    "The signed registry metadata for {name}@{version} did not include a checksum"
+                )));
+            }
             let requirements = release
                 .requirements
                 .keys()
-                .map(|s| EcoString::from(s.as_str()))
-                .collect_vec();
-            Ok(ManifestPackage {
-                name: name.into(),
-                version,
-                otp_app: Some(release.meta.app.into()),
-                build_tools,
-                requirements,
-                source: ManifestPackageSource::Hex {
-                    outer_checksum: Base16Checksum(release.outer_checksum),
+                .map(|name| EcoString::from(name.as_str()))
+                .collect();
+            Ok((
+                name.clone(),
+                VerifiedRelease {
+                    outer_checksum: release.outer_checksum.clone(),
+                    requirements,
                 },
-            })
-        }
+            ))
+        })
+        .collect()
+}
+
+async fn lookup_hex_package(
+    name: String,
+    version: Version,
+    verified: VerifiedRelease,
+    credentials: Option<&hexpm::Credentials>,
+) -> Result<ManifestPackage> {
+    let config = hexpm::Config::new();
+    let release =
+        hex::get_package_release(&name, &version, credentials, &config, &HttpClient::new()).await?;
+    Ok(hex_manifest_package(name, version, verified, release.meta))
+}
+
+fn hex_manifest_package(
+    name: String,
+    version: Version,
+    verified: VerifiedRelease,
+    meta: hexpm::ReleaseMeta,
+) -> ManifestPackage {
+    let build_tools = meta
+        .build_tools
+        .iter()
+        .map(|tool| EcoString::from(tool.as_str()))
+        .collect_vec();
+    ManifestPackage {
+        name: name.into(),
+        version,
+        otp_app: Some(meta.app.into()),
+        build_tools,
+        requirements: verified.requirements,
+        source: ManifestPackageSource::Hex {
+            outer_checksum: Base16Checksum(verified.outer_checksum),
+        },
     }
 }
 
@@ -1125,6 +1762,7 @@ struct PackageFetcher {
     runtime_cache: RefCell<HashMap<String, Rc<hexpm::Package>>>,
     runtime: tokio::runtime::Handle,
     http: HttpClient,
+    credentials: Option<hexpm::Credentials>,
 }
 
 impl PackageFetcher {
@@ -1133,6 +1771,7 @@ impl PackageFetcher {
             runtime_cache: RefCell::new(HashMap::new()),
             runtime,
             http: HttpClient::new(),
+            credentials: crate::hex::read_env_readonly_api_key(),
         }
     }
 
@@ -1184,14 +1823,15 @@ impl dependency::PackageFetcher for PackageFetcher {
 
         tracing::debug!(package = package, "looking_up_hex_package");
         let config = hexpm::Config::new();
-        let request = hexpm::repository_v2_get_package_request(package, None, &config);
+        let request =
+            hexpm::repository_v2_get_package_request(package, self.credentials.as_ref(), &config);
         let response = self
             .runtime
             .block_on(self.http.send(request))
             .map_err(PackageFetchError::fetch_error)?;
 
         let pkg = hexpm::repository_v2_get_package_response(response, HEXPM_PUBLIC_KEY)
-            .map_err(|e| PackageFetchError::from_api_error(e, package))?;
+            .map_err(|error| PackageFetchError::from_api_error(error, package))?;
         let pkg = Rc::new(pkg);
         let pkg_ref = Rc::clone(&pkg);
         self.cache_package(package, pkg);

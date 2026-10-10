@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 mod stale_package_remover;
-use crate::error::{FileIoAction, FileKind};
+use crate::error::{self, FileIoAction, FileIoCause, FileKind, did_you_mean};
 use crate::io::FileSystemReader;
 use crate::io::ordered_map;
 use crate::manifest::Manifest;
@@ -11,12 +14,13 @@ use ecow::EcoString;
 use globset::{Glob, GlobSetBuilder};
 use hexpm::version::{self, LowestVersion, Version};
 use http::Uri;
+use regex::Regex;
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::{self};
 use std::marker::PhantomData;
-use toml::Table;
+use std::sync::OnceLock;
 
 #[cfg(test)]
 use crate::manifest::ManifestPackage;
@@ -35,17 +39,9 @@ fn default_javascript_runtime() -> Runtime {
     Runtime::NodeJs
 }
 
-pub type Dependencies = HashMap<EcoString, Requirement>;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpdxLicense {
     pub licence: String,
-}
-
-impl ToString for SpdxLicense {
-    fn to_string(&self) -> String {
-        String::from(&self.licence)
-    }
 }
 
 impl<'de> Deserialize<'de> for SpdxLicense {
@@ -71,9 +67,29 @@ impl<'de> serde::de::Visitor<'de> for SpdxLicenseVisitor {
         E: serde::de::Error,
     {
         match spdx::license_id(value) {
-            None => Err(serde::de::Error::custom(format!(
-                "{value} is not a valid SPDX License ID"
-            ))),
+            None => {
+                if is_valid_license_ref(value) {
+                    Ok(SpdxLicense {
+                        licence: value.to_string(),
+                    })
+                } else {
+                    let suggestion = {
+                        let licence_names: Vec<EcoString> = spdx::identifiers::LICENSES
+                            .iter()
+                            .map(|licence| EcoString::from(licence.name))
+                            .collect();
+                        did_you_mean(value, &licence_names)
+                            .map_or_default(|suggestion| format!("\n\nHint: {suggestion}"))
+                    };
+
+                    Err(serde::de::Error::custom(error::wrap_format!(
+                        "This is not a valid SPDX licence identifier or custom licence reference.
+
+Custom licence references must start with `LicenseRef-` and contain only \
+alphabetical characters, numbers, dashes, and dots.{suggestion}"
+                    )))
+                }
+            }
             Some(_) => Ok(SpdxLicense {
                 licence: value.to_string(),
             }),
@@ -128,9 +144,9 @@ impl GleamVersion {
 
     pub fn new(spec: String) -> Result<GleamVersion> {
         let hex =
-            version::Range::new(spec.to_string()).map_err(|e| Error::InvalidVersionFormat {
+            version::Range::new(spec.to_string()).map_err(|error| Error::InvalidVersionFormat {
                 input: spec,
-                error: e.to_string(),
+                error: error.to_string(),
             })?;
         Ok(hex.into())
     }
@@ -145,7 +161,6 @@ impl GleamVersion {
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct PackageConfig {
     #[serde(deserialize_with = "package_name::deserialize")]
     pub name: EcoString,
@@ -165,10 +180,19 @@ pub struct PackageConfig {
     pub description: EcoString,
     #[serde(default, alias = "docs")]
     pub documentation: Docs,
-    #[serde(default, serialize_with = "ordered_map")]
-    pub dependencies: Dependencies,
-    #[serde(default, alias = "dev-dependencies", serialize_with = "ordered_map")]
-    pub dev_dependencies: Dependencies,
+    #[serde(
+        default,
+        serialize_with = "ordered_map",
+        deserialize_with = "map_with_package_name_keys::deserialize"
+    )]
+    pub dependencies: HashMap<EcoString, Requirement>,
+    #[serde(
+        default,
+        alias = "dev-dependencies",
+        serialize_with = "ordered_map",
+        deserialize_with = "map_with_package_name_keys::deserialize"
+    )]
+    pub dev_dependencies: HashMap<EcoString, Requirement>,
     #[serde(default)]
     pub repository: Option<Repository>,
     #[serde(default)]
@@ -183,11 +207,6 @@ pub struct PackageConfig {
     pub target: Target,
     #[serde(default)]
     pub internal_modules: Option<Vec<Glob>>,
-    /// This entry contains values from [tools] table, which is the only way
-    /// for tools to store configuration inside package config, other unknown
-    /// values are denied. It isn't used anywhere in the compiler and build tool.
-    #[serde(default)]
-    pub tools: Table,
 }
 
 pub fn serialise_gleam_version<S>(
@@ -217,7 +236,7 @@ where
 }
 
 impl PackageConfig {
-    pub fn dependencies_for(&self, mode: Mode) -> Result<Dependencies> {
+    pub fn dependencies_for(&self, mode: Mode) -> Result<HashMap<EcoString, Requirement>> {
         match mode {
             Mode::Dev | Mode::Lsp => self.all_direct_dependencies(),
             Mode::Prod => Ok(self.dependencies.clone()),
@@ -226,7 +245,7 @@ impl PackageConfig {
 
     // Return all the dependencies listed in the configuration, that is, all the
     // direct dependencies, both in the `dependencies` and `dev_dependencies`.
-    pub fn all_direct_dependencies(&self) -> Result<Dependencies> {
+    pub fn all_direct_dependencies(&self) -> Result<HashMap<EcoString, Requirement>> {
         let mut deps =
             HashMap::with_capacity(self.dependencies.len() + self.dev_dependencies.len());
         for (name, requirement) in self.dependencies.iter().chain(&self.dev_dependencies) {
@@ -305,7 +324,7 @@ impl PackageConfig {
                 Version::parse(COMPILER_VERSION).expect("Parse compiler semantic version");
 
             // We ignore the pre-release and build metadata when checking compatibility
-            let mut version_without_pre = compiler_version.clone();
+            let mut version_without_pre = compiler_version;
             version_without_pre.pre = vec![];
             version_without_pre.build = None;
             if !range.contains(&version_without_pre) {
@@ -346,11 +365,11 @@ fn deserialise_config<P: AsRef<Utf8Path>>(
     path: P,
     toml: String,
 ) -> std::result::Result<PackageConfig, Error> {
-    let config: PackageConfig = toml::from_str(&toml).map_err(|e| Error::FileIo {
+    let config: PackageConfig = toml::from_str(&toml).map_err(|error| Error::FileIo {
         action: FileIoAction::Parse,
         kind: FileKind::File,
         path: path.as_ref().to_path_buf(),
-        err: Some(e.to_string()),
+        cause: FileIoCause::Other(error.to_string()),
     })?;
     Ok(config)
 }
@@ -368,6 +387,34 @@ aide_generator = { git = "git@github.com:crowdhailer/aide.git", ref = "f559c5bc"
     let error = deserialise_config("gleam.toml", toml.into())
         .expect_err("should fail to deserialise because of additional path");
 
+    insta::assert_snapshot!(insta::internals::AutoName, error.pretty_string());
+}
+
+#[test]
+fn invalid_dependency_name() {
+    let toml = r#"
+name = "wibble"
+version = "1.0.0"
+
+[dependencies]
+Hello = "> 1.0.0"
+"#;
+    let error = deserialise_config("gleam.toml", toml.into())
+        .expect_err("should fail to deserialise because invalid name");
+    insta::assert_snapshot!(insta::internals::AutoName, error.pretty_string());
+}
+
+#[test]
+fn invalid_dev_dependency_name() {
+    let toml = r#"
+name = "wibble"
+version = "1.0.0"
+
+[dev_dependencies]
+"yes." = "> 1.0.0"
+"#;
+    let error = deserialise_config("gleam.toml", toml.into())
+        .expect_err("should fail to deserialise because invalid name");
     insta::assert_snapshot!(insta::internals::AutoName, error.pretty_string());
 }
 
@@ -697,28 +744,26 @@ fn locked_version(name: &'static str, version: &'static str) -> (EcoString, Vers
 impl Default for PackageConfig {
     fn default() -> Self {
         Self {
-            name: Default::default(),
+            name: EcoString::new(),
             version: default_version(),
-            gleam_version: Default::default(),
-            description: Default::default(),
-            documentation: Default::default(),
-            dependencies: Default::default(),
-            erlang: Default::default(),
-            javascript: Default::default(),
-            webassembly: Default::default(),
-            repository: Default::default(),
-            dev_dependencies: Default::default(),
-            licences: Default::default(),
-            links: Default::default(),
-            internal_modules: Default::default(),
+            gleam_version: None,
+            description: EcoString::new(),
+            documentation: Docs::default(),
+            dependencies: HashMap::new(),
+            erlang: ErlangConfig::default(),
+            javascript: JavaScriptConfig::default(),
+            webassembly: WebAssemblyConfig::default(),
+            repository: None,
+            dev_dependencies: HashMap::new(),
+            licences: vec![],
+            links: vec![],
+            internal_modules: None,
             target: Target::Erlang,
-            tools: Default::default(),
         }
     }
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Default, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct ErlangConfig {
     /// An module that can be set in the `.app` file as the entrypoint for a stateful application
     /// that defines a singleton supervision tree.
@@ -735,17 +780,18 @@ pub struct ErlangConfig {
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Default, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct JavaScriptConfig {
     #[serde(default)]
     pub typescript_declarations: bool,
+    #[serde(default)]
+    pub source_maps: bool,
     #[serde(default = "default_javascript_runtime")]
     pub runtime: Runtime,
     #[serde(default, rename = "deno")]
     pub deno: DenoConfig,
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Default, Clone)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Default, Clone, Copy)]
 #[serde(deny_unknown_fields)]
 pub struct WebAssemblyConfig {
     #[serde(default)]
@@ -893,7 +939,6 @@ where
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Default, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct DenoConfig {
     #[serde(default, deserialize_with = "bool_or_seq_string_to_deno_flag")]
     pub allow_env: DenoFlag,
@@ -924,7 +969,7 @@ pub struct DenoConfig {
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone)]
-#[serde(tag = "type", deny_unknown_fields)]
+#[serde(tag = "type")]
 pub enum Repository {
     #[serde(rename = "github")]
     GitHub {
@@ -1027,7 +1072,7 @@ impl Repository {
                 format!("https://git.sr.ht/~{user}/{repo}")
             }
             Repository::Tangled { repo, user, .. } => {
-                format!("https://tangled.sh/{user}/{repo}")
+                format!("https://tangled.org/{user}/{repo}")
             }
             Repository::Gitea {
                 repo, user, host, ..
@@ -1060,22 +1105,46 @@ impl Repository {
 }
 
 #[derive(Deserialize, Serialize, Default, Debug, PartialEq, Eq, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct Docs {
     #[serde(default)]
     pub pages: Vec<DocsPage>,
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct DocsPage {
     pub title: String,
-    pub path: String,
+    #[serde(deserialize_with = "package_scoped_path::deserialize")]
+    pub path: Utf8PathBuf,
+    #[serde(deserialize_with = "package_scoped_path::deserialize")]
     pub source: Utf8PathBuf,
 }
 
+pub(crate) mod package_scoped_path {
+    use camino::Utf8PathBuf;
+    use serde::{Deserialize, Deserializer, de::Error as _};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Utf8PathBuf, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let path = Utf8PathBuf::deserialize(deserializer)?;
+        crate::io::validate_safe_relative_path(&path).map_err(D::Error::custom)?;
+        Ok(path)
+    }
+
+    pub fn optional_deserialize<'de, D>(deserializer: D) -> Result<Option<Utf8PathBuf>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let path = Option::<Utf8PathBuf>::deserialize(deserializer)?;
+        if let Some(path) = &path {
+            crate::io::validate_safe_relative_path(path).map_err(D::Error::custom)?;
+        }
+        Ok(path)
+    }
+}
+
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct Link {
     pub title: String,
     #[serde(with = "uri_serde")]
@@ -1158,13 +1227,10 @@ mod uri_serde_default_https {
     }
 }
 
-mod package_name {
+pub(crate) mod package_name {
     use ecow::EcoString;
-    use regex::Regex;
     use serde::Deserializer;
-    use std::{fmt, sync::OnceLock};
-
-    static PACKAGE_NAME_PATTERN: OnceLock<Regex> = OnceLock::new();
+    use std::fmt;
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<EcoString, D::Error>
     where
@@ -1186,10 +1252,7 @@ mod package_name {
         where
             E: serde::de::Error,
         {
-            if PACKAGE_NAME_PATTERN
-                .get_or_init(|| Regex::new("^[a-z][a-z0-9_]*$").expect("Package name regex"))
-                .is_match(value)
-            {
+            if super::is_valid_package_name(value) {
                 Ok(value.into())
             } else {
                 let error =
@@ -1198,6 +1261,95 @@ mod package_name {
             }
         }
     }
+
+    pub fn optional_deserialize<'de, D>(deserializer: D) -> Result<Option<EcoString>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_option(OptionVisitor)
+    }
+
+    struct OptionVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for OptionVisitor {
+        type Value = Option<EcoString>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an optional package name")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserialize(deserializer).map(Some)
+        }
+    }
+}
+
+pub mod map_with_package_name_keys {
+    use ecow::EcoString;
+    use serde::{Deserialize, Deserializer, de};
+    use std::collections::HashMap;
+
+    pub fn deserialize<'de, D, V>(deserializer: D) -> Result<HashMap<EcoString, V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        V: Deserialize<'de>,
+    {
+        struct DependenciesVisitor<V>(std::marker::PhantomData<V>);
+
+        impl<'de, V: Deserialize<'de>> de::Visitor<'de> for DependenciesVisitor<V> {
+            type Value = HashMap<EcoString, V>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "a map with valid package name keys")
+            }
+
+            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut dependencies = HashMap::new();
+                while let Some(key) = map.next_key::<EcoString>()? {
+                    if !super::is_valid_package_name(&key) {
+                        return Err(de::Error::invalid_value(
+                            de::Unexpected::Str(&key),
+                            &"a package name containing only lowercase letter, numbers, and underscores",
+                        ));
+                    }
+                    let _: Option<_> = dependencies.insert(key, map.next_value()?);
+                }
+                Ok(dependencies)
+            }
+        }
+
+        deserializer.deserialize_map(DependenciesVisitor(std::marker::PhantomData))
+    }
+}
+
+static PACKAGE_NAME_PATTERN: OnceLock<Regex> = OnceLock::new();
+
+/// Package names must start with a lowercase letter and may only contain
+/// lowercase letters, numbers and underscores.
+pub fn is_valid_package_name(name: &str) -> bool {
+    PACKAGE_NAME_PATTERN
+        .get_or_init(|| Regex::new("^[a-z][a-z0-9_]*$").expect("Package name regex"))
+        .is_match(name)
+}
+
+static LICENSE_REF_PATTERN: OnceLock<Regex> = OnceLock::new();
+
+// Check that a license string is a valid SPDX LicenseRef, according to:
+// https://spdx.github.io/spdx-spec/v2.3/SPDX-license-expressions/
+fn is_valid_license_ref(licence: &str) -> bool {
+    LICENSE_REF_PATTERN
+        .get_or_init(|| Regex::new(r"^LicenseRef-[A-Za-z0-9\.-]+$").expect("LicenseRef regex"))
+        .is_match(licence)
 }
 
 #[test]
@@ -1225,6 +1377,166 @@ name = "1"
             .unwrap_err()
             .to_string(),
     )
+}
+
+#[test]
+fn docs_dot_dot_string_path() {
+    let input = r#"
+name = "one_two"
+
+[documentation]
+pages = [{ title = "My Page", path = "../secrets.txt", source = "./path/to/my-page.md" }]
+"#;
+
+    insta::assert_snapshot!(
+        insta::internals::AutoName,
+        toml::from_str::<PackageConfig>(input)
+            .unwrap_err()
+            .to_string()
+    );
+}
+
+#[test]
+fn docs_prefix_dot_dot_string_path() {
+    let input = r#"
+name = "one_two"
+
+[documentation]
+pages = [{ title = "My Page", path = "something/../../secrets.txt", source = "./path/to/my-page.md" }]
+"#;
+
+    insta::assert_snapshot!(
+        insta::internals::AutoName,
+        toml::from_str::<PackageConfig>(input)
+            .unwrap_err()
+            .to_string()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn docs_windows_dot_dot_string_path() {
+    let input = r#"
+name = "one_two"
+
+[documentation]
+pages = [{ title = "My Page", path = "..\\secrets.txt", source = "./path/to/my-page.md" }]
+"#;
+
+    insta::assert_snapshot!(
+        insta::internals::AutoName,
+        toml::from_str::<PackageConfig>(input)
+            .unwrap_err()
+            .to_string()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn docs_prefix_windows_dot_dot_string_path() {
+    let input = r#"
+name = "one_two"
+
+[documentation]
+pages = [{ title = "My Page", path = "something\\..\\..\\secrets.txt", source = "./path/to/my-page.md" }]
+"#;
+
+    insta::assert_snapshot!(
+        insta::internals::AutoName,
+        toml::from_str::<PackageConfig>(input)
+            .unwrap_err()
+            .to_string()
+    );
+}
+
+#[test]
+fn docs_dot_dot_path_buf() {
+    let input = r#"
+name = "one_two"
+
+[documentation]
+pages = [{ title = "My Page", path = "stuff.html", source = "../secrets.txt" }]
+"#;
+
+    insta::assert_snapshot!(
+        insta::internals::AutoName,
+        toml::from_str::<PackageConfig>(input)
+            .unwrap_err()
+            .to_string()
+    );
+}
+
+#[test]
+fn docs_prefix_dot_dot_path_buf() {
+    let input = r#"
+name = "one_two"
+
+[documentation]
+pages = [{ title = "My Page", path = "stuff.html", source = "something/../../secrets.txt" }]
+"#;
+
+    insta::assert_snapshot!(
+        insta::internals::AutoName,
+        toml::from_str::<PackageConfig>(input)
+            .unwrap_err()
+            .to_string()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn docs_windows_dot_dot_path_buf() {
+    let input = r#"
+name = "one_two"
+
+[documentation]
+pages = [{ title = "My Page", path = "stuff.html", source = "..\\secrets.txt" }]
+"#;
+
+    assert!(toml::from_str::<PackageConfig>(input).is_err())
+}
+
+#[cfg(windows)]
+#[test]
+fn docs_prefix_windows_dot_dot_path_buf() {
+    let input = r#"
+name = "one_two"
+
+[documentation]
+pages = [{ title = "My Page", path = "stuff.html", source = "something\\..\\..\\secrets.txt" }]
+"#;
+
+    assert!(toml::from_str::<PackageConfig>(input).is_err())
+}
+
+#[cfg(windows)]
+#[test]
+fn docs_absolute_source_windows() {
+    let input = r#"
+name = "one_two"
+
+[documentation]
+pages = [{ title = "My Page", path = "stuff.html", source = "C:\\etc\\passwd" }]
+"#;
+
+    assert!(toml::from_str::<PackageConfig>(input).is_err())
+}
+
+#[test]
+fn docs_absolute_source() {
+    let input = r#"
+name = "one_two"
+
+[documentation]
+pages = [{ title = "My Page", path = "stuff.html", source = "/etc/passwd" }]
+"#;
+
+    insta::assert_snapshot!(
+        insta::internals::AutoName,
+        toml::from_str::<PackageConfig>(input)
+            .unwrap_err()
+            .to_string()
+    );
 }
 
 #[test]
@@ -1256,6 +1568,7 @@ extra_applications = ["inets", "ssl"]
 
 [javascript]
 typescript_declarations = true
+source_maps = true
 runtime = "node"
 
 [javascript.deno]
@@ -1264,9 +1577,6 @@ allow_ffi = true
 allow_env = ["DATABASE_URL"]
 allow_net = ["example.com:443"]
 allow_read = ["./database.sqlite"]
-
-[tools.my-tool]
-enable = true
 "#;
 
     let config = toml::from_str::<PackageConfig>(input).unwrap();
@@ -1313,18 +1623,44 @@ wibble = ">= 1.0.0 and < 2.0.0"
 }
 
 #[test]
-fn unknown_field_root() {
+fn valid_licence_ref() {
     let input = r#"
-name = "wibble"
+name = "my_project"
 version = "1.0.0"
-
-unknown = true
+licences = ["LicenseRef-my.valid-licence4"]
 "#;
 
-    insta::assert_snapshot!(
-        insta::internals::AutoName,
-        toml::from_str::<PackageConfig>(input)
-            .unwrap_err()
-            .to_string(),
-    )
+    let config = toml::from_str::<PackageConfig>(input).unwrap();
+    assert_eq!(
+        config.licences,
+        vec![SpdxLicense {
+            licence: "LicenseRef-my.valid-licence4".to_string()
+        }]
+    );
+}
+
+#[test]
+fn invalid_licence_ref() {
+    let input = r#"
+name = "my_project"
+version = "1.0.0"
+licences = ["LicenseRef-my_invalid_licence"]
+"#;
+    let output = toml::from_str::<PackageConfig>(input)
+        .unwrap_err()
+        .to_string();
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn licence_typo() {
+    let input = r#"
+name = "my_project"
+version = "1.0.0"
+licences = ["MIIT"]
+"#;
+    let output = toml::from_str::<PackageConfig>(input)
+        .unwrap_err()
+        .to_string();
+    insta::assert_snapshot!(output);
 }

@@ -1,5 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 #![warn(
     clippy::all,
+    clippy::redundant_clone,
     clippy::dbg_macro,
     clippy::todo,
     clippy::mem_forget,
@@ -18,6 +22,8 @@
     clippy::option_option,
     clippy::verbose_file_reads,
     clippy::unnested_or_patterns,
+    clippy::default_trait_access,
+    clippy::format_push_string,
     rust_2018_idioms,
     missing_debug_implementations,
     missing_copy_implementations,
@@ -47,7 +53,8 @@
     clippy::match_single_binding,
     clippy::match_like_matches_macro,
     clippy::inconsistent_struct_constructor,
-    clippy::len_without_is_empty
+    clippy::len_without_is_empty,
+    clippy::let_unit_value
 )]
 
 mod code_action;
@@ -71,11 +78,9 @@ mod tests;
 pub use server::LanguageServer;
 
 use camino::Utf8PathBuf;
-use gleam_core::{
-    Result, ast::SrcSpan, build::Target, line_numbers::LineNumbers, manifest::Manifest,
-    paths::ProjectPaths,
-};
-use lsp_types::{Position, Range, TextEdit, Url};
+use gleam_core::{Result, build::Target, manifest::Manifest, paths::ProjectPaths};
+use lsp_types::{Position, Range, TextEdit, Uri as Url};
+use src_span::{LineNumbers, SrcSpan};
 use std::any::Any;
 
 #[derive(Debug)]
@@ -94,8 +99,8 @@ pub trait DownloadDependencies {
 }
 
 pub fn src_span_to_lsp_range(location: SrcSpan, line_numbers: &LineNumbers) -> Range {
-    let start = line_numbers.line_and_column_number(location.start);
-    let end = line_numbers.line_and_column_number(location.end);
+    let start = line_numbers.line_and_utf16_column_number(location.start);
+    let end = line_numbers.line_and_utf16_column_number(location.end);
 
     Range::new(
         Position::new(start.line - 1, start.column - 1),
@@ -137,22 +142,22 @@ impl<'a> TextEdits<'a> {
         self.edits.push(TextEdit {
             range: src_span_to_lsp_range(location, self.line_numbers),
             new_text,
-        })
+        });
     }
 
     pub fn insert(&mut self, at: u32, new_text: String) {
-        self.replace(SrcSpan { start: at, end: at }, new_text)
+        self.replace(SrcSpan { start: at, end: at }, new_text);
     }
 
     pub fn delete(&mut self, location: SrcSpan) {
-        self.replace(location, "".to_string())
+        self.replace(location, "".to_string());
     }
 
     fn delete_range(&mut self, range: Range) {
         self.edits.push(TextEdit {
             range,
             new_text: "".into(),
-        })
+        });
     }
 }
 

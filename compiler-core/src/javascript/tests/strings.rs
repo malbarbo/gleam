@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use crate::assert_js;
 
 #[test]
@@ -251,5 +254,330 @@ pub fn main() {
   cute_cute_bee_buzz
 }
 "#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5856
+#[test]
+fn overlapping_string_prefixes_with_guard() {
+    assert_js!(
+        r#"
+pub fn classify(input: String, flag: Bool) -> String {
+  case input {
+    "aa" <> _rest if flag -> "wibble"
+    "a" <> _rest if flag -> "wobble"
+    "a" <> _rest -> "woo"
+    _ -> "other"
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5856
+#[test]
+fn string_prefix_binding_rest_with_guard() {
+    assert_js!(
+        r#"
+pub fn classify(input: String, flag: Bool) -> String {
+  case input {
+    "aa" <> rest if flag -> rest
+    "a" <> rest -> rest
+    _ -> "other"
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5856
+#[test]
+fn non_overlapping_sibling_string_prefix() {
+    assert_js!(
+        r#"
+pub fn classify(input: String, a: Bool, b: Bool) -> String {
+  case input {
+    "aa" <> _ if a -> "aa"
+    "a" <> _ if b -> "a-guard"
+    "ac" <> _ -> "ac"
+    _ -> "other"
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5856
+#[test]
+fn exact_string_after_longer_prefix() {
+    assert_js!(
+        r#"
+pub fn classify(input: String, a: Bool, b: Bool) -> String {
+  case input {
+    "aa" <> _ if a -> "aa-prefix"
+    "a" <> _ if b -> "a-prefix"
+    "a" -> "exact-a"
+    _ -> "other"
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5856
+#[test]
+fn string_prefix_name_binding_after_longer_prefix() {
+    assert_js!(
+        r#"
+pub fn classify(input: String, flag: Bool) -> String {
+  case input {
+    "aa" <> _ if flag -> "aa"
+    "a" as first <> rest -> rest <> first
+    _ -> "other"
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5856
+#[test]
+fn string_prefix_guard_on_bound_variable_falls_through() {
+    assert_js!(
+        r#"
+pub fn classify(input: String) -> String {
+  case input {
+    "aa" <> rest if rest == "x" -> "aa-x"
+    "a" <> rest -> rest
+    _ -> "other"
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5856
+#[test]
+fn string_prefix_nested_guard_falls_through_to_shorter() {
+    assert_js!(
+        r#"
+pub fn classify(input: String, flag: Bool) -> String {
+  case input {
+    "w" <> _ if flag -> "w"
+    "wibble" <> rest if rest == "x" -> rest
+    "wib" <> rest -> rest
+    _ -> "other"
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5856
+#[test]
+fn string_prefix_name_binding_falls_through_to_shorter() {
+    assert_js!(
+        r#"
+pub fn classify(input: String) -> String {
+  case input {
+    "aa" <> rest if rest == "x" -> rest
+    "a" as first <> rest -> rest <> first
+    _ -> "other"
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5856
+#[test]
+fn string_prefix_discard_falls_through_to_shorter() {
+    assert_js!(
+        r#"
+pub fn classify(input: String) -> String {
+  case input {
+    "aa" <> rest if rest == "x" -> rest
+    "a" <> _ -> "short"
+    _ -> "other"
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5856
+#[test]
+fn string_prefix_multibyte_falls_through_to_shorter() {
+    assert_js!(
+        r#"
+pub fn classify(input: String) -> String {
+  case input {
+    "🫥a" <> rest if rest == "x" -> rest
+    "🫥" <> rest -> rest
+    _ -> "other"
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5856
+#[test]
+fn disjoint_string_prefixes_with_guard() {
+    assert_js!(
+        r#"
+pub fn classify(input: String) -> String {
+  case input {
+    "aa" <> rest if rest == "x" -> rest
+    "b" <> _ -> "b-start"
+    _ -> "other"
+  }
+}
+"#,
+    );
+}
+
+#[test]
+fn string_prefix_rest_is_not_recomputed_for_a_single_check() {
+    assert_js!(
+        r#"
+pub fn classify(input: String, a: Bool, b: Bool) -> String {
+  case input {
+    "aa" <> _ if a -> "aa"
+    "a" <> _ if b -> "a-guard"
+    "ac" <> r -> r
+    _ -> "other"
+  }
+}
+"#,
+    );
+}
+
+#[test]
+fn string_prefix_rest_is_not_recomputed_when_used_by_guard() {
+    assert_js!(
+        r#"
+pub fn go(input: String, b: Bool) -> String {
+  case input {
+    "a" <> _ if b -> "a-guard"
+    "ac" <> r if r != "" -> "ac" <> r
+    _ -> "other"
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6168
+#[test]
+fn string_literal_guard_falls_through_to_prefix() {
+    assert_js!(
+        r#"
+pub fn go(input: String, x: Int) -> Int {
+  case input, x {
+    "ab", y if y > 4 -> 1
+    "a" <> _, _ -> 400
+    _, _ -> 999
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6168
+#[test]
+fn string_prefix_falls_through_to_shorter_prefix_without_a_guard() {
+    assert_js!(
+        r#"
+pub fn go(wrap: Result(Result(Int, Int), Nil), input: String) -> Int {
+  case wrap, input {
+    _, "ab" -> 100
+    Ok(Ok(0)), "ab" <> _ -> 200
+    Ok(_), "a" <> _ -> 500
+    _, _ -> 999
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6168
+#[test]
+fn string_prefix_chain_falls_through_to_each_shorter_prefix() {
+    assert_js!(
+        r#"
+pub fn go(wrap: Result(Result(Int, Int), Nil), input: String) -> Int {
+  case wrap, input {
+    _, "abc" -> 100
+    Ok(Ok(0)), "abc" <> _ -> 200
+    Ok(Error(1)), "ab" <> _ -> 300
+    _, "a" <> _ -> 500
+    _, _ -> 999
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6168
+#[test]
+fn string_literal_falls_through_to_prefix_binding_rest() {
+    assert_js!(
+        r#"
+pub fn go(input: String, x: Int) -> String {
+  case input, x {
+    "ab", y if y > 4 -> "exact"
+    "a" <> rest, _ -> rest
+    _, _ -> "other"
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6168
+#[test]
+fn string_literal_dependent_bit_array_falls_through_to_prefix() {
+    assert_js!(
+        r#"
+pub fn go(input: String, bits: BitArray) -> Int {
+  case input, bits {
+    "ab", <<length, _:bytes-size(length)>> -> 1
+    "a" <> _, _ -> 2
+    _, _ -> 3
+  }
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6168
+#[test]
+fn string_prefix_falls_through_to_shorter_prefix_with_a_tuple_pattern() {
+    assert_js!(
+        r#"
+pub fn go(a: #(Int), b: String) -> Int {
+  case a, b {
+    #(1), "ab" <> _ -> 1
+    _, "a" <> _ -> 2
+    _, _ -> 3
+  }
+}
+"#,
+    );
+}
+
+#[test]
+fn string_prefix_assignment_inside_a_nested_pattern_after_a_guard() {
+    assert_js!(
+        r#"
+pub fn go(b: Bool, r: Result(String, Nil)) -> String {
+  case b, r {
+    True, _ if True -> "x"
+    _, Ok("ab" as p <> _) -> p
+    _, _ -> "no"
+  }
+}
+"#,
     );
 }

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 //! Graphs that represent the relationships between entities in a Gleam module,
 //! such as module functions or constants.
 
@@ -8,18 +11,18 @@ use crate::{
     Result,
     ast::{
         AssignName, AssignmentKind, BitArrayOption, BitArraySize, ClauseGuard, Constant, Pattern,
-        SrcSpan, Statement, UntypedClauseGuard, UntypedExpr, UntypedFunction,
+        Statement, UntypedClauseGuard, UntypedConstant, UntypedExpr, UntypedFunction,
         UntypedModuleConstant, UntypedPattern, UntypedStatement,
     },
     type_::Error,
 };
 use itertools::Itertools;
-use petgraph::stable_graph::NodeIndex;
-use petgraph::{Directed, stable_graph::StableGraph};
+use petgraph::{Directed, stable_graph::NodeIndex, stable_graph::StableGraph};
+use src_span::SrcSpan;
 
 #[derive(Debug, Default)]
 struct CallGraphBuilder<'a> {
-    names: im::HashMap<&'a str, Option<(NodeIndex, SrcSpan)>>,
+    names: imbl::HashMap<&'a str, Option<(NodeIndex, SrcSpan)>>,
     graph: StableGraph<(), (), Directed>,
     current_function: NodeIndex,
 }
@@ -171,10 +174,10 @@ impl<'a> CallGraphBuilder<'a> {
             Statement::Assert(assert) => {
                 self.expression(&assert.value);
                 if let Some(message) = &assert.message {
-                    self.expression(message)
+                    self.expression(message);
                 }
             }
-        };
+        }
     }
 
     fn expression(&mut self, expression: &'a UntypedExpr) {
@@ -183,13 +186,13 @@ impl<'a> CallGraphBuilder<'a> {
 
             UntypedExpr::Todo { message, .. } => {
                 if let Some(msg_expr) = message {
-                    self.expression(msg_expr)
+                    self.expression(msg_expr);
                 }
             }
 
             UntypedExpr::Panic { message, .. } => {
                 if let Some(msg_expr) = message {
-                    self.expression(msg_expr)
+                    self.expression(msg_expr);
                 }
             }
 
@@ -219,7 +222,7 @@ impl<'a> CallGraphBuilder<'a> {
                 }
             }
 
-            UntypedExpr::PipeLine { expressions } => {
+            UntypedExpr::Pipeline { expressions } => {
                 for expression in expressions {
                     self.expression(expression);
                 }
@@ -293,7 +296,7 @@ impl<'a> CallGraphBuilder<'a> {
                 let names = self.names.clone();
                 for argument in arguments {
                     if let Some(name) = argument.names.get_variable_name() {
-                        self.define(name)
+                        self.define(name);
                     }
                 }
                 self.statements(body);
@@ -431,6 +434,8 @@ impl<'a> CallGraphBuilder<'a> {
 
     fn guard(&mut self, guard: &'a UntypedClauseGuard) {
         match guard {
+            ClauseGuard::Invalid { .. } => (),
+
             ClauseGuard::BinaryOperator { left, right, .. } => {
                 self.guard(left);
                 self.guard(right);
@@ -452,7 +457,7 @@ impl<'a> CallGraphBuilder<'a> {
         }
     }
 
-    fn constant(&mut self, constant: &'a Constant<(), ()>) {
+    fn constant(&mut self, constant: &'a UntypedConstant) {
         match constant {
             Constant::Int { .. }
             | Constant::Float { .. }
@@ -462,14 +467,29 @@ impl<'a> CallGraphBuilder<'a> {
                 module: Some(_), ..
             } => (),
 
-            Constant::List { elements, .. } | Constant::Tuple { elements, .. } => {
+            Constant::Todo { message, .. } => {
+                if let Some(message) = message {
+                    self.constant(message);
+                }
+            }
+
+            Constant::List { elements, tail, .. } => {
+                for element in elements {
+                    self.constant(element);
+                }
+                if let Some(tail) = tail {
+                    self.constant(tail);
+                }
+            }
+
+            Constant::Tuple { elements, .. } => {
                 for element in elements {
                     self.constant(element);
                 }
             }
 
             Constant::Record { arguments, .. } => {
-                for argument in arguments {
+                for argument in arguments.iter().flatten() {
                     self.constant(&argument.value);
                 }
             }
@@ -497,7 +517,7 @@ impl<'a> CallGraphBuilder<'a> {
                 }
             }
 
-            Constant::StringConcatenation { left, right, .. } => {
+            Constant::BinaryOperator { left, right, .. } => {
                 self.constant(left);
                 self.constant(right);
             }
@@ -536,7 +556,7 @@ pub fn into_dependency_order(
 
     // Determine the order in which the functions should be compiled by looking
     // at which other functions they depend on.
-    let indices = crate::graph::into_dependency_order(graph);
+    let indices = petgraph::algo::tarjan_scc(&graph);
 
     // We got node indices back, so we need to map them back to the functions
     // they represent.

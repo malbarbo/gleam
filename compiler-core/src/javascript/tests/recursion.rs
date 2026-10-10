@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2022 The Gleam contributors
+
 use crate::assert_js;
 
 #[test]
@@ -50,7 +53,7 @@ pub fn main(x) {
 // https://github.com/gleam-lang/gleam/issues/2400
 #[test]
 fn shadowing_so_not_recursive() {
-    // This funtion is calling an argument with the same name as itself, so it is not recursive
+    // This function is calling an argument with the same name as itself, so it is not recursive
     assert_js!(
         r#"
 pub fn map(map) {

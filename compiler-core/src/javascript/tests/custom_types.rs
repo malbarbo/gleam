@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use crate::javascript::tests::CURRENT_PACKAGE;
 use crate::{assert_js, assert_ts_def};
 
@@ -988,6 +991,284 @@ pub type Wibble(value, error) {
     wobble: Result(value, error),
     wubble: error,
   )
+}
+"
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5757
+#[test]
+fn zero_arity_type_with_import_alias() {
+    assert_js!(
+        (
+            "wibble",
+            r#"
+pub type WibbleStatus {
+  Active
+  Inactive
+}
+"#
+        ),
+        r#"
+import wibble.{type WibbleStatus, Active as WibbleActive}
+
+pub fn is_wibble_active(s: WibbleStatus) -> Bool {
+  s == WibbleActive
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5757
+#[test]
+fn zero_arity_type_with_import_alias_and_same_named_local_type() {
+    assert_js!(
+        (
+            "wibble",
+            r#"
+pub type WibbleStatus {
+  Active
+  Inactive
+}
+"#
+        ),
+        r#"
+import wibble.{type WibbleStatus, Active as WibbleActive}
+
+pub type WobbleStatus {
+  Active
+  Disabled
+}
+
+pub fn is_wibble_active(s: WibbleStatus) -> Bool {
+  s == WibbleActive
+}
+
+pub fn is_wobble_active(s: WobbleStatus) -> Bool {
+  s == Active
+}
+"#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5613
+#[test]
+pub fn type_with_constructor_as_field_is_properly_escaped() {
+    assert_js!(
+        "
+pub type Box {
+  Box(constructor: Int)
+}
+"
+    )
+}
+
+#[test]
+fn type_with_constructor_as_field_is_properly_escaped_in_ts_def() {
+    assert_ts_def!(
+        r#"
+pub type Box {
+  Box(constructor: Int)
+}
+"#,
+    );
+}
+
+#[test]
+fn singleton_for_two_aliased_variants() {
+    assert_js!(
+        ("wibble", "pub type Wibble { Wibble }"),
+        ("wobble", "pub type Wibble { Wibble }"),
+        "
+import wobble.{Wibble as Wobble}
+import wibble.{Wibble as Wubble}
+
+pub fn main() {
+  #(Wobble, Wubble)
+}
+"
+    );
+}
+
+#[test]
+fn singletons_for_multiple_variants_from_one_module_are_imported_in_a_stable_order() {
+    assert_js!(
+        (
+            "colour",
+            "pub type Colour { Red Orange Yellow Green Blue Violet }"
+        ),
+        "
+import colour.{Blue, Green, Orange, Red, Violet, Yellow}
+
+pub fn main() {
+  #(Red, Orange, Yellow, Green, Blue, Violet)
+}
+"
+    );
+}
+
+#[test]
+fn fieldless_variant_still_imported_if_used_in_instanceof_comparison() {
+    assert_js!(
+        ("wibble", "pub type Wibble { Wibble Wobble }"),
+        "
+import wibble.{Wibble}
+
+pub fn main() {
+  let x = Wibble
+  x == Wibble
+}
+"
+    );
+}
+
+#[test]
+fn fieldless_variant_still_imported_if_used_in_instanceof_comparison_in_guard() {
+    assert_js!(
+        ("wibble", "pub type Wibble { Wibble Wobble }"),
+        "
+import wibble.{Wibble}
+
+pub fn main() {
+  let x = Wibble
+  case x {
+    _ if x == Wibble -> 1
+    _ -> 2
+  }
+}
+"
+    );
+}
+
+#[test]
+fn aliased_variant_still_imported_if_used_in_instanceof_comparison() {
+    assert_js!(
+        ("wibble", "pub type Wibble { Wibble Wobble }"),
+        "
+import wibble.{Wibble as Wobble}
+
+pub fn main() {
+  let x = Wobble
+  x == Wobble
+}
+"
+    );
+}
+
+#[test]
+fn aliased_variant_still_imported_if_used_in_instanceof_comparison_in_guard() {
+    assert_js!(
+        ("wibble", "pub type Wibble { Wibble Wobble }"),
+        "
+import wibble.{Wibble as Wobble}
+
+pub fn go(x) {
+  case x {
+    _ if x == Wobble -> Wobble
+    _ -> wibble.Wobble
+  }
+}
+"
+    );
+}
+
+#[test]
+fn aliased_variant_still_imported_if_used_in_pattern_matching() {
+    assert_js!(
+        ("wibble", "pub type Wibble { Wibble Wobble }"),
+        "
+import wibble.{Wibble as Wobble}
+
+pub fn go(x) {
+  case x {
+    Wobble -> wibble.Wobble
+    _ -> Wobble
+  }
+}
+"
+    );
+}
+
+#[test]
+fn opaque_variant_produces_private_singleton_constants() {
+    assert_js!(
+        "
+pub opaque type Wibble {
+  Wibble
+  Wobble(Int)
+}
+
+pub fn wibble() -> Wibble {
+  Wibble
+}
+
+pub fn wobble(x: Int) -> Wibble {
+  Wobble(x)
+}
+"
+    );
+}
+
+#[test]
+fn singleton_constant_used_in_const() {
+    assert_js!(
+        "
+pub opaque type Wibble {
+  Wibble
+  Wobble(Int)
+}
+
+pub const wibble = Wibble
+"
+    );
+}
+
+#[test]
+fn singleton_constant_from_other_module_used_in_const() {
+    assert_js!(
+        ("wibble", "pub type Wibble { Wibble Wobble }"),
+        "
+import wibble.{Wobble}
+
+pub const wibble = wibble.Wibble
+
+pub const wobble = Wobble
+"
+    );
+}
+
+#[test]
+fn singleton_constant_used_in_guard() {
+    assert_js!(
+        "
+pub opaque type Wibble {
+  Wibble
+  Wobble(Int)
+}
+
+pub fn go(x) {
+  case x {
+    _ if x == #(Wibble) -> True
+    _ -> False
+  }
+}
+"
+    );
+}
+
+#[test]
+fn singleton_constant_from_other_module_used_in_guard() {
+    assert_js!(
+        ("wibble", "pub type Wibble { Wibble Wobble }"),
+        "
+import wibble.{Wobble}
+
+pub fn go(x) {
+  case x {
+    _ if x == #(wibble.Wibble) -> 1
+    _ if x == #(Wobble) -> 2
+    _ -> 3
+  }
 }
 "
     );

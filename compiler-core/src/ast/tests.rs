@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2022 The Gleam contributors
+
 use std::sync::Arc;
 
 use camino::Utf8PathBuf;
@@ -6,13 +9,12 @@ use ecow::EcoString;
 use crate::analyse::TargetSupport;
 use crate::build::{ExpressionPosition, Origin, Target};
 use crate::config::PackageConfig;
-use crate::line_numbers::LineNumbers;
 use crate::type_::error::{VariableDeclaration, VariableOrigin, VariableSyntax};
 use crate::type_::expression::{FunctionDefinition, Purity};
 use crate::type_::{Deprecation, PRELUDE_MODULE_NAME, Problems};
 use crate::warning::WarningEmitter;
 use crate::{
-    ast::{SrcSpan, TypedExpr},
+    ast::{BinOp, TypedExpr},
     build::Located,
     type_::{
         self, AccessorsMap, EnvironmentArguments, ExprTyper, FieldMap, ModuleValueConstructor,
@@ -21,6 +23,7 @@ use crate::{
     uid::UniqueIdGenerator,
     warning::TypeWarningEmitter,
 };
+use src_span::{LineNumbers, SrcSpan};
 
 use super::{Publicity, Statement, TypedModule, TypedStatement};
 
@@ -33,7 +36,7 @@ fn compile_module(src: &str) -> TypedModule {
     let ids = UniqueIdGenerator::new();
     let mut config = PackageConfig::default();
     config.name = "thepackage".into();
-    let mut modules = im::HashMap::new();
+    let mut modules = imbl::HashMap::new();
     // DUPE: preludeinsertion
     // TODO: Currently we do this here and also in the tests. It would be better
     // to have one place where we create all this required state for use in each
@@ -67,10 +70,21 @@ fn get_bare_expression(statement: &TypedStatement) -> &TypedExpr {
     }
 }
 
+fn cat_type() -> Arc<Type> {
+    Arc::new(Type::Named {
+        publicity: Publicity::Public,
+        package: "mypackage".into(),
+        module: "mymod".into(),
+        name: "Cat".into(),
+        arguments: vec![],
+        inferred_variant: None,
+    })
+}
+
 fn compile_expression(src: &str) -> TypedStatement {
     let ast = crate::parse::parse_statement_sequence(src).expect("syntax error");
 
-    let mut modules = im::HashMap::new();
+    let mut modules = imbl::HashMap::new();
     let ids = UniqueIdGenerator::new();
     // DUPE: preludeinsertion
     // TODO: Currently we do this here and also in the tests. It would be better
@@ -93,14 +107,7 @@ fn compile_expression(src: &str) -> TypedStatement {
     .build();
 
     // Insert a cat record to use in the tests
-    let cat_type = Arc::new(Type::Named {
-        publicity: Publicity::Public,
-        package: "mypackage".into(),
-        module: "mymod".into(),
-        name: "Cat".into(),
-        arguments: vec![],
-        inferred_variant: None,
-    });
+    let cat_type = cat_type();
     let variant = ValueConstructorVariant::Record {
         documentation: Some("wibble".into()),
         variants_count: 1,
@@ -607,6 +614,50 @@ fn find_node_binop() {
 }
 
 #[test]
+fn subtraction_is_left_associative_in_ast() {
+    // `1 - 2 - 3` must parse as `(1 - 2) - 3`, not `1 - (2 - 3)`.
+    let statement = compile_expression("1 - 2 - 3");
+    let expr = get_bare_expression(&statement);
+
+    let TypedExpr::BinOp {
+        operator: BinOp::SubInt,
+        left,
+        right,
+        ..
+    } = expr
+    else {
+        panic!("expected outer SubInt, got {expr:?}");
+    };
+
+    let TypedExpr::Int {
+        value: right_val, ..
+    } = right.as_ref()
+    else {
+        panic!("expected int on right, got {right:?}");
+    };
+    assert_eq!(right_val, "3");
+
+    let TypedExpr::BinOp {
+        operator: BinOp::SubInt,
+        left: ll,
+        right: lr,
+        ..
+    } = left.as_ref()
+    else {
+        panic!("expected inner SubInt on left, got {left:?}");
+    };
+
+    let TypedExpr::Int { value: ll_val, .. } = ll.as_ref() else {
+        panic!("expected int as left-left, got {ll:?}")
+    };
+    let TypedExpr::Int { value: lr_val, .. } = lr.as_ref() else {
+        panic!("expected int as left-right, got {lr:?}")
+    };
+    assert_eq!(ll_val, "1");
+    assert_eq!(lr_val, "2");
+}
+
+#[test]
 fn find_node_tuple_index() {
     let statement = compile_expression(r#"#(1).0"#);
     let expr = get_bare_expression(&statement);
@@ -875,27 +926,16 @@ fn find_node_record_access() {
             position: ExpressionPosition::Expression
         })
     );
-    assert_eq!(
-        access.find_node(15),
-        Some(Located::Expression {
-            expression: access,
-            position: ExpressionPosition::Expression
-        })
-    );
-    assert_eq!(
-        access.find_node(18),
-        Some(Located::Expression {
-            expression: access,
-            position: ExpressionPosition::Expression
-        })
-    );
-    assert_eq!(
-        access.find_node(19),
-        Some(Located::Expression {
-            expression: access,
-            position: ExpressionPosition::Expression
-        })
-    );
+    let label = Located::RecordAccessLabel {
+        location: SrcSpan { start: 15, end: 19 },
+        field_type: type_::string(),
+        label: "name".into(),
+        record_type: cat_type(),
+        documentation: None,
+    };
+    assert_eq!(access.find_node(15), Some(label.clone()));
+    assert_eq!(access.find_node(18), Some(label.clone()));
+    assert_eq!(access.find_node(19), Some(label));
 }
 
 #[test]

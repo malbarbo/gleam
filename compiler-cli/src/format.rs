@@ -1,11 +1,12 @@
-use gleam_core::{
-    error::{Error, FileIoAction, FileKind, Result, StandardIoAction, Unformatted},
-    io::Content,
-    io::OutputFile,
-};
-use std::{io::Read, str::FromStr};
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
 
 use camino::{Utf8Path, Utf8PathBuf};
+use gleam_core::{
+    error::{Error, Result, StandardIoAction, Unformatted},
+    io::{Content, OutputFile},
+};
+use std::io::Read;
 
 pub fn run(stdin: bool, check: bool, files: Vec<String>) -> Result<()> {
     if stdin {
@@ -18,7 +19,7 @@ pub fn run(stdin: bool, check: bool, files: Vec<String>) -> Result<()> {
 fn process_stdin(check: bool) -> Result<()> {
     let src = read_stdin()?.into();
     let mut out = String::new();
-    gleam_core::format::pretty(&mut out, &src, Utf8Path::new("<stdin>"))?;
+    gleam_format::pretty(&mut out, &src, Utf8Path::new("<stdin>"))?;
 
     if !check {
         print!("{out}");
@@ -71,13 +72,7 @@ pub fn unformatted_files(files: Vec<String>) -> Result<Vec<Unformatted>> {
     let mut problem_files = Vec::with_capacity(files.len());
 
     for file_path in files {
-        let path = Utf8PathBuf::from_str(&file_path).map_err(|e| Error::FileIo {
-            action: FileIoAction::Open,
-            kind: FileKind::File,
-            path: Utf8PathBuf::from(file_path),
-            err: Some(e.to_string()),
-        })?;
-
+        let path = Utf8PathBuf::from(&file_path);
         if path.is_dir() {
             for path in crate::fs::gleam_files(&path) {
                 format_file(&mut problem_files, path)?;
@@ -93,7 +88,7 @@ pub fn unformatted_files(files: Vec<String>) -> Result<Vec<Unformatted>> {
 fn format_file(problem_files: &mut Vec<Unformatted>, path: Utf8PathBuf) -> Result<()> {
     let src = crate::fs::read(&path)?.into();
     let mut output = String::new();
-    gleam_core::format::pretty(&mut output, &src, &path)?;
+    gleam_format::pretty(&mut output, &src, &path)?;
 
     if src != output {
         problem_files.push(Unformatted {
@@ -110,9 +105,9 @@ pub fn read_stdin() -> Result<String> {
     let mut src = String::new();
     let _ = std::io::stdin()
         .read_to_string(&mut src)
-        .map_err(|e| Error::StandardIo {
+        .map_err(|error| Error::StandardIo {
             action: StandardIoAction::Read,
-            err: Some(e.kind()),
+            err: Some(error.kind()),
         })?;
     Ok(src)
 }

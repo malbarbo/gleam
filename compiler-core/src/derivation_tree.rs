@@ -1,7 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2025 The Gleam contributors
+
+use crate::dependency::{Presence, ResolutionFailure};
 use crate::error::wrap;
 use ecow::EcoString;
 use hexpm::version::Version;
-use im::HashSet;
+use imbl::HashSet;
 use itertools::Itertools;
 use petgraph::Direction;
 use petgraph::algo::all_simple_paths;
@@ -11,7 +15,7 @@ use pubgrub::External;
 use pubgrub::{DerivationTree, Derived, Ranges};
 use std::collections::HashMap;
 use std::hash::RandomState;
-use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::Bound::{self, Excluded, Included, Unbounded};
 use std::sync::Arc;
 
 macro_rules! wrap_format {
@@ -24,7 +28,7 @@ macro_rules! wrap_format {
 /// message.
 ///
 pub struct DerivationTreePrinter {
-    derivation_tree: DerivationTree<String, Ranges<Version>, String>,
+    derivation_tree: DerivationTree<String, Ranges<Presence>, String>,
 
     /// The name of the root package for which we're trying to add new
     /// dependencies. This is the starting point we use to find and report
@@ -41,7 +45,7 @@ pub struct DerivationTreePrinter {
     /// Means "package wibble with version `range1` requires package wobble
     /// with version `range2`".
     ///
-    dependencies: StableGraph<String, (Ranges<Version>, Ranges<Version>)>,
+    dependencies: StableGraph<String, (Ranges<Presence>, Ranges<Presence>)>,
 
     /// A map going from package name to its index in the dependencies graph.
     ///
@@ -49,10 +53,9 @@ pub struct DerivationTreePrinter {
 }
 
 impl DerivationTreePrinter {
-    pub fn new(
-        root_package_name: EcoString,
-        mut derivation_tree: DerivationTree<String, Ranges<Version>, String>,
-    ) -> Self {
+    pub fn new(root_package_name: EcoString, failure: ResolutionFailure) -> Self {
+        let ResolutionFailure(mut derivation_tree) = failure;
+
         // We start by trying to simplify the derivation tree as much as
         // possible.
         derivation_tree.collapse_no_versions();
@@ -71,15 +74,42 @@ impl DerivationTreePrinter {
     }
 
     pub fn print(&self) -> String {
-        self.pretty_explanation()
+        self.explanation_for_missing_version()
+            .or_else(|| self.explanation_for_complex_failure())
             .unwrap_or_else(|| self.fallback_explanation())
+    }
+
+    /// This catches the case in which we try adding a dependency's version that
+    /// doesn't exist. That produces a very simple decision tree with just two
+    /// nodes and can have an ad hoc explanation, telling the user the version
+    /// they tried adding doesn't exist!
+    ///
+    fn explanation_for_missing_version(&self) -> Option<String> {
+        if let DerivationTree::External(External::FromDependencyOf(
+            base,
+            _,
+            package,
+            package_ranges,
+        )) = &self.derivation_tree
+            && *base == self.root_package_name
+        {
+            let pretty_range = pretty_range(package_ranges);
+            let message = if is_single_version(package_ranges) {
+                format!("The package `{package}` doesn't have a version {pretty_range}.")
+            } else {
+                format!("The package `{package}` has no versions in the range {pretty_range}.",)
+            };
+            Some(message)
+        } else {
+            None
+        }
     }
 
     /// Tries and print a pretty explanation for the given resolution tree.
     /// If for some reason our heuristic to produce a nice error message fails
     /// we return `None` so we can still produce a good enough error message!
     ///
-    fn pretty_explanation(&self) -> Option<String> {
+    fn explanation_for_complex_failure(&self) -> Option<String> {
         let root_package_index = self.nodes.get(self.root_package_name.as_str())?;
         let unresolvable_nodes = self.find_unresolvable_nodes();
         if unresolvable_nodes.is_empty() {
@@ -141,10 +171,13 @@ impl DerivationTreePrinter {
                 .ranges_between(previous, next)
                 .expect("path edge is in the graph");
 
-            message.push_str(&format!(
-                "\n    - {previous_name} requires {next_name} {}",
-                pretty_range(next_range)
-            ));
+            message.push_str("\n    - ");
+            message.push_str(previous_name);
+            message.push_str(" requires ");
+            message.push_str(next_name);
+            message.push(' ');
+            message.push_str(&pretty_range(next_range));
+
             previous = next;
         }
         message
@@ -167,7 +200,7 @@ impl DerivationTreePrinter {
         &self,
         one: &NodeIndex,
         other: &NodeIndex,
-    ) -> Option<(&Ranges<Version>, &Ranges<Version>)> {
+    ) -> Option<(&Ranges<Presence>, &Ranges<Presence>)> {
         let edge = self.dependencies.find_edge(*one, *other)?;
         self.dependencies
             .edge_weight(edge)
@@ -196,8 +229,8 @@ The conflicting packages are:
 }
 
 fn build_dependencies_graph(
-    derivation_tree: &DerivationTree<String, Ranges<Version>, String>,
-    graph: &mut StableGraph<String, (Ranges<Version>, Ranges<Version>)>,
+    derivation_tree: &DerivationTree<String, Ranges<Presence>, String>,
+    graph: &mut StableGraph<String, (Ranges<Presence>, Ranges<Presence>)>,
     nodes: &mut HashMap<String, NodeIndex<u32>>,
 ) {
     match derivation_tree {
@@ -266,7 +299,9 @@ fn build_dependencies_graph(
 /// This way we can print an error message that is way more concise and still
 /// informative about what went wrong, at the cost of
 ///
-fn simplify_derivation_tree(derivation_tree: &mut DerivationTree<String, Ranges<Version>, String>) {
+fn simplify_derivation_tree(
+    derivation_tree: &mut DerivationTree<String, Ranges<Presence>, String>,
+) {
     match derivation_tree {
         DerivationTree::External(_) => {}
         DerivationTree::Derived(derived) => {
@@ -278,7 +313,7 @@ fn simplify_derivation_tree(derivation_tree: &mut DerivationTree<String, Ranges<
 }
 
 fn simplify_derivation_tree_outer(
-    derivation_tree: &mut DerivationTree<String, Ranges<Version>, String>,
+    derivation_tree: &mut DerivationTree<String, Ranges<Presence>, String>,
 ) {
     match derivation_tree {
         DerivationTree::External(_) => {}
@@ -306,7 +341,7 @@ fn simplify_derivation_tree_outer(
                         package_range.union(other_package_range),
                         required_package.clone(),
                         required_package_range.union(other_required_package_range),
-                    ))
+                    ));
                 }
 
                 _ => {}
@@ -316,7 +351,7 @@ fn simplify_derivation_tree_outer(
 }
 
 fn collect_conflicting_packages<'dt>(
-    derivation_tree: &'dt DerivationTree<String, Ranges<Version>, String>,
+    derivation_tree: &'dt DerivationTree<String, Ranges<Presence>, String>,
     conflicting_packages: &mut HashSet<&'dt String>,
 ) {
     match derivation_tree {
@@ -338,9 +373,33 @@ fn collect_conflicting_packages<'dt>(
     }
 }
 
-fn pretty_range(range: &Ranges<Version>) -> String {
+/// Lower one segment of a resolver range back to the versions it talks about.
+///
+/// `Absent` is how optional requirements are modelled internally, so it carries
+/// no version a reader could act on. A segment that is only absence is dropped
+/// entirely, and absence as a lower end is just no lower bound at all.
+///
+fn without_absent<'range>(
+    (lower, upper): (&'range Bound<Presence>, &'range Bound<Presence>),
+) -> Option<(Bound<&'range Version>, Bound<&'range Version>)> {
+    let upper = match upper {
+        Included(Presence::Present(version)) => Included(version),
+        Excluded(Presence::Present(version)) => Excluded(version),
+        Unbounded => Unbounded,
+        Included(Presence::Absent) | Excluded(Presence::Absent) => return None,
+    };
+    let lower = match lower {
+        Included(Presence::Present(version)) => Included(version),
+        Excluded(Presence::Present(version)) => Excluded(version),
+        Included(Presence::Absent) | Excluded(Presence::Absent) | Unbounded => Unbounded,
+    };
+    Some((lower, upper))
+}
+
+fn pretty_range(range: &Ranges<Presence>) -> String {
     range
         .iter()
+        .filter_map(without_absent)
         .map(|(lower, upper)| match (lower, upper) {
             (Included(lower), Included(upper)) if lower == upper => format!("{lower}"),
             (Included(lower), Included(upper)) => format!(">= {lower} and <= {upper}"),
@@ -356,4 +415,23 @@ fn pretty_range(range: &Ranges<Version>) -> String {
             (Unbounded, Unbounded) => "".into(),
         })
         .join(" or ")
+}
+
+fn is_single_version(range: &Ranges<Presence>) -> bool {
+    // Note: at the time of writing this, `Ranges` has a method called
+    // `as_singleton` which, according to its doc, should do the same thing.
+    // However, it strangely seems to consider as a single version ranges like
+    // this one `> 11.0.0 and <= 12.0.0`. To me this doesn't read as a single
+    // version!
+
+    // The range needs to have exactly one segment that includes exactly one
+    // version number.
+    let mut segments = range.iter().filter_map(without_absent);
+    if let Some((Included(lower), Included(upper))) = segments.next()
+        && segments.next().is_none()
+    {
+        lower == upper
+    } else {
+        false
+    }
 }

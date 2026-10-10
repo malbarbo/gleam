@@ -1,6 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2022 The Gleam contributors
+
 [package]
 name = "test-project-compiler"
-version = "1.14.0"
+version = "1.19.1"
 authors = ["Louis Pilfold <louis@lpil.uk>"]
 edition = "2024"
 license = "Apache-2.0"
@@ -9,7 +12,7 @@ license = "Apache-2.0"
 gleam-core = { path = "../compiler-core" }
 test-helpers-rs = { path = "../test-helpers-rs" }
 toml.workspace = true
-im.workspace = true
+imbl.workspace = true
 itertools.workspace = true
 regex.workspace = true
 camino.workspace = true

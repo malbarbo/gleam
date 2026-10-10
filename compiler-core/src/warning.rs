@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 use crate::{
-    ast::{BitArraySegmentTruncation, SrcSpan, TodoKind},
+    ast::{BitArraySegmentTruncation, TodoKind},
     build::Target,
     diagnostic::{self, Diagnostic, ExtraLabel, Location},
     error::wrap,
@@ -11,19 +14,26 @@ use crate::{
             TodoOrPanic, UnreachablePatternReason,
         },
         expression::ComparisonOutcome,
-        pretty::Printer,
+        printer::Printer,
     },
 };
 use camino::Utf8PathBuf;
 use debug_ignore::DebugIgnore;
 use ecow::EcoString;
 use itertools::Itertools;
+use src_span::SrcSpan;
 use std::{
     io::Write,
     sync::{Arc, atomic::Ordering},
 };
 use std::{rc::Rc, sync::atomic::AtomicUsize};
 use termcolor::Buffer;
+
+macro_rules! wrap_format {
+    ($($tts:tt)*) => {
+        wrap(&format!($($tts)*))
+    }
+}
 
 pub trait WarningEmitterIO {
     fn emit_warning(&self, warning: Warning);
@@ -143,7 +153,7 @@ impl TypeWarningEmitter {
         self.emitter.emit(Warning::Type {
             path: self.module_path.clone(),
             src: self.module_src.clone(),
-            warning,
+            warning: Box::new(warning),
         });
     }
 }
@@ -153,7 +163,7 @@ pub enum Warning {
     Type {
         path: Utf8PathBuf,
         src: EcoString,
-        warning: type_::Warning,
+        warning: Box<type_::Warning>,
     },
 
     InvalidSource {
@@ -164,10 +174,6 @@ pub enum Warning {
         path: Utf8PathBuf,
         src: EcoString,
         warning: DeprecatedSyntaxWarning,
-    },
-
-    DeprecatedEnvironmentVariable {
-        variable: DeprecatedEnvironmentVariable,
     },
 
     EmptyModule {
@@ -182,33 +188,7 @@ pub enum Warning {
     },
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Copy)]
-pub enum DeprecatedEnvironmentVariable {
-    HexpmUser,
-    HexpmPass,
-}
-
-impl DeprecatedEnvironmentVariable {
-    fn name(&self) -> &'static str {
-        match self {
-            DeprecatedEnvironmentVariable::HexpmUser => "HEXPM_USER",
-            DeprecatedEnvironmentVariable::HexpmPass => "HEXPM_PASS",
-        }
-    }
-
-    fn message(&self) -> &'static str {
-        match self {
-            DeprecatedEnvironmentVariable::HexpmUser => {
-                "Use the `{API_ENV_NAME}` environment variable instead."
-            }
-            DeprecatedEnvironmentVariable::HexpmPass => {
-                "Use the `{API_ENV_NAME}` environment variable instead."
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Copy)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum DeprecatedSyntaxWarning {
     /// If someone uses the deprecated syntax to append to a list:
     /// `["a"..rest]`, notice how there's no comma!
@@ -241,6 +221,21 @@ pub enum DeprecatedSyntaxWarning {
     ///
     DeprecatedListCatchAllPattern {
         location: SrcSpan,
+    },
+
+    /// If someone uses the deprecated syntax to bind an entire list to a
+    /// variable with a spread, instead of using the variable directly:
+    /// ```gleam
+    /// case list {
+    ///   [..x] -> todo
+    /// //^^^^^ this matches the whole list so `x` should be used instead!
+    ///   _ ->
+    /// }
+    /// ```
+    ///
+    DeprecatedListSpreadAsVariablePattern {
+        location: SrcSpan,
+        name: EcoString,
     },
 
     /// If a record pattern has a spread that is not preceded by a comma:
@@ -277,13 +272,13 @@ impl Warning {
         match self {
             Warning::InvalidSource { path } => Diagnostic {
                 title: "Invalid module name".into(),
-                text: "\
-Module names must begin with a lowercase letter and contain
-only lowercase alphanumeric characters or underscores."
-                    .into(),
+                text: wrap(
+                    "Module names must begin with a lowercase letter and \
+contain only lowercase alphanumeric characters or underscores.",
+                ),
                 level: diagnostic::Level::Warning,
                 location: None,
-                hint: Some(format!(
+                hint: Some(wrap_format!(
                     "Rename `{path}` to be valid, or remove this file from the project source."
                 )),
             },
@@ -371,7 +366,32 @@ To match on all possible lists, use the `_` catch-all pattern instead.",
                 level: diagnostic::Level::Warning,
                 location: Some(Location {
                     label: diagnostic::Label {
-                        text: Some("This can be replaced with `_`".into()),
+                        text: Some("Replace this with `_`".into()),
+                        span: *location,
+                    },
+                    path: path.clone(),
+                    src: src.clone(),
+                    extra_labels: vec![],
+                }),
+            },
+
+            Warning::DeprecatedSyntax {
+                path,
+                src,
+                warning:
+                    DeprecatedSyntaxWarning::DeprecatedListSpreadAsVariablePattern { location, name },
+            } => Diagnostic {
+                title: "Deprecated list pattern matching syntax".into(),
+                text: wrap_format!(
+                    "This syntax for pattern matching on lists is deprecated.
+This spread matches the entire list, so the variable {name} can be used as \
+the pattern directly instead.",
+                ),
+                hint: None,
+                level: diagnostic::Level::Warning,
+                location: Some(Location {
+                    label: diagnostic::Label {
+                        text: Some(format!("Replace this with `{name}`")),
                         span: *location,
                     },
                     path: path.clone(),
@@ -414,9 +434,10 @@ To have a clause without a guard, remove this.",
 
                 Diagnostic {
                     title: "Deprecated target shorthand syntax".into(),
-                    text: wrap(&format!(
-                        "This shorthand target name is deprecated. Use the full name: `{full_name}` instead."
-                    )),
+                    text: wrap_format!(
+                        "This shorthand target name is deprecated. \
+Use the full name: `{full_name}` instead."
+                    ),
                     hint: None,
                     level: diagnostic::Level::Warning,
                     location: Some(Location {
@@ -454,47 +475,63 @@ comment so it is not attached to any definition.",
                 hint: Some("Move the comment above the doc comment".into()),
             },
 
-            Warning::Type { path, warning, src } => match warning {
+            Warning::Type { path, warning, src } => match warning.as_ref() {
                 type_::Warning::Todo {
                     kind,
                     location,
                     type_,
+                    names,
                 } => {
-                    let mut text = String::new();
-                    text.push_str(
-                        "\
+                    let (title, text) = match kind {
+                        TodoKind::Keyword => {
+                            let text = "\
 This code will crash if it is run. Be sure to finish it before
-running your program.",
-                    );
-                    let title = match kind {
-                        TodoKind::Keyword => "Todo found",
+running your program.";
+
+                            ("Todo found", text)
+                        }
+
                         TodoKind::EmptyBlock => {
-                            text.push_str(
-                                "
-A block must always contain at least one expression.",
-                            );
-                            "Incomplete block"
+                            let text = "\
+A block must always contain at least one expression.
+
+A todo expression has been used in place of the missing code,
+so this code will crash if it is run. Be sure to finish it before
+running your program.";
+                            ("Incomplete block", text)
                         }
-                        TodoKind::EmptyFunction { .. } => "Unimplemented function",
+                        TodoKind::EmptyFunction { .. } => {
+                            let text = "\
+A function must always have an implementation.
+
+A todo expression has been used in place of the missing body,
+so this code will crash if it is run. Be sure to finish it before
+running your program.";
+                            ("Unimplemented function", text)
+                        }
                         TodoKind::IncompleteUse => {
-                            text.push_str(
-                                "
-A use expression must always be followed by at least one expression.",
-                            );
-                            "Incomplete use expression"
+                            let text = "\
+A use expression must always be followed by at least one expression.
+
+A todo expression has been used in place of the missing code, so
+this code will crash if it is run. Be sure to finish it before
+running your program.";
+                            ("Incomplete use expression", text)
                         }
-                    }
-                    .into();
-                    if !type_.is_variable() {
-                        text.push_str(&format!(
-                            "\n\nHint: I think its type is `{}`.\n",
-                            Printer::new().pretty_print(type_, 0)
-                        ));
-                    }
+                    };
+
+                    let hint = if !type_.is_variable() {
+                        Some(format!(
+                            "I think its type is `{}`.\n",
+                            Printer::new(names).print_type(type_)
+                        ))
+                    } else {
+                        None
+                    };
 
                     Diagnostic {
-                        title,
-                        text,
+                        title: title.into(),
+                        text: text.into(),
                         level: diagnostic::Level::Warning,
                         location: Some(Location {
                             path: path.to_path_buf(),
@@ -505,7 +542,7 @@ A use expression must always be followed by at least one expression.",
                             },
                             extra_labels: Vec::new(),
                         }),
-                        hint: None,
+                        hint,
                     }
                 }
 
@@ -561,7 +598,7 @@ A use expression must always be followed by at least one expression.",
                     }),
                 },
 
-                type_::Warning::AllFieldsRecordUpdate { location } => Diagnostic {
+                type_::Warning::AllFieldsRecordUpdate { location, .. } => Diagnostic {
                     title: "Redundant record update".into(),
                     text: "".into(),
                     hint: Some("It is better style to use the record creation syntax.".into()),
@@ -805,11 +842,11 @@ but it's never used for anything.",
                 },
                 type_::Warning::InefficientEmptyListCheck { location, kind } => {
                     use type_::error::EmptyListCheckKind;
-                    let text = "The `list.length` function has to iterate across the whole
-list to calculate the length, which is wasteful if you only
-need to know if the list is empty or not.
-"
-                    .into();
+                    let text = wrap(
+                        "The `list.length` function has to iterate across the whole \
+list to calculate the length, which is wasteful if you only \
+need to know if the list is empty or not.",
+                    );
                     let hint = Some(match kind {
                         EmptyListCheckKind::Empty => "You can use `the_list == []` instead.".into(),
                         EmptyListCheckKind::NonEmpty => {
@@ -839,7 +876,7 @@ need to know if the list is empty or not.
                     module,
                     package,
                 } => {
-                    let text = wrap(&format!(
+                    let text = wrap_format!(
                         "The module `{module}` is being imported, but \
 `{package}`, the package it belongs to, is not a direct dependency of your \
 package.
@@ -849,7 +886,7 @@ Run this command to add it to your dependencies:
 
     gleam add {package}
 "
-                    ));
+                    );
                     Diagnostic {
                         title: "Transitive dependency imported".into(),
                         text,
@@ -872,7 +909,7 @@ Run this command to add it to your dependencies:
                     message,
                     layer,
                 } => {
-                    let text = wrap(&format!("It was deprecated with this message: {message}"));
+                    let text = wrap_format!("It was deprecated with this message: {message}");
                     let (title, diagnostic_label_text) = if layer.is_value() {
                         (
                             "Deprecated value used".into(),
@@ -906,15 +943,15 @@ Run this command to add it to your dependencies:
                     let text = match reason {
                         UnreachablePatternReason::DuplicatePattern => wrap(
                             "This pattern cannot be reached as a previous \
-pattern matches the same values.\n",
+pattern matches the same values.",
                         ),
                         UnreachablePatternReason::ImpossibleVariant => wrap(
                             "This pattern cannot be reached as it matches on \
-a variant of a type which is never present.\n",
+a variant of a type which is never present.",
                         ),
                         UnreachablePatternReason::ImpossibleSegments(_) => wrap(
                             "This pattern cannot be reached as it contains \
-segments that will never match.\n",
+segments that will never match.",
                         ),
                     };
 
@@ -958,7 +995,7 @@ segments that will never match.\n",
                     };
 
                     let title = format!("Redundant {kind}");
-                    let text = wrap(&format!(
+                    let text = wrap_format!(
                         "Instead of building a {kind} and matching on it, \
 you can match on its contents directly.
 A case expression can take multiple subjects separated by commas like this:
@@ -968,7 +1005,7 @@ A case expression can take multiple subjects separated by commas like this:
     }}
 
 See: https://tour.gleam.run/flow-control/multiple-subjects/"
-                    ));
+                    );
 
                     Diagnostic {
                         title,
@@ -1042,43 +1079,11 @@ variable, or delete the expression entirely if it's not needed.",
                     }),
                 },
 
-                type_::Warning::InternalTypeLeak { location, leaked } => {
-                    let mut printer = Printer::new();
-
-                    // TODO: be more precise.
-                    // - is being returned by this public function
-                    // - is taken as an argument by this public function
-                    // - is taken as an argument by this public enum constructor
-                    // etc
-                    let text = format!(
-                        "The following type is internal, but is being used by this public export.
-
-{}
-
-Internal types should not be used in a public facing function since they are
-hidden from the package's documentation.",
-                        printer.pretty_print(leaked, 4),
-                    );
-                    Diagnostic {
-                        title: "Internal type used in public interface".into(),
-                        text,
-                        hint: None,
-                        level: diagnostic::Level::Warning,
-                        location: Some(Location {
-                            label: diagnostic::Label {
-                                text: None,
-                                span: *location,
-                            },
-                            path: path.clone(),
-                            src: src.clone(),
-                            extra_labels: vec![],
-                        }),
-                    }
-                }
                 type_::Warning::RedundantAssertAssignment { location } => Diagnostic {
                     title: "Redundant assertion".into(),
-                    text: "This assertion is redundant since the pattern covers all possibilities."
-                        .into(),
+                    text: wrap(
+                        "This assertion is redundant since the pattern covers all possibilities.",
+                    ),
                     hint: None,
                     level: diagnostic::Level::Warning,
                     location: Some(Location {
@@ -1149,30 +1154,34 @@ Either change the pattern or use `panic` to unconditionally fail.",
                     };
                     let mut text = format!("`{name}` is not a function");
                     match arguments {
-                        0 => text.push_str(&format!(
-                            ", you can just write `{name}` instead of `{name}()`."
-                        )),
+                        0 => {
+                            text.push_str(", you can just write `");
+                            text.push_str(name);
+                            text.push_str("` instead of `");
+                            text.push_str(name);
+                            text.push_str("()`.");
+                        }
                         1 => text.push_str(
                             " and will crash before it can do anything with this argument.",
                         ),
                         _ => text.push_str(
                             " and will crash before it can do anything with these arguments.",
                         ),
-                    };
+                    }
 
-                    match arguments {
-                        0 => {}
-                        _ => text.push_str(&format!(
-                            "\n\nHint: if you want to display an error message you should write
+                    let hint = match arguments {
+                        0 => None,
+                        _ => Some(wrap_format!(
+                            "if you want to display an error message you should write
 `{name} as \"my error message\"`
 See: https://tour.gleam.run/advanced-features/{name}/"
                         )),
-                    }
+                    };
 
                     Diagnostic {
                         title,
                         text: wrap(&text),
-                        hint: None,
+                        hint,
                         level: diagnostic::Level::Warning,
                         location: Some(Location {
                             label: diagnostic::Label {
@@ -1228,8 +1237,8 @@ should be printing always panics."
                 type_::Warning::RedundantPipeFunctionCapture { location } => Diagnostic {
                     title: "Redundant function capture".into(),
                     text: wrap(
-                        "This function capture is redundant since the value is already piped as \
-the first argument of this call.
+                        "This function capture is redundant since the value is \
+already piped as the first argument of this call.
 
 See: https://tour.gleam.run/functions/pipelines/",
                     ),
@@ -1294,16 +1303,17 @@ See: https://tour.gleam.run/functions/pipelines/",
                         FeatureKind::ConstantRecordUpdate => {
                             "The record update syntax for constants was"
                         }
+                        FeatureKind::ConstantListWithTail => "Prepending to a constant list was",
                     };
 
                     Diagnostic {
                         title: "Incompatible gleam version range".into(),
-                        text: wrap(&format!(
+                        text: wrap_format!(
                         "{feature} introduced in version v{minimum_required_version}. But the Gleam version range \
                         specified in your `gleam.toml` would allow this code to run on an earlier \
                         version like v{wrongfully_allowed_version}, resulting in compilation errors!",
-                    )),
-                        hint: Some(format!(
+                    ),
+                        hint: Some(wrap_format!(
                             "Remove the version constraint from your `gleam.toml` or update it to be:
 
     gleam = \">= {minimum_required_version}\""
@@ -1376,14 +1386,15 @@ information.",
                         ("bits", segment_size, taken)
                     };
 
-                    let text = format!(
+                    let text = wrap_format!(
                         "This segment is {segment_size} long, but {truncated_value} \
-doesn't fit in that many {unit}. It would be truncated by taking its {taken}, resulting in the value {truncated_into}."
+doesn't fit in that many {unit}. It would be truncated by taking its {taken}, \
+resulting in the value {truncated_into}."
                     );
 
                     Diagnostic {
                         title: "Truncated bit array segment".into(),
-                        text: wrap(&text),
+                        text,
                         hint: None,
                         level: diagnostic::Level::Warning,
                         location: Some(Location {
@@ -1394,6 +1405,30 @@ doesn't fit in that many {unit}. It would be truncated by taking its {taken}, re
                                     "You can safely replace this with {truncated_into}"
                                 )),
                                 span: *value_location,
+                            },
+                            extra_labels: vec![],
+                        }),
+                    }
+                }
+
+                type_::Warning::JavaScriptBitArrayUnsafeInt { location, size } => {
+                    let text = wrap_format!(
+                        "This segment is a {size}-bit long int, but on the \
+JavaScript target numbers have at most 52 bits. It would be truncated to its \
+first 52 bits."
+                    );
+
+                    Diagnostic {
+                        title: "Truncated bit array segment".into(),
+                        text: wrap(&text),
+                        hint: Some("Did you mean to use the `bytes` segment option?".into()),
+                        level: diagnostic::Level::Warning,
+                        location: Some(Location {
+                            path: path.to_path_buf(),
+                            src: src.clone(),
+                            label: diagnostic::Label {
+                                text: None,
+                                span: *location,
                             },
                             extra_labels: vec![],
                         }),
@@ -1465,19 +1500,19 @@ can already tell whether it will be `True` or `False`.",
                 },
 
                 type_::Warning::TopLevelDefinitionShadowsImport { location, name } => {
-                    let text = format!(
+                    let text = wrap_format!(
                         "Definition of {name} shadows an imported value.
 The imported value could not be used in this module anyway."
                     );
                     Diagnostic {
                         title: "Shadowed Import".into(),
-                        text: wrap(&text),
+                        text,
                         level: diagnostic::Level::Warning,
                         location: Some(Location {
                             path: path.clone(),
                             src: src.clone(),
                             label: diagnostic::Label {
-                                text: Some(wrap(&format!("`{name}` is defined here"))),
+                                text: Some(wrap_format!("`{name}` is defined here")),
                                 span: *location,
                             },
                             extra_labels: Vec::new(),
@@ -1513,24 +1548,50 @@ The imported value could not be used in this module anyway."
                         extra_labels: vec![],
                     }),
                 },
-            },
 
-            Warning::DeprecatedEnvironmentVariable { variable } => {
-                let name = variable.name();
-                let message = variable.message();
+                type_::Warning::PipeIntoCallWhichReturnsFunction { location } => Diagnostic {
+                    title: "Deprecated pipe use".into(),
+                    text: wrap(
+                        "This use of pipelines is deprecated, as it creates \
+ambiguity in pipe syntax. Currently `a |> b(c)` can desugar to either `b(a, c)` or \
+`b(a)(c)` depending on the type of `b`. The latter syntax is deprecated, and should \
+not be used.",
+                    ),
+                    hint: Some(
+                        "Add an extra set of parentheses after the call, like `a |> b(c)()`".into(),
+                    ),
+                    level: diagnostic::Level::Warning,
+                    location: Some(Location {
+                        label: diagnostic::Label {
+                            text: Some("This should have an extra set of parentheses".into()),
+                            span: *location,
+                        },
+                        path: path.clone(),
+                        src: src.clone(),
+                        extra_labels: vec![],
+                    }),
+                },
 
-                let text = wrap(&format!(
-                    "The environment variable `{name}` is deprecated.\n\n{message}"
-                ));
-
-                Diagnostic {
-                    title: "Use of deprecated environment variable".into(),
-                    text,
+                type_::Warning::EmptyStringBitArraySegment { location } => Diagnostic {
+                    title: "Empty string segment".into(),
+                    text: wrap(
+                        "This empty string segment is ignored in the pattern, \
+so it can be safely removed. Empty string segments are deprecated and will become \
+an error in a future version.",
+                    ),
                     hint: None,
                     level: diagnostic::Level::Warning,
-                    location: None,
-                }
-            }
+                    location: Some(Location {
+                        label: diagnostic::Label {
+                            text: Some("Remove this empty string".into()),
+                            span: *location,
+                        },
+                        path: path.clone(),
+                        src: src.clone(),
+                        extra_labels: vec![],
+                    }),
+                },
+            },
 
             Warning::EmptyModule { path: _, name } => Diagnostic {
                 title: "Empty module".into(),

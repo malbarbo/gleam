@@ -1,6 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Gleam contributors
+
 [package]
 name = "hexpm"
-version = "5.1.1"
+version = "1.19.1"
 authors = ["Louis Pilfold <louis@lpil.uk>"]
 edition = "2024"
 license = "Apache-2.0"
@@ -17,7 +20,7 @@ url = "2.2"
 # Byte collections
 bytes = "1"
 # gzip (de)compression
-flate2 = "1.0"
+flate2 = "1.1"
 # RSA signature and SHA256 checksum verification
 ring = "0.17"
 # PEM -> DER conversion
@@ -28,6 +31,8 @@ http-auth-basic = "0.3"
 prost = "0.13.5"
 
 base16 = { workspace = true, features = ["alloc"] }
+clap = { workspace = true, features = ["derive"] }
+ecow = { workspace = true, features = ["serde"] }
 http.workspace = true
 pubgrub.workspace = true
 regex.workspace = true
@@ -37,7 +42,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 # toml encoding
-toml = "0.8"
+toml = "1.1"
 
 [build-dependencies]
 # Protobuf codegen

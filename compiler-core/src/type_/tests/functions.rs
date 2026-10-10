@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 use crate::{assert_module_error, assert_module_infer};
 
 // https://github.com/gleam-lang/gleam/issues/1860
@@ -569,6 +572,19 @@ pub fn main() {
    let b = "not an int"
    fn(x, y) { x + y }(a, b)
 }
+"#
+    );
+}
+
+#[test]
+fn constant_record_incorrect_arg_types_fault_tolerance() {
+    assert_module_error!(
+        r#"
+pub type Wibble {
+  Wibble(Int, Int)
+}
+
+pub const wibble = Wibble(1.0, 1.0)
 "#
     );
 }

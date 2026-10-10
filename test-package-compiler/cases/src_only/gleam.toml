@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2022 The Gleam contributors
+
+name = "src_only"
+version = "1.0.0"
+
+[dependencies]
+gleam_stdlib = "~> 1337.0"
+
+[dev_dependencies]
+gleeunit = "~> 1337.0"

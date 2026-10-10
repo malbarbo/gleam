@@ -1,5 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 import {
   BitArray,
+  BitArray$BitArray,
+  BitArray$BitArray$data,
+  BitArray$isBitArray,
   CustomType,
   Error,
   List,
@@ -63,6 +69,14 @@ function assertThrows(msg, callable) {
     fail(msg);
   } catch (error) {
     pass();
+  }
+}
+
+function assert(msg, value) {
+  if (value) {
+    pass();
+  } else {
+    fail(msg);
   }
 }
 
@@ -668,6 +682,21 @@ assertEqual(sizedFloat(NaN, 16, true), new Uint8Array([0x7e, 0x00]));
 assertEqual(sizedFloat(1_000_000.0, 16, true), new Uint8Array([0x7c, 0x00]));
 assertEqual(sizedFloat(-1_000_000.0, 16, true), new Uint8Array([0xfc, 0x00]));
 
+assertEqual(sizedFloat(2047.5, 16, true), new Uint8Array([0x68, 0x00]));
+assertEqual(sizedFloat(2049.0, 16, true), new Uint8Array([0x68, 0x00]));
+assertEqual(sizedFloat(1.00048828125, 16, true), new Uint8Array([0x3c, 0x00]));
+assertEqual(sizedFloat(1.0009765625, 16, true), new Uint8Array([0x3c, 0x01]));
+assertEqual(sizedFloat(3945.0, 16, true), new Uint8Array([0x6b, 0xb4]));
+assertEqual(sizedFloat(65_520.0, 16, true), new Uint8Array([0x7c, 0x00]));
+assertEqual(
+  sizedFloat(2.9802322387695312e-8, 16, true),
+  new Uint8Array([0x00, 0x00]),
+);
+assertEqual(
+  sizedFloat(8.940696716308594e-8, 16, true),
+  new Uint8Array([0x00, 0x02]),
+);
+
 assertEqual(sizedFloat(16.25, 32, true), new Uint8Array([65, 130, 0, 0]));
 assertEqual(sizedFloat(-16.25, 32, false), new Uint8Array([0, 0, 130, 193]));
 assertEqual(
@@ -1171,6 +1200,46 @@ assertEqual(new BitArray(new Uint8Array([])).byteSize, 0);
 assertEqual(new BitArray(new Uint8Array([1, 2])).byteSize, 2);
 assertEqual(new BitArray(new Uint8Array([1, 2, 3, 4])).byteSize, 4);
 assertEqual(new BitArray(new Uint8Array([1, 2, 3, 4], 28)).byteSize, 4);
+
+// BitArray
+
+assert("numbers are not bit arrays", !BitArray$isBitArray(123));
+assert("strings are not bit arrays", !BitArray$isBitArray("!"));
+assert("results are not bit arrays", new Ok("!"));
+assert(
+  "Bit arrays are bit arrays",
+  BitArray$isBitArray(BitArray$BitArray(new Uint8Array([]))),
+);
+
+// Byte aligned bit array
+{
+  const bitArray = BitArray$BitArray(new Uint8Array([1, 2, 3]));
+  assertEqual(bitArray.bitSize, 3 * 8);
+  assertEqual(bitArray.byteSize, 3);
+  assertEqual(bitArray.bitOffset, 0);
+  assertEqual(bitArray.rawBuffer, new Uint8Array([1, 2, 3]));
+  assertEqual(
+    BitArray$BitArray$data(bitArray),
+    new DataView(new Uint8Array([1, 2, 3]).buffer),
+  );
+}
+
+// Non-byte aligned bit array
+{
+  const bitArray = BitArray$BitArray(new Uint8Array([1, 2, 3]), 23, 1);
+  assertEqual(bitArray.bitSize, 23);
+  assertEqual(bitArray.byteSize, 3);
+  assertEqual(bitArray.bitOffset, 1);
+  assertEqual(bitArray.rawBuffer, new Uint8Array([1, 2, 3]));
+  assertThrows("BitArray$BitArray$data of un-aligned bit array", () => {
+    BitArray$BitArray$data(bitArray);
+  });
+}
+
+assertEqual(
+  BitArray$BitArray(new Uint8Array([])),
+  new BitArray(new Uint8Array([])),
+);
 
 //
 // Division

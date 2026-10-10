@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2022 The Gleam contributors
+
 use super::*;
 use crate::{
     assert_js_no_warnings, assert_js_warning, assert_no_warnings, assert_warning,
@@ -17,6 +20,37 @@ fn unknown_label() {
 #[test]
 fn todo_warning_test() {
     assert_warning!("pub fn main() { 1 == todo }");
+}
+
+// https://github.com/gleam-lang/gleam/issues/4164
+#[test]
+fn todo_uses_the_appropriate_type_name() {
+    assert_warning!(
+        "
+pub fn curry(_f: fn(a, b) -> c) -> fn(a) -> fn(b) -> c {
+  fn(_a: a) {
+    todo
+  }
+}"
+    );
+}
+
+#[test]
+fn todo_uses_the_appropriate_type_name_2() {
+    assert_warning!(
+        (
+            "wibble",
+            "
+            pub type Wibble
+            pub fn consume(wibble: Wibble) -> Nil { todo }
+        "
+        ),
+        "
+import wibble
+pub fn main() {
+  wibble.consume(todo)
+}"
+    );
 }
 
 // https://github.com/gleam-lang/gleam/issues/1669
@@ -460,17 +494,17 @@ pub const make_two = one.Two
 
 // https://github.com/gleam-lang/gleam/issues/2050
 #[test]
-fn double_unary_integer_literal() {
+fn double_unary_int_literal() {
     assert_warning!("pub fn main() { let _ = --7 }");
 }
 
 #[test]
-fn even_number_of_multiple_integer_negations_raise_a_single_warning() {
+fn even_number_of_multiple_int_negations_raise_a_single_warning() {
     assert_warning!("pub fn main() { let _ = ----7 }");
 }
 
 #[test]
-fn odd_number_of_multiple_integer_negations_raise_a_single_warning_that_highlights_the_unnecessary_ones()
+fn odd_number_of_multiple_int_negations_raise_a_single_warning_that_highlights_the_unnecessary_ones()
  {
     assert_warning!("pub fn main() { let _ = -----7 }");
 }
@@ -488,7 +522,7 @@ fn odd_number_of_multiple_bool_negations_raise_a_single_warning_that_highlights_
 
 // https://github.com/gleam-lang/gleam/issues/2050
 #[test]
-fn double_unary_integer_variable() {
+fn double_unary_int_variable() {
     assert_warning!(
         r#"
         pub fn main() {
@@ -1108,6 +1142,63 @@ fn unused_alias_for_duplicate_module_no_warning_for_alias_test() {
             import b/wibble as wobble
             pub const one = wibble.one
         "#,
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5975
+#[test]
+fn imported_module_usage_not_confused_with_another_module_name() {
+    assert_no_warnings!(
+        ("thepackage", "wibble/wobble", "pub const one = 1"),
+        ("thepackage", "wobble", "pub const two = 2"),
+        r#"
+            import wibble/wobble
+            import wobble as my_wobble
+            pub const one = wobble.one
+            pub const two = my_wobble.two
+        "#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5975
+#[test]
+fn imported_module_type_usage_not_confused_with_another_module_name() {
+    assert_no_warnings!(
+        ("thepackage", "wibble/wobble", "pub type One = Int"),
+        ("thepackage", "wobble", "pub type Two = Int"),
+        r#"
+            import wibble/wobble
+            import wobble as my_wobble
+            pub fn one(value: wobble.One) -> wobble.One { value }
+            pub fn two(value: my_wobble.Two) -> my_wobble.Two { value }
+        "#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5975
+#[test]
+fn unused_module_alias_not_confused_with_another_module_name() {
+    assert_warning!(
+        ("thepackage", "wibble/wobble", "pub const one = 1"),
+        ("thepackage", "wobble", "pub const two = 2"),
+        r#"
+            import wibble/wobble
+            import wobble as my_wobble
+            pub const one = wobble.one
+        "#
+    );
+}
+
+#[test]
+fn unused_module_not_marked_as_used_by_discard_aliased_import_with_same_name() {
+    assert_warning!(
+        ("thepackage", "wibble/wobble", "pub const one = 1"),
+        ("thepackage", "wobble", "pub const two = 2"),
+        r#"
+            import wibble/wobble
+            import wobble.{two} as _wobble
+            pub fn main() { two }
+        "#
     );
 }
 
@@ -1778,6 +1869,35 @@ fn unreachable_warning_if_all_branches_panic() {
     );
 }
 
+// https://github.com/gleam-lang/gleam/issues/5683
+#[test]
+fn unreachable_use_statement_after_panic() {
+    assert_warning!(
+        "
+pub fn main() {
+  panic
+  use <- wibble
+  1
+}
+
+fn wibble(f) { f() }
+"
+    );
+}
+
+#[test]
+fn unreachable_use_fn_statement_after_panic() {
+    assert_warning!(
+        "
+pub fn main() -> Nil {
+  panic
+  use <- fn(_) { Nil }
+  1
+}
+"
+    );
+}
+
 #[test]
 fn unreachable_warning_if_all_branches_panic_2() {
     assert_warning!(
@@ -1945,13 +2065,28 @@ fn doesnt_warn_twice_for_unreachable_code_if_has_already_warned_in_a_block_2() {
 }
 
 #[test]
-fn unreachable_use_after_panic() {
+fn unreachable_use_after_panic_1() {
     assert_warning!(
         r#"
         pub fn wibble(_) { 1 }
         pub fn main() {
             panic
             use <- wibble
+            1
+        }
+        "#
+    );
+}
+
+#[test]
+fn unreachable_use_after_panic_2() {
+    assert_warning!(
+        ("package", "module", r#"pub fn wibble(_) { 1 }"#),
+        r#"
+        import module
+        pub fn a() {
+            panic
+            use <- module.wibble
             1
         }
         "#
@@ -2190,6 +2325,22 @@ fn deprecated_list_pattern_syntax_1() {
       }
     }
         "#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6088
+#[test]
+fn deprecated_list_spread_variable_pattern_syntax() {
+    assert_warning!(
+        r#"
+pub fn main() {
+  let letters = ["b", "c"]
+  case letters {
+    [] -> []
+    [..x] -> x
+  }
+}
+"#
     );
 }
 
@@ -3871,7 +4022,7 @@ fn make_panic() {
 }
 
 fn impure(x) {
-  x |> make_panic()
+  x |> make_panic()()
 }
 
 pub fn main() {
@@ -4300,7 +4451,7 @@ fn float_literals_redundant_comparison_infinity() {
 
 #[test]
 fn float_literals_redundant_comparison_signed_zero() {
-    assert_warning!("pub fn main() { 0.0 == -0.0 }");
+    assert_no_warnings!("pub fn main() { 0.0 == -0.0 }");
 }
 
 #[test]
@@ -4549,7 +4700,7 @@ pub fn main() {
 }
 
 #[test]
-fn impossible_to_reach_integer_segment() {
+fn impossible_to_reach_int_segment() {
     assert_warning!(
         "
 pub fn main(x) {
@@ -4562,7 +4713,7 @@ pub fn main(x) {
 }
 
 #[test]
-fn impossible_to_reach_integer_segment_2() {
+fn impossible_to_reach_int_segment_2() {
     assert_warning!(
         "
 pub fn main(x) {
@@ -4575,7 +4726,7 @@ pub fn main(x) {
 }
 
 #[test]
-fn impossible_to_reach_integer_segment_3() {
+fn impossible_to_reach_int_segment_3() {
     assert_warning!(
         "
 pub fn main(x) {
@@ -4588,7 +4739,7 @@ pub fn main(x) {
 }
 
 #[test]
-fn impossible_to_reach_integer_segment_4() {
+fn impossible_to_reach_int_segment_4() {
     assert_warning!(
         "
 pub fn main(x) {
@@ -4601,7 +4752,7 @@ pub fn main(x) {
 }
 
 #[test]
-fn multiple_impossible_to_reach_integer_segments() {
+fn multiple_impossible_to_reach_int_segments() {
     assert_warning!(
         "
 pub fn main(x) {
@@ -4614,7 +4765,7 @@ pub fn main(x) {
 }
 
 #[test]
-fn assert_on_impossible_to_reach_integer_segment() {
+fn assert_on_impossible_to_reach_int_segment() {
     assert_warning!(
         "
 pub fn main(x) {
@@ -4828,5 +4979,307 @@ pub fn main(x) {
     _ -> 2
   }
 }",
+    );
+}
+
+#[test]
+fn constant_list_prepending_requires_v1_16_warning() {
+    assert_warnings_with_gleam_version!(
+        Range::higher_than(Version::new(1, 0, 0)),
+        "
+pub const one = []
+pub const other = [1, 2, ..one]
+",
+    );
+}
+
+#[test]
+fn constant_list_prepending_in_guard_requires_v1_16_warning() {
+    assert_warnings_with_gleam_version!(
+        Range::higher_than(Version::new(1, 0, 0)),
+        "
+fn go(x) {
+  case x {
+    [1, ..] if [1, ..x] == x -> Nil
+    _ -> Nil
+  }
+}
+",
+    );
+}
+
+#[test]
+fn record_update_with_all_wrong_fields_produces_no_warnings_1() {
+    assert_no_warnings!(
+        "
+pub type Wibble {
+  Wibble(a: Int, b: Bool)
+}
+
+pub fn main() {
+  let original = Wibble(a: 1, b: True)
+  Wibble(..original, c: 2)
+}
+",
+    );
+}
+
+#[test]
+fn record_update_with_all_wrong_fields_produces_no_warnings_2() {
+    assert_no_warnings!(
+        "
+pub type Wibble {
+  Wibble(a: Int, b: Bool)
+}
+
+pub fn main() {
+  let original = Wibble(a: 1, b: True)
+  Wibble(..original, a: True)
+}
+",
+    );
+}
+
+#[test]
+fn record_update_with_wrong_types_but_all_fields_produces_warning() {
+    assert_warning!(
+        "
+pub type Wibble {
+  Wibble(a: Int, b: Bool)
+}
+
+pub fn main() {
+  let original = Wibble(a: 1, b: True)
+  Wibble(..original, a: True, b: 1)
+}
+"
+    );
+}
+
+#[test]
+fn bit_array_match_on_int_over_js_limit() {
+    assert_js_warning!(
+        "
+pub fn go(x: BitArray) {
+    let <<number:123>> = x
+    number
+}
+"
+    );
+}
+
+#[test]
+fn bit_array_match_on_int_over_js_limit_1() {
+    assert_js_warning!(
+        "
+pub fn go(x: BitArray) {
+  case x {
+    <<n:size(53)>> -> n
+    _ -> 1
+  }
+}
+"
+    );
+}
+
+#[test]
+fn bit_array_match_on_int_over_js_limit_with_unit() {
+    assert_js_warning!(
+        "
+pub fn go(x: BitArray) {
+  case x {
+    <<n:2-unit(250)>> -> n
+    _ -> 1
+  }
+}
+"
+    );
+}
+
+#[test]
+fn bit_array_match_on_bytes_does_not_complain_about_int_size() {
+    assert_js_no_warnings!(
+        "
+pub fn go(x: BitArray) {
+  case x {
+    <<n:150-bytes>> -> n
+    _ -> <<>>
+  }
+}
+"
+    );
+}
+
+#[test]
+fn bit_array_match_on_bytes_for_erlang_does_not_complain_about_int_size() {
+    assert_js_no_warnings!(
+        r#"
+pub fn main() -> Nil {
+  echo wibble(<<1, 2, 3, 4, 5, 6, 7, 8>>)
+  Nil
+}
+
+@external(javascript, "./ffi.mjs", "wibble")
+fn wibble(bits: BitArray) -> Int {
+  let assert <<x:64>> = bits
+  x
+}
+"#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5599
+#[test]
+fn bit_array_size_constant() {
+    assert_no_warnings!(
+        r#"
+const some_size = 2
+
+pub fn run(data) {
+  case data {
+    <<x:bytes-size(some_size), _:bits>> -> x
+    _ -> data
+  }
+}
+        "#
+    );
+}
+
+#[test]
+fn constant_used_in_todo_message_counts_as_used() {
+    assert_no_warnings!(
+        "
+const wibble = 1
+pub const wobble = todo as wibble
+"
+    );
+}
+
+#[test]
+fn piping_into_call_which_returns_function() {
+    assert_warning!(
+        "
+pub fn main() {
+  1 |> wibble(2)
+}
+
+fn wibble(a) {
+  fn(b) { #(a, b) }
+}
+"
+    );
+}
+
+#[test]
+fn no_warning_when_extra_brackets_are_added_to_call_returning_function() {
+    assert_no_warnings!(
+        "
+pub fn main() {
+  1 |> wibble(2)()
+}
+
+fn wibble(a) {
+  fn(b) { #(a, b) }
+}
+"
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/3899
+#[test]
+fn deprecated_value_in_use_with_fn_literal_rhs_warns_once() {
+    assert_warning!(
+        r#"
+@deprecated("Don't use this!")
+pub fn wibble() {
+  Nil
+}
+
+pub fn main() {
+  use <- fn(f) { f() }
+  wibble()
+}
+"#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/3899
+#[test]
+fn deprecated_value_in_nested_use_with_fn_literal_rhs_warns_once() {
+    assert_warning!(
+        r#"
+@deprecated("Don't use this!")
+pub fn wibble() {
+  Nil
+}
+
+pub fn main() {
+  use <- fn(f) { f() }
+  use <- fn(f) { f() }
+  wibble()
+}
+"#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/3899
+#[test]
+fn unreachable_code_in_use_with_fn_literal_rhs_warns_once() {
+    assert_warning!(
+        "
+pub fn wibble() {
+  Nil
+}
+
+pub fn main() {
+  use <- fn(f) { f() }
+  panic
+  wibble()
+}
+"
+    );
+}
+
+#[test]
+fn unreachable_empty_bit_array() {
+    // <<>> and <<"">> are equivalent.
+    assert_warning!(
+        r#"
+pub fn thingy(wibble) {
+  case wibble {
+    <<>> -> 1
+    <<"">> -> 2
+    _ -> 3
+  }
+}
+    "#
+    );
+}
+
+#[test]
+fn empty_string_in_bit_array_pattern_segment() {
+    assert_warning!(
+        r#"
+pub fn go(x) {
+  case x {
+    <<"">> -> True
+    _ -> False
+  }
+}
+"#
+    );
+}
+
+#[test]
+fn unused_variable_with_alternative_patterns() {
+    assert_warning!(
+        "
+pub fn go(a) {
+  case a {
+    [x, y] | [0, x, y] | [1, 1 as x, 2 as y] -> y
+    _ -> todo
+  }
+}
+"
     );
 }

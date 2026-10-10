@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 //! An implementation of the algorithm described in:
 //!
 //! - How to compile pattern matching, Jules Jacobs.
@@ -68,8 +71,8 @@ pub mod printer;
 
 use crate::{
     ast::{
-        self, AssignName, BitArraySize, Endianness, IntOperator, SrcSpan, TypedBitArraySize,
-        TypedClause, TypedPattern, TypedPatternBitArraySegment,
+        self, AssignName, BitArraySize, Endianness, IntOperator, TypedBitArraySize, TypedClause,
+        TypedPattern, TypedPatternBitArraySegment,
     },
     parse::LiteralFloatValue,
     strings::{
@@ -89,6 +92,7 @@ use itertools::Itertools;
 use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 use radix_trie::{Trie, TrieCommon};
+use src_span::SrcSpan;
 use std::{
     cell::RefCell,
     cmp::Ordering,
@@ -133,7 +137,7 @@ struct Branch {
     ///
     alternative_index: usize,
     checks: Vec<PatternCheck>,
-    guard: Option<usize>,
+    has_guard: bool,
     body: Body,
 }
 
@@ -148,7 +152,7 @@ impl Branch {
             clause_index,
             alternative_index,
             checks,
-            guard: if has_guard { Some(clause_index) } else { None },
+            has_guard,
             body: Body::new(clause_index),
         }
     }
@@ -245,12 +249,18 @@ impl Branch {
                     Pattern::StringPrefix {
                         prefix,
                         prefix_name,
-                        rest: _,
+                        rest,
                     } => {
-                        if let Some(variable) = std::mem::take(prefix_name) {
-                            self.body
-                                .assign_literal_string(variable.clone(), prefix.clone());
-                        }
+                        let Some(variable) = prefix_name.clone() else {
+                            return true;
+                        };
+                        let prefix = prefix.clone();
+                        let rest = *rest;
+                        // Move the literal prefix assignment to this branch's
+                        // body and give its check a pattern without the assignment.
+                        // Other branches still use the original shared pattern.
+                        check.pattern = compiler.string_prefix_pattern(&prefix, rest);
+                        self.body.assign_literal_string(variable, prefix);
                         return true;
                     }
                     // There's a special case of assignments when it comes to bit
@@ -263,68 +273,121 @@ impl Branch {
                     // any size test, so if we find a `ReadAction` that is the first
                     // test to perform in a bit array pattern we know it's always
                     // going to match and can be safely moved into the branch's body.
-                    Pattern::BitArray { tests } => match tests.front_mut() {
-                        Some(BitArrayTest::Match(MatchTest {
-                            value: BitArrayMatchedValue::Variable(name),
-                            read_action,
-                        })) => {
-                            let bit_array = check.var.clone();
-                            self.body.assign_bit_array_slice(
-                                name.clone(),
-                                bit_array,
-                                read_action.clone(),
-                            );
-                            let _ = tests.pop_front();
+                    Pattern::BitArray { tests } => {
+                        // Most patterns start with a test we can't move into the
+                        // body, like a size check. There's nothing to pop in that
+                        // case, so we leave the shared pattern alone rather than
+                        // copying it into an identical one.
+                        if !tests
+                            .front()
+                            .is_none_or(BitArrayTest::binds_or_discards_value)
+                        {
+                            return true;
                         }
 
-                        Some(test) => match test {
-                            // If we have `_ as a` we treat that as a regular variable
-                            // assignment.
-                            BitArrayTest::Match(MatchTest {
-                                value: BitArrayMatchedValue::Assign { name, value },
-                                read_action,
-                            }) if value.is_discard() => {
-                                *test = BitArrayTest::Match(MatchTest {
-                                    value: BitArrayMatchedValue::Variable(name.clone()),
-                                    read_action: read_action.clone(),
-                                });
+                        // Patterns live in an arena shared by every branch, and
+                        // splitting can leave several branches pointing at this
+                        // one. Popping the unconditional tests out would bind
+                        // them only in the branch that happens to be compiled
+                        // first, so work on a copy and give this branch's check
+                        // a pattern of its own.
+                        let mut tests = tests.clone();
+                        let keep_pattern = loop {
+                            match tests.front_mut() {
+                                Some(BitArrayTest::Match(MatchTest {
+                                    value: BitArrayMatchedValue::Variable(name),
+                                    read_action,
+                                })) => {
+                                    let bit_array = check.var.clone();
+                                    self.body.assign_bit_array_slice(
+                                        name.clone(),
+                                        bit_array,
+                                        read_action.clone(),
+                                    );
+                                    let _ = tests.pop_front();
+                                }
+
+                                Some(test) => match test {
+                                    // If we have `_ as a` we treat that as a regular variable
+                                    // assignment.
+                                    BitArrayTest::Match(MatchTest {
+                                        value: BitArrayMatchedValue::Assign { name, value },
+                                        read_action,
+                                    }) if value.is_discard() => {
+                                        *test = BitArrayTest::Match(MatchTest {
+                                            value: BitArrayMatchedValue::Variable(name.clone()),
+                                            read_action: read_action.clone(),
+                                        });
+                                    }
+
+                                    // Just like regular assigns, those patterns are unrefutable
+                                    // and will become assignments in the branch's body.
+                                    BitArrayTest::Match(MatchTest {
+                                        value: BitArrayMatchedValue::Assign { name, value },
+                                        read_action,
+                                    }) => {
+                                        self.body.assign_segment_constant_value(
+                                            name.clone(),
+                                            value.as_ref(),
+                                        );
+
+                                        // We will still need to check the aliased value!
+                                        *test = BitArrayTest::Match(MatchTest {
+                                            value: value.as_ref().clone(),
+                                            read_action: read_action.clone(),
+                                        });
+                                    }
+
+                                    // An empty string always matches so there is no test to perform.
+                                    BitArrayTest::Match(MatchTest {
+                                        value: BitArrayMatchedValue::LiteralString { value, .. },
+                                        ..
+                                    }) if value.is_empty() => {
+                                        let _ = tests.pop_front();
+                                    }
+
+                                    // Discards are removed directly without even binding them
+                                    // in the branch's body.
+                                    _ if test.is_discard() => {
+                                        let _ = tests.pop_front();
+                                    }
+
+                                    // Otherwise there's no unconditional test to pop, we
+                                    // keep the pattern without changing it.
+                                    BitArrayTest::Size(_)
+                                    | BitArrayTest::Match(_)
+                                    | BitArrayTest::CatchAllIsBytes { .. }
+                                    | BitArrayTest::ReadSizeIsNotNegative { .. }
+                                    | BitArrayTest::SegmentIsFiniteFloat { .. } => break true,
+                                },
+
+                                // If a bit array pattern has no tests then it's always
+                                // going to match, no matter what. We just remove it.
+                                None => break false,
                             }
+                        };
 
-                            // Just like regular assigns, those patterns are unrefutable
-                            // and will become assignments in the branch's body.
-                            BitArrayTest::Match(MatchTest {
-                                value: BitArrayMatchedValue::Assign { name, value },
-                                read_action,
-                            }) => {
-                                self.body
-                                    .assign_segment_constant_value(name.clone(), value.as_ref());
+                        if !keep_pattern {
+                            return false;
+                        }
+                        check.pattern = compiler.bit_array_pattern(tests);
+                        return true;
+                    }
 
-                                // We will still need to check the aliased value!
-                                *test = BitArrayTest::Match(MatchTest {
-                                    value: value.as_ref().clone(),
-                                    read_action: read_action.clone(),
-                                });
-                            }
-
-                            // Discards are removed directly without even binding them
-                            // in the branch's body.
-                            _ if test.is_discard() => {
-                                let _ = tests.pop_front();
-                            }
-
-                            // Otherwise there's no unconditional test to pop, we
-                            // keep the pattern without changing it.
-                            BitArrayTest::Size(_)
-                            | BitArrayTest::Match(_)
-                            | BitArrayTest::CatchAllIsBytes { .. }
-                            | BitArrayTest::ReadSizeIsNotNegative { .. }
-                            | BitArrayTest::SegmentIsFiniteFloat { .. } => return true,
-                        },
-
-                        // If a bit array pattern has no tests then it's always
-                        // going to match, no matter what. We just remove it.
-                        None => return false,
-                    },
+                    // The pattern binds the rest of the string to a slice of the
+                    // subject and nothing else. Splitting only ever builds it from
+                    // a `StringPrefix` whose prefix name the case above has already
+                    // bound in the body, so no name is left to bind here.
+                    Pattern::StringPrefixSlice { rest_name, prefix } => {
+                        self.body.assign_string_slice(
+                            // Patterns live in an arena shared by every branch, so the
+                            // rest name is cloned rather than taken out of it.
+                            rest_name.clone(),
+                            check.var.clone(),
+                            prefix.clone(),
+                        );
+                        return false;
+                    }
 
                     // All other patterns are not unconditional, so we just keep them.
                     Pattern::Int { .. }
@@ -386,6 +449,13 @@ pub enum BoundValue {
         bit_array: Variable,
         read_action: ReadAction,
     },
+
+    /// `let a = subject.slice(N)`
+    ///
+    StringSlice {
+        subject: Variable,
+        prefix: EcoString,
+    },
 }
 
 impl Body {
@@ -407,6 +477,11 @@ impl Body {
             .push((variable, BoundValue::LiteralString(value)));
     }
 
+    fn assign_string_slice(&mut self, variable: EcoString, subject: Variable, prefix: EcoString) {
+        self.bindings
+            .push((variable, BoundValue::StringSlice { subject, prefix }));
+    }
+
     fn assign_bit_array_slice(
         &mut self,
         segment_name: EcoString,
@@ -419,7 +494,7 @@ impl Body {
                 bit_array,
                 read_action: value,
             },
-        ))
+        ));
     }
 
     fn assign_segment_constant_value(&mut self, name: EcoString, value: &BitArrayMatchedValue) {
@@ -436,7 +511,7 @@ impl Body {
             }
         };
 
-        self.bindings.push((name, value))
+        self.bindings.push((name, value));
     }
 }
 
@@ -467,6 +542,15 @@ pub enum Pattern {
         prefix_name: Option<EcoString>,
         rest: Id<Pattern>,
     },
+    /// Binds the rest of a string whose prefix an earlier check has already
+    /// matched, so there is nothing left to test.
+    ///
+    /// For example, after checking that `"wibble" <> rest` matches, all that
+    /// remains is to bind `rest` to the string after `"wibble"`.
+    StringPrefixSlice {
+        rest_name: EcoString,
+        prefix: EcoString,
+    },
     Assign {
         name: EcoString,
         pattern: Id<Pattern>,
@@ -479,6 +563,7 @@ pub enum Pattern {
     },
     Variant {
         index: usize,
+        used_name: EcoString,
         name: EcoString,
         module: Option<EcoString>,
         fields: Vec<Id<Pattern>>,
@@ -503,7 +588,10 @@ impl Pattern {
             // These patterns are unconditional: they will always match and be moved
             // out of a branch's checks. So there's no corresponding runtime check
             // we can perform for them.
-            Pattern::Discard | Pattern::Variable { .. } | Pattern::Assign { .. } => return None,
+            Pattern::Discard
+            | Pattern::Variable { .. }
+            | Pattern::Assign { .. }
+            | Pattern::StringPrefixSlice { .. } => return None,
             Pattern::Int { int_value, .. } => RuntimeCheckKind::Int {
                 int_value: int_value.clone(),
             },
@@ -571,6 +659,7 @@ impl Pattern {
             | Self::Float { .. }
             | Self::String { .. }
             | Self::StringPrefix { .. }
+            | Self::StringPrefixSlice { .. }
             | Self::Assign { .. }
             | Self::Variable { .. }
             | Self::Tuple { .. }
@@ -736,6 +825,9 @@ pub enum RuntimeCheckKind {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VariantMatch {
     ExplicitlyMatchedOn {
+        /// The locally used name, including any alias
+        used_name: EcoString,
+        /// The original name of the variant
         name: EcoString,
         module: Option<EcoString>,
     },
@@ -745,16 +837,23 @@ pub enum VariantMatch {
 }
 
 impl VariantMatch {
-    pub(crate) fn name(&self) -> EcoString {
+    pub(crate) fn used_name(&self) -> EcoString {
         match self {
-            VariantMatch::ExplicitlyMatchedOn { name, module: _ } => name.clone(),
+            VariantMatch::ExplicitlyMatchedOn { used_name, .. } => used_name.clone(),
+            VariantMatch::NeverExplicitlyMatchedOn { name } => name.clone(),
+        }
+    }
+
+    pub(crate) fn variant_name(&self) -> EcoString {
+        match self {
+            VariantMatch::ExplicitlyMatchedOn { name, .. } => name.clone(),
             VariantMatch::NeverExplicitlyMatchedOn { name } => name.clone(),
         }
     }
 
     pub(crate) fn module(&self) -> Option<EcoString> {
         match self {
-            VariantMatch::ExplicitlyMatchedOn { name: _, module } => module.clone(),
+            VariantMatch::ExplicitlyMatchedOn { module, .. } => module.clone(),
             VariantMatch::NeverExplicitlyMatchedOn { name: _ } => None,
         }
     }
@@ -962,6 +1061,30 @@ pub enum BitArrayTest {
 }
 
 impl BitArrayTest {
+    /// Whether this test binds the matched value to a name (a variable or an
+    /// `as` assignment) or discards it, instead of checking it against
+    /// something. When such a test is the first one of a pattern,
+    /// `move_unconditional_patterns` can pop it into the branch's body, or
+    /// rewrite an assignment into a test on the value it aliases.
+    ///
+    fn binds_or_discards_value(&self) -> bool {
+        match self {
+            BitArrayTest::Match(MatchTest { value, .. }) => match value {
+                BitArrayMatchedValue::Variable(_)
+                | BitArrayMatchedValue::Assign { .. }
+                | BitArrayMatchedValue::Discard(_) => true,
+                BitArrayMatchedValue::LiteralString { value, .. } => value.is_empty(),
+                BitArrayMatchedValue::LiteralFloat(_) | BitArrayMatchedValue::LiteralInt { .. } => {
+                    false
+                }
+            },
+            BitArrayTest::Size(_)
+            | BitArrayTest::CatchAllIsBytes { .. }
+            | BitArrayTest::ReadSizeIsNotNegative { .. }
+            | BitArrayTest::SegmentIsFiniteFloat { .. } => false,
+        }
+    }
+
     fn is_discard(&self) -> bool {
         match self {
             BitArrayTest::Match(MatchTest {
@@ -1207,14 +1330,14 @@ impl MatchTest {
         let offset_other = other.read_action.from.constant_bits()?.to_usize()?;
         if offset_one > offset_other {
             return None;
-        };
+        }
 
         // The second requirement is that: `o1 + s1 > o2`
         let size_one = self.read_action.size.constant_bits()?.to_usize()?;
         let size_other = other.read_action.size.constant_bits()?.to_usize()?;
         if offset_one + size_one <= offset_other {
             return None;
-        };
+        }
 
         // At this point we know that both are interfering, so we compare the
         // overlapping slice of bits they're matching against.
@@ -1678,11 +1801,19 @@ impl Confidence {
 /// is referenced once, in a segment with unit `1`; `calculations` would contain
 /// `b - 1`.
 ///
-#[derive(Clone, Eq, PartialEq, Debug, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Eq, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Offset {
     pub constant: BigInt,
-    pub variables: im::HashMap<VariableUsage, usize>,
-    pub calculations: im::Vector<OffsetCalculation>,
+    pub variables: imbl::HashMap<VariableUsage, usize>,
+    pub calculations: imbl::Vector<OffsetCalculation>,
+}
+
+impl Hash for Offset {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.constant.hash(state);
+        self.variables.iter().for_each(|kv| kv.hash(state));
+        self.calculations.hash(state);
+    }
 }
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash, serde::Serialize, serde::Deserialize)]
@@ -1696,8 +1827,8 @@ impl Offset {
     pub fn constant(value: impl Into<BigInt>) -> Self {
         Self {
             constant: value.into(),
-            variables: im::HashMap::new(),
-            calculations: im::Vector::new(),
+            variables: imbl::HashMap::new(),
+            calculations: imbl::Vector::new(),
         }
     }
 
@@ -1936,7 +2067,7 @@ impl ReadSize {
             }
 
             ReadSize::ConstantBits(..) | ReadSize::RemainingBits | ReadSize::RemainingBytes => (),
-        };
+        }
     }
 
     fn can_be_negative(&self) -> bool {
@@ -2022,7 +2153,7 @@ pub enum Decision {
         var: Variable,
         choices: Vec<(RuntimeCheck, Decision)>,
         fallback: Box<Decision>,
-        fallback_check: Box<FallbackCheck>,
+        fallback_check: FallbackCheck,
     },
 
     /// This is a special node: it represents a missing pattern. If a tree
@@ -2069,7 +2200,7 @@ pub enum FallbackCheck {
     /// no matter what, if none of the other checks matches. We still keep the
     /// corresponding runtime check around because it's useful for code generation!
     ///
-    RuntimeCheck { check: RuntimeCheck },
+    RuntimeCheck { check: Box<RuntimeCheck> },
 
     /// This is a special case for a catch all! It happens when we're matching
     /// on a variant and use a catch all pattern:
@@ -2337,27 +2468,26 @@ impl<'a> Compiler<'a> {
             // its variable patterns as assignments into the body and there's no
             // additional checks remaining. So the only thing left that could result
             // in the match failing is the additional guard.
-            None => match first_branch.guard {
-                // If there's no guard we're in the following situation:
-                // `∅ -> body`. It means that this branch will always match no
-                // matter what, all the remaining branches are just discarded and
-                // we can produce a terminating node to run the body
-                // unconditionally.
-                None => Decision::run(first_branch.body.clone()),
-                // If we have a guard we're in this scenario:
-                // `∅ if condition -> body`. We can produce a `Guard` node:
-                // if the condition evaluates to `True` we can run its body.
-                // Otherwise, we'll have to keep looking at the remaining branches
-                // to know what to do if this branch doesn't match.
-                Some(guard) => {
-                    let if_true = first_branch.body.clone();
-                    // All the remaining branches will be compiled and end up
-                    // in the path of the tree to choose if the guard is false.
-                    let _ = branches.pop_front();
-                    let if_false = self.compile(branches);
-                    Decision::guard(guard, if_true, if_false)
-                }
-            },
+            // If there's no guard we're in the following situation:
+            // `∅ -> body`. It means that this branch will always match no
+            // matter what, all the remaining branches are just discarded and
+            // we can produce a terminating node to run the body
+            // unconditionally.
+            None if !first_branch.has_guard => Decision::run(first_branch.body.clone()),
+            // If we have a guard we're in this scenario:
+            // `∅ if condition -> body`. We can produce a `Guard` node:
+            // if the condition evaluates to `True` we can run its body.
+            // Otherwise, we'll have to keep looking at the remaining branches
+            // to know what to do if this branch doesn't match.
+            None => {
+                let clause_index = first_branch.clause_index;
+                let if_true = first_branch.body.clone();
+                // All the remaining branches will be compiled and end up
+                // in the path of the tree to choose if the guard is false.
+                let _ = branches.pop_front();
+                let if_false = self.compile(branches);
+                Decision::guard(clause_index, if_true, if_false)
+            }
         }
     }
 
@@ -2479,7 +2609,7 @@ impl<'a> Compiler<'a> {
             var,
             choices,
             fallback: Box::new(last_choice),
-            fallback_check: Box::new(FallbackCheck::InfiniteCatchAll),
+            fallback_check: FallbackCheck::InfiniteCatchAll,
         }
     }
 
@@ -2502,9 +2632,9 @@ impl<'a> Compiler<'a> {
                 let mut remaining_choices = vec![];
                 for choice in choices.into_iter() {
                     if choice.0.is_ignored() {
-                        ignored_checks.push(choice.0)
+                        ignored_checks.push(choice.0);
                     } else {
-                        remaining_choices.push(choice)
+                        remaining_choices.push(choice);
                     }
                 }
 
@@ -2514,7 +2644,9 @@ impl<'a> Compiler<'a> {
                 // Otherwise we just use the last check as the final one that
                 // can be outright skipped.
                 let (last_check, last_choice) = choices.pop().expect("at least one choice");
-                let fallback_check = FallbackCheck::RuntimeCheck { check: last_check };
+                let fallback_check = FallbackCheck::RuntimeCheck {
+                    check: Box::new(last_check),
+                };
                 (choices, last_choice, fallback_check)
             };
 
@@ -2524,7 +2656,7 @@ impl<'a> Compiler<'a> {
             var,
             choices,
             fallback,
-            fallback_check: Box::new(fallback_check),
+            fallback_check,
         }
     }
 
@@ -2549,15 +2681,11 @@ impl<'a> Compiler<'a> {
         branch_mode: &BranchMode,
     ) -> RuntimeCheck {
         match (kind, branch_mode) {
-            (RuntimeCheckKind::Int { int_value }, _) => RuntimeCheck::Int {
-                int_value: int_value.clone(),
-            },
+            (RuntimeCheckKind::Int { int_value }, _) => RuntimeCheck::Int { int_value },
             (RuntimeCheckKind::Float { float_value }, _) => RuntimeCheck::Float { float_value },
-            (RuntimeCheckKind::String { value }, _) => RuntimeCheck::String {
-                value: value.clone(),
-            },
+            (RuntimeCheckKind::String { value }, _) => RuntimeCheck::String { value },
             (RuntimeCheckKind::StringPrefix { prefix }, _) => RuntimeCheck::StringPrefix {
-                prefix: prefix.clone(),
+                prefix,
                 rest: self.fresh_variable(string()),
             },
             (RuntimeCheckKind::Tuple { .. }, BranchMode::Tuple { elements }) => {
@@ -2591,6 +2719,7 @@ impl<'a> Compiler<'a> {
     ///
     fn new_checks(
         &mut self,
+        subject: &Variable,
         for_pattern: &Pattern,
         after_succeding_check: &RuntimeCheck,
     ) -> Vec<PatternCheck> {
@@ -2688,25 +2817,57 @@ impl<'a> Compiler<'a> {
             // we know it already starts with `"wibble"` we can just check that the remaining
             // part after that starts with the missing part of the prefix:
             // `prefix0 is "st" <> rest1`.
+            //
+            // The opposite can also happen. The prefix we've already checked might be longer
+            // than (and start with) the pattern's prefix. This comes up when an earlier branch
+            // matched the longer prefix but then failed for some other reason, such as a
+            // guard or a pattern on another of the case's subjects, so control falls
+            // through to this shorter-prefix branch. For example we might be checking
+            // the pattern `"wib" <> rest1` knowing that `"wibble" <> rest0` already
+            // succeeded.
+            //
+            // This rests on an invariant established by `check_overlaps`. A shorter prefix is
+            // only ever paired with an already-succeeded longer prefix when that longer prefix
+            // starts with it. Two disjoint prefixes (say `"b"` reached after `"aaa" <> rest0`
+            // succeeded) are never routed here together. So when `prefix1.strip_prefix(prefix0)`
+            // returns `None` below it is precisely because `prefix0` starts with `prefix1`, and
+            // the pattern's prefix is therefore already guaranteed to match. If it binds nothing
+            // we're done. Otherwise we rebind its `rest1` to the value with the (shorter) prefix
+            // stripped off.
             (
                 Pattern::StringPrefix {
                     prefix: prefix1,
-                    prefix_name: _,
                     rest: rest1,
+                    ..
                 },
                 RuntimeCheck::StringPrefix {
                     prefix: prefix0,
                     rest: rest0,
                 },
             ) => {
-                let remaining = prefix1.strip_prefix(prefix0.as_str()).unwrap_or(prefix1);
-                // If the prefixes are exactly the same then the only remaining check
-                // is for the two remaining bits to be the same.
-                if remaining.is_empty() {
-                    vec![rest0.is(*rest1)]
+                if let Some(remaining) = prefix1.strip_prefix(prefix0.as_str()) {
+                    // The pattern's prefix extends (or equals) the one we've already checked.
+                    // If the prefixes are exactly the same then the only remaining check is
+                    // for the two remaining bits to be the same.
+                    if remaining.is_empty() {
+                        vec![rest0.is(*rest1)]
+                    } else {
+                        vec![rest0.is(self.string_prefix_pattern(remaining, *rest1))]
+                    }
                 } else {
-                    vec![rest0.is(self.string_prefix_pattern(remaining, *rest1))]
+                    // The prefix we've already checked is longer than the pattern's prefix, so
+                    // the pattern is guaranteed to match and all that's left is binding.
+                    self.guaranteed_prefix_checks(subject, prefix1, *rest1)
                 }
+            }
+
+            // Just like the case above, if we already know the string is exactly some
+            // literal value then a prefix pattern that value starts with is guaranteed
+            // to match. This comes up when an earlier branch matched the literal but
+            // then failed for some other reason, such as a guard or a pattern on
+            // another of the case's subjects, and control falls through to this branch.
+            (Pattern::StringPrefix { prefix, rest, .. }, RuntimeCheck::String { .. }) => {
+                self.guaranteed_prefix_checks(subject, prefix, *rest)
             }
 
             (_, _) => unreachable!("invalid pattern overlapping"),
@@ -2774,6 +2935,43 @@ impl<'a> Compiler<'a> {
 
     fn bit_array_pattern(&mut self, tests: VecDeque<BitArrayTest>) -> Id<Pattern> {
         self.patterns.alloc(Pattern::BitArray { tests })
+    }
+
+    /// The checks left for a string prefix pattern we already know will match,
+    /// because an earlier runtime check on the same string matched its prefix.
+    ///
+    fn guaranteed_prefix_checks(
+        &mut self,
+        subject: &Variable,
+        prefix: &EcoString,
+        rest: Id<Pattern>,
+    ) -> Vec<PatternCheck> {
+        let rest_pattern = self.pattern(rest);
+        let rest_name = match rest_pattern {
+            Pattern::Variable { name } => name.clone(),
+            // A discarded rest binds nothing, and the prefix is already known
+            // to match, so there is no check to make at all.
+            Pattern::Discard => return vec![],
+            Pattern::Int { .. }
+            | Pattern::Float { .. }
+            | Pattern::String { .. }
+            | Pattern::StringPrefix { .. }
+            | Pattern::StringPrefixSlice { .. }
+            | Pattern::Assign { .. }
+            | Pattern::Tuple { .. }
+            | Pattern::Variant { .. }
+            | Pattern::NonEmptyList { .. }
+            | Pattern::EmptyList
+            | Pattern::BitArray { .. } => {
+                unreachable!("rest should be Variable or Discard, got {rest_pattern:?}")
+            }
+        };
+
+        let pattern = self.patterns.alloc(Pattern::StringPrefixSlice {
+            rest_name,
+            prefix: prefix.clone(),
+        });
+        vec![subject.is(pattern)]
     }
 
     /// Allocates a new `StringPrefix` pattern with the given prefix and pattern
@@ -2848,12 +3046,18 @@ struct BranchSplitter {
     indices: HashMap<RuntimeCheckKind, usize>,
 
     /// This is used to store the indices of just the prefix checks as they have
-    /// different rules from all the other `RuntimeCheckKinds` whose indices are
-    /// instead stored in the `indices` field.
+    /// different rules from the other `RuntimeCheckKinds` whose indices are
+    /// instead stored in the `indices` field, or in `literal_indices` in the
+    /// case of exact strings.
     ///
-    /// We discuss this in more detail in the `index_of_overlapping_runtime_check`
-    /// function!
+    /// We discuss this in more detail in the `check_overlaps` function!
     prefix_indices: Trie<String, usize>,
+
+    /// The indices of the exact string literal choices, keyed by the literal
+    /// itself. A prefix check overlaps with every literal starting with it, so
+    /// we need to look those up by prefix and not just by exact value the way
+    /// `indices` does.
+    literal_indices: Trie<String, usize>,
 }
 
 impl BranchSplitter {
@@ -2876,6 +3080,7 @@ impl BranchSplitter {
             choices,
             indices,
             prefix_indices: Trie::new(),
+            literal_indices: Trie::new(),
         }
     }
 
@@ -2910,52 +3115,64 @@ impl BranchSplitter {
         if let Pattern::BitArray { tests } = pattern {
             self.add_checked_bit_array_branch(pattern_check, tests, branch, compiler);
             return;
-        };
+        }
 
         let kind = pattern
             .to_runtime_check_kind()
             .expect("no unconditional patterns left");
 
-        let indices_of_overlapping_checks = self.indices_of_overlapping_checks(&kind);
-        if indices_of_overlapping_checks.is_empty() {
-            // This is a new choice we haven't yet discovered as it is not overlapping
-            // with any of the existing ones. So we add it as a possible new path
-            // we might have to go down to in the decision tree.
+        let CheckOverlaps {
+            overlapping,
+            needs_new_choice,
+        } = self.check_overlaps(&kind);
+
+        // The branch is relevant to every existing choice its check overlaps
+        // with, so we add it (together with any newly discovered checks) to all
+        // of those paths. For a string prefix this also includes any longer
+        // prefixes and exact literals that start with it. When one of those
+        // matched but its branch then failed, control falls through to this
+        // shorter prefix.
+        for index in overlapping.iter() {
+            let (overlapping_check, branches) = self
+                .choices
+                .get_mut(*index)
+                .expect("check to already be a choice");
+
+            let mut branch = branch.clone();
+            for new_check in compiler.new_checks(&pattern_check.var, &pattern, overlapping_check) {
+                branch.add_check(new_check);
+            }
+            branches.push_back(branch);
+        }
+
+        // Unless the check is fully subsumed by an existing choice, we also add
+        // it as a new path we might have to go down to in the decision tree.
+        // A shorter prefix still needs its own choice even when it overlaps
+        // earlier longer prefixes, so it can match values outside those.
+        if needs_new_choice {
             self.save_index_of_new_choice(kind.clone());
 
             let check = compiler.fresh_runtime_check(kind, branch_mode);
-            for new_check in compiler.new_checks(&pattern, &check) {
+            for new_check in compiler.new_checks(&pattern_check.var, &pattern, &check) {
                 branch.add_check(new_check);
             }
             let mut branches = self.fallback.clone();
             branches.push_back(branch);
 
             self.choices.push((check, branches));
-        } else {
-            // Otherwise, we know that the check for this branch overlaps with
-            // (possibly more than one) existing checks and so is relevant only
-            // as part of those existing paths.
-            // We'll add the branch with its newly discovered checks only to those
-            // paths.
-            for index in indices_of_overlapping_checks.iter() {
-                let (overlapping_check, branches) = self
-                    .choices
-                    .get_mut(*index)
-                    .expect("check to already be a choice");
-
-                let mut branch = branch.clone();
-                for new_check in compiler.new_checks(&pattern, overlapping_check) {
-                    branch.add_check(new_check);
-                }
-                branches.push_back(branch);
-            }
         }
 
         // Then we have to update all variant checks with any new name/module
         // we might have discovered from the pattern to make sure we're using
         // the correct qualification to refer to each constructor.
-        if let Pattern::Variant { name, module, .. } = pattern {
-            for index in indices_of_overlapping_checks {
+        if let Pattern::Variant {
+            used_name,
+            name,
+            module,
+            ..
+        } = pattern
+        {
+            for index in overlapping {
                 let (check, _) = self
                     .choices
                     .get_mut(index)
@@ -2963,6 +3180,7 @@ impl BranchSplitter {
                 if let RuntimeCheck::Variant { match_, .. } = check {
                     *match_ = VariantMatch::ExplicitlyMatchedOn {
                         module: module.clone(),
+                        used_name: used_name.clone(),
                         name: name.clone(),
                     }
                 }
@@ -2984,7 +3202,7 @@ impl BranchSplitter {
     fn add_checked_bit_array_branch(
         &mut self,
         pattern_check: PatternCheck,
-        tests: VecDeque<BitArrayTest>,
+        mut tests: VecDeque<BitArrayTest>,
         mut branch: Branch,
         compiler: &mut Compiler<'_>,
     ) {
@@ -3021,12 +3239,37 @@ impl BranchSplitter {
             // if the succeeding pivot test is `size >= 20` there's no point
             // in checking that `size >= 10`, we know that's always true in this
             // path of the decision tree!
-            let tests = tests
-                .into_iter()
-                .filter(|test| test.succeeds_if_succeeding(&pivot_test) == Confidence::Uncertain)
-                .collect::<VecDeque<_>>();
-
             let mut branch = branch.clone();
+            tests.retain(|test| {
+                if test.succeeds_if_succeeding(&pivot_test) == Confidence::Uncertain {
+                    return true;
+                }
+
+                // A test we're about to drop might still be giving a name to
+                // the segment it matches on, so we turn that into an
+                // assignment in the branch's body. Otherwise the name would
+                // be left unbound in this path of the decision tree.
+                if let BitArrayTest::Match(MatchTest { value, .. }) = test {
+                    match value {
+                        // A variable has no constant bits to compare with, and
+                        // a variable test at the front of a pattern is popped
+                        // before any split, so one never gets dropped here.
+                        BitArrayMatchedValue::Variable(_) => {
+                            unreachable!("variable segment dropped while splitting")
+                        }
+                        BitArrayMatchedValue::Assign { name, value } => branch
+                            .body
+                            .assign_segment_constant_value(name.clone(), value.as_ref()),
+                        BitArrayMatchedValue::LiteralFloat(_)
+                        | BitArrayMatchedValue::LiteralInt { .. }
+                        | BitArrayMatchedValue::LiteralString { .. }
+                        | BitArrayMatchedValue::Discard(_) => {}
+                    }
+                }
+
+                false
+            });
+
             let variable = &pattern_check.var;
             branch.add_check(variable.is(compiler.bit_array_pattern(tests)));
 
@@ -3052,33 +3295,59 @@ impl BranchSplitter {
     }
 
     fn save_index_of_new_choice(&mut self, kind: RuntimeCheckKind) {
-        let _ = match kind {
-            RuntimeCheckKind::Int { .. }
-            | RuntimeCheckKind::Float { .. }
-            | RuntimeCheckKind::String { .. }
-            | RuntimeCheckKind::Tuple { .. }
-            | RuntimeCheckKind::Variant { .. }
-            | RuntimeCheckKind::EmptyList
-            | RuntimeCheckKind::NonEmptyList => self.indices.insert(kind, self.choices.len()),
-
-            RuntimeCheckKind::StringPrefix { prefix } => self
-                .prefix_indices
-                .insert(prefix.to_string(), self.choices.len()),
-        };
-    }
-
-    fn indices_of_overlapping_checks(&self, kind: &RuntimeCheckKind) -> Vec<usize> {
+        let index = self.choices.len();
         match kind {
-            // All these checks will only overlap with a check that is exactly the
-            // same, so we just look up their index in the `indices` map using the
-            // kind as the lookup.
             RuntimeCheckKind::Int { .. }
             | RuntimeCheckKind::Float { .. }
             | RuntimeCheckKind::Tuple { .. }
             | RuntimeCheckKind::Variant { .. }
             | RuntimeCheckKind::EmptyList
             | RuntimeCheckKind::NonEmptyList => {
-                self.indices.get(kind).cloned().into_iter().collect_vec()
+                let _ = self.indices.insert(kind, index);
+            }
+
+            // An exact literal is looked up both by its exact value, to find an
+            // identical check, and by any prefix it starts with, so a prefix
+            // check can find every literal it overlaps with. The literal trie
+            // answers both.
+            RuntimeCheckKind::String { value } => {
+                let _ = self.literal_indices.insert(value.to_string(), index);
+            }
+
+            RuntimeCheckKind::StringPrefix { prefix } => {
+                let _ = self.prefix_indices.insert(prefix.to_string(), index);
+            }
+        }
+    }
+
+    /// The indices of the choices for exact string literals that start with the
+    /// given prefix.
+    ///
+    fn overlapping_string_literals(&self, prefix: &EcoString) -> impl Iterator<Item = usize> {
+        descendant_candidates(&self.literal_indices, prefix)
+            .filter(|&(literal, _)| literal.starts_with(prefix.as_str()))
+            .map(|(_, index)| index)
+    }
+
+    fn check_overlaps(&self, kind: &RuntimeCheckKind) -> CheckOverlaps {
+        match kind {
+            // All these checks will only overlap with a check that is exactly the
+            // same, so we just look up their index in the `indices` map using the
+            // kind as the lookup. An identical existing choice fully subsumes this
+            // one, so we only need a new choice when there isn't one already.
+            RuntimeCheckKind::Int { .. }
+            | RuntimeCheckKind::Float { .. }
+            | RuntimeCheckKind::Tuple { .. }
+            | RuntimeCheckKind::Variant { .. }
+            | RuntimeCheckKind::EmptyList
+            | RuntimeCheckKind::NonEmptyList => {
+                let overlapping = self.indices.get(kind).cloned().into_iter().collect_vec();
+                let needs_new_choice = overlapping.is_empty();
+
+                CheckOverlaps {
+                    overlapping,
+                    needs_new_choice,
+                }
             }
 
             // String patterns are a bit more tricky as they might end up overlapping
@@ -3101,7 +3370,55 @@ impl BranchSplitter {
             // That is, we look for a prefix of the pattern we're checking in the prefix
             // trie.
             RuntimeCheckKind::StringPrefix { prefix: value } => {
-                ancestors_values(&self.prefix_indices, value).collect_vec()
+                // A prefix pattern overlaps with any of its own prefixes, and also with a
+                // longer prefix it is itself a prefix of: once that longer prefix matched,
+                // this shorter one is guaranteed to match too, so control has to be able
+                // to fall through to it if the longer prefix's branch then fails.
+                //
+                // The same goes for exact string literals that start with this
+                // prefix: `"a" <> _` still matches a string we've checked is `"ab"`.
+                let literals = self.overlapping_string_literals(value);
+
+                match self.prefix_indices.get_ancestor(value.as_str()) {
+                    // One of `value`'s own (shorter) prefixes is already a choice. Any
+                    // value that could match `value` is routed into that choice first, so
+                    // `value` doesn't need its own. It just joins that choice, along
+                    // with any longer prefixes nested under it that control could fall
+                    // through from.
+                    Some(_) => {
+                        let overlapping = overlap_candidates(&self.prefix_indices, value)
+                            // An ancestor (or the prefix itself) always belongs in that
+                            // choice as `value` extends it. A longer prefix belongs in it
+                            // as a fall-through target. Anything else is unrelated.
+                            .filter(|&(prefix, _)| {
+                                value.starts_with(prefix) || prefix.starts_with(value.as_str())
+                            })
+                            .map(|(_, index)| index)
+                            .chain(literals)
+                            .collect_vec();
+
+                        CheckOverlaps {
+                            overlapping,
+                            needs_new_choice: false,
+                        }
+                    }
+                    // No shorter prefix of `value` is a choice yet, so `value` needs its
+                    // own choice to match values outside any longer prefixes. It is also
+                    // added to each of those longer prefixes as a fall-through target,
+                    // for when one of them matches but its branch then fails.
+                    None => {
+                        let overlapping = descendant_candidates(&self.prefix_indices, value)
+                            .filter(|&(prefix, _)| prefix.starts_with(value.as_str()))
+                            .map(|(_, index)| index)
+                            .chain(literals)
+                            .collect_vec();
+
+                        CheckOverlaps {
+                            overlapping,
+                            needs_new_choice: true,
+                        }
+                    }
+                }
             }
 
             // Strings are almost exactly the same, except they could also have an exact
@@ -3109,20 +3426,64 @@ impl BranchSplitter {
             // another string pattern (if they're matching on the same value), or with
             // one or more string prefix patterns with a matching prefix.
             RuntimeCheckKind::String { value } => {
-                let first_index = self.indices.get(kind).cloned();
-                first_index
+                // Unlike a prefix pattern, an exact literal can only overlap with one of
+                // its own prefixes. A longer prefix can never match an exact literal (the
+                // literal is too short), so we leave those out.
+                let first_index = self.literal_indices.get(value.as_str()).cloned();
+                let overlapping = first_index
                     .into_iter()
-                    .chain(ancestors_values(&self.prefix_indices, value))
-                    .collect_vec()
+                    .chain(
+                        overlap_candidates(&self.prefix_indices, value)
+                            .filter(|&(prefix, _)| value.starts_with(prefix))
+                            .map(|(_, index)| index),
+                    )
+                    .collect_vec();
+                let needs_new_choice = overlapping.is_empty();
+
+                CheckOverlaps {
+                    overlapping,
+                    needs_new_choice,
+                }
             }
         }
     }
 }
 
-fn ancestors_values(trie: &Trie<String, usize>, key: &str) -> impl Iterator<Item = usize> {
+/// Describes how a branch's runtime check relates to the choices discovered so
+/// far when splitting branches.
+struct CheckOverlaps {
+    /// The indices of the existing choices this branch is relevant to and so
+    /// must be added to
+    overlapping: Vec<usize>,
+    /// Whether the check also needs to become a new choice of its own. A new choice is a
+    /// fresh branch of the decision tree, carrying its own runtime check.
+    ///
+    /// For example, suppose `"wib" <> _` is reached after `"wibble" <> _` is already a
+    /// choice. A string can start with `"wib"` without starting with `"wibble"`
+    /// (for example `"wibz"`), so `"wib"` is not subsumed and needs its own choice to
+    /// match those values. With the order reversed, `"wibble"` would route through
+    /// the existing `"wib"` choice and need no choice of its own.
+    needs_new_choice: bool,
+}
+
+fn overlap_candidates<'a>(
+    trie: &'a Trie<String, usize>,
+    key: &str,
+) -> impl Iterator<Item = (&'a str, usize)> {
     trie.get_ancestor(key)
         .into_iter()
-        .flat_map(|ancestor| ancestor.values().copied())
+        .flat_map(|ancestor| ancestor.iter())
+        .map(|(prefix, index)| (prefix.as_str(), *index))
+}
+
+fn descendant_candidates<'a>(
+    trie: &'a Trie<String, usize>,
+    key: &str,
+) -> impl Iterator<Item = (&'a str, usize)> {
+    trie.get_raw_descendant(key)
+        .into_iter()
+        .flat_map(|descendant| descendant.iter())
+        .map(|(prefix, index)| (prefix.as_str(), *index))
 }
 
 #[derive(Debug)]
@@ -3143,7 +3504,7 @@ impl ConstructorSpecialiser {
             // it the same as an external type.
             Opaque::Opaque if current_module != type_module => return Vec::new(),
             Opaque::Opaque | Opaque::NotOpaque => {}
-        };
+        }
 
         let specialiser = Self::new(constructors.type_parameters_ids.as_slice(), type_arguments);
         constructors
@@ -3167,6 +3528,7 @@ impl ConstructorSpecialiser {
             name,
             parameters,
             documentation,
+            deprecation,
         } = v;
         let parameters = parameters
             .iter()
@@ -3180,6 +3542,7 @@ impl ConstructorSpecialiser {
             name: name.clone(),
             parameters,
             documentation: documentation.clone(),
+            deprecation: deprecation.clone(),
         }
     }
 
@@ -3299,7 +3662,7 @@ impl CaseToCompile {
                     .subject_variables
                     .get(i)
                     .expect("wrong number of subjects");
-                checks.push(var.is(pattern))
+                checks.push(var.is(pattern));
             }
 
             let has_guard = branch.guard.is_some();
@@ -3412,14 +3775,16 @@ impl CaseToCompile {
                 module,
                 ..
             } => {
-                let index = constructor.expect_ref("must be inferred").constructor_index as usize;
+                let constructor = constructor.expect_ref("must be inferred");
+                let index = constructor.constructor_index as usize;
                 let module = module.as_ref().map(|(module, _)| module.clone());
                 let fields = arguments
                     .iter()
                     .map(|argument| self.register(&argument.value))
                     .collect_vec();
                 self.insert(Pattern::Variant {
-                    name: name.clone(),
+                    used_name: name.clone(),
+                    name: constructor.name.clone(),
                     module,
                     index,
                     fields,
@@ -3440,7 +3805,7 @@ impl CaseToCompile {
                 let prefix = left_side_string.clone();
                 let prefix_name = left_side_assignment
                     .as_ref()
-                    .map(|(label, _)| label.clone());
+                    .map(|assignment| assignment.name.clone());
                 let rest_pattern = match right_side_assignment {
                     AssignName::Variable(name) => Pattern::Variable { name: name.clone() },
                     AssignName::Discard(_) => Pattern::Discard,
@@ -3501,9 +3866,17 @@ impl CaseToCompile {
             let is_last_segment = i + 1 == segments_count;
             match &segment_size {
                 ReadSize::RemainingBits => (),
-                ReadSize::RemainingBytes => tests.push_back(BitArrayTest::CatchAllIsBytes {
-                    size_so_far: previous_end.clone(),
-                }),
+                ReadSize::RemainingBytes => {
+                    // `(bitSize - c) % 8 === 0` is equivalent to
+                    // `(bitSize - (c % 8)) % 8 === 0` for any constant c,
+                    // because c ≡ c%8 (mod 8). This ensures structurally
+                    // identical JS checks regardless of the accumulated offset.
+                    let mut normalized = previous_end.clone();
+                    normalized.constant = &normalized.constant % 8;
+                    tests.push_back(BitArrayTest::CatchAllIsBytes {
+                        size_so_far: normalized,
+                    });
+                }
                 ReadSize::ConstantBits(_)
                 | ReadSize::VariableBits { .. }
                 | ReadSize::BinaryOperator { .. } => {
@@ -3515,7 +3888,7 @@ impl CaseToCompile {
                     };
                     tests.push_back(BitArrayTest::Size(SizeTest { operator, size }));
                 }
-            };
+            }
 
             let type_ = match &segment.type_ {
                 type_ if type_.is_int() => ReadType::Int,
@@ -3834,8 +4207,8 @@ fn bit_array_size(
 ///
 #[must_use]
 fn superset(
-    one: &im::HashMap<VariableUsage, usize>,
-    other: &im::HashMap<VariableUsage, usize>,
+    one: &imbl::HashMap<VariableUsage, usize>,
+    other: &imbl::HashMap<VariableUsage, usize>,
 ) -> bool {
     other
         .iter()
@@ -3850,7 +4223,7 @@ fn representable_with_bits(value: &BigInt, bits: u32, signed: bool) -> bool {
     // No number is representable in 0 bits.
     if bits == 0 {
         return false;
-    };
+    }
 
     let required_bits = match (value.sign(), signed) {
         // Zero always needs one bit.
@@ -3924,9 +4297,6 @@ mod representable_with_bits_test {
 
     #[test]
     fn zero_representable_with_bits_test() {
-        for i in 0..12 {
-            println!("{i}: {}", BigInt::from(i).bits());
-        }
         assert!(!representable_with_bits(&BigInt::ZERO, 0, false));
         assert!(!representable_with_bits(&BigInt::ZERO, 0, true));
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2024 The Gleam contributors
+
 use crate::assert_js;
 
 #[test]
@@ -133,6 +136,37 @@ fn constants_get_their_own_jsdoc_comment() {
         "
 /// 11 is clearly the best number!
 pub const jaks_favourite_number = 11
+"
+    );
+}
+
+#[test]
+fn list_prepend() {
+    assert_js!(
+        "
+const wibble = [2, 3, 4]
+pub const wobble = [0, 1, ..wibble]
+"
+    );
+}
+
+#[test]
+fn list_prepend_from_other_module() {
+    assert_js!(
+        ("mod", "pub const wibble = [2, 3, 4]"),
+        "
+import mod
+
+pub const wobble = [0, 1, ..mod.wibble]
+"
+    );
+}
+
+#[test]
+fn list_prepend_literal() {
+    assert_js!(
+        "
+pub const wibble = [0, 1, ..[2, 3, 4]]
 "
     );
 }

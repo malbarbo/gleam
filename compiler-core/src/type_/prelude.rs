@@ -1,12 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 use hexpm::version::Version;
 use strum::{EnumIter, IntoEnumIterator};
 
-use crate::{
-    ast::{Publicity, SrcSpan},
-    build::Origin,
-    line_numbers::LineNumbers,
-    uid::UniqueIdGenerator,
-};
+use crate::{ast::Publicity, build::Origin, uid::UniqueIdGenerator};
 
 use super::{
     ModuleInterface, Opaque, References, Type, TypeConstructor, TypeValueConstructor,
@@ -14,6 +12,7 @@ use super::{
     ValueConstructorVariant,
 };
 use crate::type_::Deprecation::NotDeprecated;
+use src_span::{LineNumbers, SrcSpan};
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 const BIT_ARRAY: &str = "BitArray";
@@ -244,16 +243,14 @@ pub fn build_prelude(ids: &UniqueIdGenerator) -> ModuleInterface {
         minimum_required_version: Version::new(0, 1, 0),
         type_aliases: HashMap::new(),
         documentation: Vec::new(),
-        contains_echo: false,
         references: References::default(),
-        inline_functions: HashMap::new(),
     };
 
     for t in PreludeType::iter() {
         match t {
             PreludeType::BitArray => {
                 let v = TypeConstructor {
-                    origin: Default::default(),
+                    origin: SrcSpan::default(),
                     parameters: vec![],
                     type_: bit_array(),
                     module: PRELUDE_MODULE_NAME.into(),
@@ -274,11 +271,13 @@ pub fn build_prelude(ids: &UniqueIdGenerator) -> ModuleInterface {
                                 name: "True".into(),
                                 parameters: vec![],
                                 documentation: None,
+                                deprecation: NotDeprecated,
                             },
                             TypeValueConstructor {
                                 name: "False".into(),
                                 parameters: vec![],
                                 documentation: None,
+                                deprecation: NotDeprecated,
                             },
                         ],
                         opaque: Opaque::NotOpaque,
@@ -319,7 +318,7 @@ pub fn build_prelude(ids: &UniqueIdGenerator) -> ModuleInterface {
                 let _ = prelude.types.insert(
                     BOOL.into(),
                     TypeConstructor {
-                        origin: Default::default(),
+                        origin: SrcSpan::default(),
                         parameters: vec![],
                         type_: bool(),
                         module: PRELUDE_MODULE_NAME.into(),
@@ -334,7 +333,7 @@ pub fn build_prelude(ids: &UniqueIdGenerator) -> ModuleInterface {
                 let _ = prelude.types.insert(
                     FLOAT.into(),
                     TypeConstructor {
-                        origin: Default::default(),
+                        origin: SrcSpan::default(),
                         parameters: vec![],
                         type_: float(),
                         module: PRELUDE_MODULE_NAME.into(),
@@ -351,7 +350,7 @@ pub fn build_prelude(ids: &UniqueIdGenerator) -> ModuleInterface {
                     TypeConstructor {
                         parameters: vec![],
                         type_: int(),
-                        origin: Default::default(),
+                        origin: SrcSpan::default(),
                         module: PRELUDE_MODULE_NAME.into(),
                         publicity: Publicity::Public,
                         deprecation: NotDeprecated,
@@ -365,7 +364,7 @@ pub fn build_prelude(ids: &UniqueIdGenerator) -> ModuleInterface {
                 let _ = prelude.types.insert(
                     LIST.into(),
                     TypeConstructor {
-                        origin: Default::default(),
+                        origin: SrcSpan::default(),
                         parameters: vec![list_parameter.clone()],
                         type_: list(list_parameter),
                         module: PRELUDE_MODULE_NAME.into(),
@@ -396,7 +395,7 @@ pub fn build_prelude(ids: &UniqueIdGenerator) -> ModuleInterface {
                 let _ = prelude.types.insert(
                     NIL.into(),
                     TypeConstructor {
-                        origin: Default::default(),
+                        origin: SrcSpan::default(),
                         parameters: vec![],
                         type_: nil(),
                         module: PRELUDE_MODULE_NAME.into(),
@@ -413,6 +412,7 @@ pub fn build_prelude(ids: &UniqueIdGenerator) -> ModuleInterface {
                             name: "Nil".into(),
                             parameters: vec![],
                             documentation: None,
+                            deprecation: NotDeprecated,
                         }],
                         opaque: Opaque::NotOpaque,
                     },
@@ -427,7 +427,7 @@ pub fn build_prelude(ids: &UniqueIdGenerator) -> ModuleInterface {
                 let _ = prelude.types.insert(
                     RESULT.into(),
                     TypeConstructor {
-                        origin: Default::default(),
+                        origin: SrcSpan::default(),
                         parameters: vec![result_value.clone(), result_error.clone()],
                         type_: result(result_value.clone(), result_error.clone()),
                         module: PRELUDE_MODULE_NAME.into(),
@@ -449,6 +449,7 @@ pub fn build_prelude(ids: &UniqueIdGenerator) -> ModuleInterface {
                                     documentation: None,
                                 }],
                                 documentation: None,
+                                deprecation: NotDeprecated,
                             },
                             TypeValueConstructor {
                                 name: "Error".into(),
@@ -458,6 +459,7 @@ pub fn build_prelude(ids: &UniqueIdGenerator) -> ModuleInterface {
                                     documentation: None,
                                 }],
                                 documentation: None,
+                                deprecation: NotDeprecated,
                             },
                         ],
                         opaque: Opaque::NotOpaque,
@@ -505,7 +507,7 @@ pub fn build_prelude(ids: &UniqueIdGenerator) -> ModuleInterface {
                 let _ = prelude.types.insert(
                     STRING.into(),
                     TypeConstructor {
-                        origin: Default::default(),
+                        origin: SrcSpan::default(),
                         parameters: vec![],
                         type_: string(),
                         module: PRELUDE_MODULE_NAME.into(),
@@ -520,7 +522,7 @@ pub fn build_prelude(ids: &UniqueIdGenerator) -> ModuleInterface {
                 let _ = prelude.types.insert(
                     UTF_CODEPOINT.into(),
                     TypeConstructor {
-                        origin: Default::default(),
+                        origin: SrcSpan::default(),
                         parameters: vec![],
                         type_: utf_codepoint(),
                         module: PRELUDE_MODULE_NAME.into(),

@@ -1,6 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 use gleam_core::{
     analyse::TargetSupport,
-    build::{Codegen, Compile, Mode, Options, Target},
+    build::{Codegen, Compile, ErlangOutput, Mode, Options, Target},
     error::{Error, ShellCommandFailureReason},
     paths::ProjectPaths,
 };
@@ -18,11 +21,12 @@ pub fn command(paths: &ProjectPaths) -> Result<(), Error> {
             mode: Mode::Dev,
             target: Some(Target::Erlang),
             no_print_progress: false,
+            erlang_output: ErlangOutput::Binary,
         },
         crate::build::download_dependencies(paths, crate::cli::Reporter::new())?,
     )?;
 
-    // Don't exit on ctrl+c as it is used by child erlang shell
+    // Don't exit on ctrl+c as it is used by child Erlang shell
     ctrlc::set_handler(move || {}).expect("Error setting Ctrl-C handler");
 
     // Prepare the Erlang shell command
@@ -41,9 +45,9 @@ pub fn command(paths: &ProjectPaths) -> Result<(), Error> {
 
     // Run the shell
     tracing::info!("Running OS process {:?}", command);
-    let _ = command.status().map_err(|e| Error::ShellCommand {
+    let _ = command.status().map_err(|error| Error::ShellCommand {
         program: "erl".into(),
-        reason: ShellCommandFailureReason::IoError(e.kind()),
+        reason: ShellCommandFailureReason::IoError(error.kind()),
     })?;
     Ok(())
 }

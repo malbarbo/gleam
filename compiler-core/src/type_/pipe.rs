@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use self::expression::CallKind;
 
 use super::*;
@@ -22,7 +25,7 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
     fn new(expr_typer: &'a mut ExprTyper<'b, 'c>, size: usize, first: TypedExpr, end: u32) -> Self {
         let first_type = first.type_();
         let first_location = first.location();
-        let first_value = new_pipeline_assignment(expr_typer, first);
+        let first_value = new_pipeline_assignment(expr_typer, first, first_location);
         Self {
             size,
             expr_typer,
@@ -82,6 +85,8 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
         let mut finally = None;
 
         for (i, call) in expressions.into_iter().enumerate() {
+            let step_location = call.location();
+
             if self.expr_typer.previous_panics {
                 self.expr_typer
                     .warn_for_unreachable_code(call.location(), PanicPosition::PreviousExpression);
@@ -117,6 +122,7 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
                             arguments,
                             type_: return_type,
                             fun: Box::new(func),
+                            open_parenthesis: None,
                         },
                     )
                 }
@@ -129,7 +135,7 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
                     location,
                     ..
                 } => {
-                    let fun = self.expr_typer.infer(*fun);
+                    let fun = self.infer_called(*fun, arguments.len() + 1);
 
                     match fun.type_().fn_types() {
                         // Rewrite as right(..args)(left)
@@ -138,6 +144,12 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
                             // Without lifting purity tracking into the type system,
                             // we have no idea whether it's pure or not!
                             self.expr_typer.purity = self.expr_typer.purity.merge(Purity::Unknown);
+
+                            // This syntax is deprecated.
+                            self.expr_typer
+                                .problems
+                                .warning(Warning::PipeIntoCallWhichReturnsFunction { location });
+
                             (
                                 PipelineAssignmentKind::FunctionCall,
                                 self.infer_apply_to_call_pipe(fun, arguments, location),
@@ -164,8 +176,12 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
                     expression: None,
                     message,
                 } => {
-                    self.expr_typer.environment.echo_found = true;
                     self.expr_typer.purity = Purity::Impure;
+                    self.expr_typer
+                        .environment
+                        .references
+                        .echo_usages
+                        .push(location);
                     // An echo that is not followed by an expression that is
                     // used as a pipeline's step is just like the identity
                     // function.
@@ -192,7 +208,7 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
                 | UntypedExpr::Var { .. }
                 | UntypedExpr::List { .. }
                 | UntypedExpr::BinOp { .. }
-                | UntypedExpr::PipeLine { .. }
+                | UntypedExpr::Pipeline { .. }
                 | UntypedExpr::Case { .. }
                 | UntypedExpr::FieldAccess { .. }
                 | UntypedExpr::Tuple { .. }
@@ -212,7 +228,7 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
             if i + 2 == self.size {
                 finally = Some((call, kind));
             } else {
-                self.push_assignment(call, kind);
+                self.push_assignment(call, step_location, kind);
             }
         }
 
@@ -269,10 +285,15 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
     }
 
     /// Push an assignment for the value on the left hand side of the pipe
-    fn push_assignment(&mut self, expression: TypedExpr, kind: PipelineAssignmentKind) {
+    fn push_assignment(
+        &mut self,
+        expression: TypedExpr,
+        call_location: SrcSpan,
+        kind: PipelineAssignmentKind,
+    ) {
         self.argument_type = expression.type_();
         self.argument_location = expression.location();
-        let assignment = new_pipeline_assignment(self.expr_typer, expression);
+        let assignment = new_pipeline_assignment(self.expr_typer, expression, call_location);
         self.assignments.push((assignment, kind));
     }
 
@@ -294,6 +315,7 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
             type_,
             arguments,
             fun: Box::new(function),
+            open_parenthesis: None,
         };
         let arguments = vec![self.untyped_left_hand_value_variable_call_argument()];
         // TODO: use `.with_unify_error_situation(UnifyErrorSituation::PipeTypeMismatch)`
@@ -312,6 +334,7 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
             type_,
             arguments,
             fun: Box::new(function),
+            open_parenthesis: None,
         }
     }
 
@@ -339,6 +362,7 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
             type_,
             arguments,
             fun: Box::new(fun),
+            open_parenthesis: None,
         }
     }
 
@@ -346,7 +370,7 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
     /// b is the `function` argument.
     fn infer_apply_pipe(&mut self, function: UntypedExpr) -> TypedExpr {
         let function_location = function.location();
-        let function = Box::new(self.expr_typer.infer(function));
+        let function = Box::new(self.infer_called(function, 1));
 
         self.expr_typer.purity = self
             .expr_typer
@@ -370,13 +394,44 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
                 };
                 self.expr_typer.problems.error(error);
             }
-        };
+        }
 
         TypedExpr::Call {
             location: function_location,
             type_: return_type,
             fun: function,
             arguments: vec![self.typed_left_hand_value_variable_call_argument()],
+            open_parenthesis: None,
+        }
+    }
+
+    fn infer_called(&mut self, function: UntypedExpr, arity: usize) -> TypedExpr {
+        match function {
+            // If the function is used as a variable, then we can suggest values
+            // from imported modules with the same name and same arity.
+            UntypedExpr::Var { location, name } => {
+                self.expr_typer.infer_called_var(name, location, arity)
+            }
+            UntypedExpr::Int { .. }
+            | UntypedExpr::Float { .. }
+            | UntypedExpr::String { .. }
+            | UntypedExpr::Block { .. }
+            | UntypedExpr::Fn { .. }
+            | UntypedExpr::List { .. }
+            | UntypedExpr::Call { .. }
+            | UntypedExpr::BinOp { .. }
+            | UntypedExpr::Pipeline { .. }
+            | UntypedExpr::Case { .. }
+            | UntypedExpr::FieldAccess { .. }
+            | UntypedExpr::Tuple { .. }
+            | UntypedExpr::TupleIndex { .. }
+            | UntypedExpr::Todo { .. }
+            | UntypedExpr::Panic { .. }
+            | UntypedExpr::Echo { .. }
+            | UntypedExpr::BitArray { .. }
+            | UntypedExpr::RecordUpdate { .. }
+            | UntypedExpr::NegateBool { .. }
+            | UntypedExpr::NegateInt { .. } => self.expr_typer.infer(function),
         }
     }
 
@@ -428,8 +483,8 @@ impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
 fn new_pipeline_assignment(
     expr_typer: &mut ExprTyper<'_, '_>,
     expression: TypedExpr,
+    location: SrcSpan,
 ) -> TypedPipelineAssignment {
-    let location = expression.location();
     // Insert the variable for use in type checking the rest of the pipeline
     expr_typer.environment.insert_local_variable(
         PIPE_VARIABLE.into(),

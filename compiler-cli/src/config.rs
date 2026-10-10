@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use camino::Utf8PathBuf;
 
 use gleam_core::{
     config::PackageConfig,
-    error::{Error, FileIoAction, FileKind},
+    error::{Error, FileIoAction, FileIoCause, FileKind},
     manifest::{Manifest, ManifestPackage, ManifestPackageSource},
     paths::ProjectPaths,
 };
@@ -58,11 +61,11 @@ pub fn root_config(paths: &ProjectPaths) -> Result<PackageConfig, Error> {
 
 pub fn read(config_path: Utf8PathBuf) -> Result<PackageConfig, Error> {
     let toml = crate::fs::read(&config_path)?;
-    let config: PackageConfig = toml::from_str(&toml).map_err(|e| Error::FileIo {
+    let config: PackageConfig = toml::from_str(&toml).map_err(|error| Error::FileIo {
         action: FileIoAction::Parse,
         kind: FileKind::File,
         path: config_path,
-        err: Some(e.to_string()),
+        cause: FileIoCause::Other(error.to_string()),
     })?;
     config.check_gleam_compatibility()?;
     Ok(config)
@@ -75,7 +78,7 @@ pub fn ensure_config_exists(paths: &ProjectPaths) -> Result<(), Error> {
             action: FileIoAction::Read,
             kind: FileKind::File,
             path,
-            err: Some("File not found".into()),
+            cause: FileIoCause::NotFound,
         });
     }
     Ok(())
@@ -117,6 +120,7 @@ mod tests {
             source: ManifestPackageSource::Git {
                 repo: "repo".into(),
                 commit: "commit".into(),
+                path: None,
             },
         };
         assert_eq!(

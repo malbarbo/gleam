@@ -78,12 +78,14 @@ expression: "\nlet my_string = \"hello \"\ncase my_string {\n    _ if my_string 
                                     end: 89,
                                 },
                                 operator: Eq,
+                                operator_start: 73,
                                 left: BinaryOperator {
                                     location: SrcSpan {
                                         start: 52,
                                         end: 72,
                                     },
                                     operator: Concatenate,
+                                    operator_start: 62,
                                     left: Var {
                                         location: SrcSpan {
                                             start: 52,
@@ -94,6 +96,10 @@ expression: "\nlet my_string = \"hello \"\ncase my_string {\n    _ if my_string 
                                         definition_location: SrcSpan {
                                             start: 0,
                                             end: 0,
+                                        },
+                                        origin: VariableOrigin {
+                                            syntax: Generated,
+                                            declaration: Generated,
                                         },
                                     },
                                     right: Constant(
@@ -157,6 +163,7 @@ expression: "\nlet my_string = \"hello \"\ncase my_string {\n    _ if my_string 
                                     implicit: None,
                                 },
                             ],
+                            open_parenthesis: 101,
                         },
                     },
                 ],

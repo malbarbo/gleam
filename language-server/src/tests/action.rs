@@ -1,18 +1,28 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 use itertools::Itertools;
 use lsp_types::{
-    CodeActionContext, CodeActionParams, PartialResultParams, Position, Range, Url,
+    CodeActionContext, CodeActionParams, DocumentChange, PartialResultParams, Position, Uri as Url,
     WorkDoneProgressParams,
 };
 
 use super::*;
+use crate::path;
 
-fn code_actions(tester: &TestProject<'_>, range: Range) -> Option<Vec<lsp_types::CodeAction>> {
+fn code_actions(
+    tester: &TestProject<'_>,
+    origin: Origin,
+    module: &str,
+    range_selector: RangeSelector,
+) -> Vec<lsp_types::CodeAction> {
     let position = Position {
         line: 0,
         character: 0,
     };
 
-    tester.at(position, |engine, params, _| {
+    tester.in_module_at(origin, module, position, |engine, params, code| {
+        let range = range_selector.find_range(&code);
         let params = CodeActionParams {
             text_document: params.text_document,
             range,
@@ -20,44 +30,51 @@ fn code_actions(tester: &TestProject<'_>, range: Range) -> Option<Vec<lsp_types:
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: PartialResultParams::default(),
         };
-        engine.code_actions(params).result.unwrap()
+        engine
+            .code_actions(params)
+            .result
+            .unwrap()
+            .unwrap_or_default()
     })
 }
 
 fn actions_with_title(
     titles: Vec<&str>,
     tester: &TestProject<'_>,
-    range: Range,
+    origin: Origin,
+    module: &str,
+    range_selector: RangeSelector,
 ) -> Vec<lsp_types::CodeAction> {
-    code_actions(tester, range)
+    code_actions(tester, origin, module, range_selector)
         .into_iter()
-        .flatten()
         .filter(|action| titles.contains(&action.title.as_str()))
         .collect_vec()
 }
 
-fn owned_actions_with_title(
-    titles: Vec<&str>,
-    tester: TestProject<'_>,
-    range: Range,
-) -> Vec<lsp_types::CodeAction> {
-    actions_with_title(titles, &tester, range)
-}
-
-fn apply_code_action(title: &str, tester: TestProject<'_>, range: Range) -> String {
+fn apply_code_action(
+    title: &str,
+    tester: &TestProject<'_>,
+    origin: Origin,
+    module: &str,
+    range_selector: RangeSelector,
+) -> (String, String) {
     let titles = vec![title];
-    let changes = actions_with_title(titles, &tester, range)
-        .pop()
+    let actions = actions_with_title(titles, &tester, origin, module, range_selector);
+    let changes = actions
+        .last()
         .expect("No action with the given title")
         .edit
-        .expect("No workspace edit found")
-        .changes
-        .expect("No text edit found");
-    apply_code_edit(tester, changes)
+        .as_ref()
+        .and_then(|edit| edit.changes.as_ref())
+        .cloned()
+        .unwrap_or_default();
+    let code_change = apply_code_edit(tester, changes);
+    let file_operations = format_code_action_file_operations(&actions);
+    (code_change, file_operations)
 }
 
 fn apply_code_edit(
-    tester: TestProject<'_>,
+    tester: &TestProject<'_>,
     changes: HashMap<Url, Vec<lsp_types::TextEdit>>,
 ) -> String {
     let mut changed_files: HashMap<Url, String> = HashMap::new();
@@ -75,7 +92,7 @@ fn apply_code_edit(
     show_code_edits(tester, changed_files)
 }
 
-fn show_code_edits(tester: TestProject<'_>, changed_files: HashMap<Url, String>) -> String {
+fn show_code_edits(tester: &TestProject<'_>, changed_files: HashMap<Url, String>) -> String {
     let format_code = |url: &Url, code: &String| {
         format!(
             "// --- Edits applied to module '{}'\n{}",
@@ -98,9 +115,53 @@ fn show_code_edits(tester: TestProject<'_>, changed_files: HashMap<Url, String>)
         // file before each!
         changed_files
             .iter()
+            .sorted_by_key(|(url, _)| *url)
             .map(|(url, code)| format_code(url, code))
             .join("\n")
     }
+}
+
+fn format_code_action_file_operations(actions: &[lsp_types::CodeAction]) -> String {
+    // Display path the same on linux or windows so tests don't fail between targets
+    let normalized_path = |uri: &Url| {
+        format!(
+            "/{}",
+            path(uri)
+                .components()
+                .filter(|component| match component {
+                    camino::Utf8Component::Prefix(_) | camino::Utf8Component::RootDir => false,
+                    camino::Utf8Component::CurDir
+                    | camino::Utf8Component::ParentDir
+                    | camino::Utf8Component::Normal(_) => true,
+                })
+                .join("/")
+        )
+    };
+
+    actions
+        .iter()
+        .filter_map(|action| {
+            action
+                .edit
+                .as_ref()
+                .and_then(|edit| edit.document_changes.as_ref())
+        })
+        .flatten()
+        .filter_map(|op| match op {
+            DocumentChange::CreateFile(create) => {
+                Some(format!("- Create {}", normalized_path(&create.uri)))
+            }
+            DocumentChange::RenameFile(rename) => Some(format!(
+                "- Rename {} to {}",
+                normalized_path(&rename.old_uri),
+                normalized_path(&rename.new_uri)
+            )),
+            DocumentChange::DeleteFile(delete) => {
+                Some(format!("- Delete {}", normalized_path(&delete.uri)))
+            }
+            DocumentChange::TextDocumentEdit(_) => None,
+        })
+        .join("\n")
 }
 
 const REMOVE_UNUSED_IMPORTS: &str = "Remove unused imports";
@@ -122,7 +183,9 @@ const GENERATE_DYNAMIC_DECODER: &str = "Generate dynamic decoder";
 const GENERATE_TO_JSON_FUNCTION: &str = "Generate to-JSON function";
 const PATTERN_MATCH_ON_ARGUMENT: &str = "Pattern match on argument";
 const PATTERN_MATCH_ON_VARIABLE: &str = "Pattern match on variable";
+const PATTERN_MATCH_ON_VALUE: &str = "Pattern match on value";
 const GENERATE_FUNCTION: &str = "Generate function";
+const GENERATE_TYPE: &str = "Generate type";
 const CONVERT_TO_FUNCTION_CALL: &str = "Convert to function call";
 const INLINE_VARIABLE: &str = "Inline variable";
 const CONVERT_TO_PIPE: &str = "Convert to pipe";
@@ -130,7 +193,6 @@ const INTERPOLATE_STRING: &str = "Interpolate string";
 const FILL_UNUSED_FIELDS: &str = "Fill unused fields";
 const REMOVE_ALL_ECHOS_FROM_THIS_MODULE: &str = "Remove all `echo`s from this module";
 const WRAP_IN_BLOCK: &str = "Wrap in block";
-const GENERATE_VARIANT: &str = "Generate variant";
 const REMOVE_BLOCK: &str = "Remove block";
 const REMOVE_OPAQUE_FROM_PRIVATE_TYPE: &str = "Remove opaque from private type";
 const COLLAPSE_NESTED_CASE: &str = "Collapse nested case";
@@ -139,38 +201,115 @@ const ADD_OMITTED_LABELS: &str = "Add omitted labels";
 const EXTRACT_FUNCTION: &str = "Extract function";
 const MERGE_CASE_BRANCHES: &str = "Merge case branches";
 const ADD_MISSING_TYPE_PARAMETER: &str = "Add missing type parameter";
+const REPLACE_UNDERSCORE_WITH_TYPE: &str = "Replace `_` with type";
+const WRAP_IN_ANONYMOUS_FUNCTION: &str = "Wrap in anonymous function";
+const UNWRAP_ANONYMOUS_FUNCTION: &str = "Remove anonymous function wrapper";
+const REMOVE_REDUNDANT_RECORD_UPDATE: &str = "Remove redundant record update";
+const DISCARD_UNUSED_VARIABLE: &str = "Discard unused variable";
+const ADD_EXTRA_PARENTHESES: &str = "Add extra parentheses";
+const CONVERT_TO_DOCUMENTATION_COMMENT: &str = "Convert to documentation comment";
+const CONVERT_TO_REGULAR_COMMENT: &str = "Convert to regular comment";
+
+fn generate_variant_message(type_name: &str) -> String {
+    format!("Generate `{type_name}` variant")
+}
 
 macro_rules! assert_code_action {
-    ($title:expr, $code:literal, $range:expr $(,)?) => {
+    ($title:expr, $code:literal, $range_selector:expr $(,)?) => {
         let project = TestProject::for_source($code);
-        assert_code_action!($title, project, $range);
+        assert_code_action!($title, project, $range_selector);
     };
 
-    ($title:expr, $project:expr, $range:expr $(,)?) => {
-        let src = $project.src;
-        let range = $range.find_range(src);
-        let result = apply_code_action($title, $project, range);
-        let output = format!(
+    ($title:expr, $project:expr, $range_selector:expr $(,)?) => {
+        assert_code_action!(
+            $title,
+            $project,
+            Origin::Src,
+            LSP_TEST_ROOT_PACKAGE_NAME,
+            $range_selector
+        );
+    };
+
+    ($title:expr, $code:literal, $origin:expr, $module:expr, $range_selector:expr $(,)?) => {
+        let project = TestProject::for_source($code);
+        assert_code_action!($title, project, $origin, $module, $range_selector);
+    };
+
+    ($title:expr, $project:expr, $origin:expr, $module:expr, $range_selector:expr $(,)?) => {
+        let project = &$project;
+        let src = project
+            .src_from_origin_and_module_name($origin, $module)
+            .unwrap();
+        let range = $range_selector.find_range(src);
+        let (updated_src, file_operations) =
+            apply_code_action($title, project, $origin, $module, $range_selector);
+
+        let mut output = format!(
             "----- BEFORE ACTION\n{}\n\n----- AFTER ACTION\n{}",
             hover::show_hover(src, range, range.end),
-            result
+            updated_src
         );
+
+        if !file_operations.is_empty() {
+            output.push_str("\n----- FILE OPERATIONS -----\n");
+            output.push_str(&file_operations);
+        }
+
         insta::assert_snapshot!(insta::internals::AutoName, output, src);
     };
 }
 
 macro_rules! assert_no_code_actions {
-    ($title:ident $(| $titles:ident)*, $code:literal, $range:expr $(,)?) => {
+    ($title:ident $(| $titles:ident)*, $code:literal, $range_selector:expr $(,)?) => {
         let project = TestProject::for_source($code);
-        assert_no_code_actions!($title $(| $titles)*, project, $range);
+        assert_no_code_actions!($title $(| $titles)*, project, $range_selector);
     };
 
-    ($title:ident $(| $titles:ident)*, $project:expr, $range:expr $(,)?) => {
-        let src = $project.src;
-        let range = $range.find_range(src);
+    ($title:ident $(| $titles:ident)*, $project:expr, $range_selector:expr $(,)?) => {
         let all_titles = vec![$title $(, $titles)*];
         let expected: Vec<lsp_types::CodeAction> = vec![];
-        let result = owned_actions_with_title(all_titles, $project, range);
+        let result = actions_with_title(
+            all_titles,
+            &$project,
+            Origin::Src,
+            LSP_TEST_ROOT_PACKAGE_NAME,
+            $range_selector
+        );
+        assert_eq!(expected, result);
+    };
+
+    ($title:literal $(| $titles:literal)*, $code:literal, $range_selector:expr $(,)?) => {
+        let project = TestProject::for_source($code);
+        assert_no_code_actions!($title $(| $titles)*, project, $range_selector);
+    };
+
+    ($title:literal $(| $titles:literal)*, $project:expr, $range_selector:expr $(,)?) => {
+        let all_titles = vec![$title $(, $titles)*];
+        let expected: Vec<lsp_types::CodeAction> = vec![];
+        let result = actions_with_title(
+            all_titles,
+            &$project,
+            Origin::Src,
+            LSP_TEST_ROOT_PACKAGE_NAME,
+            $range_selector
+        );
+        assert_eq!(expected, result);
+    };
+
+    ($title:expr, $code:literal, $range_selector:expr $(,)?) => {
+        let project = TestProject::for_source($code);
+        assert_no_code_actions!($title, project, $range_selector);
+    };
+
+    ($title:expr, $project:expr, $range_selector:expr $(,)?) => {
+        let expected: Vec<lsp_types::CodeAction> = vec![];
+        let result = actions_with_title(
+            vec![$title],
+            &$project,
+            Origin::Src,
+            LSP_TEST_ROOT_PACKAGE_NAME,
+            $range_selector
+        );
         assert_eq!(expected, result);
     };
 }
@@ -204,7 +343,7 @@ pub fn main() {
 #[test]
 fn generate_variant_with_fields_in_same_module() {
     assert_code_action!(
-        GENERATE_VARIANT,
+        &generate_variant_message("Wibble"),
         r#"
 pub type Wibble {
   Wibble
@@ -220,7 +359,7 @@ pub fn main() -> Wibble {
 #[test]
 fn generate_variant_with_no_fields_in_same_module() {
     assert_code_action!(
-        GENERATE_VARIANT,
+        &generate_variant_message("Wibble"),
         r#"
 pub type Wibble {
   Wibble
@@ -236,7 +375,7 @@ pub fn main() -> Wibble {
 #[test]
 fn generate_variant_with_labels_in_same_module() {
     assert_code_action!(
-        GENERATE_VARIANT,
+        &generate_variant_message("Wibble"),
         r#"
 pub type Wibble {
   Wibble
@@ -252,7 +391,7 @@ pub fn main() -> Wibble {
 #[test]
 fn generate_variant_from_pattern_with_fields() {
     assert_code_action!(
-        GENERATE_VARIANT,
+        &generate_variant_message("Wibble"),
         r#"
 pub type Wibble {
   Wibble
@@ -272,7 +411,7 @@ pub fn main() -> Wibble {
 #[test]
 fn generate_variant_from_pattern_with_labelled_fields() {
     assert_code_action!(
-        GENERATE_VARIANT,
+        &generate_variant_message("Wibble"),
         r#"
 pub type Wibble {
   Wibble
@@ -292,7 +431,7 @@ pub fn main() -> Wibble {
 #[test]
 fn generate_variant_from_pattern_with_no_fields() {
     assert_code_action!(
-        GENERATE_VARIANT,
+        &generate_variant_message("Wibble"),
         r#"
 pub type Wibble {
   Wibble
@@ -322,8 +461,58 @@ pub fn new() -> other.Wibble { todo }
 "#;
 
     assert_code_action!(
-        GENERATE_VARIANT,
+        &generate_variant_message("other.Wibble"),
         TestProject::for_source(src).add_module("other", "pub type Wibble"),
+        find_position_of("Wobble").to_selection()
+    );
+}
+
+#[test]
+fn generate_unqualified_variant_in_other_module_adds_an_unqualified_import_if_other_variants_are_unqualified()
+ {
+    let src = r#"
+import other.{ Wibble }
+
+pub fn main() -> other.Wibble {
+  let assert Wobble = new()
+}
+
+pub fn new() -> other.Wibble { todo }
+"#;
+
+    assert_code_action!(
+        &generate_variant_message("other.Wibble"),
+        TestProject::for_source(src).add_module(
+            "other",
+            "pub type Wibble {
+  Wibble
+}"
+        ),
+        find_position_of("Wobble").to_selection()
+    );
+}
+
+#[test]
+fn generate_unqualified_variant_in_other_module_adds_qualification_if_other_variants_are_not_imported()
+ {
+    let src = r#"
+import other
+
+pub fn main() -> other.Wibble {
+  let assert Wobble = new()
+}
+
+pub fn new() -> other.Wibble { todo }
+"#;
+
+    assert_code_action!(
+        &generate_variant_message("other.Wibble"),
+        TestProject::for_source(src).add_module(
+            "other",
+            "pub type Wibble {
+  Wibble
+}"
+        ),
         find_position_of("Wobble").to_selection()
     );
 }
@@ -340,7 +529,7 @@ pub fn main() -> other.Wibble {
 pub fn new() -> other.Wibble { todo }
 "#;
     assert_code_action!(
-        GENERATE_VARIANT,
+        &generate_variant_message("other.Wibble"),
         TestProject::for_source(src).add_module("other", "pub type Wibble"),
         find_position_of("Wobble").to_selection()
     );
@@ -349,7 +538,7 @@ pub fn new() -> other.Wibble { todo }
 #[test]
 fn do_not_generate_variant_if_one_with_the_same_name_exists() {
     assert_no_code_actions!(
-        GENERATE_VARIANT,
+        &generate_variant_message("Wibble"),
         r#"
 pub fn main() -> Wibble {
   let assert Wobble = new()
@@ -377,7 +566,7 @@ pub fn main() -> Wibble {
 pub fn new() -> Wibble { todo }
 "#;
     assert_no_code_actions!(
-        GENERATE_VARIANT,
+        &generate_variant_message("Wibble"),
         TestProject::for_source(src).add_module("other", "pub type Wibble { Wobble(String) }"),
         find_position_of("Wobble").to_selection()
     );
@@ -395,7 +584,7 @@ pub fn main() -> Wibble {
 pub fn new() -> Wibble { todo }
 "#;
     assert_no_code_actions!(
-        GENERATE_VARIANT,
+        &generate_variant_message("Wibble"),
         TestProject::for_source(src).add_module("other", "pub type Wibble { Wobble(String) }"),
         find_position_of("Wobble").to_selection()
     );
@@ -1920,6 +2109,18 @@ pub fn wibble(arg1 arg1, arg2 arg2) { Nil }
 }
 
 #[test]
+fn fill_in_labelled_args_with_some_constant_arguments_already_supplied() {
+    assert_code_action!(
+        FILL_LABELS,
+        r#"
+pub const wibble = Wibble(1,)
+pub type Wibble { Wibble(arg1: Int, arg2: Int) }
+ "#,
+        find_position_of("Wibble(").under_char('b').to_selection(),
+    );
+}
+
+#[test]
 fn fill_in_labelled_args_with_some_arguments_already_supplied_2() {
     assert_code_action!(
         FILL_LABELS,
@@ -1935,6 +2136,18 @@ pub fn wibble(arg1 arg1, arg2 arg2) { Nil }
 }
 
 #[test]
+fn fill_in_labelled_args_with_some_constant_arguments_already_supplied_2() {
+    assert_code_action!(
+        FILL_LABELS,
+        r#"
+pub const wibble = Wibble(arg2: 1)
+pub type Wibble { Wibble(arg1: Int, arg2: Int) }
+ "#,
+        find_position_of("Wibble(").to_selection(),
+    );
+}
+
+#[test]
 fn fill_in_labelled_args_with_some_arguments_already_supplied_3() {
     assert_code_action!(
         FILL_LABELS,
@@ -1946,6 +2159,18 @@ pub fn main() {
 pub fn wibble(arg1 arg1, arg2 arg2, arg3 arg3) { Nil }
  "#,
         find_position_of("wibble(").to_selection(),
+    );
+}
+
+#[test]
+fn fill_in_labelled_args_with_some_constant_arguments_already_supplied_3() {
+    assert_code_action!(
+        FILL_LABELS,
+        r#"
+pub const wibble = Wibble(1, arg3: 2)
+pub type Wibble { Wibble(arg1: Int, arg2: Int, arg3: Int) }
+ "#,
+        find_position_of("Wibble(").to_selection(),
     );
 }
 
@@ -1973,6 +2198,18 @@ pub fn main() {
   Wibble()
 }
 
+pub type Wibble { Wibble(arg1: Int, arg2: String) }
+ "#,
+        find_position_of("Wibble").select_until(find_position_of("Wibble()").under_last_char()),
+    );
+}
+
+#[test]
+fn fill_in_labelled_args_works_with_constant_record_constructor() {
+    assert_code_action!(
+        FILL_LABELS,
+        r#"
+pub const wibble = Wibble()
 pub type Wibble { Wibble(arg1: Int, arg2: String) }
  "#,
         find_position_of("Wibble").select_until(find_position_of("Wibble()").under_last_char()),
@@ -2126,6 +2363,20 @@ pub fn wibble(arg1 arg1, arg2 arg2) { Nil }
 }
 
 #[test]
+fn fill_in_labelled_args_in_const_selects_innermost_function() {
+    assert_code_action!(
+        FILL_LABELS,
+        r#"
+pub const a_constant = Wibble(Wibble())
+pub type Wibble { Wibble(arg1: Int, arg2: Int) }
+ "#,
+        find_position_of("Wibble()")
+            .under_last_char()
+            .to_selection(),
+    );
+}
+
+#[test]
 fn fill_labels_uses_variable_in_scope_with_matching_type() {
     assert_code_action!(
         FILL_LABELS,
@@ -2144,6 +2395,21 @@ pub fn main() {
 }
 
 #[test]
+fn fill_in_labelled_args_in_const_uses_constants_in_scope_with_matching_type() {
+    assert_code_action!(
+        FILL_LABELS,
+        r#"
+pub const power = 10
+pub const a_constant = Wibble()
+pub type Wibble { Wibble(power: Int, another_arg: Int) }
+ "#,
+        find_position_of("Wibble()")
+            .under_last_char()
+            .to_selection(),
+    );
+}
+
+#[test]
 fn fill_labels_falls_back_to_todo_when_type_does_not_match() {
     assert_code_action!(
         FILL_LABELS,
@@ -2158,6 +2424,21 @@ pub fn main() {
 }
 "#,
         find_position_of("Player").nth_occurrence(3).to_selection(),
+    );
+}
+
+#[test]
+fn fill_in_labelled_args_in_const_uses_todo_if_constant_in_scope_does_not_match() {
+    assert_code_action!(
+        FILL_LABELS,
+        r#"
+pub const power = "not an int"
+pub const a_constant = Wibble()
+pub type Wibble { Wibble(power: Int, another_arg: Int) }
+ "#,
+        find_position_of("Wibble()")
+            .under_last_char()
+            .to_selection(),
     );
 }
 
@@ -2751,6 +3032,44 @@ fn add_missing_patterns_bool() {
         "
 pub fn main(bool: Bool) {
   case bool {}
+}
+",
+        find_position_of("case").select_until(find_position_of("bool {"))
+    );
+}
+
+#[test]
+fn add_missing_patterns_does_not_remove_comment() {
+    assert_code_action!(
+        ADD_MISSING_PATTERNS,
+        "
+pub fn main(bool: Bool) {
+  case bool {
+    // Here is some comment that should not be deleted
+  }
+}
+",
+        find_position_of("case").select_until(find_position_of("bool {"))
+    );
+}
+
+#[test]
+fn add_missing_patterns_does_not_remove_comment_2() {
+    assert_code_action!(
+        ADD_MISSING_PATTERNS,
+        "
+pub fn main(bool: Bool) {
+  case bool {
+    // Here is some comment that should not be deleted
+
+    // Here is some other separate comment!
+    // And loads of white space that has to be deleted.
+
+
+
+
+
+  }
 }
 ",
         find_position_of("case").select_until(find_position_of("bool {"))
@@ -3691,6 +4010,24 @@ pub fn main(x) -> option.Option(Int) {
 }
 
 #[test]
+fn test_qualified_to_unqualified_only_triggers_within_qualified_value() {
+    let src = r#"
+import option
+
+pub fn main(x) -> option.Option(Int) {
+    option.Some(1)
+}
+// end
+"#;
+    assert_no_code_actions!(
+        "Unqualify option.Option",
+        TestProject::for_source(src)
+            .add_hex_module("option", "pub type Option(v) { Some(v) None }"),
+        find_position_of("import").select_until(find_position_of("// end")),
+    );
+}
+
+#[test]
 fn test_qualified_to_unqualified_import_nested_type_outer() {
     let src = r#"
 import option
@@ -4347,7 +4684,25 @@ pub fn main() {
     assert_code_action!(
         "Qualify map as list.map",
         TestProject::for_source(src).add_hex_module("list", "pub fn map(list, f) { todo }"),
-        find_position_of("map(").select_until(find_position_of("[1, 2, 3]")),
+        find_position_of("map").nth_occurrence(2).to_selection(),
+    );
+}
+
+#[test]
+fn test_unqualified_to_qualified_only_triggers_when_within_an_expression() {
+    let src = r#"
+import list.{map}
+
+pub fn main() {
+    let identity = map([1, 2, 3], fn(x) { x })
+    let double = map([1, 2, 3], fn(x) { x * 2 })
+}
+// end
+"#;
+    assert_no_code_actions!(
+        "Qualify map as list.map",
+        TestProject::for_source(src).add_hex_module("list", "pub fn map(list, f) { todo }"),
+        find_position_of("import").select_until(find_position_of("// end")),
     );
 }
 
@@ -4367,7 +4722,7 @@ pub fn circle_circumference(radius: Float) -> Float {
     assert_code_action!(
         "Qualify pi as mymath.pi",
         TestProject::for_source(src).add_hex_module("mymath", "pub const pi = 3.14159"),
-        find_position_of("pi *.").select_until(find_position_of(" radius")),
+        find_position_of("pi").nth_occurrence(2).to_selection(),
     );
 }
 
@@ -4384,7 +4739,10 @@ pub fn create_user(name: String) -> User {
         "Qualify User as user.User",
         TestProject::for_source(src)
             .add_hex_module("user", "pub type User { User(name: String, id: Int) }"),
-        find_position_of("User(").select_until(find_position_of("name: name")),
+        find_position_of("User")
+            .nth_occurrence(4)
+            .under_char('s')
+            .to_selection(),
     );
 }
 
@@ -4401,7 +4759,7 @@ import user.{type User, User}
         "Qualify User as user.User",
         TestProject::for_source(src)
             .add_hex_module("user", "pub type User { User(name: String, id: Int) }"),
-        find_position_of("User(").select_until(find_position_of("name: name")),
+        find_position_of("User").nth_occurrence(2).to_selection(),
     );
 }
 
@@ -4424,7 +4782,7 @@ pub fn user_list(users: List(User)) -> List(String) {
         "Qualify User as user.User",
         TestProject::for_source(src)
             .add_hex_module("user", "pub type User { User(name: String, id: Int) }"),
-        find_position_of("User(").select_until(find_position_of("name: name")),
+        find_position_of("User").nth_occurrence(2).to_selection(),
     );
 }
 
@@ -4445,7 +4803,7 @@ pub fn process_list(items: List(Int)) -> List(Int) {
             "list",
             "pub fn map(list: List(a), with fun: fn(a) -> b) -> List(b) { todo }"
         ),
-        find_position_of("|> map").select_until(find_position_of("(fn(x)")),
+        find_position_of("map").nth_occurrence(2).to_selection(),
     );
 }
 
@@ -4465,7 +4823,7 @@ pub fn process_result(res: Result(Int, String)) -> Int {
         "Qualify Ok as result.Ok",
         TestProject::for_source(src)
             .add_hex_module("result", "pub type Result(a, e) { Ok(a) Error(e) }"),
-        find_position_of("Ok(").select_until(find_position_of("value)")),
+        find_position_of("Ok").nth_occurrence(2).to_selection(),
     );
 }
 
@@ -4487,7 +4845,7 @@ pub fn maybe_increment(x: Option(Int)) -> Option(Int) {
             .add_hex_module("option", "pub type Option(a) { Some(a) None }"),
         find_position_of("Opt")
             .nth_occurrence(2)
-            .select_until(find_position_of("ion(")),
+            .select_until(find_position_of("ion").nth_occurrence(3)),
     );
 }
 
@@ -4512,7 +4870,9 @@ pub fn process_names(names: List(List(Int))) -> List(Int) {
 pub fn flatten(lists: List(List(a))) -> List(a) { todo }"
             )
             .add_hex_module("operation", "pub fn double(s: Int) -> Int { todo }"),
-        find_position_of("(dou").select_until(find_position_of("ble)")),
+        find_position_of("dou")
+            .nth_occurrence(2)
+            .select_until(find_position_of("ble").nth_occurrence(2)),
     );
 }
 
@@ -4531,7 +4891,9 @@ pub fn double_list(items: List(Int)) -> List(Int) {
             "list",
             "pub fn map(list: List(a), with fun: fn(a) -> b) -> List(b) { todo }"
         ),
-        find_position_of("transform(").select_until(find_position_of("items,")),
+        find_position_of("transform")
+            .nth_occurrence(2)
+            .to_selection(),
     );
 }
 
@@ -4550,7 +4912,9 @@ pub fn double_list(items: List(Int)) -> List(Int) {
             "list",
             "pub fn map(list: List(a), with fun: fn(a) -> b) -> List(b) { todo }"
         ),
-        find_position_of("transform(").select_until(find_position_of("items,")),
+        find_position_of("transform")
+            .nth_occurrence(2)
+            .to_selection(),
     );
 }
 
@@ -4570,7 +4934,9 @@ pub fn double_list(items: List(Int)) -> List(Int) {
             "list",
             "pub fn map(list: List(a), with fun: fn(a) -> b) -> List(b) { todo }"
         ),
-        find_position_of("transform(").select_until(find_position_of("items,")),
+        find_position_of("transform")
+            .nth_occurrence(2)
+            .to_selection(),
     );
 }
 
@@ -4592,7 +4958,7 @@ pub fn maybe_increment(x: Option(Int)) -> Option(Int) {
             .add_hex_module("option", "pub type Option(a) { Some(a) None }"),
         find_position_of("Opt")
             .nth_occurrence(2)
-            .select_until(find_position_of("ion(")),
+            .select_until(find_position_of("ion").nth_occurrence(3)),
     );
 }
 
@@ -4614,7 +4980,7 @@ pub fn maybe_increment(x: Maybe(Int)) -> Maybe(Int) {
             .add_hex_module("option", "pub type Option(a) { Some(a) None }"),
         find_position_of("May")
             .nth_occurrence(2)
-            .select_until(find_position_of("be(")),
+            .select_until(find_position_of("be").nth_occurrence(3)),
     );
 }
 
@@ -4636,7 +5002,7 @@ pub fn maybe_increment(x: Option(Int)) -> Option(Int) {
             .add_hex_module("option", "pub type Option(a) { Some(a) None }"),
         find_position_of("Opt")
             .nth_occurrence(2)
-            .select_until(find_position_of("ion(")),
+            .select_until(find_position_of("ion").nth_occurrence(3)),
     );
 }
 
@@ -4654,7 +5020,7 @@ pub fn main() {
         "Qualify Some as option.Some",
         TestProject::for_source(src)
             .add_hex_module("option", "pub type Option(v) { Some(v) None }"),
-        find_position_of("Some(").select_until(find_position_of("1)")),
+        find_position_of("Some(1)").select_until(find_position_of("Some(1)").under_char('e')),
     );
 }
 #[test]
@@ -4679,7 +5045,7 @@ pub fn main() {
         "Qualify Some as option.Some",
         TestProject::for_source(src)
             .add_hex_module("option", "pub type Option(v) { Some(v) None }"),
-        find_position_of("Some(").select_until(find_position_of("1)")),
+        find_position_of("Some(1)").select_until(find_position_of("Some(1)").under_char('e')),
     );
 }
 
@@ -5555,6 +5921,17 @@ fn inexhaustive_let_alias_to_case() {
 }
 
 #[test]
+fn cursor_must_be_within_let_assignment_to_trigger_action() {
+    assert_no_code_actions!(
+        CONVERT_TO_CASE,
+        "pub fn main() {
+  let 10 as ten = 10
+}",
+        find_position_of("pub").select_until(find_position_of("}")),
+    );
+}
+
+#[test]
 fn inexhaustive_let_tuple_to_case() {
     assert_code_action!(
         CONVERT_TO_CASE,
@@ -5632,6 +6009,19 @@ fn outer_inexhaustive_let_to_case() {
 }
 
 #[test]
+fn second_sibling_inexhaustive_let_to_case() {
+    assert_code_action!(
+        CONVERT_TO_CASE,
+        r#"pub fn main(a, b) {
+  let Ok(x) = a
+  let Ok(y) = b
+  #(x, y)
+}"#,
+        find_position_of("let Ok(y)").select_until(find_position_of("= b")),
+    );
+}
+
+#[test]
 fn no_code_action_for_exhaustive_let_to_case() {
     assert_no_code_actions!(
         CONVERT_TO_CASE,
@@ -5651,6 +6041,156 @@ fn extract_variable() {
   list.map([1, 2, 3], int.add(1, _))
 }"#,
         find_position_of("[1").select_until(find_position_of("2"))
+    );
+}
+
+#[test]
+fn extract_can_extract_number_used_as_call_argument() {
+    assert_code_action!(
+        EXTRACT_VARIABLE,
+        r#"pub fn main() {
+  wibble(label: 1)
+}"#,
+        find_position_of("1").to_selection()
+    );
+}
+
+#[test]
+fn extract_can_extract_bool_used_as_call_argument() {
+    assert_code_action!(
+        EXTRACT_VARIABLE,
+        r#"pub fn main() {
+  wibble(label: True)
+}"#,
+        find_position_of("True").to_selection()
+    );
+}
+
+#[test]
+fn extract_variable_ignores_names_in_other_branches() {
+    assert_code_action!(
+        EXTRACT_VARIABLE,
+        r#"pub fn main(x: Result(_, _)) {
+  case x {
+    Ok(_) -> {
+      let int = 1
+      int + 2
+    }
+    Error(_) -> wibble(11)
+  }
+
+}"#,
+        find_position_of("11").to_selection()
+    );
+}
+
+#[test]
+fn extract_variable_ignores_names_in_other_branches_2() {
+    assert_code_action!(
+        EXTRACT_VARIABLE,
+        r#"
+pub fn main(x: Result(_, _)) {
+  case x {
+    Ok(_) -> {
+      let int = 1
+      int + 2
+    }
+    Error(_) -> {
+        wibble(11)
+    }
+  }
+}
+"#,
+        find_position_of("11").to_selection()
+    );
+}
+
+#[test]
+fn extract_variable_ignores_names_in_other_blocks() {
+    assert_code_action!(
+        EXTRACT_VARIABLE,
+        r#"
+pub fn main() {
+  {
+    let int = 1
+    int + 2
+  }
+  wibble(11)
+}
+"#,
+        find_position_of("11").to_selection()
+    );
+}
+
+#[test]
+fn extract_variable_ignores_names_in_anonymous_functions() {
+    assert_code_action!(
+        EXTRACT_VARIABLE,
+        r#"
+pub fn main() {
+  let fun = fn() {
+    let int = 1
+    int + 2
+  }
+
+  wibble(11)
+}
+"#,
+        find_position_of("11").to_selection()
+    );
+}
+
+#[test]
+fn extract_variable_does_not_shadow_names_in_anonymous_function() {
+    assert_code_action!(
+        EXTRACT_VARIABLE,
+        r#"
+pub fn main() {
+  let fun = fn() {
+    let int = 1
+    wibble(11)
+  }
+  fun()
+}
+"#,
+        find_position_of("11").to_selection()
+    );
+}
+
+#[test]
+fn extract_variable_does_not_shadow_name_in_same_branch() {
+    assert_code_action!(
+        EXTRACT_VARIABLE,
+        r#"
+pub fn main(x: Result(_, _)) {
+  case x {
+    Ok(_) -> {
+        let int = 1
+        wibble(11)
+    }
+    Error(_) -> {
+        panic
+    }
+  }
+}
+"#,
+        find_position_of("11").to_selection()
+    );
+}
+
+#[test]
+fn extract_variable_does_not_shadow_name_in_same_block() {
+    assert_code_action!(
+        EXTRACT_VARIABLE,
+        r#"
+pub fn main() {
+  let result = {
+    let int = 1
+    wibble(11)
+  }
+  result
+}"#,
+        find_position_of("11").to_selection()
     );
 }
 
@@ -5744,6 +6284,21 @@ fn extract_variable_does_not_extract_echo() {
   echo x
 }"#,
         find_position_of("echo").to_selection()
+    );
+}
+
+#[test]
+fn extract_variable_does_not_extract_record_constructor_in_record_update() {
+    assert_no_code_actions!(
+        EXTRACT_VARIABLE,
+        r#"
+pub fn main() {
+  Wibble(..todo, a: 1)
+}
+
+pub type Wibble { Wibble(a: Int, b: Int) }
+"#,
+        find_position_of("Wibble").to_selection()
     );
 }
 
@@ -7205,6 +7760,48 @@ fn do_not_extract_top_level_expression_in_let_statement() {
 }
 
 #[test]
+fn allow_extracting_multiple_selects() {
+    assert_code_action!(
+        EXTRACT_VARIABLE,
+        r#"
+pub fn go(wibble: Wibble) {
+    [
+        wibble.wobble.wubble.woo,
+        todo as "something else",
+    ]
+}
+
+pub type Wibble { Wibble(wobble: Wobble) }
+pub type Wobble { Wobble(wubble: Wubble) }
+pub type Wubble { Wubble(woo: Int) }
+"#,
+        find_position_of("wibble")
+            .nth_occurrence(2)
+            .select_until(find_position_of("woo"))
+    );
+}
+
+#[test]
+fn allow_extracting_part_of_multiple_selects() {
+    assert_code_action!(
+        EXTRACT_VARIABLE,
+        r#"
+pub fn go(wibble: Wibble) {
+    [
+        wibble.wobble.wubble.woo,
+        todo as "something else",
+    ]
+}
+
+pub type Wibble { Wibble(wobble: Wobble) }
+pub type Wobble { Wobble(wubble: Wubble) }
+pub type Wubble { Wubble(woo: Int) }
+"#,
+        find_position_of("wubble").to_selection()
+    );
+}
+
+#[test]
 fn do_not_extract_top_level_module_call() {
     let src = r#"
 import list
@@ -7271,8 +7868,47 @@ pub fn add(n, m) { n + m }
 }
 
 #[test]
-fn generate_dynamic_decoder() {
+fn expand_function_capture_in_pipeline() {
     assert_code_action!(
+        EXPAND_FUNCTION_CAPTURE,
+        "pub fn main() {
+  1 |> wibble(2, _) |> wobble
+}
+
+fn wibble(a, b) {
+  todo
+}
+
+fn wobble(i) {
+  todo
+}
+
+",
+        find_position_of("wibble").to_selection()
+    );
+}
+
+#[test]
+fn generate_dynamic_decoder() {
+    let src = "
+pub type Person {
+  Person(name: String, age: Int, height: Float, is_cool: Bool, brain: BitArray)
+}
+";
+    assert_code_action!(
+        GENERATE_DYNAMIC_DECODER,
+        TestProject::for_source(src).add_package_module(
+            "gleam_stdlib",
+            "gleam/dynamic",
+            "pub type Dynamic"
+        ),
+        find_position_of("type").to_selection()
+    );
+}
+
+#[test]
+fn generate_dynamic_decoder_not_offered_without_stdlib() {
+    assert_no_code_actions!(
         GENERATE_DYNAMIC_DECODER,
         "
 pub type Person {
@@ -7280,6 +7916,29 @@ pub type Person {
 }
 ",
         find_position_of("type").to_selection()
+    );
+}
+
+#[test]
+fn generate_dynamic_decoder_only_works_if_withing_a_type() {
+    let src = "
+pub type Person {
+  Person(name: String, age: Int, height: Float, is_cool: Bool, brain: BitArray)
+}
+
+pub fn main() {
+  // unrelated
+  todo
+}
+";
+    assert_no_code_actions!(
+        GENERATE_DYNAMIC_DECODER,
+        TestProject::for_source(src).add_package_module(
+            "gleam_stdlib",
+            "gleam/dynamic",
+            "pub type Dynamic"
+        ),
+        find_position_of("pub type").select_until(find_position_of("todo"))
     );
 }
 
@@ -7304,9 +7963,9 @@ pub type Wibble(value) {
     assert_code_action!(
         GENERATE_DYNAMIC_DECODER,
         TestProject::for_source(src)
-            .add_module("gleam/option", "pub type Option(a)")
-            .add_module("gleam/dynamic", "pub type Dynamic")
-            .add_module("gleam/dict", "pub type Dict(k, v)"),
+            .add_package_module("gleam_stdlib", "gleam/option", "pub type Option(a)")
+            .add_package_module("gleam_stdlib", "gleam/dynamic", "pub type Dynamic")
+            .add_package_module("gleam_stdlib", "gleam/dict", "pub type Dict(k, v)"),
         find_position_of("type W").to_selection()
     );
 }
@@ -7323,20 +7982,29 @@ pub type Wibble {
 
     assert_code_action!(
         GENERATE_DYNAMIC_DECODER,
-        TestProject::for_source(src).add_module("gleam/dynamic/decode", "pub type Decoder(a)"),
+        TestProject::for_source(src).add_package_module(
+            "gleam_stdlib",
+            "gleam/dynamic/decode",
+            "pub type Decoder(a)"
+        ),
         find_position_of("type W").to_selection()
     );
 }
 
 #[test]
 fn generate_dynamic_decoder_tuple() {
-    assert_code_action!(
-        GENERATE_DYNAMIC_DECODER,
-        "
+    let src = "
 pub type Wibble {
   Wibble(tuple: #(Int, Float, #(String, Bool)))
 }
-",
+";
+    assert_code_action!(
+        GENERATE_DYNAMIC_DECODER,
+        TestProject::for_source(src).add_package_module(
+            "gleam_stdlib",
+            "gleam/dynamic/decode",
+            "pub type Decoder(a)"
+        ),
         find_position_of("type W").to_selection()
     );
 }
@@ -7352,91 +8020,125 @@ pub type LinkedList {
 ";
     assert_code_action!(
         GENERATE_DYNAMIC_DECODER,
-        TestProject::for_source(src).add_module("gleam/option", "pub type Option(a)"),
+        TestProject::for_source(src).add_package_module(
+            "gleam_stdlib",
+            "gleam/option",
+            "pub type Option(a)"
+        ),
         find_position_of("type").to_selection()
     );
 }
 
 #[test]
 fn generate_dynamic_decoder_for_multi_variant_type() {
-    assert_code_action!(
-        GENERATE_DYNAMIC_DECODER,
-        "
+    let src = "
 pub type Wibble {
   Wibble(wibble: Int, next: Wibble)
   Wobble(wobble: Float, text: String, values: List(Bool))
 }
-",
+";
+    assert_code_action!(
+        GENERATE_DYNAMIC_DECODER,
+        TestProject::for_source(src).add_package_module(
+            "gleam_stdlib",
+            "gleam/dynamic/decode",
+            "pub type Decoder(a)"
+        ),
         find_position_of("type").to_selection()
     );
 }
 
 #[test]
 fn generate_dynamic_decoder_for_multi_variant_type_multi_word_name() {
-    assert_code_action!(
-        GENERATE_DYNAMIC_DECODER,
-        "
+    let src = "
 pub type Wibble {
   OneTwo(wibble: Int, next: Wibble)
   ThreeFour(wobble: Float, text: String, values: List(Bool))
   FiveSixSeven(one_two: Int)
 }
-",
+";
+    assert_code_action!(
+        GENERATE_DYNAMIC_DECODER,
+        TestProject::for_source(src).add_package_module(
+            "gleam_stdlib",
+            "gleam/dynamic/decode",
+            "pub type Decoder(a)"
+        ),
         find_position_of("type").to_selection()
     );
 }
 
 #[test]
 fn generate_dynamic_decoder_for_variant_with_no_fields() {
-    assert_code_action!(
-        GENERATE_DYNAMIC_DECODER,
-        "
+    let src = "
 pub type Wibble {
   Wibble
 }
-",
+";
+    assert_code_action!(
+        GENERATE_DYNAMIC_DECODER,
+        TestProject::for_source(src).add_package_module(
+            "gleam_stdlib",
+            "gleam/dynamic/decode",
+            "pub type Decoder(a)"
+        ),
         find_position_of("type").to_selection()
     );
 }
 
 #[test]
 fn generate_dynamic_decoder_for_variants_with_no_fields() {
-    assert_code_action!(
-        GENERATE_DYNAMIC_DECODER,
-        "
+    let src = "
 pub type Wibble {
   Wibble
   Wobble
   Woo
 }
-",
+";
+    assert_code_action!(
+        GENERATE_DYNAMIC_DECODER,
+        TestProject::for_source(src).add_package_module(
+            "gleam_stdlib",
+            "gleam/dynamic/decode",
+            "pub type Decoder(a)"
+        ),
         find_position_of("type").to_selection()
     );
 }
 
 #[test]
 fn generate_dynamic_decoder_for_variants_with_mixed_fields() {
-    assert_code_action!(
-        GENERATE_DYNAMIC_DECODER,
-        "
+    let src = "
 pub type Wibble {
   Wibble
   Wobble(field: String, field2: Int)
 }
-",
+";
+    assert_code_action!(
+        GENERATE_DYNAMIC_DECODER,
+        TestProject::for_source(src).add_package_module(
+            "gleam_stdlib",
+            "gleam/dynamic/decode",
+            "pub type Decoder(a)"
+        ),
         find_position_of("type").to_selection()
     );
 }
 
 #[test]
 fn no_code_action_to_generate_dynamic_decoder_for_type_without_labels() {
-    assert_no_code_actions!(
-        GENERATE_DYNAMIC_DECODER,
-        "
+    let src = "
 pub type Wibble {
   Wibble(Int, Int, String)
 }
-",
+";
+    assert_no_code_actions!(
+        GENERATE_DYNAMIC_DECODER,
+        TestProject::for_source(src).add_package_module(
+            "gleam_stdlib",
+            "gleam/dynamic/decode",
+            "pub type Decoder(a)"
+        ),
         find_position_of("type").to_selection()
     );
 }
@@ -7568,6 +8270,134 @@ pub fn main() {
 }
 
 #[test]
+fn pattern_match_on_call_statement() {
+    assert_code_action!(
+        PATTERN_MATCH_ON_VALUE,
+        "
+pub fn main() {
+  wibble()
+}
+
+pub fn wibble() -> Result(Int, String) { todo }
+",
+        find_position_of("wibble").to_selection()
+    );
+}
+
+#[test]
+fn pattern_match_on_record_select_statement() {
+    assert_code_action!(
+        PATTERN_MATCH_ON_VALUE,
+        "
+pub fn main() {
+  let wibble = Wibble(Ok(1))
+  wibble.wobble
+}
+
+pub type Wibble { Wibble(wobble: Result(Int, Nil)) }
+",
+        find_position_of("wibble").nth_occurrence(2).to_selection()
+    );
+}
+
+#[test]
+fn pattern_match_on_tuple_index_statement() {
+    assert_code_action!(
+        PATTERN_MATCH_ON_VALUE,
+        "
+pub fn main() {
+  let wibble = #(Ok(1), 2)
+  wibble.0
+}
+",
+        find_position_of("wibble").nth_occurrence(2).to_selection()
+    );
+}
+
+#[test]
+fn pattern_match_on_module_select_statement() {
+    assert_code_action!(
+        PATTERN_MATCH_ON_VALUE,
+        TestProject::for_source(
+            "
+import wibble
+
+pub fn main() {
+  wibble.wobble
+}
+    "
+        )
+        .add_module("wibble", "pub const wobble = Ok(1)"),
+        find_position_of("wibble").nth_occurrence(2).to_selection()
+    );
+}
+
+#[test]
+fn pattern_match_on_call_statement_returning_nil() {
+    assert_no_code_actions!(
+        PATTERN_MATCH_ON_VALUE,
+        "
+pub fn main() {
+  wibble()
+}
+
+pub fn wibble() -> Nil { todo }
+",
+        find_position_of("wibble").to_selection()
+    );
+}
+
+#[test]
+fn pattern_match_on_call_statement_in_the_middle_of_a_function_body() {
+    assert_code_action!(
+        PATTERN_MATCH_ON_VALUE,
+        "
+pub fn main() {
+  wibble()
+  Nil
+}
+
+pub fn wibble() -> Result(Int, String) { todo }
+",
+        find_position_of("wibble").to_selection()
+    );
+}
+
+#[test]
+fn pattern_match_on_value_picks_innermost_value_and_not_outer_call() {
+    assert_no_code_actions!(
+        PATTERN_MATCH_ON_VALUE,
+        "
+pub fn main() {
+  wibble({
+    let match_on_me = wibble(todo)
+  })
+}
+
+pub fn wibble(a) -> Result(Int, String) { todo }
+",
+        find_position_of("match_on_me").to_selection()
+    );
+}
+
+#[test]
+fn pattern_match_on_value_picks_innermost_value_and_not_outer_call_2() {
+    assert_code_action!(
+        PATTERN_MATCH_ON_VARIABLE,
+        "
+pub fn main() {
+  wibble({
+    let match_on_me = wibble(todo)
+  })
+}
+
+pub fn wibble(a) -> Result(Int, String) { todo }
+",
+        find_position_of("match_on_me").to_selection()
+    );
+}
+
+#[test]
 fn pattern_match_on_clause_variable() {
     assert_code_action!(
         PATTERN_MATCH_ON_VARIABLE,
@@ -7588,6 +8418,24 @@ fn maybe_wibble() { Ok(Wobble) }
 
 ",
         find_position_of("something").to_selection()
+    );
+}
+
+#[test]
+// https://github.com/gleam-lang/gleam/issues/5648
+fn pattern_match_on_variable_defined_inside_anonymous_function() {
+    assert_code_action!(
+        PATTERN_MATCH_ON_VARIABLE,
+        "
+pub fn main() {
+  let outcome = apply(#(Ok(1), Nil), fn(pair) {
+    let #(result, nil) = pair
+  })
+}
+
+fn apply(a, f) { f(a) }
+",
+        find_position_of("result").to_selection()
     );
 }
 
@@ -8018,6 +8866,89 @@ pub fn main() -> Bool {
 }
 
 #[test]
+fn generate_type_works_for_unknown_type() {
+    assert_code_action!(
+        GENERATE_TYPE,
+        "
+pub fn main() {
+  let x: Wobble = todo
+}
+",
+        find_position_of("Wobble").to_selection()
+    );
+}
+
+#[test]
+fn generate_type_works_for_unknown_type_with_parameters() {
+    assert_code_action!(
+        GENERATE_TYPE,
+        "
+type Wibble {
+  Wibble(Wobble(Int, String))
+}
+",
+        find_position_of("Wobble").to_selection()
+    );
+}
+
+#[test]
+fn generate_type_works_for_unknown_type_in_argument_annotation() {
+    assert_code_action!(
+        GENERATE_TYPE,
+        "
+pub fn wibble(argument: Wibble(some, generics)) { todo }
+",
+        find_position_of("Wibble").to_selection()
+    );
+}
+
+#[test]
+fn generate_type_works_for_unknown_type_in_private_function() {
+    assert_code_action!(
+        GENERATE_TYPE,
+        "
+fn wibble(argument: Wobble) { todo }
+",
+        find_position_of("Wobble").to_selection()
+    );
+}
+
+#[test]
+fn generate_type_generates_non_colliding_parameter_names() {
+    assert_code_action!(
+        GENERATE_TYPE,
+        "
+pub fn wibble(argument: Wibble(b, Int)) { todo }
+",
+        find_position_of("Wibble").to_selection()
+    );
+}
+
+#[test]
+fn generate_type_generates_names_for_more_than_26_parameters() {
+    assert_code_action!(
+        GENERATE_TYPE,
+        "
+pub fn wibble(argument: Wibble(Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int)) { todo }
+",
+        find_position_of("Wibble").to_selection()
+    );
+}
+
+#[test]
+fn generate_type_not_offered_when_cursor_is_elsewhere() {
+    assert_no_code_actions!(
+        GENERATE_TYPE,
+        "
+pub fn main() {
+  let x: Wobble = todo
+}
+",
+        find_position_of("main").to_selection()
+    );
+}
+
+#[test]
 fn generate_function_works_with_constants() {
     assert_code_action!(
         GENERATE_FUNCTION,
@@ -8304,6 +9235,30 @@ pub type Person {
             "pub type Json"
         ),
         find_position_of("type").to_selection()
+    );
+}
+
+#[test]
+fn generate_json_only_triggers_within_a_type() {
+    let src = "
+pub type Person {
+  Person(name: String, age: Int, height: Float, is_cool: Bool)
+}
+
+pub fn main() {
+  // unrelated
+  todo
+}
+";
+
+    assert_no_code_actions!(
+        GENERATE_TO_JSON_FUNCTION,
+        TestProject::for_source(src).add_package_module(
+            "gleam_json",
+            "gleam/json",
+            "pub type Json"
+        ),
+        find_position_of("type").select_until(find_position_of("todo"))
     );
 }
 
@@ -9555,6 +10510,121 @@ fn name() { "Jak" }
     );
 }
 
+#[test]
+fn fix_float_operator_on_ints_in_guards() {
+    let name = "Use `>=`";
+    assert_code_action!(
+        name,
+        r#"
+pub fn main() {
+  case todo {
+    _ if 1 >=. 2 -> todo
+  }
+}
+"#,
+        find_position_of("1").to_selection()
+    );
+}
+
+#[test]
+fn fix_float_operator_on_ints_in_guards_2() {
+    let name = "Use `-`";
+    assert_code_action!(
+        name,
+        r#"
+pub fn main() {
+  case todo {
+    _ if 1 -. 2 -> todo
+  }
+}
+"#,
+        find_position_of("1").select_until(find_position_of("2"))
+    );
+}
+
+#[test]
+fn fix_float_operator_on_ints_in_guards_3() {
+    let name = "Use `*`";
+    assert_code_action!(
+        name,
+        r#"
+pub fn main() {
+  let wobble = 3
+  case todo {
+    _ if 1 *. wobble -> todo
+  }
+}
+"#,
+        find_position_of("*.").to_selection()
+    );
+}
+
+#[test]
+fn fix_int_operator_on_floats_in_guards() {
+    let name = "Use `>=.`";
+    assert_code_action!(
+        name,
+        r#"
+pub fn main() {
+  case todo {
+    _ if 1.0 >= 2.3 -> todo
+  }
+}
+"#,
+        find_position_of("1").to_selection()
+    );
+}
+
+#[test]
+fn fix_int_operator_on_floats_in_guards_2() {
+    let name = "Use `-.`";
+    assert_code_action!(
+        name,
+        r#"
+pub fn main() {
+  case todo {
+    _ if 1.12 - 2.0 -> todo
+  }
+}
+"#,
+        find_position_of("1").select_until(find_position_of("2.0"))
+    );
+}
+
+#[test]
+fn fix_int_operator_on_floats_in_guards_3() {
+    let name = "Use `*.`";
+    assert_code_action!(
+        name,
+        r#"
+pub fn main() {
+  let wobble = 3.2
+  case todo {
+    _ if 1.3 * wobble -> todo
+  }
+}
+"#,
+        find_position_of("*").to_selection()
+    );
+}
+
+#[test]
+fn fix_plus_operator_on_strings_in_guards() {
+    let name = "Use `<>`";
+    assert_code_action!(
+        name,
+        r#"
+pub fn main() {
+  let name = "jak"
+  case todo {
+    _ if "hello, " + name -> todo
+  }
+}
+"#,
+        find_position_of("hello").select_until(find_position_of("name ->"))
+    );
+}
+
 // https://github.com/gleam-lang/gleam/issues/4454
 #[test]
 fn unqualify_already_imported_type() {
@@ -9701,6 +10771,35 @@ fn wibble() {
     );
 }
 
+#[test]
+fn add_missing_patterns_needs_to_be_within_the_inexhaustive_case_expression() {
+    assert_no_code_actions!(
+        ADD_MISSING_PATTERNS,
+        r#"
+fn wibble() {
+  case True {}
+}
+"#,
+        find_position_of("fn").select_until(find_position_of("}"))
+    );
+}
+
+#[test]
+fn add_missing_patterns_fires_for_second_inexhaustive_case_when_first_does_not_contain_cursor() {
+    assert_code_action!(
+        ADD_MISSING_PATTERNS,
+        r#"
+pub fn wibble(a: Bool, b: Bool) {
+  case a {}
+  case b {}
+}
+"#,
+        find_position_of("case")
+            .nth_occurrence(2)
+            .select_until(find_position_of("b {"))
+    );
+}
+
 // https://github.com/gleam-lang/gleam/issues/4626
 #[test]
 fn add_missing_patterns_opaque_type() {
@@ -9719,6 +10818,158 @@ pub fn main(w: mod.Wibble) {
             "pub opaque type Wibble { Wibble(Int) Wobble(String) }"
         ),
         find_position_of("{}").to_selection(),
+    );
+}
+
+#[test]
+fn pattern_match_on_variable_does_not_add_patterns_for_internal_type() {
+    let src = "
+import wibble
+
+pub type Type {
+  Type(wibble: wibble.Wibble, list: List(Int))
+}
+
+pub fn main(thing: Type) {
+  case thing {
+    Type(wibble:, ..) -> todo
+  }
+}
+";
+
+    assert_no_code_actions!(
+        PATTERN_MATCH_ON_VARIABLE,
+        TestProject::for_source(src).add_module(
+            "wibble",
+            "@internal pub type Wibble { Wibble(Int) Wobble(String) }"
+        ),
+        find_position_of("wibble").nth_occurrence(3).to_selection(),
+    );
+}
+
+#[test]
+fn pattern_match_on_argument_does_not_add_patterns_for_internal_type() {
+    let src = "
+import wibble
+
+pub fn main(thing: wibble.Wibble) {}
+";
+
+    assert_no_code_actions!(
+        PATTERN_MATCH_ON_ARGUMENT,
+        TestProject::for_source(src).add_module(
+            "wibble",
+            "@internal pub type Wibble { Wibble(Int) Wobble(String) }"
+        ),
+        find_position_of("thing").to_selection(),
+    );
+}
+
+#[test]
+fn pattern_match_on_argument_adds_patterns_for_internal_type_inside_module_where_it_is_defined() {
+    let src = "
+@internal
+pub type Wibble {
+  Wibble(Int)
+  Wobble(String)
+}
+
+pub fn main(thing: Wibble) {}
+";
+
+    assert_code_action!(
+        PATTERN_MATCH_ON_ARGUMENT,
+        TestProject::for_source(src),
+        find_position_of("thing").to_selection(),
+    );
+}
+
+#[test]
+fn add_missing_patterns_adds_a_discard_for_opaque_type() {
+    let src = "
+import wibble
+
+pub fn main(w: wibble.Wibble) {
+  case w {}
+}
+";
+
+    assert_code_action!(
+        ADD_MISSING_PATTERNS,
+        TestProject::for_source(src).add_module(
+            "wibble",
+            "@internal pub type Wibble { Wibble(Int) Wobble(String) }"
+        ),
+        find_position_of("{}").to_selection(),
+    );
+}
+
+#[test]
+fn add_missing_patterns_adds_a_discard_for_opaque_type_1() {
+    let src = "
+import wibble
+
+pub type Type {
+  Type(wibble: wibble.Wibble, list: List(Int))
+}
+
+pub fn main(thing: Type) {
+  case thing {}
+}
+";
+
+    assert_code_action!(
+        ADD_MISSING_PATTERNS,
+        TestProject::for_source(src).add_module(
+            "wibble",
+            "@internal pub type Wibble { Wibble(Int) Wobble(String) }"
+        ),
+        find_position_of("{}").to_selection(),
+    );
+}
+
+#[test]
+fn add_missing_patterns_adds_a_discard_for_opaque_type_2() {
+    let src = "
+import wibble
+
+pub type Type {
+  Type(wibble.Wibble)
+}
+
+pub fn main(thing: Type) {
+  case thing {}
+}
+";
+
+    assert_code_action!(
+        ADD_MISSING_PATTERNS,
+        TestProject::for_source(src).add_module(
+            "wibble",
+            "@internal pub type Wibble { Wibble(Int) Wobble(String) }"
+        ),
+        find_position_of("{}").to_selection(),
+    );
+}
+
+#[test]
+fn add_missing_patterns_adds_patterns_for_internal_type_inside_same_module_where_it_is_defined() {
+    let src = "
+@internal
+pub type Wibble {
+  Wibble(Int)
+  Wobble(String)
+}
+
+pub fn main(thing: Wibble) {
+  case thing {}
+}
+";
+
+    assert_code_action!(
+        ADD_MISSING_PATTERNS,
+        TestProject::for_source(src),
+        find_position_of("thing").nth_occurrence(2).to_selection(),
     );
 }
 
@@ -10170,6 +11421,47 @@ fn pattern_match_on_list_tail_with_shadowed_name() {
   }
 }",
         find_position_of("else_").to_selection()
+    );
+}
+
+#[test]
+fn pattern_match_on_discard_pattern_in_branch() {
+    assert_code_action!(
+        PATTERN_MATCH_ON_VALUE,
+        "pub fn main(x: Result(List(a), Nil)) {
+  case x {
+    Error(Nil) -> todo
+    Ok(_) -> todo
+  }
+}",
+        find_position_of("_").to_selection()
+    );
+}
+
+#[test]
+fn cannot_pattern_match_on_discard_on_the_left_of_an_assignment() {
+    assert_no_code_actions!(
+        PATTERN_MATCH_ON_VALUE,
+        "pub fn main(x: Result(List(a), Nil)) {
+  let _ = x
+}",
+        find_position_of("_").to_selection()
+    );
+}
+
+#[test]
+fn cannot_pattern_match_on_discard_on_the_left_of_a_use() {
+    assert_no_code_actions!(
+        PATTERN_MATCH_ON_VALUE,
+        "pub fn main() {
+  use _ <- wibble()
+}
+
+fn wibble(fun: fn(Result(Int, Nil)) -> Nil) {
+  todo
+}
+",
+        find_position_of("_").to_selection()
     );
 }
 
@@ -10661,6 +11953,102 @@ fn remove_unreachable_clauses() {
 }
 
 #[test]
+fn remove_unreachable_clauses_removes_alternative_patterns() {
+    assert_code_action!(
+        REMOVE_UNREACHABLE_CLAUSES,
+        "pub fn main(x) {
+  case x {
+    Ok(n) -> 1
+    Ok(1) -> 3
+    Error(_) | Ok(_) -> todo
+  }
+}
+",
+        find_position_of("Ok(1)").to_selection()
+    );
+}
+
+#[test]
+fn remove_unreachable_clauses_removes_multiple_alternative_patterns_at_the_start_of_branch() {
+    assert_code_action!(
+        REMOVE_UNREACHABLE_CLAUSES,
+        "pub fn main(x) {
+  case x {
+    Ok(n) -> 1
+    Ok(1) -> 3
+    Ok(_) | Ok(_) | Ok(_) | Error(_) -> todo
+  }
+}
+",
+        find_position_of("Ok(1)").to_selection()
+    );
+}
+
+#[test]
+fn remove_unreachable_clauses_removes_multiple_alternative_patterns_at_the_end_of_branch() {
+    assert_code_action!(
+        REMOVE_UNREACHABLE_CLAUSES,
+        "pub fn main(x) {
+  case x {
+    Ok(n) -> 1
+    Ok(1) -> 3
+    Error(_) | Ok(_) | Ok(_) | Ok(_) -> todo
+  }
+}
+",
+        find_position_of("Ok(1)").to_selection()
+    );
+}
+
+#[test]
+fn remove_unreachable_clauses_removes_multiple_alternative_patterns_in_the_middle_of_branch() {
+    assert_code_action!(
+        REMOVE_UNREACHABLE_CLAUSES,
+        "pub fn main(x) {
+  case x {
+    1 -> todo
+    2 -> todo
+    3 | 3 | 3 | 3 | 4 -> todo
+  }
+}
+",
+        find_position_of("3").nth_occurrence(2).to_selection()
+    );
+}
+
+#[test]
+fn remove_unreachable_clauses_with_mix_of_reachable_and_unreachables() {
+    assert_code_action!(
+        REMOVE_UNREACHABLE_CLAUSES,
+        "pub fn main(x) {
+  case x {
+    1 -> todo
+    2 -> todo
+    3 | 3 | 3 | 4 | 3 | 5 -> todo
+  }
+}
+",
+        find_position_of("3").nth_occurrence(2).to_selection()
+    );
+}
+
+#[test]
+fn remove_unreachable_clauses_can_be_triggered_from_alternative_pattern() {
+    assert_code_action!(
+        REMOVE_UNREACHABLE_CLAUSES,
+        "pub fn main(x) {
+  case x {
+    Ok(n) -> 1
+    Error(_) | Ok(_) -> 3
+    Ok(1) -> todo
+  }
+}
+",
+        find_position_of("Ok(_)").to_selection()
+    );
+}
+
+#[test]
 fn remove_unreachable_branches_does_not_pop_up_if_all_branches_are_reachable() {
     assert_no_code_actions!(
         REMOVE_UNREACHABLE_CLAUSES,
@@ -11020,6 +12408,220 @@ pub fn do_things(a, b) {
 }
 
 #[test]
+fn extract_function_with_selected_expression_in_statement() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        "
+pub fn do_things(a, b) {
+  let result = call(a, [])
+  result + 3
+}
+",
+        find_position_of("call").select_until(find_position_of("[]"))
+    );
+}
+
+#[test]
+fn extract_function_with_selected_pipeline_expression_in_statement() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        "
+pub fn do_things(a, b) {
+  let result =
+    wibble
+    |> wobble
+    |> woo
+
+  result + 3
+}
+",
+        find_position_of("wibble").select_until(find_position_of("woo"))
+    );
+}
+
+#[test]
+fn extract_function_with_assignment_expression_and_multiple_assignments() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        "
+pub fn do_things(a, b) {
+  let result =
+    wibble
+    |> wobble
+    |> woo
+
+  let a = result + 2
+
+  a + 3
+}
+",
+        find_position_of("wibble").select_until(find_position_of("2"))
+    );
+}
+
+#[test]
+fn extract_function_inside_anonymous_function_returning_value() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+fn wibble() {
+  let wobble = fn() {
+    let random_number = 4
+    random_number * 42
+  }
+}
+"#,
+        find_position_of("random_number")
+            .nth_occurrence(2)
+            .select_until(find_position_of("42")),
+    );
+}
+
+#[test]
+fn extract_function_after_anonymous_function() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+fn wibble() {
+  let wobble = fn() {
+    let random_number = 4
+    random_number * 42
+  }
+  wobble() / 22
+}
+"#,
+        find_position_of("wobble()").select_until(find_position_of("22").under_last_char()),
+    );
+}
+
+#[test]
+fn extract_function_first_statement_inside_of_use() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn wibble() {
+    use wobble <- result.map(todo)
+    echo wobble as "1"
+    echo wobble as "2"
+    echo wobble as "3"
+    echo wobble as "4"
+}
+"#,
+        find_position_of("echo").select_until(find_position_of("1\""))
+    );
+}
+
+#[test]
+fn extract_function_second_statement_inside_of_use() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn wibble() {
+    use wobble <- result.map(todo)
+    echo wobble as "1"
+    echo wobble as "2"
+    echo wobble as "3"
+    echo wobble as "4"
+}
+"#,
+        find_position_of("echo")
+            .nth_occurrence(2)
+            .select_until(find_position_of("2\""))
+    );
+}
+
+#[test]
+fn extract_function_last_statement_inside_of_use() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn wibble() {
+    use wobble <- result.map(todo)
+    echo wobble as "1"
+    echo wobble as "2"
+    echo wobble as "3"
+    echo wobble as "4"
+}
+"#,
+        find_position_of("echo")
+            .nth_occurrence(4)
+            .select_until(find_position_of("4\""))
+    );
+}
+
+#[test]
+fn extract_function_first_few_statements_inside_of_use() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn wibble() {
+  use wobble <- result.map(todo)
+  echo wobble as "1"
+  echo wobble as "2"
+  echo wobble as "3"
+  echo wobble as "4"
+}
+"#,
+        find_position_of("echo").select_until(find_position_of("2\""))
+    );
+}
+
+#[test]
+fn extract_function_middle_few_statements_inside_of_use() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn wibble() {
+  use wobble <- result.map(todo)
+  echo wobble as "1"
+  echo wobble as "2"
+  echo wobble as "3"
+  echo wobble as "4"
+}
+"#,
+        find_position_of("echo")
+            .nth_occurrence(2)
+            .select_until(find_position_of("3\""))
+    );
+}
+
+#[test]
+fn extract_function_last_few_statements_inside_of_use() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn wibble() {
+  use wobble <- result.map(todo)
+  echo wobble as "1"
+  echo wobble as "2"
+  echo wobble as "3"
+  echo wobble as "4"
+}
+"#,
+        find_position_of("echo")
+            .nth_occurrence(3)
+            .select_until(find_position_of("4\""))
+    );
+}
+
+#[test]
+fn extract_function_all_statements_inside_of_use() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn wibble() {
+  use wobble <- result.map(todo)
+  echo wobble as "1"
+  echo wobble as "2"
+  echo wobble as "3"
+  echo wobble as "4"
+}
+"#,
+        find_position_of("echo").select_until(find_position_of("4\""))
+    );
+}
+
+#[test]
 fn extract_function_from_statements() {
     assert_code_action!(
         EXTRACT_FUNCTION,
@@ -11183,6 +12785,347 @@ pub fn main() {
 }
 "#,
         find_position_of("case").select_until(find_position_of("}"))
+    );
+}
+
+#[test]
+fn no_extract_function_selecting_multiple_case_branches() {
+    assert_no_code_actions!(
+        EXTRACT_FUNCTION,
+        r#"
+const pi = 3.14
+
+pub fn main() {
+  let value = 3.15
+
+  let string = case value {
+    0.0 -> "Zero"
+    1.0 -> "One"
+    _ -> "Something else"
+  }
+
+  echo string
+}
+"#,
+        find_position_of("0.0").select_until(find_position_of("else"))
+    );
+}
+
+#[test]
+fn no_extract_function_selecting_case_branch_pattern() {
+    assert_no_code_actions!(
+        EXTRACT_FUNCTION,
+        r#"
+const pi = 3.14
+
+pub fn main() {
+  let value = 3.15
+
+  let string = case value {
+    0.0 -> "Zero"
+    1.0 -> "One"
+    _ -> "Something else"
+  }
+
+  echo string
+}
+"#,
+        find_position_of("0.0").select_until(find_position_of("Zero").under_last_char())
+    );
+}
+
+#[test]
+fn no_extract_function_selecting_case_branch_guard() {
+    assert_no_code_actions!(
+        EXTRACT_FUNCTION,
+        r#"
+const pi = 3.14
+
+pub fn main() {
+  let value = 3.15
+
+  let string = case value {
+    0.0 if True -> "Zero"
+    1.0 -> "One"
+    _ -> "Something else"
+  }
+
+  echo string
+}
+"#,
+        find_position_of("True")
+            .under_char('u')
+            .select_until(find_position_of("Zero").under_last_char())
+    );
+}
+
+#[test]
+fn extract_use_inside_function() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+fn wibble(f) { todo }
+
+pub fn main() {
+  use a <- wibble()
+  Ok(Nil)
+}
+"#,
+        find_position_of("use").select_until(find_position_of("<-"))
+    );
+}
+
+#[test]
+fn extract_use_inside_block() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+fn wibble(f) -> Int { todo }
+
+pub fn main() {
+  let wobble = {
+    use a <- wibble()
+    Ok(Nil)
+  }
+
+  wobble
+}
+"#,
+        find_position_of("use").select_until(find_position_of("Nil)"))
+    );
+}
+
+#[test]
+fn extract_use_with_some_statements_before() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+fn wibble(f) { todo }
+
+pub fn main() {
+  let a = wibble(todo)
+  use a <- wibble()
+  Ok(Nil)
+}
+"#,
+        find_position_of("let").select_until(find_position_of("use"))
+    );
+}
+
+#[test]
+fn extract_use_including_some_statements_after() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+fn wibble(f) { todo }
+
+pub fn main() {
+  let wobble = {
+    use a <- wibble()
+    Ok(Nil)
+  }
+  wibble(panic)
+
+  wobble
+}
+"#,
+        find_position_of("let").select_until(find_position_of("panic)"))
+    );
+}
+
+#[test]
+fn extract_entire_pipeline() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn main() {
+  True
+  |> wibble
+  |> wobble
+}
+
+fn wibble(_) { 1 }
+fn wobble(_) { 1.0 }
+"#,
+        find_position_of("True").select_until(find_position_of("wobble"))
+    );
+}
+
+#[test]
+fn extract_starting_steps_of_pipeline() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn main() {
+  True
+  |> wibble
+  |> wobble
+}
+
+fn wibble(_) { 1 }
+fn wobble(_) { 1.0 }
+"#,
+        find_position_of("True").select_until(find_position_of("wibble"))
+    );
+}
+
+#[test]
+fn extract_starting_steps_of_pipeline_with_argument() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn main() {
+  let something = 1
+
+  True
+  |> wibble(something)
+  |> wobble
+}
+
+fn wibble(_, _) { 1 }
+fn wobble(_) { 1.0 }
+"#,
+        find_position_of("True").select_until(find_position_of("wibble"))
+    );
+}
+
+#[test]
+fn extract_final_steps_of_pipeline() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn main() {
+  True
+  |> wibble
+  |> wobble
+}
+
+fn wibble(_) { 1 }
+fn wobble(_) { 1.0 }
+"#,
+        find_position_of("wibble").select_until(find_position_of("wobble"))
+    );
+}
+
+#[test]
+fn extract_final_steps_of_pipeline_with_arguments() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn main() {
+  let something = 1
+
+  True
+  |> wibble
+  |> wobble(something)
+}
+
+fn wibble(_) { 1 }
+fn wobble(_, _) { 1.0 }
+"#,
+        find_position_of("wibble").select_until(find_position_of("wobble"))
+    );
+}
+
+#[test]
+fn extract_middle_steps_of_pipeline() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn main() {
+  True
+  |> wibble
+  |> wobble
+  |> woo
+}
+
+fn wibble(_) { 1 }
+fn wobble(_) { 1.0 }
+fn woo(_) { [] }
+"#,
+        find_position_of("wibble").select_until(find_position_of("wobble"))
+    );
+}
+
+#[test]
+fn extract_middle_steps_of_pipeline_with_arguments() {
+    assert_code_action!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn main() {
+  let something = 1
+
+  True
+  |> wibble(1)
+  |> wobble(something)
+  |> woo
+}
+
+fn wibble(_, _) { 1 }
+fn wobble(_, _) { 1.0 }
+fn woo(_) { [] }
+"#,
+        find_position_of("wibble").select_until(find_position_of("wobble"))
+    );
+}
+
+#[test]
+fn cannot_extract_a_single_starting_step_as_function() {
+    assert_no_code_actions!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn main() {
+  True
+  |> wibble
+  |> wobble
+  |> woo
+}
+
+fn wibble(_, _) { 1 }
+fn wobble(_, _) { 1.0 }
+fn woo(_) { [] }
+"#,
+        find_position_of("True").to_selection()
+    );
+}
+
+#[test]
+fn cannot_extract_a_single_middle_step_as_function() {
+    assert_no_code_actions!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn main() {
+  True
+  |> wibble
+  |> wobble
+  |> woo
+}
+
+fn wibble(_, _) { 1 }
+fn wobble(_, _) { 1.0 }
+fn woo(_) { [] }
+"#,
+        find_position_of("wibble").to_selection()
+    );
+}
+
+#[test]
+fn cannot_extract_a_single_final_step_as_function() {
+    assert_no_code_actions!(
+        EXTRACT_FUNCTION,
+        r#"
+pub fn main() {
+  True
+  |> wibble
+  |> wobble
+  |> woo
+}
+
+fn wibble(_, _) { 1 }
+fn wobble(_, _) { 1.0 }
+fn woo(_) { [] }
+"#,
+        find_position_of("woo").to_selection()
     );
 }
 
@@ -11892,6 +13835,24 @@ type Wibble {
 }
 
 #[test]
+fn add_missing_type_parameter_can_only_trigger_if_within_type() {
+    assert_no_code_actions!(
+        ADD_MISSING_TYPE_PARAMETER,
+        r#"
+type Wibble {
+  Wibble(field: t)
+}
+
+pub fn main() {
+    // unrelated
+    todo
+}
+"#,
+        find_position_of("type").select_until(find_position_of("todo"))
+    );
+}
+
+#[test]
 fn add_missing_type_parameter_to_exising_parameter() {
     assert_code_action!(
         ADD_MISSING_TYPE_PARAMETER,
@@ -11955,6 +13916,19 @@ fn add_missing_type_parameter_not_suggested_when_no_parameters() {
         r#"
 type Wibble {
   Wibble
+}
+"#,
+        find_position_of("Wibble").nth_occurrence(2).to_selection()
+    );
+}
+
+#[test]
+fn add_missing_type_parameter_does_not_add_types_that_do_not_exist() {
+    assert_no_code_actions!(
+        ADD_MISSING_TYPE_PARAMETER,
+        r#"
+type Wibble {
+  Wibble(Wobble)
 }
 "#,
         find_position_of("Wibble").nth_occurrence(2).to_selection()
@@ -12159,8 +14133,12 @@ pub type Wobble {
     assert_code_action!(
         GENERATE_DYNAMIC_DECODER,
         TestProject::for_source(src)
-            .add_hex_module("gleam/option", "pub type Option(a) { Some(a) None }")
-            .add_hex_module("gleam/dict", "pub type Dict(key, value)"),
+            .add_package_module(
+                "gleam_stdlib",
+                "gleam/option",
+                "pub type Option(a) { Some(a) None }"
+            )
+            .add_package_module("gleam_stdlib", "gleam/dict", "pub type Dict(key, value)"),
         find_position_of("pub type Wobble {").select_until(find_position_of("}"))
     );
 }
@@ -12188,7 +14166,13 @@ pub type Wobble {
     "#;
     assert_code_action!(
         GENERATE_DYNAMIC_DECODER,
-        TestProject::for_source(src).add_module("wibble", "pub type Wibble { Wibble }"),
+        TestProject::for_source(src)
+            .add_module("wibble", "pub type Wibble { Wibble }")
+            .add_package_module(
+                "gleam_stdlib",
+                "gleam/dynamic/decode",
+                "pub type Decoder(a)"
+            ),
         find_position_of("pub type Wobble {").select_until(find_position_of("}").nth_occurrence(2))
     );
 }
@@ -12229,6 +14213,11 @@ pub type Wibble { Wibble(value: NestedWibble) }
                 r#"
 pub type NestedWibble { NestedWibble }
 "#
+            )
+            .add_package_module(
+                "gleam_stdlib",
+                "gleam/dynamic/decode",
+                "pub type Decoder(a)"
             ),
         find_position_of("pub type Wobble {").select_until(find_position_of("}").nth_occurrence(2))
     );
@@ -12260,6 +14249,11 @@ pub type Wibble { Wibble(map: Dict(Int, Bool)) }
 pub type Dict(key, value)
 pub fn new() -> Dict(k, v) { todo }
 "#
+            )
+            .add_package_module(
+                "gleam_stdlib",
+                "gleam/dynamic/decode",
+                "pub type Decoder(a)"
             ),
         find_position_of("pub type Wobble {").select_until(find_position_of("}").nth_occurrence(2))
     );
@@ -12277,21 +14271,32 @@ pub type Wobble {
     "#;
     assert_code_action!(
         GENERATE_DYNAMIC_DECODER,
-        TestProject::for_source(src).add_hex_module("wibble", "pub type Wibble { Wibble }"),
+        TestProject::for_source(src)
+            .add_hex_module("wibble", "pub type Wibble { Wibble }")
+            .add_package_module(
+                "gleam_stdlib",
+                "gleam/dynamic/decode",
+                "pub type Decoder(a)"
+            ),
         find_position_of("pub type Wobble {").select_until(find_position_of("}").nth_occurrence(2))
     );
 }
 
 #[test]
 fn generate_dynamic_decoder_skips_over_recursive_constructors_when_generating_zero_values() {
-    assert_code_action!(
-        GENERATE_DYNAMIC_DECODER,
-        r#"
+    let src = r#"
 pub type Wobble {
   Wobble(inside: Wobble)
   Dummy(a: Int, b: Int)
 }
-    "#,
+    "#;
+    assert_code_action!(
+        GENERATE_DYNAMIC_DECODER,
+        TestProject::for_source(src).add_package_module(
+            "gleam_stdlib",
+            "gleam/dynamic/decode",
+            "pub type Decoder(a)"
+        ),
         find_position_of("pub type Wobble {").select_until(find_position_of("}"))
     );
 }
@@ -12299,9 +14304,7 @@ pub type Wobble {
 #[test]
 fn generate_dynamic_decoder_skips_over_mutually_recursive_constructors_when_generating_zero_values()
 {
-    assert_code_action!(
-        GENERATE_DYNAMIC_DECODER,
-        r#"
+    let src = r#"
 pub type Wobble {
   Wobble(inside: Wibble)
   DummyWobble(a: Int, b: Int)
@@ -12311,7 +14314,14 @@ pub type Wibble {
   Wibble(inside: Wobble)
   DummyWibble(a: Int, b: Int)
 }
-    "#,
+    "#;
+    assert_code_action!(
+        GENERATE_DYNAMIC_DECODER,
+        TestProject::for_source(src).add_package_module(
+            "gleam_stdlib",
+            "gleam/dynamic/decode",
+            "pub type Decoder(a)"
+        ),
         find_position_of("pub type Wobble {").select_until(find_position_of("}"))
     );
 }
@@ -12329,36 +14339,52 @@ pub type Wobble {
     "#;
     assert_code_action!(
         GENERATE_DYNAMIC_DECODER,
-        TestProject::for_source(src).add_hex_module("wibble", "pub type Wibble { Wibble }"),
+        TestProject::for_source(src)
+            .add_hex_module("wibble", "pub type Wibble { Wibble }")
+            .add_package_module(
+                "gleam_stdlib",
+                "gleam/dynamic/decode",
+                "pub type Decoder(a)"
+            ),
         find_position_of("pub type Wobble {").select_until(find_position_of("}").nth_occurrence(2))
     );
 }
 
 #[test]
 fn generate_dynamic_decoder_generates_todo_for_zero_value_when_all_constructors_fail() {
-    assert_code_action!(
-        GENERATE_DYNAMIC_DECODER,
-        r#"
+    let src = r#"
 pub type Wobble {
   Wobble(nope: Wobble)
   Wibble(not: Int, again: Wobble)
 }
-    "#,
+    "#;
+    assert_code_action!(
+        GENERATE_DYNAMIC_DECODER,
+        TestProject::for_source(src).add_package_module(
+            "gleam_stdlib",
+            "gleam/dynamic/decode",
+            "pub type Decoder(a)"
+        ),
         find_position_of("pub type Wobble {").select_until(find_position_of("}"))
     );
 }
 
 #[test]
 fn generate_dynamic_decoder_uses_decode_success_for_nil() {
-    assert_code_action!(
-        GENERATE_DYNAMIC_DECODER,
-        r#"
+    let src = r#"
 pub type Nothing {
   No(val: Nil)
   Nope(val: #(Nil, Nil))
   Nothing(val: List(Nil))
 }
-    "#,
+    "#;
+    assert_code_action!(
+        GENERATE_DYNAMIC_DECODER,
+        TestProject::for_source(src).add_package_module(
+            "gleam_stdlib",
+            "gleam/dynamic/decode",
+            "pub type Decoder(a)"
+        ),
         find_position_of("pub type Nothing {").select_until(find_position_of("}"))
     );
 }
@@ -12406,5 +14432,1863 @@ pub type Nothing {
             .add_hex_module("gleam/dict", "pub type Dict(key, value)"),
         find_position_of("pub type Nothing {")
             .select_until(find_position_of("}").nth_occurrence(2))
+    );
+}
+
+#[test]
+fn replace_underscore_with_function_return_type() {
+    assert_code_action!(
+        REPLACE_UNDERSCORE_WITH_TYPE,
+        r#"
+pub fn wibble() -> _ {
+    12
+}
+    "#,
+        find_position_of("_").to_selection()
+    );
+}
+
+#[test]
+fn wrap_uncalled_function_in_anonymous_function() {
+    assert_code_action!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  op
+}
+
+fn op(i) {
+  todo
+}
+",
+        find_position_of("op").to_selection()
+    );
+}
+
+#[test]
+fn wrap_function_in_anonymous_function_does_not_trigger_if_selection_is_not_within_the_function() {
+    assert_no_code_actions!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  let a = 1
+  some_function
+  let b = 2
+  Nil
+}
+
+fn some_function(i) {
+  todo
+}
+",
+        find_position_of("1").select_until(find_position_of("2"))
+    );
+}
+
+#[test]
+fn wrap_function_in_anonymous_function_does_not_trigger_on_record_update() {
+    assert_no_code_actions!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  Wibble(..todo, a: 1)
+}
+
+pub type Wibble { Wibble(a: Int, b: Int) }
+",
+        find_position_of("Wibble").to_selection()
+    );
+}
+
+#[test]
+fn wrap_function_in_anonymous_function_does_not_trigger_on_invalid_record_update() {
+    assert_no_code_actions!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  Wibble(..todo, a: 1)
+}
+",
+        find_position_of("Wibble").to_selection()
+    );
+}
+
+#[test]
+fn wrap_function_in_anonymous_function_does_not_trigger_on_record_call() {
+    assert_no_code_actions!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  Wibble(1, 2)
+}
+
+pub type Wibble { Wibble(a: Int, b: Int) }
+",
+        find_position_of("Wibble").to_selection()
+    );
+}
+
+#[test]
+fn wrap_function_in_anonymous_function_does_not_trigger_on_invalid_record_call() {
+    assert_no_code_actions!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  Wibble(1)
+}
+",
+        find_position_of("Wibble").to_selection()
+    );
+}
+
+#[test]
+fn replace_nested_underscore_with_generic_type() {
+    assert_code_action!(
+        REPLACE_UNDERSCORE_WITH_TYPE,
+        r#"
+pub fn wibble() -> Result(a, _) {
+    Ok(todo)
+}
+    "#,
+        find_position_of("_").to_selection()
+    );
+}
+
+#[test]
+fn wrap_uncalled_constructor_in_anonymous_function() {
+    assert_code_action!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  Record
+}
+
+type Record {
+  Record(i: Int)
+}
+",
+        find_position_of("Record").to_selection()
+    );
+}
+
+#[test]
+fn replace_nested_underscore_with_function_return_type() {
+    assert_code_action!(
+        REPLACE_UNDERSCORE_WITH_TYPE,
+        r#"
+pub fn wibble() -> Result(Result(_, Nil), Int) {
+    Ok(Ok("hello"))
+}
+    "#,
+        find_position_of("_").to_selection()
+    );
+}
+
+#[test]
+fn wrap_call_arg_in_anonymous_function() {
+    assert_code_action!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "import gleam/list
+
+pub fn main() {
+  list.map([1, 2, 3], op)
+}
+
+fn op(i: Int) -> Int {
+  todo
+}
+",
+        find_position_of("op").to_selection()
+    );
+}
+
+#[test]
+fn replace_nested_underscore_in_let_annotation() {
+    assert_code_action!(
+        REPLACE_UNDERSCORE_WITH_TYPE,
+        r#"
+pub fn wibble() {
+    let a: Result(Result(_, Nil), Nil) = Ok(Ok("hello"))
+}
+    "#,
+        find_position_of("_").to_selection()
+    );
+}
+
+#[test]
+fn wrap_function_in_anonymous_function_without_shadowing() {
+    assert_code_action!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  int
+}
+
+fn int(i: Int) {
+  todo
+}
+",
+        find_position_of("int").to_selection()
+    );
+}
+
+#[test]
+fn replace_underscore_in_let_annotation() {
+    assert_code_action!(
+        REPLACE_UNDERSCORE_WITH_TYPE,
+        r#"
+pub fn wibble() {
+    let a: _ = Ok(Ok("hello"))
+}
+    "#,
+        find_position_of("_").to_selection()
+    );
+}
+
+#[test]
+fn replace_nested_underscore_with_tuple_type() {
+    assert_code_action!(
+        REPLACE_UNDERSCORE_WITH_TYPE,
+        r#"
+pub fn wibble() {
+    let a: #(Int, _, Int) = #(1, "hello", 2)
+}
+    "#,
+        find_position_of("_").to_selection()
+    );
+}
+
+#[test]
+fn replace_underscore_in_function_argument() {
+    assert_code_action!(
+        REPLACE_UNDERSCORE_WITH_TYPE,
+        r#"
+pub fn wibble(a: _) -> Int {
+    a + 2
+}
+    "#,
+        find_position_of("_").to_selection()
+    );
+}
+
+#[test]
+fn replace_underscore_in_fn_expr_argument() {
+    assert_code_action!(
+        REPLACE_UNDERSCORE_WITH_TYPE,
+        r#"
+pub fn wibble() {
+    fn(a: _) { a + 2 }
+}
+    "#,
+        find_position_of("_").to_selection()
+    );
+}
+
+#[test]
+fn wrap_assignment_in_anonymous_function() {
+    assert_code_action!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  let op = op_factory(1, 2, 3)
+}
+
+fn op_factory(a: Int, b: Int, c: Int) -> fn(Int) -> Int {
+  todo
+}
+",
+        find_position_of("op_factory").to_selection()
+    );
+}
+
+#[test]
+fn wrap_imported_function_in_anonymous_function() {
+    let source = "import gleam/list
+import gleam/int
+
+pub fn main() {
+  list.map([1, 2, 3], int.is_even)
+}
+";
+
+    let int_source = "pub fn is_even(int) { int % 2 == 0 }";
+
+    assert_code_action!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        TestProject::for_source(source).add_module("gleam/int", int_source),
+        find_position_of("int.is_even").to_selection()
+    );
+}
+
+#[test]
+fn dont_wrap_anonymous_function_in_anonymous_function() {
+    assert_no_code_actions!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  let f = fn(in) { ception(in) }
+}
+
+",
+        find_position_of("fn(in)").to_selection()
+    );
+}
+
+#[test]
+fn wrap_pipeline_step_in_anonymous_function() {
+    assert_code_action!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  1 |> wibble |> wobble
+}
+
+fn wibble(i) {
+  todo
+}
+
+fn wobble(i) {
+  todo
+}
+
+",
+        find_position_of("wibble").to_selection()
+    );
+}
+
+#[test]
+fn wrap_final_pipeline_step_in_anonymous_function() {
+    assert_code_action!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  1 |> wibble |> wobble
+}
+
+fn wibble(i) {
+  todo
+}
+
+fn wobble(i) {
+  todo
+}
+
+",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn wrap_record_field_in_anonymous_function() {
+    assert_code_action!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  let r = Record(wibble)
+}
+
+type Record {
+  Record(wibbler: fn(Int) -> Int)
+}
+
+fn wibble(v) {
+  todo
+}
+
+",
+        find_position_of("wibble").to_selection()
+    );
+}
+
+#[test]
+fn dont_wrap_functions_that_are_already_being_called() {
+    assert_no_code_actions!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  wibble(1)
+}
+
+fn wibble(i) {
+  todo
+}
+
+",
+        find_position_of("wibble").to_selection()
+    );
+}
+
+#[test]
+fn unwrap_trivial_anonymous_function() {
+    assert_code_action!(
+        UNWRAP_ANONYMOUS_FUNCTION,
+        "import gleam/list
+
+pub fn main() {
+  list.map([1, 2, 3], fn(int) { op(int) })
+}
+
+fn op(i: Int) -> Int {
+  todo
+}
+",
+        find_position_of("fn(int)").to_selection()
+    );
+}
+
+#[test]
+fn unwrap_anonymous_function_can_only_trigger_if_cursor_is_within_the_function() {
+    assert_no_code_actions!(
+        UNWRAP_ANONYMOUS_FUNCTION,
+        "import gleam/list
+
+pub fn main() {
+  list.map([1, 2, 3], fn(int) { op(int) })
+}
+
+fn op(i: Int) -> Int {
+  todo
+}
+",
+        find_position_of("fn(int)").select_until(find_position_of("todo"))
+    );
+}
+
+#[test]
+fn unwrap_trivial_anonymous_function_with_bad_spacing() {
+    assert_code_action!(
+        UNWRAP_ANONYMOUS_FUNCTION,
+        "import gleam/list
+
+pub fn main() {
+  list.map([1, 2, 3], fn (int)  {
+
+    op(int)
+
+        })
+}
+
+fn op(i: Int) -> Int {
+  todo
+}
+",
+        find_position_of("fn (int)").to_selection()
+    );
+}
+
+#[test]
+fn unwrap_nested_anonymous_function() {
+    assert_code_action!(
+        UNWRAP_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  fn(do) { fn(re){ mi(re) }(do) }
+}
+
+fn mi(v) {
+  todo
+}
+",
+        find_position_of("fn(re)").to_selection()
+    );
+}
+
+#[test]
+fn unwrap_anonymous_function_with_labelled_args() {
+    assert_code_action!(
+        UNWRAP_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  fn(a, b) { op(first: a, second: b) }
+}
+
+fn op(first a, second b) {
+  todo
+}
+",
+        find_position_of("fn(a, b)").to_selection()
+    );
+}
+
+#[test]
+fn unwrap_anonymous_function_with_labelled_and_unlabelled_args() {
+    assert_code_action!(
+        UNWRAP_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  fn(a, b, c) { op(a, second: b, third: c) }
+}
+
+fn op(a, second b, third c) {
+  todo
+}
+",
+        find_position_of("fn(a, b, c)").to_selection()
+    );
+}
+
+#[test]
+fn unwrap_anonymous_function_with_labelled_args_out_of_order() {
+    assert_code_action!(
+        UNWRAP_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  fn(a, b) { op(second: b, first: a) }
+}
+
+fn op(first a, second b) {
+  todo
+}
+",
+        find_position_of("fn(a, b)").to_selection()
+    );
+}
+
+#[test]
+fn unwrap_anonymous_function_with_comment_after() {
+    assert_code_action!(
+        UNWRAP_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  fn(a) {
+    op(a)
+    // look out!
+  }
+}
+
+fn op(a) {
+  todo
+}
+",
+        find_position_of("fn(a)").to_selection()
+    );
+}
+
+#[test]
+fn unwrap_anonymous_function_with_comment_on_line() {
+    assert_code_action!(
+        UNWRAP_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  fn(a) {
+    op(a) // look out!
+  }
+}
+
+fn op(a) {
+  todo
+}
+",
+        find_position_of("fn(a)").to_selection()
+    );
+}
+
+#[test]
+fn unwrap_anonymous_function_with_comment_on_head_line() {
+    assert_code_action!(
+        UNWRAP_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  fn(a) { // look out!
+    op(a)
+  }
+}
+
+fn op(a) {
+  todo
+}
+",
+        find_position_of("fn(a)").to_selection()
+    );
+}
+
+#[test]
+fn unwrap_anonymous_function_with_comments_before() {
+    assert_code_action!(
+        UNWRAP_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  fn(a) {
+    // look out,
+    // there's a comment!
+
+    // another comment!
+    //here's one without a leading space
+      // here's one indented wrong
+  // here's one indented even wronger
+    op(a)
+  }
+}
+
+fn op(a) {
+  todo
+}
+",
+        find_position_of("fn(a)").to_selection()
+    );
+}
+
+#[test]
+fn unwrap_anonymous_function_unavailable_when_args_discarded() {
+    assert_no_code_actions!(
+        UNWRAP_ANONYMOUS_FUNCTION,
+        "import gleam/list
+
+pub fn main() {
+  list.index_map([1, 2, 3], fn(_, int) { op(int) })
+}
+
+fn op(i: Int) -> Int {
+  todo
+}
+",
+        find_position_of("fn(_, int)").to_selection()
+    );
+}
+
+#[test]
+fn unwrap_anonymous_function_unavailable_with_different_args() {
+    assert_no_code_actions!(
+        UNWRAP_ANONYMOUS_FUNCTION,
+        "import gleam/list
+
+const another_int = 7
+
+pub fn main() {
+  list.map([1, 2, 3], fn(int) { op(another_int) })
+}
+
+fn op(i: Int) -> Int {
+  todo
+}
+",
+        find_position_of("fn(int)").to_selection()
+    );
+}
+
+#[test]
+fn dont_wrap_use_in_anonymous_function() {
+    assert_no_code_actions!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "fn apply(x, k) {
+  k(x)
+}
+
+pub fn main() {
+  use a <- apply(5)
+  a * 1
+}
+",
+        find_position_of("a * 1").to_selection()
+    );
+}
+
+#[test]
+fn dont_wrap_uses_in_anonymous_function() {
+    assert_no_code_actions!(
+        WRAP_IN_ANONYMOUS_FUNCTION,
+        "pub fn main() {
+  use a <- apply(1)
+  use b <- apply(2)
+  use c <- apply(3)
+  a * b * c
+}
+
+fn apply(x, k) {
+  k(x)
+}",
+        find_position_of("a * b * c").to_selection()
+    );
+}
+
+#[test]
+fn create_unknown_module_under_src() {
+    assert_code_action!(
+        "Create src/wibble/wobble.gleam",
+        "
+import wibble/wobble
+
+pub fn main() {
+  Nil
+}",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn create_unknown_module_under_dev() {
+    let project = TestProject::for_source(
+        "
+pub fn main() {
+  Nil
+}",
+    )
+    .add_dev_module(
+        "wibble",
+        "
+import wobble/woo",
+    );
+
+    assert_code_action!(
+        "Create dev/wobble/woo.gleam",
+        project,
+        Origin::Dev,
+        "wibble",
+        find_position_of("woo").to_selection()
+    );
+}
+
+#[test]
+fn create_unknown_module_under_test() {
+    let project = TestProject::for_source(
+        "
+pub fn main() {
+  Nil
+}",
+    )
+    .add_test_module(
+        "wibble",
+        "
+import wobble/woo",
+    );
+
+    assert_code_action!(
+        "Create test/wobble/woo.gleam",
+        project,
+        Origin::Test,
+        "wibble",
+        find_position_of("woo").to_selection()
+    );
+}
+
+#[test]
+fn create_unknown_module_doesnt_trigger_when_module_exists() {
+    let code = "
+import wibble/wobble
+
+pub fn main() {
+  Nil
+}
+";
+
+    assert_no_code_actions!(
+        "Create src/wibble/wobble.gleam",
+        TestProject::for_source(code)
+            .add_module("wibble/wobble", "pub type Wibble { Wobble(String) }"),
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn create_unknown_module_doesnt_trigger_when_module_is_importable() {
+    let code = "
+pub fn main() {
+  wibble.something()
+}
+";
+
+    assert_no_code_actions!(
+        "Create src/wobble/wibble.gleam",
+        TestProject::for_source(code)
+            .add_module("wobble/wibble", "pub type Wibble { Wobble(String) }"),
+        find_position_of("wibble").to_selection()
+    );
+}
+
+#[test]
+fn create_unknown_module_doesnt_trigger_when_import_not_selected() {
+    let code = "
+import wibble/wobble
+
+pub fn main() {
+  Nil
+}
+";
+
+    assert_no_code_actions!(
+        "Create src/wibble/wobble.gleam",
+        TestProject::for_source(code),
+        find_position_of("main").to_selection()
+    );
+}
+
+#[test]
+fn remove_redundant_record_update_triggered_on_the_record_spread() {
+    assert_code_action!(
+        REMOVE_REDUNDANT_RECORD_UPDATE,
+        "
+pub fn go(record: Wibble) {
+  Wibble(..record, a: 1, b: 2)
+}
+
+pub type Wibble { Wibble(a: Int, b: Int) }
+",
+        find_position_of("..").to_selection()
+    );
+}
+
+#[test]
+fn remove_redundant_record_update_triggered_on_the_record() {
+    assert_code_action!(
+        REMOVE_REDUNDANT_RECORD_UPDATE,
+        "
+pub fn go(record: Wibble) {
+  Wibble(..record, a: 1, b: 2)
+}
+
+pub type Wibble { Wibble(a: Int, b: Int) }
+",
+        find_position_of("record").nth_occurrence(2).to_selection()
+    );
+}
+
+#[test]
+fn remove_redundant_record_update_triggered_anywhere_on_the_expression() {
+    assert_code_action!(
+        REMOVE_REDUNDANT_RECORD_UPDATE,
+        "
+pub fn go(record: Wibble) {
+  Wibble(..record, a: 1, b: 2)
+}
+
+pub type Wibble { Wibble(a: Int, b: Int) }
+",
+        find_position_of("1").select_until(find_position_of("2"))
+    );
+}
+
+#[test]
+fn remove_redundant_record_update_does_not_trigger_if_update_is_not_redundant() {
+    assert_no_code_actions!(
+        REMOVE_REDUNDANT_RECORD_UPDATE,
+        "
+pub fn go(record: Wibble) {
+  Wibble(..record, a: 1)
+}
+
+pub type Wibble { Wibble(a: Int, b: Int) }
+",
+        find_position_of("..record").to_selection()
+    );
+}
+
+#[test]
+fn remove_redundant_constant_record_update_triggered_on_the_record_spread() {
+    assert_code_action!(
+        REMOVE_REDUNDANT_RECORD_UPDATE,
+        "
+pub const updated = Wibble(..base, a: 1, b: 3)
+pub const base = Wibble(a: 1, b: 2)
+pub type Wibble { Wibble(a: Int, b: Int) }
+",
+        find_position_of("..").to_selection()
+    );
+}
+
+#[test]
+fn remove_redundant_constant_record_update_triggered_on_the_record() {
+    assert_code_action!(
+        REMOVE_REDUNDANT_RECORD_UPDATE,
+        "
+pub const updated = Wibble(..base, a: 1, b: 3)
+pub const base = Wibble(a: 1, b: 2)
+pub type Wibble { Wibble(a: Int, b: Int) }
+",
+        find_position_of("1").select_until(find_position_of("3"))
+    );
+}
+
+#[test]
+fn remove_redundant_constant_record_update_does_not_trigger_if_update_i_not_redundant() {
+    assert_no_code_actions!(
+        REMOVE_REDUNDANT_RECORD_UPDATE,
+        "
+pub const updated = Wibble(..base, a: 1)
+pub const base = Wibble(a: 1, b: 2)
+pub type Wibble { Wibble(a: Int, b: Int) }
+",
+        find_position_of("base").to_selection()
+    );
+}
+
+#[test]
+fn discard_unused_variable_triggered_at_variable() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        "pub fn go() -> Nil {
+  let wibble = 0
+  Nil
+}",
+        find_position_of("wibble").to_selection()
+    );
+}
+
+#[test]
+fn discard_unused_variable_triggered_at_variable_with_multiple_ones() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        "pub fn go() -> Nil {
+  let wibble = 0
+  let wobble = 0
+  Nil
+}",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn discard_unused_variable_triggered_at_variable_with_discarded_one() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        "pub fn go() -> Nil {
+  let wibble = 0
+  let _wobble = 0
+  Nil
+}",
+        find_position_of("wibble").to_selection()
+    );
+}
+
+#[test]
+fn no_discard_unused_variable_triggered_at_discarded_variable() {
+    assert_no_code_actions!(
+        DISCARD_UNUSED_VARIABLE,
+        "pub fn go() -> Nil {
+  let _wibble = 0
+  Nil
+}",
+        find_position_of("_wibble").to_selection()
+    );
+}
+
+#[test]
+fn discard_unused_variable_triggered_at_pattern_assignment_shorthand() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        "pub type Wibble {
+  Wibble(a: Int)
+}
+
+fn wobble(wibble: Wibble) -> Int {
+  case wibble {
+    Wibble(a:) -> 0
+  }
+}",
+        find_position_of("a:").nth_occurrence(2).to_selection()
+    );
+}
+
+#[test]
+fn no_discard_unused_variable_triggered_at_discarded_pattern_assignment_shorthand() {
+    assert_no_code_actions!(
+        DISCARD_UNUSED_VARIABLE,
+        "pub type Wibble {
+  Wibble(a: Int)
+}
+
+fn wobble(wibble: Wibble) -> Int {
+  case wibble {
+    Wibble(a: _) -> 0
+  }
+}",
+        find_position_of("a:").nth_occurrence(2).to_selection()
+    );
+}
+
+#[test]
+fn discard_unused_variable_triggered_at_pattern_assignment() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        "pub type Wibble {
+  Wibble(a: Int)
+}
+
+fn wobble(wibble: Wibble) -> Int {
+  case wibble {
+    Wibble(a) -> 0
+  }
+}",
+        find_position_of("a").nth_occurrence(3).to_selection()
+    );
+}
+
+#[test]
+fn no_discard_unused_variable_triggered_at_discarded_pattern_assignment() {
+    assert_no_code_actions!(
+        DISCARD_UNUSED_VARIABLE,
+        "pub type Wibble {
+  Wibble(a: Int)
+}
+
+fn wobble(wibble: Wibble) -> Int {
+  case wibble {
+    Wibble(_a) -> 0
+  }
+}",
+        find_position_of("_a").to_selection()
+    );
+}
+
+#[test]
+fn discard_unused_variable_triggered_at_list_pattern_assignment() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        "fn wibble(wobble: List(Int)) -> Nil {
+  case wobble {
+    [_, ..] as tail -> Nil
+    [] -> Nil
+  }
+}",
+        find_position_of("tail").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_function_call_on_single_step_pipeline() {
+    assert_code_action!(
+        CONVERT_TO_FUNCTION_CALL,
+        "fn wibble(wobble: List(Int)) -> Nil {
+  wobble |> echo
+}",
+        find_position_of("echo").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_function_call_on_single_step_pipeline_on_value() {
+    assert_code_action!(
+        CONVERT_TO_FUNCTION_CALL,
+        "fn wibble(wobble: List(Int)) -> Nil {
+  wobble |> echo
+}",
+        find_position_of("wobble |>").under_char('b').to_selection()
+    );
+}
+
+#[test]
+fn convert_to_function_call_on_value() {
+    assert_code_action!(
+        CONVERT_TO_FUNCTION_CALL,
+        "fn go() {
+  [1, 2, 3]
+  |> echo
+  |> wibble
+  |> wobble
+}",
+        find_position_of("[1, 2, 3]").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_function_call_on_first_step() {
+    assert_code_action!(
+        CONVERT_TO_FUNCTION_CALL,
+        "fn go() {
+  [1, 2, 3]
+  |> echo
+  |> wibble
+  |> wobble
+}",
+        find_position_of("echo").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_function_call_on_second_step() {
+    assert_code_action!(
+        CONVERT_TO_FUNCTION_CALL,
+        "fn go() {
+  [1, 2, 3]
+  |> echo
+  |> wibble
+  |> wobble
+}",
+        find_position_of("wibble").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_function_call_on_last_step() {
+    assert_code_action!(
+        CONVERT_TO_FUNCTION_CALL,
+        "fn go() {
+  [1, 2, 3]
+  |> echo
+  |> wibble
+  |> wobble
+}",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_function_call_on_value_single_line() {
+    assert_code_action!(
+        CONVERT_TO_FUNCTION_CALL,
+        "fn go() {
+  [1, 2, 3] |> echo |> wibble |> wobble
+}",
+        find_position_of("[1, 2, 3]").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_function_call_on_first_step_single_line() {
+    assert_code_action!(
+        CONVERT_TO_FUNCTION_CALL,
+        "fn go() {
+  [1, 2, 3] |> echo |> wibble |> wobble
+}",
+        find_position_of("echo").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_function_call_on_second_step_single_line() {
+    assert_code_action!(
+        CONVERT_TO_FUNCTION_CALL,
+        "fn go() {
+  [1, 2, 3] |> echo |> wibble |> wobble
+}",
+        find_position_of("wibble").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_function_call_on_last_step_single_line() {
+    assert_code_action!(
+        CONVERT_TO_FUNCTION_CALL,
+        "fn go() {
+  [1, 2, 3] |> echo |> wibble |> wobble
+}",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn fix_deprecated_pipe_syntax() {
+    assert_code_action!(
+        ADD_EXTRA_PARENTHESES,
+        "
+pub fn main() {
+  1 |> wibble(2)
+}
+
+pub fn wibble(a) {
+  fn(b) {
+    #(a, b)
+  }
+}
+",
+        find_position_of("wibble").under_char('i').to_selection()
+    );
+}
+
+#[test]
+fn convert_to_doc_comment_on_function() {
+    assert_code_action!(
+        CONVERT_TO_DOCUMENTATION_COMMENT,
+        "// wobble
+fn wibble() {
+    todo
+}",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_doc_comment_on_type() {
+    assert_code_action!(
+        CONVERT_TO_DOCUMENTATION_COMMENT,
+        "// wobble
+type Wibble {
+    Wibble
+}",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_doc_comment_on_constant() {
+    assert_code_action!(
+        CONVERT_TO_DOCUMENTATION_COMMENT,
+        "// wobble
+const wibble: Int = 42",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_doc_comment_on_type_alias() {
+    assert_code_action!(
+        CONVERT_TO_DOCUMENTATION_COMMENT,
+        "// wobble
+type Wibble = Int",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_doc_comment_on_variant_constructor_definition() {
+    assert_code_action!(
+        CONVERT_TO_DOCUMENTATION_COMMENT,
+        "type Wibble {
+    // wobble
+    Wibble(Int)
+}",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_doc_comment_on_record_label_definition() {
+    assert_code_action!(
+        CONVERT_TO_DOCUMENTATION_COMMENT,
+        "type Wibble {
+    Wibble(
+        // wobble
+        wibble: Int,
+    )
+}",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn no_convert_to_doc_comment_triggered_on_doc_comment() {
+    assert_no_code_actions!(
+        CONVERT_TO_DOCUMENTATION_COMMENT,
+        "/// wobble
+fn wibble() {
+    todo
+}",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn no_convert_to_doc_comment_inside_function() {
+    assert_no_code_actions!(
+        CONVERT_TO_DOCUMENTATION_COMMENT,
+        "fn wibble() {
+    // wobble
+    todo
+}",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn no_convert_to_doc_comment_before_import() {
+    assert_no_code_actions!(
+        CONVERT_TO_DOCUMENTATION_COMMENT,
+        "// wobble
+import wibble",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_module_doc_comment() {
+    assert_code_action!(
+        CONVERT_TO_DOCUMENTATION_COMMENT,
+        "// wobble
+
+import wibble
+",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_regular_comment() {
+    assert_code_action!(
+        CONVERT_TO_REGULAR_COMMENT,
+        "/// wobble
+fn wibble() {
+    todo
+}",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn convert_module_doc_comment_to_regular_comment() {
+    assert_code_action!(
+        CONVERT_TO_REGULAR_COMMENT,
+        "//// wobble
+
+import wibble
+",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn convert_multiline_comment_with_doc_comment() {
+    assert_code_action!(
+        CONVERT_TO_DOCUMENTATION_COMMENT,
+        "// wibble
+// wobble
+// wibble
+fn wibble() {
+    todo
+}",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_doc_comment_no_affect_other_comment() {
+    assert_code_action!(
+        CONVERT_TO_DOCUMENTATION_COMMENT,
+        "// wibble
+
+// wobble
+fn wibble() {
+    todo
+}",
+        find_position_of("wobble").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_regular_comment_no_affect_other_comment() {
+    assert_code_action!(
+        CONVERT_TO_REGULAR_COMMENT,
+        "/// wibble
+
+/// wobble",
+        find_position_of("wibble").to_selection()
+    );
+}
+
+#[test]
+fn convert_int_decimal_to_binary() {
+    assert_code_action!(
+        "Convert to `0b1101111`",
+        "pub fn main() { 111 }",
+        find_position_of("111").to_selection()
+    );
+}
+
+#[test]
+fn convert_int_decimal_to_octal() {
+    assert_code_action!(
+        "Convert to `0o157`",
+        "pub fn main() { 111 }",
+        find_position_of("111").to_selection()
+    );
+}
+
+#[test]
+fn convert_int_decimal_to_hexadecimal() {
+    assert_code_action!(
+        "Convert to `0x6f`",
+        "pub fn main() { 111 }",
+        find_position_of("111").to_selection()
+    );
+}
+
+#[test]
+fn convert_int_binary_to_octal() {
+    assert_code_action!(
+        "Convert to `0o157`",
+        "pub fn main() { 0b1101111 }",
+        find_position_of("0b1101111").to_selection()
+    );
+}
+
+#[test]
+fn convert_int_binary_to_decimal() {
+    assert_code_action!(
+        "Convert to `111`",
+        "pub fn main() { 0b1101111 }",
+        find_position_of("0b1101111").to_selection()
+    );
+}
+
+#[test]
+fn convert_int_binary_to_hexadecimal() {
+    assert_code_action!(
+        "Convert to `0x6f`",
+        "pub fn main() { 0b1101111 }",
+        find_position_of("0b1101111").to_selection()
+    );
+}
+
+#[test]
+fn convert_int_octal_to_binary() {
+    assert_code_action!(
+        "Convert to `0b1101111`",
+        "pub fn main() { 0o157 }",
+        find_position_of("0o157").to_selection()
+    );
+}
+
+#[test]
+fn convert_int_octal_to_decimal() {
+    assert_code_action!(
+        "Convert to `111`",
+        "pub fn main() { 0o157 }",
+        find_position_of("0o157").to_selection()
+    );
+}
+
+#[test]
+fn convert_int_octal_to_hexadecimal() {
+    assert_code_action!(
+        "Convert to `0x6f`",
+        "pub fn main() { 0o157 }",
+        find_position_of("0o157").to_selection()
+    );
+}
+
+#[test]
+fn convert_int_hexadecimal_to_binary() {
+    assert_code_action!(
+        "Convert to `0b1101111`",
+        "pub fn main() { 0x6f }",
+        find_position_of("0x6f").to_selection()
+    );
+}
+
+#[test]
+fn convert_int_hexadecimal_to_octal() {
+    assert_code_action!(
+        "Convert to `0o157`",
+        "pub fn main() { 0x6f }",
+        find_position_of("0x6f").to_selection()
+    );
+}
+
+#[test]
+fn convert_int_hexadecimal_to_decimal() {
+    assert_code_action!(
+        "Convert to `111`",
+        "pub fn main() { 0x6f }",
+        find_position_of("0x6f").to_selection()
+    );
+}
+#[test]
+fn convert_negative_int_decimal_to_binary() {
+    assert_code_action!(
+        "Convert to `-0b1101111`",
+        "pub fn main() { -111 }",
+        find_position_of("111").to_selection()
+    );
+}
+
+#[test]
+fn convert_negative_int_decimal_to_octal() {
+    assert_code_action!(
+        "Convert to `-0o157`",
+        "pub fn main() { -111 }",
+        find_position_of("111").to_selection()
+    );
+}
+
+#[test]
+fn convert_negative_int_decimal_to_hexadecimal() {
+    assert_code_action!(
+        "Convert to `-0x6f`",
+        "pub fn main() { -111 }",
+        find_position_of("111").to_selection()
+    );
+}
+
+#[test]
+fn convert_negative_int_binary_to_octal() {
+    assert_code_action!(
+        "Convert to `-0o157`",
+        "pub fn main() { -0b1101111 }",
+        find_position_of("0b1101111").to_selection()
+    );
+}
+
+#[test]
+fn convert_negative_int_binary_to_decimal() {
+    assert_code_action!(
+        "Convert to `-111`",
+        "pub fn main() { -0b1101111 }",
+        find_position_of("0b1101111").to_selection()
+    );
+}
+
+#[test]
+fn convert_negative_int_binary_to_hexadecimal() {
+    assert_code_action!(
+        "Convert to `-0x6f`",
+        "pub fn main() { -0b1101111 }",
+        find_position_of("0b1101111").to_selection()
+    );
+}
+
+#[test]
+fn convert_negative_int_octal_to_binary() {
+    assert_code_action!(
+        "Convert to `-0b1101111`",
+        "pub fn main() { -0o157 }",
+        find_position_of("0o157").to_selection()
+    );
+}
+
+#[test]
+fn convert_negative_int_octal_to_decimal() {
+    assert_code_action!(
+        "Convert to `-111`",
+        "pub fn main() { -0o157 }",
+        find_position_of("0o157").to_selection()
+    );
+}
+
+#[test]
+fn convert_negative_int_octal_to_hexadecimal() {
+    assert_code_action!(
+        "Convert to `-0x6f`",
+        "pub fn main() { -0o157 }",
+        find_position_of("0o157").to_selection()
+    );
+}
+
+#[test]
+fn convert_negative_int_hexadecimal_to_binary() {
+    assert_code_action!(
+        "Convert to `-0b1101111`",
+        "pub fn main() { -0x6f }",
+        find_position_of("0x6f").to_selection()
+    );
+}
+
+#[test]
+fn convert_negative_int_hexadecimal_to_octal() {
+    assert_code_action!(
+        "Convert to `-0o157`",
+        "pub fn main() { -0x6f }",
+        find_position_of("0x6f").to_selection()
+    );
+}
+
+#[test]
+fn convert_negative_int_hexadecimal_to_decimal() {
+    assert_code_action!(
+        "Convert to `-111`",
+        "pub fn main() { -0x6f }",
+        find_position_of("0x6f").to_selection()
+    );
+}
+
+#[test]
+fn convert_to_int_has_nicely_separated_digits() {
+    assert_code_action!(
+        "Convert to `1_234_567`",
+        "pub fn main() { 0b100101101011010000111 }",
+        find_position_of("0b100101101011010000111").to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6120
+#[test]
+fn discard_unused_variable_triggered_at_string_prefix_pattern() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        r#"fn wobble(wibble) {
+  case wibble {
+    "Hello" as hello <> name -> name
+    _ -> "unknown"
+  }
+}"#,
+        find_position_of("hello").to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_alternative_pattern_list() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        r#"fn wobble(wibble) {
+  case wibble {
+    [0, x, y] | [1, x, y] | [2, x, y] -> x
+    _ -> 0
+  }
+}"#,
+        find_position_of("y").to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_alternative_pattern_list_2() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        r#"fn wobble(wibble) {
+  case wibble {
+    [0, x, y] | [1, x, y] | [2, x, y] -> x
+    _ -> 0
+  }
+}"#,
+        find_position_of("y").nth_occurrence(2).to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_alternative_pattern_list_3() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        r#"fn wobble(wibble) {
+  case wibble {
+    [0, x, y] | [1, x, y] | [2, x, y] -> x
+    _ -> 0
+  }
+}"#,
+        find_position_of("y").nth_occurrence(3).to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_alternative_pattern_string_prefix() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        r#"fn wobble(wibble) {
+  case wibble {
+    "Hello, " as hello <> name | "Hey, " as hello <> name -> hello
+    _ -> "unknown"
+  }
+}"#,
+        find_position_of("name").to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_alternative_pattern_string_prefix_2() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        r#"fn wobble(wibble) {
+  case wibble {
+    "Hello, " as hello <> name | "Hey, " as hello <> name -> hello
+    _ -> "unknown"
+  }
+}"#,
+        find_position_of("name").nth_occurrence(2).to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_alternative_pattern_string_prefix_left_side() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        r#"fn wobble(wibble) {
+  case wibble {
+    "Hello, " as hello <> name | "Hey, " as hello <> name -> name
+    _ -> "unknown"
+  }
+}"#,
+        find_position_of("hello").to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_alternative_pattern_string_prefix_left_side_2() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        r#"fn wobble(wibble) {
+  case wibble {
+    "Hello, " as hello <> name | "Hey, " as hello <> name -> name
+    _ -> "unknown"
+  }
+}"#,
+        find_position_of("hello").nth_occurrence(2).to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_alternative_pattern_multiple_mixed() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        r#"fn wobble(wibble, wubble) {
+  case wibble, wubble {
+    0, [y] | y, [] | _, [1, 2, y] -> todo
+    _ -> todo
+  }
+}"#,
+        find_position_of("y").to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_alternative_pattern_multiple_mixed_2() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        r#"fn wobble(wibble, wubble) {
+  case wibble, wubble {
+    0, [y] | y, [] | _, [1, 2, y] -> todo
+    _ -> todo
+  }
+}"#,
+        find_position_of("y").nth_occurrence(2).to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_alternative_pattern_multiple_mixed_3() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        r#"fn wobble(wibble, wubble) {
+  case wibble, wubble {
+    0, [y] | y, [] | _, [1, 2, y] -> todo
+    _ -> todo
+  }
+}"#,
+        find_position_of("y").nth_occurrence(3).to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_alternative_pattern_list_assignments() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        r#"fn wobble(wibble) {
+  case wibble {
+    [0, ..y] | [0, 1, ..] as y | y -> todo
+    _ -> todo
+  }
+}"#,
+        find_position_of("y").to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_alternative_pattern_list_assignments_2() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        r#"fn wobble(wibble) {
+  case wibble {
+    [0, ..y] | [0, 1, ..] as y | y -> todo
+    _ -> todo
+  }
+}"#,
+        find_position_of("y").nth_occurrence(2).to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_alternative_pattern_list_assignments_3() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        r#"fn wobble(wibble) {
+  case wibble {
+    [0, ..y] | [0, 1, ..] as y | y -> todo
+    _ -> todo
+  }
+}"#,
+        find_position_of("y").nth_occurrence(3).to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_list_pattern_assignment_with_alternative_patterns() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        "fn wibble(wobble: List(Int)) -> Nil {
+  case wobble {
+    [1, 2, ..] as tail | [2, 1, ..] as tail -> Nil
+    _ -> Nil
+  }
+}",
+        find_position_of("tail").to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_list_pattern_assignment_with_alternative_patterns_2() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        "fn wibble(wobble: List(Int)) -> Nil {
+  case wobble {
+    [1, 2, ..] as tail | [2, 1, ..] as tail -> Nil
+    _ -> Nil
+  }
+}",
+        find_position_of("tail").nth_occurrence(2).to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_pattern_assignment_with_alternative_patterns() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        "pub type Wibble {
+  Wibble(a: Int)
+  Wobble(a: Int)
+}
+
+fn wobble(wibble: Wibble) -> Int {
+  case wibble {
+    Wibble(a) | Wobble(a) -> 0
+  }
+}",
+        find_position_of("a").nth_occurrence(4).to_selection()
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6121
+#[test]
+fn discard_unused_variable_triggered_at_pattern_assignment_shorthand_with_alternative_patterns() {
+    assert_code_action!(
+        DISCARD_UNUSED_VARIABLE,
+        "pub type Wibble {
+  Wibble(a: Int)
+  Wobble(a: Int)
+}
+
+fn wobble(wibble: Wibble) -> Int {
+  case wibble {
+    Wibble(a:) | Wobble(a:) -> 0
+  }
+}",
+        find_position_of("a:").nth_occurrence(3).to_selection()
+    );
+}
+
+#[test]
+fn convert_int_between_bases_in_constants() {
+    assert_code_action!(
+        "Convert to `0b1101111`",
+        "const wibble = 111",
+        find_position_of("111").to_selection()
+    );
+}
+
+#[test]
+fn convert_int_between_bases_in_patterns() {
+    assert_code_action!(
+        "Convert to `0b1101111`",
+        "pub fn go(x) {
+  let assert <<111>> = x
+}",
+        find_position_of("111").to_selection()
+    );
+}
+
+#[test]
+fn convert_int_between_bases_in_size_options() {
+    assert_code_action!(
+        "Convert to `0b1101111`",
+        "pub fn go(x) {
+  let assert <<2:size(111)>> = x
+}",
+        find_position_of("111").to_selection()
+    );
+}
+
+#[test]
+fn generate_qualified_variant_in_other_module_with_exisiting_variant() {
+    let source = "import woo
+
+pub fn wibble() -> woo.Wibble {
+  woo.Wobble(0)
+}";
+    assert_code_action!(
+        &generate_variant_message("woo.Wibble"),
+        TestProject::for_source(source).add_module(
+            "woo",
+            "pub type Wibble {
+  Wibble
+}"
+        ),
+        find_position_of("Wobble").to_selection()
     );
 }

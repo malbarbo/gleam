@@ -1,6 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 pub mod memory;
 
-use crate::error::{Error, FileIoAction, FileKind, Result};
+use crate::error::{Error, FileIoAction, FileIoCause, FileKind, Result};
 use async_trait::async_trait;
 use debug_ignore::DebugIgnore;
 use flate2::read::GzDecoder;
@@ -14,7 +17,25 @@ use std::{
 };
 use tar::{Archive, Entry};
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
+
+/// Validates that a path is safe to use as a relative path.
+pub fn validate_safe_relative_path(path: &Utf8Path) -> Result<(), &'static str> {
+    // Absolute paths are not permitted.
+    // On Windows paths starting with \\ are drive-relative, so absolute as
+    // far as we are concerned.
+    if path.is_absolute() || (cfg!(windows) && path.starts_with("\\")) {
+        return Err("paths must be relative");
+    }
+
+    for component in path.components() {
+        if component == Utf8Component::ParentDir {
+            return Err("paths must not contain .. segments");
+        }
+    }
+
+    Ok(())
+}
 
 /// Takes in a source path and a target path and determines a relative path
 /// from source -> target.
@@ -43,7 +64,7 @@ pub fn make_relative(source_path: &Utf8Path, target_path: &Utf8Path) -> Utf8Path
 pub trait Reader: io::Read {
     /// A wrapper around `std::io::Read` that has Gleam's error handling.
     fn read_bytes(&mut self, buffer: &mut [u8]) -> Result<usize> {
-        self.read(buffer).map_err(|e| self.convert_err(e))
+        self.read(buffer).map_err(|error| self.convert_err(error))
     }
 
     fn convert_err<E: std::error::Error>(&self, error: E) -> Error;
@@ -52,7 +73,7 @@ pub trait Reader: io::Read {
 pub trait Utf8Writer: std::fmt::Write {
     /// A wrapper around `fmt::Write` that has Gleam's error handling.
     fn str_write(&mut self, str: &str) -> Result<()> {
-        self.write_str(str).map_err(|e| self.convert_err(e))
+        self.write_str(str).map_err(|error| self.convert_err(error))
     }
 
     fn convert_err<E: std::error::Error>(&self, err: E) -> Error;
@@ -64,7 +85,7 @@ impl Utf8Writer for String {
             action: FileIoAction::WriteTo,
             kind: FileKind::File,
             path: Utf8PathBuf::from("<in memory>"),
-            err: Some(error.to_string()),
+            cause: FileIoCause::Other(error.to_string()),
         }
     }
 }
@@ -74,7 +95,7 @@ pub trait Writer: io::Write + Utf8Writer {
     fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
         io::Write::write(self, bytes)
             .map(|_| ())
-            .map_err(|e| self.convert_err(e))
+            .map_err(|error| self.convert_err(error))
     }
 }
 
@@ -128,6 +149,15 @@ impl From<&str> for Content {
 pub struct OutputFile {
     pub content: Content,
     pub path: Utf8PathBuf,
+}
+
+impl OutputFile {
+    pub fn text(path: Utf8PathBuf, content: String) -> Self {
+        Self {
+            path,
+            content: Content::Text(content),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -193,7 +223,7 @@ impl DirEntry {
 #[derive(Debug, Clone)]
 pub struct DirWalker {
     walk_queue: VecDeque<Utf8PathBuf>,
-    dirs_walked: im::HashSet<Utf8PathBuf>,
+    dirs_walked: imbl::HashSet<Utf8PathBuf>,
 }
 
 impl DirWalker {
@@ -201,7 +231,7 @@ impl DirWalker {
     pub fn new(dir: Utf8PathBuf) -> Self {
         Self {
             walk_queue: VecDeque::from([dir]),
-            dirs_walked: im::HashSet::new(),
+            dirs_walked: imbl::HashSet::new(),
         }
     }
 
@@ -243,16 +273,17 @@ impl DirWalker {
             }
 
             for entry in io.read_dir(&next_path)? {
-                let Ok(entry) = entry else {
-                    return Err(Error::FileIo {
-                        kind: FileKind::Directory,
-                        action: FileIoAction::Read,
-                        path: next_path,
-                        err: None,
-                    });
-                };
-
-                self.walk_queue.push_back(entry.into_path())
+                match entry {
+                    Ok(entry) => self.walk_queue.push_back(entry.into_path()),
+                    Err(error) => {
+                        return Err(Error::FileIo {
+                            kind: FileKind::Directory,
+                            action: FileIoAction::Read,
+                            path: next_path,
+                            cause: FileIoCause::std_io(error),
+                        });
+                    }
+                }
             }
         }
 
@@ -269,6 +300,7 @@ pub trait FileSystemReader {
     fn read_bytes(&self, path: &Utf8Path) -> Result<Vec<u8>, Error>;
     fn reader(&self, path: &Utf8Path) -> Result<WrappedReader, Error>;
     fn is_file(&self, path: &Utf8Path) -> bool;
+    fn is_same_file(&self, left: &Utf8Path, right: &Utf8Path) -> Result<bool, Error>;
     fn is_directory(&self, path: &Utf8Path) -> bool;
     fn modification_time(&self, path: &Utf8Path) -> Result<SystemTime, Error>;
     fn canonicalise(&self, path: &Utf8Path) -> Result<Utf8PathBuf, Error>;
@@ -318,14 +350,14 @@ impl Stdio {
 }
 
 /// A trait used to compile Erlang and Elixir modules to BEAM bytecode.
-pub trait BeamCompiler {
+pub trait BeamCompilerIO {
     fn compile_beam(
         &self,
         out: &Utf8Path,
         lib: &Utf8Path,
         modules: &HashSet<Utf8PathBuf>,
         stdio: Stdio,
-    ) -> Result<Vec<String>, Error>;
+    ) -> Result<(), Error>;
 }
 
 /// A trait used to write files.
@@ -371,12 +403,12 @@ impl io::Read for WrappedReader {
 }
 
 impl Reader for WrappedReader {
-    fn convert_err<E: std::error::Error>(&self, err: E) -> Error {
+    fn convert_err<E: std::error::Error>(&self, error: E) -> Error {
         Error::FileIo {
             kind: FileKind::File,
             action: FileIoAction::Read,
             path: self.path.clone(),
-            err: Some(err.to_string()),
+            cause: FileIoCause::Other(error.to_string()),
         }
     }
 }
@@ -401,8 +433,8 @@ pub trait TarUnpacker {
     ) -> Result<tar::Entries<'a, WrappedReader>> {
         tracing::debug!("iterating through tar archive");
         self.io_result_entries(archive)
-            .map_err(|e| Error::ExpandTar {
-                error: e.to_string(),
+            .map_err(|error| Error::ExpandTar {
+                error: error.to_string(),
             })
     }
 
@@ -419,11 +451,11 @@ pub trait TarUnpacker {
     ) -> Result<()> {
         tracing::debug!(path = ?path, "unpacking tar archive");
         self.io_result_unpack(path, archive)
-            .map_err(|e| Error::FileIo {
+            .map_err(|error| Error::FileIo {
                 action: FileIoAction::WriteTo,
                 kind: FileKind::Directory,
                 path: path.to_path_buf(),
-                err: Some(e.to_string()),
+                cause: FileIoCause::std_io(error),
             })
     }
 }
@@ -432,7 +464,7 @@ pub trait TarUnpacker {
 pub fn is_native_file_extension(extension: &str) -> bool {
     matches!(
         extension,
-        "erl" | "hrl" | "ex" | "js" | "mjs" | "cjs" | "ts"
+        "erl" | "hrl" | "ex" | "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx"
     )
 }
 

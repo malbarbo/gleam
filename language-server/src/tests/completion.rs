@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 use insta::assert_debug_snapshot;
 use itertools::Itertools;
 use lsp_types::{CompletionItem, Position};
@@ -22,14 +25,14 @@ pub fn show_complete(code: &str, position: Position) -> String {
     str
 }
 
-fn apply_conversion(src: &str, completions: Vec<CompletionItem>, value: &str) -> String {
+fn apply_completion(src: &str, completions: Vec<CompletionItem>, value: &str) -> String {
     let completion = completions
         .iter()
         .find(|c| c.label == value)
         .unwrap_or_else(|| panic!("no completion with value `{value}`"));
 
     let mut edits = vec![];
-    if let Some(lsp_types::CompletionTextEdit::Edit(edit)) = &completion.text_edit {
+    if let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &completion.text_edit {
         edits.push(edit.clone());
     }
     apply_code_edit(src, edits)
@@ -43,7 +46,7 @@ macro_rules! assert_apply_completion {
         let output = format!(
             "{}\n\n----- After applying completion -----\n{}",
             show_complete(src, $position),
-            apply_conversion(src, completions, $name)
+            apply_completion(src, completions, $name)
         );
         insta::assert_snapshot!(insta::internals::AutoName, output, src);
     };
@@ -98,6 +101,7 @@ fn format_completion_results(completions: Vec<CompletionItem>) -> EcoString {
         kind,
         detail,
         documentation,
+        #[expect(deprecated)]
         deprecated,
         preselect,
         sort_text,
@@ -111,6 +115,7 @@ fn format_completion_results(completions: Vec<CompletionItem>) -> EcoString {
         commit_characters,
         data,
         tags,
+        text_edit_text,
     } in completions
     {
         assert!(deprecated.is_none());
@@ -123,6 +128,7 @@ fn format_completion_results(completions: Vec<CompletionItem>) -> EcoString {
         assert!(commit_characters.is_none());
         assert!(data.is_none());
         assert!(tags.is_none());
+        assert!(text_edit_text.is_none());
 
         buffer.push_str(&label);
 
@@ -167,7 +173,7 @@ fn format_completion_results(completions: Vec<CompletionItem>) -> EcoString {
         };
 
         if let Some(text_edit) = text_edit {
-            let lsp_types::CompletionTextEdit::Edit(e) = text_edit else {
+            let lsp_types::CompletionItemTextEdit::TextEdit(e) = text_edit else {
                 panic!("unexpected text edit in test {text_edit:?}");
             };
             buffer.push_str("\n  edits:");
@@ -1814,6 +1820,68 @@ pub type Wibble {
 }
 
 #[test]
+fn no_completions_for_imported_internal_record_fields() {
+    let code = "
+import dep
+
+fn fun(wibble: dep.Wibble) {
+  wibble.
+  //     ^ We should see no completions here!
+}
+";
+    let dep = "
+@internal
+pub type Wibble {
+  Wibble(wibble: String, wobble: Int)
+}
+";
+
+    assert_completion!(
+        TestProject::for_source(code).add_dep_module("dep", dep),
+        Position::new(4, 9)
+    );
+}
+
+#[test]
+fn completions_for_internal_record_fields_inside_the_same_module() {
+    let code = "
+@internal
+pub type Wibble {
+    Wibble(wibble: String, wobble: Int)
+}
+
+fn fun(wibble: Wibble) {
+  wibble.
+  //     ^ We should see some completions here!
+}
+";
+
+    assert_completion!(TestProject::for_source(code), Position::new(7, 9));
+}
+
+#[test]
+fn completions_for_imported_record_fields() {
+    let code = "
+import dep
+
+fn fun(wibble: dep.Wibble) {
+  wibble.
+  //     ^ We should see wibble and wobble completions here!
+}
+";
+    let dep = "
+pub type Wibble {
+  Wibble(wibble: String, wobble: Int)
+}
+";
+
+    assert_completion!(
+        TestProject::for_source(code).add_dep_module("dep", dep),
+        Position::new(4, 9)
+    );
+}
+
+#[test]
 fn completions_for_function_labels() {
     let code = "
 fn wibble(wibble arg1: String, wobble arg2: String) {
@@ -2320,4 +2388,405 @@ pub fn new() {
         TestProject::for_source(code).add_dep_module("gleam/list", dep),
         Position::new(4, 8)
     );
+}
+
+#[test]
+fn complete_keyword_being_typed() {
+    assert_apply_completion!(
+        TestProject::for_source("pub fn main() { t }"),
+        "todo",
+        Position::new(0, 17)
+    );
+}
+
+#[test]
+fn complete_echo_keyword() {
+    assert_apply_completion!(
+        TestProject::for_source("pub fn main() { e wibble }"),
+        "echo",
+        Position::new(0, 17)
+    );
+}
+
+#[test]
+fn complete_panic_keyword() {
+    assert_apply_completion!(
+        TestProject::for_source("pub fn main() { wibble(p) }"),
+        "panic",
+        Position::new(0, 24)
+    );
+}
+
+#[test]
+fn do_not_show_completions_when_typing_a_number() {
+    assert_completion!(
+        TestProject::for_source(
+            "
+pub fn main() { 2 }
+pub fn window_by_2() {}
+pub fn to_base_32() {}
+"
+        ),
+        Position::new(1, 17)
+    );
+}
+
+const OPTION_MODULE: &str = "
+pub type Option(a) { Some(a) None }
+pub fn all() {}
+";
+
+#[test]
+fn do_not_show_completions_for_module_values_when_typing_an_argument_type() {
+    assert_completion!(
+        TestProject::for_source(
+            "
+import option
+pub fn main(n: option.) {}
+"
+        )
+        .add_dep_module("option", OPTION_MODULE),
+        Position::new(2, 22)
+    );
+}
+
+#[test]
+fn do_not_show_completions_for_module_values_when_typing_a_return_type() {
+    assert_completion!(
+        TestProject::for_source(
+            "
+import option
+pub fn main() -> option. {}
+"
+        )
+        .add_dep_module("option", OPTION_MODULE),
+        Position::new(2, 24)
+    );
+}
+
+#[test]
+fn do_not_show_completions_for_module_values_when_typing_a_constructor_type() {
+    assert_completion!(
+        TestProject::for_source(
+            "
+import option
+pub type Wibble {
+  Wibble(option.)
+}
+"
+        )
+        .add_dep_module("option", OPTION_MODULE),
+        Position::new(3, 16)
+    );
+}
+
+#[test]
+fn do_not_show_completions_for_module_values_when_typing_an_annotation() {
+    assert_completion!(
+        TestProject::for_source(
+            "
+import option
+pub fn main() {
+  let a: option. = todo
+}
+"
+        )
+        .add_dep_module("option", OPTION_MODULE),
+        Position::new(3, 16)
+    );
+}
+
+#[test]
+fn completions_when_typing_list_tail() {
+    assert_completion!(
+        TestProject::for_source(
+            "
+pub fn main() {
+  let wibble = [1, 2]
+  [3, 4, ..w]
+}
+"
+        ),
+        Position::new(3, 12)
+    );
+}
+
+#[test]
+fn completions_when_typing_record_update() {
+    assert_completion!(
+        TestProject::for_source(
+            "
+pub type Wibble { Wibble(a: Int, b: String) }
+
+pub fn main() {
+  let wibble = todo
+  Wibble(..w)
+}
+"
+        ),
+        Position::new(5, 12)
+    );
+}
+
+#[test]
+fn do_not_show_completions_for_deprecated_values_in_dep() {
+    let code = "import dep";
+    let dep = r#"
+@deprecated("Reason")
+pub fn wibble() {
+    todo
+}
+
+pub fn wobble() {
+    todo
+}
+
+@deprecated("Reason")
+pub type Wibble {
+    Wibble
+}
+
+pub type Wobble {
+    Wobble
+}
+"#;
+
+    assert_completion!(TestProject::for_source(code).add_module("dep", dep));
+}
+
+#[test]
+fn do_not_show_completions_for_deprecated_values_in_dep_import() {
+    let code = "import dep.{}";
+    let dep = r#"
+@deprecated("Reason")
+pub fn wibble() {
+    todo
+}
+
+pub fn wobble() {
+    todo
+}
+
+@deprecated("Reason")
+pub type Wibble {
+    Wibble
+}
+
+pub type Wobble {
+    Wobble
+}
+"#;
+
+    assert_completion!(
+        TestProject::for_source(code).add_module("dep", dep),
+        Position::new(0, 12)
+    );
+}
+
+#[test]
+fn show_completions_for_local_deprecated_values() {
+    let code = r#"
+@deprecated("Reason")
+fn wibble() {
+    todo
+}
+
+@deprecated("Reason")
+type Wibble {
+    Wibble
+}
+"#;
+
+    assert_completion!(TestProject::for_source(code));
+}
+
+#[test]
+fn do_not_show_completions_for_deprecated_function_in_dep_while_typing() {
+    let code = "
+import dep
+
+pub fn wobble() {
+    dep.wibb
+}
+";
+    let dep = r#"
+@deprecated("Reason")
+pub fn wibble() {
+    todo
+}
+"#;
+
+    assert_completion!(
+        TestProject::for_source(code).add_module("dep", dep),
+        Position::new(4, 12)
+    );
+}
+
+#[test]
+fn do_not_show_completions_for_deprecated_value_in_dep_while_typing() {
+    let code = "
+import dep
+
+pub fn wobble() {
+    dep.Wibb
+}
+";
+    let dep = r#"
+@deprecated("Reason")
+pub type Wibble {
+    Wibble
+}
+"#;
+
+    assert_completion!(
+        TestProject::for_source(code).add_module("dep", dep),
+        Position::new(4, 12)
+    );
+}
+
+#[test]
+fn do_not_show_completions_for_deprecated_values_in_dep_after_dot() {
+    let code = "
+import dep
+
+pub fn wobble() {
+    dep.
+}
+";
+    let dep = r#"
+@deprecated("Reason")
+pub fn wibble() {
+    todo
+}
+
+@deprecated("Reason")
+pub type Wibble {
+    Wibble
+}
+"#;
+
+    assert_completion!(
+        TestProject::for_source(code).add_module("dep", dep),
+        Position::new(4, 8)
+    );
+}
+
+#[test]
+fn do_not_show_completions_for_deprecated_types_in_dep() {
+    let code = "
+import dep
+
+pub fn wobble() -> W {
+    todo
+}
+";
+    let dep = r#"
+pub type Wobble {
+    Wobble
+}
+
+@deprecated("Reason")
+pub type Wibble {
+    Wibble
+}
+"#;
+
+    assert_completion!(
+        TestProject::for_source(code).add_module("dep", dep),
+        Position::new(3, 20)
+    );
+}
+
+#[test]
+fn _completions_for_deprecated_types_in_dep() {
+    let code = "
+import wibble
+
+pub fn wobble() -> wibble.Wobble {
+  todo
+}
+";
+    let dep = "pub type Wobble";
+
+    assert_apply_completion!(
+        TestProject::for_source(code).add_module("wibble", dep),
+        "wibble.Wobble",
+        Position::new(3, 25)
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5937
+#[test]
+fn completions_for_imported_internal_record_fields_in_same_package() {
+    let code = "
+import mod
+
+fn fun(wibble: mod.Wibble) {
+  wibble.
+  //     ^ `mod` is in the same package so we expect completions here, even though
+  //       `Wibble` is internal.
+}
+";
+    let r#mod = "
+@internal
+pub type Wibble {
+  Wibble(wibble: String, wobble: Int)
+}
+";
+
+    assert_completion!(
+        TestProject::for_source(code).add_module("mod", r#mod),
+        Position::new(4, 9)
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6142
+#[test]
+fn completions_for_left_side_of_string_prefix_pattern() {
+    let code = r#"
+pub fn go(wibble) {
+  case wibble {
+    "Hello, " as hello <> name -> h
+    _ -> "unknown"
+  }
+}
+"#;
+    assert_completion!(TestProject::for_source(code), Position::new(3, 35));
+}
+
+// https://github.com/gleam-lang/gleam/issues/6167
+#[test]
+fn completions_for_an_unqualified_import_without_braces() {
+    let code = "import dep.";
+    let dep = "
+pub const wibble = \"wibble\"
+
+pub fn wobble() {
+  todo
+}
+
+pub type Wibble {
+  Wibble
+}";
+
+    let position = Position::new(0, 11);
+    let tester = TestProject::for_source("import dep").add_module("dep", dep);
+    let mut io = LanguageServerTestIO::new();
+    let mut engine = tester.build_engine(&mut io);
+    // Pass a valid source to compile once
+    _ = io.src_module("app", tester.src);
+    let _ = engine.compile_please();
+    // Update source to the one we want to test
+    _ = io.src_module("app", code);
+    let param = tester.build_path(position);
+    let response = engine.completion(param, code.into());
+
+    let mut completions = response.result.unwrap().unwrap_or_default();
+    completions.sort_by(|a, b| a.label.cmp(&b.label));
+    let output = format!(
+        "{}\n\n----- Completion content -----\n{}",
+        show_complete(code, position),
+        format_completion_results(completions)
+    );
+    insta::assert_snapshot!(insta::internals::AutoName, output, code);
 }

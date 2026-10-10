@@ -1,21 +1,17 @@
-// TODO: Refactor this module to be methods on structs rather than free
-// functions with a load of arguments. See the JavaScript code generator and the
-// formatter for examples.
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2018 The Gleam contributors
 
+mod echo;
 mod pattern;
 #[cfg(test)]
 mod tests;
 
-use crate::build::{Target, module_erlang_name};
-use crate::erlang::pattern::{PatternPrinter, StringPatternAssignment};
-use crate::strings::{convert_string_escape_chars, to_snake_case};
-use crate::type_::is_prelude_module;
+use crate::build::Target;
+use crate::erlang::pattern::{AliasedLiteral, PatternGenerator};
+use crate::strings::to_snake_case;
+use crate::type_::{self, HasType, is_prelude_module};
 use crate::{
-    Result,
-    ast::{Function, *},
-    docvec,
-    line_numbers::LineNumbers,
-    pretty::*,
+    ast::*,
     type_::{
         ModuleValueConstructor, PatternConstructor, Type, TypeVar, TypedCallArg, ValueConstructor,
         ValueConstructorVariant,
@@ -23,67 +19,3337 @@ use crate::{
 };
 use camino::Utf8Path;
 use ecow::{EcoString, eco_format};
+use erlang_generation::{
+    BitArraySegmentSpecifier, DocContent, ErlangBuilder, ErlangModuleName, ErlangSourceBuilder,
+};
 use itertools::Itertools;
-use regex::{Captures, Regex};
-use std::collections::HashSet;
+use num_bigint::BigInt;
+use num_traits::Signed;
+use regex::Regex;
+use src_span::{LineNumbers, SrcSpan};
+use std::collections::VecDeque;
 use std::sync::OnceLock;
-use std::{collections::HashMap, ops::Deref, str::FromStr, sync::Arc};
-use vec1::Vec1;
+use std::{collections::HashMap, ops::Deref, sync::Arc};
 
-const INDENT: isize = 4;
-const MAX_COLUMNS: isize = 80;
-
-fn module_name_atom(module: &str) -> Document<'static> {
-    atom_string(module.replace('/', "@").into())
+/// This is an open runtime error to which more fields can still be added.
+#[must_use]
+struct RuntimeError<Map, Call> {
+    /// This is the map that is going to be thrown by the `erlang:error` call.
+    error_map: Map,
+    /// This is the call to `erlang:error` that will throw the error, with the
+    /// map as an argument.
+    erlang_error_call: Call,
 }
 
-#[derive(Debug, Clone)]
-struct Env<'a> {
-    module: &'a str,
-    function: &'a str,
+/// Represents all the different kind of runtime errors that Gleam can raise.
+enum RuntimeErrorKind {
+    Todo,
+    Panic,
+    Assert,
+    LetAssert,
+}
+
+impl RuntimeErrorKind {
+    fn default_error_message(&self) -> &'static str {
+        match self {
+            RuntimeErrorKind::Panic => "`panic` expression evaluated.",
+            RuntimeErrorKind::Assert => "Assertion failed.",
+            RuntimeErrorKind::LetAssert => "Pattern match failed, no pattern matched the value.",
+            RuntimeErrorKind::Todo => {
+                "`todo` expression evaluated. This code has not yet been implemented."
+            }
+        }
+    }
+}
+
+enum EchoPrintedValue<'a> {
+    /// We're printing the result of a pipeline step.
+    PipeStep {
+        /// This is the name that was given to the variable holding the value
+        /// we have to print.
+        name: EcoString,
+    },
+    /// We're printing any arbitrary expression.
+    Expression { value: &'a TypedExpr },
+}
+
+/// This describes how an expression that is used in a Gleam's function call
+/// should be called in the Erlang generated code.
+enum FunctionCall<'a> {
+    /// We're calling a function from the given module.
+    /// It might be the same module we're generating code for, so the
+    /// qualification might not be needed at all; remember to check that!
+    ///
+    /// ```erl
+    /// io:println("wibble")
+    /// ```
+    ///
+    Call { module: &'a str, name: &'a str },
+
+    /// The expression is not a module level function and can be called directly
+    /// like thie:
+    ///
+    /// ```erl
+    /// SomeVariable("wibble"),
+    /// fun() -> nil end().
+    /// ```
+    DirectCall,
+
+    /// This is actually not a call but rather needs to build a tuple with the
+    /// given tag.
+    /// This is needed for records: those are function calls in Gleam, but
+    /// simple tuples on the Erlang side.
+    BuildRecord { name: &'a str },
+}
+
+/// This is a structure used to generate code for an Erlang module.
+#[derive(Debug)]
+pub struct Generator<'a> {
+    /// The module for which we're currently generating Erlang code.
+    module: &'a TypedModule,
     line_numbers: &'a LineNumbers,
-    needs_function_docs: bool,
+
+    /// The relative source path to the module that's gonna be used in error
+    /// messages in the generated Erlang code.
+    module_source_path: EcoString,
+
+    /// Wether `echo` has been used in this module, we're gonna need to know
+    /// this in order to add the code needed by the pretty printing.
     echo_used: bool,
-    current_scope_vars: im::HashMap<String, usize>,
-    erl_function_scope_vars: im::HashMap<String, usize>,
 }
 
-impl<'env> Env<'env> {
-    pub fn new(module: &'env str, function: &'env str, line_numbers: &'env LineNumbers) -> Self {
-        let vars: im::HashMap<_, _> = std::iter::once(("_".into(), 0)).collect();
+/// This is a generator that takes care of generating the code for a single
+/// function, taking care of things like the scope, variable renaming, and
+/// generating the function's attributes and statements.
+struct FunctionGenerator<'a, 'generator> {
+    /// The name of the function we're generating code for.
+    function_name: &'a str,
+
+    /// A reference to the module generator, this is needed to take care of some
+    /// global state shared by all the functions.
+    module_generator: &'generator mut Generator<'a>,
+
+    /// This maps from variable origin in the Gleam code to the name it was
+    /// assigned to it in the generated Erlang code.
+    ///
+    /// Erlang doesn't allow shadowing existing variables, so it's not always
+    /// the case that a variable named `wibble` in Gleam is going to correspond
+    /// to the Erlang `Wibble` variable. For example:
+    ///
+    /// ```gleam
+    /// let a = 1
+    /// let a = a + 1
+    /// ```
+    ///
+    /// In Erlang this would become:
+    ///
+    /// ```erl
+    /// A = 1,
+    /// A@1 = A + 1,
+    /// ```
+    ///
+    /// So variables might need renaming.
+    /// Whenever we find a variable usage in Gleam we have to check "what is
+    /// the name that was given to the variable that comes from this location?"
+    /// Only then we'll know what's the correct name to use for it.
+    ///
+    variable_names: imbl::HashMap<SrcSpan, EcoString>,
+
+    /// This keeps track of the number of generated variables that have already
+    /// been generated in the current function.
+    /// For example if this is `2` it means we've already generated:
+    ///
+    /// ```erl
+    /// _value
+    /// _value@1
+    /// _value@2
+    /// ```
+    ///
+    /// We need this to make sure that every time we generate a new generated
+    /// variable it has a unique name not shadowing anything else.
+    ///
+    generated_variables: usize,
+
+    /// This keeps track of all the names that are taken for the current
+    /// function and can't be used when defining new variables.
+    /// For example if this is `hash_map![("wibble", 2), ("wobble", 1)]`
+    /// this means that all of these variables have already been defined
+    /// somewhere in the current function:
+    ///
+    /// ```erl
+    /// Wibble = ...,
+    /// Wibble@1 = ...,
+    /// Wibble@2 = ...,
+    ///
+    /// Wobble = ...,
+    /// Wobble@1 = ...,
+    /// ```
+    ///
+    /// This is handy whenever we run into a new variable assignment and have to
+    /// generate a new name for it in Erlang.
+    ///
+    taken_names: imbl::HashMap<String, usize>,
+}
+
+impl<'a> Generator<'a> {
+    pub fn new(
+        module: &'a TypedModule,
+        line_numbers: &'a LineNumbers,
+        module_root: &'a Utf8Path,
+    ) -> Self {
+        let module_source_path = module
+            .type_info
+            .src_path
+            .strip_prefix(module_root)
+            .unwrap_or(&module.type_info.src_path)
+            .as_str()
+            .replace("\\", "\\\\")
+            .into();
+
         Self {
-            current_scope_vars: vars.clone(),
-            erl_function_scope_vars: vars,
-            needs_function_docs: false,
-            echo_used: false,
-            line_numbers,
-            function,
             module,
+            module_source_path,
+            line_numbers,
+            echo_used: false,
         }
     }
 
-    pub fn local_var_name<'a>(&mut self, name: &str) -> Document<'a> {
-        match self.current_scope_vars.get(name) {
+    fn module<Output>(&mut self, builder: &mut impl ErlangBuilder<Output>) {
+        builder.module_declaration(ErlangModuleName::new(&self.module.name));
+
+        // We need to know which private functions are referenced in importable
+        // constants so that we can export them anyway in the generated Erlang.
+        // This is because otherwise when the constant is used in another module it
+        // would result in an error as it tries to reference this private function.
+        let overridden_publicity =
+            find_private_functions_referenced_in_importable_constants(self.module);
+
+        // We add a `-compile` attribute at the top of each module to instruct
+        // the Erlang compiler.
+        builder.compile_attribute([
+            "no_auto_import",
+            "nowarn_ignored",
+            "nowarn_unused_vars",
+            "nowarn_unused_function",
+            "nowarn_nomatch",
+            "inline",
+        ]);
+
+        // We then need to add an `-export` attribute for all the module's
+        // public functions.
+        builder.export_attribute(
+            (self.module.definitions.functions.iter())
+                .filter_map(|function| function_export(function, &overridden_publicity)),
+        );
+        // We do the same but with types.
+        builder.export_type_attribute(self.module.definitions.custom_types.iter().map(type_export));
+
+        // We also add a `-module_doc` comment at the beginning of the module
+        // with its documentation.
+        self.module_documentation(builder);
+
+        // We add a `-file` attribute a the top of the module to set the file
+        // for all functions coming after this.
+        builder.module_file_attribute(&self.module_source_path);
+
+        // Then we generate `-type` definitions for the module's types.
+        for custom_type in &self.module.definitions.custom_types {
+            self.type_definition(builder, custom_type);
+        }
+
+        // And finally generate all the functions that the module defined.
+        for function in &self.module.definitions.functions {
+            FunctionGenerator::new(function, self).module_function(builder, function);
+        }
+
+        // If echo is needed in this module we also have to add the echo
+        // functions.
+        if self.echo_used {
+            echo::echo_with_helpers(builder);
+        }
+    }
+
+    fn module_documentation<Output>(&mut self, builder: &mut impl ErlangBuilder<Output>) {
+        if self.module.type_info.is_internal {
+            // The module is internal so we need to add a `-moduledoc(false).`
+            // attribute to make sure its documentation is hidden.
+            builder.moduledoc_attribute(DocContent::False);
+        } else if self.module.documentation.is_empty() {
+            // The module is not internal, but it has no docs.
+            // We don't have to do anything.
+        } else {
+            // The module has some documentation that we're going to include
+            // with a `-moduledoc` attribute.
+            builder.moduledoc_attribute(DocContent::String(
+                &self.module.documentation.iter().join("\n"),
+            ));
+        }
+    }
+
+    fn type_definition<Output>(
+        &self,
+        builder: &mut impl ErlangBuilder<Output>,
+        custom_type: &TypedCustomType,
+    ) {
+        let TypedCustomType {
+            name,
+            constructors,
+            opaque,
+            typed_parameters,
+            external_erlang,
+            ..
+        } = custom_type;
+
+        let name = erl_safe_type_name(to_snake_case(name));
+
+        // We start the type spec.
+        let type_spec = builder.start_type_spec(
+            *opaque,
+            &name,
+            typed_parameters
+                .iter()
+                .map(|type_| type_parameter_name(type_)),
+        );
+
+        // Now we need to generate the type definition.
+        // Erlang doesn't allow to have phantom type variables, so if there's
+        // any type variable that is not used we will need to add one variant to
+        // the resulting type that is using all those phantom variables to avoid
+        // errors!
+        let phantom_type_variables = phantom_type_variables(custom_type);
+        let has_phantom_type_variables = !phantom_type_variables.is_empty();
+        match (constructors.as_slice(), has_phantom_type_variables) {
+            // This is an external type with an annotation telling us what type
+            // it corresponds to in Erlang.
+            // In that case all type variables are phantom type variables!
+            ([], _) if let Some((module, type_name, _)) = external_erlang => {
+                let type_ =
+                    builder.start_remote_named_type(ErlangModuleName::new(module), type_name);
+                for type_variable in phantom_type_variables {
+                    builder.type_variable(&type_variable);
+                }
+                builder.end_remote_named_type(type_);
+            }
+            // This is an external type with no external annotation and no
+            // phantom type variables. It is just `any()`.
+            ([], false) => {
+                let any = builder.start_named_type("any");
+                builder.end_named_type(any);
+            }
+            // This is an external type with no external annotation and some
+            // phantom type variables, we need to add an alternative to use
+            // them: `any() | {gleam_phantom, A, B, ...}`
+            ([], true) => {
+                let union = builder.start_union_type();
+                let any = builder.start_named_type("any");
+                builder.end_named_type(any);
+                self.phantom_type(builder, phantom_type_variables);
+                builder.end_union_type(union);
+            }
+            // This is an external type with a single constructor, no need to
+            // make it a union.
+            ([constructor], false) => self.constructor_type(builder, constructor),
+            // This is an external type with multiple constructors, we have to
+            // turn it into a union!
+            (constructors, has_phantom_type_variables) => {
+                let union = builder.start_union_type();
+                for constructor in constructors {
+                    self.constructor_type(builder, constructor);
+                }
+                if has_phantom_type_variables {
+                    self.phantom_type(builder, phantom_type_variables);
+                }
+                builder.end_union_type(union);
+            }
+        }
+
+        builder.end_type_spec(type_spec);
+    }
+
+    /// Given a constructor this generates its type. For example:
+    ///
+    /// ```gleam
+    /// Wibble(Int, String)
+    /// ```
+    ///
+    /// Would be turned into:
+    ///
+    /// ```erl
+    /// {wibble, integer(), binary()}.
+    /// ```
+    ///
+    fn constructor_type<Output>(
+        &self,
+        builder: &mut impl ErlangBuilder<Output>,
+        constructor: &RecordConstructor<Arc<Type>>,
+    ) {
+        let constructor_atom = to_snake_case(&constructor.name);
+        if constructor.arguments.is_empty() {
+            // A constructor with no fields becomes a regular atom on the Erlang
+            // target.
+            builder.literal_atom_type(&constructor_atom);
+        } else {
+            // Othwerwise, it is a tuple tagged with the atom with the
+            // constructor name.
+            let generator = TypeGenerator::new(&self.module.name);
+            let tuple = builder.start_tuple_type();
+            builder.literal_atom_type(&constructor_atom);
+            for argument in &constructor.arguments {
+                generator.type_(builder, &argument.type_);
+            }
+            builder.end_tuple_type(tuple);
+        }
+    }
+
+    /// Given a list of phantom type variabes, this generates a type using all
+    /// of those.
+    ///
+    /// Erlang doesn't allow having phantom type variables in type annotations,
+    /// so whenever there's any we need to manually add a type that uses them to
+    /// make sure we get no errors. For example:
+    ///
+    /// ```gleam
+    /// pub type Wibble(a, phantom) {
+    ///   Wibble(a)
+    /// }
+    /// ```
+    ///
+    /// Will have to be turned into:
+    ///
+    /// ```erl
+    /// -type wibble(A) :: {wibble, A} | {gleam_phantom, Phantom}.
+    /// ```
+    ///
+    /// So the phantom type is nothing more than a tuple tagged with
+    /// `gleam_phantom`.
+    ///
+    fn phantom_type<Output>(
+        &self,
+        builder: &mut impl ErlangBuilder<Output>,
+        phantom_type_variables: Vec<EcoString>,
+    ) {
+        let phantom_tuple = builder.start_tuple_type();
+        builder.literal_atom_type("gleam_phantom");
+        for phantom_type_variable in phantom_type_variables {
+            builder.type_variable(&phantom_type_variable);
+        }
+        builder.end_tuple_type(phantom_tuple);
+    }
+}
+
+/// Given a custom type, this will return a vector with the names of all the
+/// phantom type varaibles that it has. The names returned are the names we can
+/// use in Erlang!
+fn phantom_type_variables(custom_type: &CustomType<Arc<Type>>) -> Vec<EcoString> {
+    // We first find all the variables that appear in the type definition
+    // itself: any of those that isn't used by any of the constructors is going
+    // to be a phantom type variable.
+    let mut definition_type_variables =
+        collect_ref_type_var_usages(HashMap::new(), custom_type.typed_parameters.iter());
+
+    // So we need to gather all the type variables referenced by all the
+    // constructors.
+    let mut constructors_type_variables = HashMap::new();
+    for constructor in &custom_type.constructors {
+        constructors_type_variables = collect_ref_type_var_usages(
+            constructors_type_variables,
+            constructor.arguments.iter().map(|argument| &argument.type_),
+        );
+    }
+
+    // The phantom ones are the ones in the definition that are not referenced
+    // by any constructor:
+    for used_type_variable in constructors_type_variables.keys() {
+        let _ = definition_type_variables.remove(used_type_variable);
+    }
+
+    definition_type_variables
+        .into_keys()
+        .map(id_to_type_var_str)
+        .sorted()
+        .collect_vec()
+}
+
+/// Given a custom type's type parameter (that is expected to be generic or
+/// unbound), this will return the name the corresponding type variable should
+/// have in the generated Erlang code.
+///
+/// If the type passed is not generic this will panic!
+fn type_parameter_name(type_: &Type) -> EcoString {
+    let Type::Var { type_ } = type_ else {
+        panic!("non generic type as type parameter")
+    };
+    match &*type_.borrow() {
+        TypeVar::Unbound { id } | TypeVar::Generic { id } => id_to_type_var_str(*id),
+        TypeVar::Link { type_ } => type_parameter_name(type_),
+    }
+}
+
+impl<'a, 'generator> FunctionGenerator<'a, 'generator> {
+    pub fn new(
+        function: &'a TypedFunction,
+        module_generator: &'generator mut Generator<'a>,
+    ) -> Self {
+        let function_name = match function.name.as_ref() {
+            Some((_, function_name)) => function_name,
+            None => panic!("Module functions should have a name"),
+        };
+
+        Self {
+            function_name,
+            module_generator,
+            taken_names: imbl::HashMap::new(),
+            variable_names: imbl::HashMap::new(),
+            generated_variables: 0,
+        }
+    }
+
+    /// Given a variable name this returns a document with the name used to
+    /// reference such variable (names can change if a variable were to shadow
+    /// something with the same name!).
+    ///
+    /// ## Panics
+    /// This will panic if the variable is not in scope as that is most likely
+    /// the result of a bug in the compiler.
+    pub fn local_var_name(&self, variable_origin: &SrcSpan) -> EcoString {
+        self.variable_names
+            .get(variable_origin)
+            .expect("variable not in scope")
+            .clone()
+    }
+
+    /// Assigns a name to this new variable making sure it's not shadowing any
+    /// existing one.
+    ///
+    /// - `name` is the name of the variable as defined in the Gleam source code
+    /// - `location` is where that variable comes from, and it is used to then
+    ///   get this newly generated name back.
+    ///
+    /// For example:
+    ///
+    /// ```gleam
+    /// let wibble = 1
+    /// ```
+    ///
+    /// When we run into this Gleam assignment we will need to decide how to
+    /// call it on the Erlang side. So we would call:
+    ///
+    /// ```txt
+    /// let location = todo!("the location of this variable")
+    /// new_erlang_variable("wibble", location)
+    /// // and later we can tell what name was picked by calling
+    /// // `local_variable_name`
+    /// local_variable_name(location) // "Wibble"
+    /// ```
+    ///
+    ///
+    pub fn new_erlang_variable(&mut self, name: &str, location: SrcSpan) -> EcoString {
+        let next = self.taken_names.get(name).map_or(0, |i| i + 1);
+        let _ = self.taken_names.insert(name.to_string(), next);
+        let erlang_name = match next {
+            0 => variable_name(name),
+            _ => eco_format!("{}@{}", variable_name(name), next),
+        };
+        let _ = self.variable_names.insert(location, erlang_name.clone());
+        erlang_name
+    }
+
+    /// Sometimes during code generation we might need to create new variables
+    /// that were not accounted for during analysis.
+    /// Those variables don't really have an origin in the source code and are
+    /// usually generated and immediately used.
+    ///
+    /// For example:
+    ///
+    /// ```erl
+    /// _denominator = ...,
+    /// 1 / _denominator.
+    /// ```
+    ///
+    /// Any time you need one such variable you can create it with this method
+    /// instead of `new_erlang_variable` which is meant to be used for variables
+    /// generated from Gleam code (and so wants the source location of the
+    /// variable).
+    ///
+    /// The generated name is guaranteed to always be unique for the given
+    /// function.
+    ///
+    fn new_generated_variable(&mut self) -> EcoString {
+        let name = if self.generated_variables == 0 {
+            EcoString::from("_value")
+        } else {
+            eco_format!("_value@{}", self.generated_variables)
+        };
+        self.generated_variables += 1;
+        name
+    }
+
+    /// Generates code for an Erlang module function. This might return None
+    /// if there's no code to be generated at all!
+    /// For example if the function is unused, or if the function is a private
+    /// Erlang external (in which case, it would be inlined instead).
+    fn module_function<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        function: &'a TypedFunction,
+    ) {
+        // We don't generate any code for unused functions.
+        if self
+            .module_generator
+            .module
+            .unused_definition_positions
+            .contains(&function.location.start)
+        {
+            return;
+        }
+
+        // Private external functions don't need to render anything, the
+        // underlying Erlang implementation is used directly at the call site.
+        if function.external_erlang.is_some() && function.publicity.is_private() {
+            return;
+        }
+
+        // If the function has no suitable Erlang implementation then there is
+        // nothing to generate for it.
+        if !function.implementations.supports(Target::Erlang) {
+            return;
+        }
+
+        let function_name = EcoString::from(escape_erlang_existing_name(self.function_name));
+
+        // Then we add the function's documentation and type annotation.
+        self.function_spec_attribute(
+            builder,
+            &function_name,
+            &function.arguments,
+            function.return_type.clone(),
+        );
+        self.function_doc_attribute(
+            builder,
+            function.publicity,
+            function
+                .documentation
+                .as_ref()
+                .map(|(_, documentation)| documentation),
+        );
+
+        // Finally we start generating code for the function itself, how we do
+        // it depends if the function is external or not.
+        let arity = function.arguments.len();
+        let function_full_location = function.full_location();
+        match function.external_erlang.as_ref() {
+            // If the function is not external we generate the code for all of
+            // its statements.
             None => {
-                let _ = self.current_scope_vars.insert(name.to_string(), 0);
-                let _ = self.erl_function_scope_vars.insert(name.to_string(), 0);
-                variable_name(name).to_doc()
+                let arguments = self.function_arguments_names(&function.arguments, false);
+                let open_function = builder.start_function(
+                    function_full_location,
+                    &function_name,
+                    arity,
+                    arguments,
+                );
+                self.statement_sequence(builder, &function.body);
+                builder.end_function(open_function);
             }
-            Some(0) => variable_name(name).to_doc(),
-            Some(n) => {
-                use std::fmt::Write;
-                let mut name = variable_name(name);
-                write!(name, "@{n}").expect("pushing number suffix to name");
-                name.to_doc()
+
+            // An external function consists of just a remote call being
+            // passed all of the function's arguments.
+            Some((module, external_function_name, _location)) => {
+                let arguments = self
+                    .function_arguments_names(&function.arguments, true)
+                    .collect_vec();
+                let open_function = builder.start_function(
+                    function_full_location,
+                    &function_name,
+                    arity,
+                    arguments.clone(),
+                );
+                let call = builder.start_remote_call(
+                    function_full_location,
+                    ErlangModuleName::new(module),
+                    external_function_name,
+                );
+                for (argument_location, argument) in arguments {
+                    builder.variable(argument_location, &argument);
+                }
+                builder.end_call(call);
+                builder.end_function(open_function);
             }
         }
     }
 
-    pub fn next_local_var_name<'a>(&mut self, name: &str) -> Document<'a> {
-        let next = self.erl_function_scope_vars.get(name).map_or(0, |i| i + 1);
-        let _ = self.erl_function_scope_vars.insert(name.to_string(), next);
-        let _ = self.current_scope_vars.insert(name.to_string(), next);
-        self.local_var_name(name)
+    /// This generates the `-spec` attribute for a function with the given name.
+    ///
+    fn function_spec_attribute<Output, Typed: HasType>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        function_name: &EcoString,
+        arguments: &[Typed],
+        return_type: Arc<Type>,
+    ) {
+        // We start by getting all the type variable usages from this function,
+        // both in the argument types and return type.
+        let module_name = &self.module_generator.module.name;
+        let var_usages = &collect_type_var_usages(
+            HashMap::new(),
+            arguments
+                .iter()
+                .map(|argument| argument.type_())
+                .chain([return_type.clone()]),
+        );
+        let generator = TypeGenerator::new(module_name).with_var_usages(var_usages);
+
+        // We can then start generating the function spec.
+        let spec = builder.start_function_spec(function_name, arguments.len());
+        let function_type = builder.start_function_type();
+        for argument in arguments {
+            generator.type_(builder, &argument.type_());
+        }
+        let function_type = builder.end_function_type_arguments(function_type);
+        generator.type_(builder, &return_type);
+        builder.end_function_type(function_type);
+        builder.end_function_spec(spec);
+    }
+
+    fn function_doc_attribute<Output>(
+        &self,
+        builder: &mut impl ErlangBuilder<Output>,
+        function_publicity: Publicity,
+        documentation: Option<&'_ EcoString>,
+    ) {
+        // If a function is marked as internal or comes from an internal module
+        // we want to hide its documentation in the Erlang shell!
+        // So the doc directive will look like this: `-doc(false).`
+        let is_internal =
+            self.module_generator.module.type_info.is_internal || function_publicity.is_internal();
+
+        if is_internal {
+            builder.doc_attribute(DocContent::False);
+        } else if let Some(documentation) = documentation
+            && !documentation.is_empty()
+        {
+            builder.doc_attribute(DocContent::String(documentation));
+        }
+    }
+
+    /// Given a function, this will return the names of the arguments to be used
+    /// in this function's definition. This will also update the current scope
+    /// to add those names to the available local variables.
+    fn function_arguments_names(
+        &mut self,
+        arguments: &[TypedArg],
+        is_external: bool,
+    ) -> impl Iterator<Item = (SrcSpan, EcoString)> {
+        arguments.iter().map(move |argument| match &argument.names {
+            // When the function is external we need to be careful with discarded
+            // arguments. _All_ of the function arguments are always used in an
+            // external function, regardless of them being discarded in Gleam:
+            //
+            // ```gleam
+            // @external(erlang, "io", "format")
+            // fn format(_string: String, _args: List(String)) -> Nil
+            // ```
+            //
+            // Becomes:
+            //
+            // ```erl
+            // format(_string, _args) ->
+            //   io:format(_string, _args).
+            // ```
+            //
+            // If an argument is made of just underscores, then that would result
+            // in a syntax error in the generated Erlang, where the external
+            // function is called with a discard `io:format(_, _)`!
+            // So in this case we use a generated name to make sure the external
+            // function can be called correctly.
+            ArgNames::Discard { name, location }
+            | ArgNames::LabelledDiscard {
+                name,
+                name_location: location,
+                ..
+            } if is_external => (*location, self.new_generated_variable()),
+            ArgNames::Discard { location, .. }
+            | ArgNames::LabelledDiscard {
+                name_location: location,
+                ..
+            } => (*location, EcoString::from("_")),
+            ArgNames::Named { name, location }
+            | ArgNames::NamedLabelled {
+                name,
+                name_location: location,
+                ..
+            } => (*location, self.new_erlang_variable(name, *location)),
+        })
+    }
+
+    fn statement_sequence<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        statements: &'a [TypedStatement],
+    ) {
+        // We go over each statement one by one and produce the code they need.
+        for i in 0..statements.len() {
+            match statements.get(i).expect("statement in range") {
+                Statement::Expression(expression) => self.expression(builder, expression),
+                Statement::Use(use_) => self.expression(builder, &use_.call),
+                Statement::Assert(assert) => self.assert(builder, assert),
+                Statement::Assignment(assignment) => match &assignment.kind {
+                    AssignmentKind::Let | AssignmentKind::Generated => {
+                        self.let_(
+                            builder,
+                            assignment.location,
+                            &assignment.value,
+                            &assignment.pattern,
+                        );
+                    }
+                    // Let asserts are slightly different from everything else:
+                    // A let assert is compiled to a case expression where we
+                    // have two branches:
+                    //
+                    // ```gleam
+                    // let assert [a, b] = some_list
+                    // // ... the remaining statements
+                    // ```
+                    //
+                    // It will turn into something that looks like this:
+                    //
+                    // ```erl
+                    // case SomeList of
+                    //   [a, b] ->
+                    //     % ... the remaining statements;
+                    //   _ ->
+                    //    erlang:error(...)
+                    // end.
+                    // ```
+                    //
+                    // So in case we find a let assert we need to break out of
+                    // this cycle and pass it all the remaining statements so
+                    // that it can put those under the correct branch of the
+                    // case expression it's going to produce.
+                    AssignmentKind::Assert {
+                        message, location, ..
+                    } => {
+                        return self.let_assert(
+                            builder,
+                            &assignment.value,
+                            &assignment.pattern,
+                            message.as_ref(),
+                            *location,
+                            statements.get(i + 1..).unwrap_or_default(),
+                        );
+                    }
+                },
+            }
+        }
+    }
+
+    fn expression<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        expression: &'a TypedExpr,
+    ) {
+        match expression {
+            //
+            // Simple scalar values, and blocks.
+            //
+            TypedExpr::Int {
+                int_value,
+                location,
+                ..
+            } => builder.int_expression(*location, int_value.clone()),
+            TypedExpr::Float {
+                float_value,
+                location,
+                ..
+            } => builder.float_expression(*location, float_value.value()),
+            TypedExpr::String {
+                value, location, ..
+            } => builder.string(*location, value),
+            TypedExpr::Var {
+                name,
+                constructor,
+                location,
+                ..
+            } => self.var(builder, *location, name, constructor),
+            TypedExpr::Block {
+                statements,
+                location,
+                ..
+            } => {
+                // If the block has a single expression we don't bother wrapping
+                // it in an additional `begin ... end` block.
+                // It's going to be added only if strictly needed.
+                if statements.len() == 1
+                    && let Statement::Expression(expression) = statements.first()
+                {
+                    self.maybe_block_expr(builder, expression);
+                } else {
+                    let block = builder.start_block(*location);
+                    self.statement_sequence(builder, statements);
+                    builder.end_block(block);
+                }
+            }
+
+            //
+            // Operators.
+            //
+            TypedExpr::NegateBool {
+                value, location, ..
+            } => {
+                builder.unary_operator(*location, "not");
+                self.maybe_block_expr(builder, value);
+            }
+            TypedExpr::NegateInt {
+                value, location, ..
+            } => {
+                builder.unary_operator(*location, "-");
+                self.maybe_block_expr(builder, value);
+            }
+            TypedExpr::BinOp {
+                operator,
+                left,
+                right,
+                location,
+                ..
+            } => self.binary_operator(builder, *location, operator, left, right),
+
+            //
+            // BitArrays, Lists, and Tuples.
+            //
+            TypedExpr::BitArray {
+                segments, location, ..
+            } => {
+                let bit_array = builder.start_bit_array(*location);
+                for segment in segments {
+                    self.bit_array_expression_segment(builder, segment);
+                }
+                builder.end_bit_array(bit_array);
+            }
+            TypedExpr::List {
+                elements,
+                tail,
+                location,
+                ..
+            } => {
+                // We generate all the items of the list as cons cells.
+                for element in elements {
+                    builder.cons_list(element.location());
+                    self.maybe_block_expr(builder, element);
+                }
+                // Finally we close the list with the tail, or an empty list
+                // (so that we're sure we're building proper Erlang lists).
+                if let Some(tail) = tail {
+                    self.maybe_block_expr(builder, tail);
+                } else {
+                    builder.empty_list(SrcSpan {
+                        start: location.end,
+                        end: location.end,
+                    });
+                }
+            }
+            TypedExpr::Tuple {
+                elements, location, ..
+            } => {
+                let tuple = builder.start_tuple(*location);
+                for element in elements {
+                    self.maybe_block_expr(builder, element);
+                }
+                builder.end_tuple(tuple);
+            }
+
+            //
+            // Accessing data inside tuples, and records.
+            // They're all tuple accesses at the end of the day!
+            //
+            TypedExpr::TupleIndex {
+                tuple,
+                index,
+                location,
+                ..
+            } => self.tuple_index(builder, *location, tuple, *index),
+            TypedExpr::RecordAccess {
+                record,
+                index,
+                location,
+                ..
+            }
+            | TypedExpr::PositionalAccess {
+                record,
+                index,
+                location,
+                ..
+            } => {
+                self.tuple_index(builder, *location, record, index + 1);
+            }
+
+            //
+            // Records and record updates.
+            //
+            TypedExpr::ModuleSelect {
+                constructor: ModuleValueConstructor::Record { name, arity: 0, .. },
+                location,
+                ..
+            } => builder.atom_expression(*location, &to_snake_case(name)),
+            TypedExpr::RecordUpdate {
+                updated_record_assigned_name,
+                updated_record,
+                constructor,
+                arguments,
+                location,
+                ..
+            } => {
+                // If the record value itself needs to be bound to a variable
+                // before the update, we define it.
+                if let Some(name) = updated_record_assigned_name.as_ref() {
+                    builder.match_operator(*location);
+                    builder.variable_pattern(
+                        *location,
+                        &self.new_erlang_variable(name, updated_record.location()),
+                    );
+                    self.maybe_block_expr(builder, updated_record);
+                }
+                // Then a record update is simply a call!
+                self.call(builder, *location, constructor, arguments);
+            }
+
+            //
+            // All kinds of anonymous functions.
+            //
+            TypedExpr::Fn {
+                arguments,
+                body,
+                location,
+                ..
+            } => {
+                let outer_scope = self.taken_names.clone();
+                let argument_names = self.function_arguments_names(arguments, false);
+                let function = builder.start_anonymous_function(*location, argument_names);
+                self.statement_sequence(builder, body);
+                builder.end_function(function);
+                self.taken_names = outer_scope;
+            }
+            TypedExpr::ModuleSelect {
+                constructor: ModuleValueConstructor::Record { name, arity, .. },
+                location,
+                ..
+            } => self.record_builder_anonymous_function(builder, *location, name, *arity as usize),
+            TypedExpr::ModuleSelect {
+                type_,
+                constructor:
+                    ModuleValueConstructor::Fn {
+                        external_erlang: Some((module, name)),
+                        ..
+                    }
+                    | ModuleValueConstructor::Fn { module, name, .. },
+                location,
+                ..
+            } => match type_::collapse_links(type_.clone()).as_ref() {
+                Type::Fn { arguments, .. } => builder.function_reference(
+                    *location,
+                    Some(ErlangModuleName::new(module)),
+                    escape_erlang_existing_name(name),
+                    arguments.len(),
+                ),
+
+                Type::Named { .. } | Type::Var { .. } | Type::Tuple { .. } => {
+                    let name = escape_erlang_existing_name(name);
+                    let call =
+                        builder.start_remote_call(*location, ErlangModuleName::new(module), name);
+                    builder.end_call(call);
+                }
+            },
+
+            //
+            // Calling functions.
+            //
+            TypedExpr::Call {
+                fun,
+                arguments,
+                location,
+                ..
+            } => self.call(builder, *location, fun, arguments),
+            TypedExpr::Pipeline {
+                first_value,
+                assignments,
+                finally,
+                ..
+            } => self.pipeline(builder, first_value, assignments, finally),
+
+            //
+            // Todo, panic, and echo.
+            //
+            TypedExpr::Todo {
+                message, location, ..
+            } => {
+                let error = self.start_runtime_error(
+                    builder,
+                    RuntimeErrorKind::Todo,
+                    *location,
+                    message.as_deref(),
+                );
+                self.end_runtime_error(builder, error);
+            }
+            TypedExpr::Panic {
+                location, message, ..
+            } => {
+                let error = self.start_runtime_error(
+                    builder,
+                    RuntimeErrorKind::Panic,
+                    *location,
+                    message.as_deref(),
+                );
+                self.end_runtime_error(builder, error);
+            }
+            TypedExpr::Echo {
+                expression,
+                location,
+                message,
+                ..
+            } => self.echo(
+                builder,
+                *location,
+                message.as_deref(),
+                EchoPrintedValue::Expression {
+                    value: expression
+                        .as_ref()
+                        .expect("echo with no expression outside of pipe"),
+                },
+            ),
+
+            //
+            // Module constants.
+            //
+            TypedExpr::ModuleSelect {
+                constructor: ModuleValueConstructor::Constant { literal, .. },
+                ..
+            } => self.inlined_constant(builder, literal),
+
+            //
+            // Control flow.
+            //
+            TypedExpr::Case {
+                location,
+                subjects,
+                clauses,
+                ..
+            } => self.case(builder, *location, subjects, clauses),
+
+            //
+            // Something went wrong!
+            //
+            TypedExpr::Invalid { .. } => {
+                panic!("invalid expressions should not reach code generation")
+            }
+        }
+    }
+
+    fn echo<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        echo_location: SrcSpan,
+        message: Option<&'a TypedExpr>,
+        printed_value: EchoPrintedValue<'a>,
+    ) {
+        self.module_generator.echo_used = true;
+
+        let call = builder.start_call(echo_location);
+        builder.atom_expression(echo_location, "echo");
+        let call = builder.end_called_expression(call);
+
+        // Echo has 4 arguments: the expression to print...
+        match printed_value {
+            EchoPrintedValue::PipeStep { name } => builder.variable(echo_location, &name),
+            EchoPrintedValue::Expression { value } => self.maybe_block_expr(builder, value),
+        }
+        // ...the message to print (or nil if there's no message)...
+        if let Some(message) = message {
+            self.maybe_block_expr(builder, message);
+        } else {
+            builder.atom_expression(echo_location, "nil");
+        }
+
+        // ...the filepath of this module...
+        builder.string(echo_location, &self.module_generator.module_source_path);
+
+        // ...and the line number of the expression.
+        builder.int_expression(
+            echo_location,
+            self.module_generator
+                .line_numbers
+                .line_number(echo_location.start)
+                .into(),
+        );
+
+        builder.end_call(call);
+    }
+
+    /// This starts a call to `erlang:error` with a map representing a Gleam
+    /// runtime error of the given kind.
+    /// Some fields are mandatory and always added, but if you need to add more
+    /// fields you can still do so by calling `builder.map_field()`.
+    ///
+    /// After you're done generating those additional fields remember you _must_
+    /// call `end_runtime_error` before generating any other piece of code!
+    ///
+    fn start_runtime_error<Output, Builder: ErlangBuilder<Output>>(
+        &mut self,
+        builder: &mut Builder,
+        error_kind: RuntimeErrorKind,
+        location: SrcSpan,
+        message: Option<&'a TypedExpr>,
+    ) -> RuntimeError<Builder::Map, Builder::Call> {
+        let call = builder.start_remote_call(location, ErlangModuleName::erlang(), "error");
+        let map = builder.start_map(location);
+
+        builder.map_field(location);
+        builder.atom_expression(location, "gleam_error");
+        builder.atom_expression(
+            location,
+            match error_kind {
+                RuntimeErrorKind::Todo => "todo",
+                RuntimeErrorKind::Panic => "panic",
+                RuntimeErrorKind::Assert => "assert",
+                RuntimeErrorKind::LetAssert => "let_assert",
+            },
+        );
+
+        builder.map_field(location);
+        builder.atom_expression(location, "message");
+        if let Some(message) = message {
+            self.maybe_block_expr(builder, message);
+        } else {
+            builder.string(location, error_kind.default_error_message());
+        }
+
+        builder.map_field(location);
+        builder.atom_expression(location, "file");
+        builder.string(location, &self.module_generator.module_source_path);
+
+        builder.map_field(location);
+        builder.atom_expression(location, "module");
+        builder.string(location, &self.module_generator.module.name);
+
+        builder.map_field(location);
+        builder.atom_expression(location, "function");
+        builder.string(location, self.function_name);
+
+        builder.map_field(location);
+        builder.atom_expression(location, "line");
+        builder.int_expression(
+            location,
+            self.module_generator
+                .line_numbers
+                .line_number(location.start)
+                .into(),
+        );
+
+        RuntimeError {
+            error_map: map,
+            erlang_error_call: call,
+        }
+    }
+
+    /// This closes an open runtime error.
+    fn end_runtime_error<Output, Builder: ErlangBuilder<Output>>(
+        &self,
+        builder: &mut Builder,
+        runtime_error: RuntimeError<Builder::Map, Builder::Call>,
+    ) {
+        builder.end_map(runtime_error.error_map);
+        builder.end_call(runtime_error.erlang_error_call);
+    }
+
+    fn maybe_block_expr<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        expression: &'a TypedExpr,
+    ) {
+        if needs_begin_end_wrapping(expression) {
+            let block = builder.start_block(expression.location());
+            self.expression(builder, expression);
+            builder.end_block(block);
+        } else {
+            self.expression(builder, expression);
+        }
+    }
+
+    fn let_<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        location: SrcSpan,
+        value: &'a TypedExpr,
+        pattern: &'a TypedPattern,
+    ) {
+        builder.match_operator(location);
+        PatternGenerator::new(self).pattern(builder, pattern);
+        self.maybe_block_expr(builder, value);
+    }
+
+    fn let_assert<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        value: &'a TypedExpr,
+        pattern: &'a TypedPattern,
+        message: Option<&'a TypedExpr>,
+        location: SrcSpan,
+        following_statements: &'a [TypedStatement],
+    ) {
+        // If the pattern will never fail, like a tuple or a simple variable, we
+        // simply treat it as if it were a `let` assignment.
+        if pattern.always_matches() {
+            self.let_(builder, location, value, pattern);
+            self.statement_sequence(builder, following_statements);
+            return;
+        }
+
+        // Otherwise we turn the let assert into a case expression with two
+        // branches: one for the asserted pattern, and one catch all to throw an
+        // exception in case the pattern doesn't match.
+        let case = builder.start_case(location);
+        self.maybe_block_expr(builder, value);
+        let case = builder.end_case_subject(case);
+
+        // This is the first branch for when the asserted pattern matches: it's
+        // going to run all the remaining statements in its body.
+        if !following_statements.is_empty() {
+            // If there's statements after this let assert we want to generate
+            // them.
+            let clause = builder.start_case_clause(location);
+            let mut generator = PatternGenerator::new(self);
+            generator.pattern(builder, pattern);
+            let clause = builder.end_clause_pattern(clause);
+            let clause = builder.end_clause_guards(clause);
+            let variables_to_add_later = generator.variables_to_add_later;
+            self.pattern_assignments(builder, variables_to_add_later);
+            self.statement_sequence(builder, following_statements);
+            builder.end_clause_body(clause);
+        } else {
+            // If there's no statements following the let assert, that means
+            // that it's the last statement in the block and we need to return
+            // the value being matched on.
+            // It will look something like this:
+            //
+            // ```erl
+            // case MatchedValue of
+            //   [_, A | _] = _value -> _value;
+            // %              ^^^^^^ We bind the pattern to a variable
+            // %                     and return it.
+            //   _ -> erlang:error(...)
+            // end
+            // ```
+            let clause = builder.start_case_clause(location);
+            let matched_value_name = self.new_generated_variable();
+            builder.match_pattern(location);
+            let mut generator = PatternGenerator::new(self);
+            generator.pattern(builder, pattern);
+            builder.variable_pattern(location, &matched_value_name);
+
+            let clause = builder.end_clause_pattern(clause);
+            let clause = builder.end_clause_guards(clause);
+            builder.variable(location, &matched_value_name);
+            builder.end_clause_body(clause);
+        }
+
+        // This is the catch all branch to throw an error otherwise.
+        let clause = builder.start_case_clause(location);
+        let value_name = self.new_generated_variable();
+        builder.variable_pattern(location, &value_name);
+        let clause = builder.end_clause_pattern(clause);
+        let clause = builder.end_clause_guards(clause);
+        let error =
+            self.start_runtime_error(builder, RuntimeErrorKind::LetAssert, location, message);
+
+        // We want to add some additional fields to the error map:
+        builder.map_field(location);
+        builder.atom_expression(location, "value");
+        builder.variable(location, &value_name);
+
+        builder.map_field(location);
+        builder.atom_expression(location, "start");
+        builder.int_expression(location, location.start.into());
+
+        builder.map_field(location);
+        builder.atom_expression(location, "end");
+        builder.int_expression(location, value.location().end.into());
+
+        builder.map_field(location);
+        builder.atom_expression(location, "pattern_start");
+        builder.int_expression(location, pattern.location().start.into());
+
+        builder.map_field(location);
+        builder.atom_expression(location, "pattern_end");
+        builder.int_expression(location, pattern.location().end.into());
+
+        self.end_runtime_error(builder, error);
+        builder.end_clause_body(clause);
+
+        builder.end_case(case);
+    }
+
+    fn pipeline<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        first_value: &'a TypedPipelineAssignment,
+        assignments: &'a [(TypedPipelineAssignment, PipelineAssignmentKind)],
+        finally: &'a TypedExpr,
+    ) {
+        // A pipeline is desugared as a sequence of assignments:
+        //
+        // ```erl
+        // Step1 = fun()
+        // Step2 = fun(Step1)
+        // Step3 = fun(Step2)
+        // % ...
+        // ```
+        //
+        // So we need to keep around the name the prevopis pipeline step had
+        // to pass it as an argument to the following call. This is what this
+        // variable is for.
+        let mut previous_step_variable_name: Option<EcoString> = None;
+        for assignment in std::iter::once(first_value)
+            .chain(assignments.iter().map(|(assignment, _kind)| assignment))
+        {
+            // A pipeline step always ends up assigned to a variable.
+            // So we start by generating `_pipe = ...`, followed by the
+            // expression.
+            builder.match_operator(assignment.location);
+            let name = self.new_erlang_variable(&assignment.name, assignment.location);
+            builder.variable_pattern(assignment.location, &name);
+
+            // In case of a pipe we need to manually pass the previous step to
+            // echo as an argument.
+            if let TypedExpr::Echo {
+                expression: None,
+                message,
+                location,
+                ..
+            } = assignment.value.as_ref()
+            {
+                self.echo(
+                    builder,
+                    *location,
+                    message.as_deref(),
+                    EchoPrintedValue::PipeStep {
+                        name: previous_step_variable_name
+                            .to_owned()
+                            .expect("echo with no previous step in a pipe"),
+                    },
+                );
+            } else {
+                self.maybe_block_expr(builder, &assignment.value);
+                previous_step_variable_name = Some(name);
+            }
+        }
+
+        // We also need to do the same thing for the final step of the pipeline.
+        // It's slightly different compared to the other ones so we have to do
+        // that separately.
+        if let TypedExpr::Echo {
+            expression: None,
+            message,
+            location,
+            ..
+        } = finally
+        {
+            self.echo(
+                builder,
+                *location,
+                message.as_deref(),
+                EchoPrintedValue::PipeStep {
+                    name: previous_step_variable_name
+                        .expect("echo with no previous step in a pipe"),
+                },
+            );
+        } else {
+            self.expression(builder, finally);
+        }
+    }
+
+    fn assert<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        assert: &'a TypedAssert,
+    ) {
+        let Assert {
+            value,
+            location,
+            message,
+        } = assert;
+
+        match value {
+            // We're asserting on a binary operator. We want to show the result
+            // of each side in the error that is produced.
+            // So we will bind the two sides of the operator to variables and
+            // shove them in the error map too!
+            TypedExpr::BinOp {
+                operator,
+                left,
+                right,
+                location: binop_location,
+                ..
+            } => {
+                let erlang_operator = match operator {
+                    // Writing asserts on binops requires some extra care, check
+                    // out their docs!
+                    BinOp::And => {
+                        return self.assert_and(builder, left, right, message.as_ref(), *location);
+                    }
+                    BinOp::Or => {
+                        return self.assert_or(builder, left, right, message.as_ref(), *location);
+                    }
+
+                    BinOp::Eq => "=:=",
+                    BinOp::NotEq => "/=",
+                    BinOp::LtInt | BinOp::LtFloat => "<",
+                    BinOp::LtEqInt | BinOp::LtEqFloat => "=<",
+                    BinOp::GtInt | BinOp::GtFloat => ">",
+                    BinOp::GtEqInt | BinOp::GtEqFloat => ">=",
+
+                    BinOp::AddInt
+                    | BinOp::AddFloat
+                    | BinOp::SubInt
+                    | BinOp::SubFloat
+                    | BinOp::MultInt
+                    | BinOp::MultFloat
+                    | BinOp::DivInt
+                    | BinOp::DivFloat
+                    | BinOp::RemainderInt
+                    | BinOp::Concatenate => {
+                        panic!("Non-boolean operators cannot appear here in well-typed code")
+                    }
+                };
+
+                // If the left or right hand side are not simple variables we'll
+                // need to first assign those to generated variables and keep
+                // track of those names.
+                let left = if !left.is_var() {
+                    let name = self.new_generated_variable();
+                    builder.match_operator(left.location());
+                    builder.variable_pattern(left.location(), &name);
+                    self.maybe_block_expr(builder, left);
+                    AssertionExpression::from_generated_variable(name, left)
+                } else {
+                    AssertionExpression::from_expression(left)
+                };
+
+                let right = if !right.is_var() {
+                    let name = self.new_generated_variable();
+                    builder.match_operator(right.location());
+                    builder.variable_pattern(right.location(), &name);
+                    self.maybe_block_expr(builder, right);
+                    AssertionExpression::from_generated_variable(name, right)
+                } else {
+                    AssertionExpression::from_expression(right)
+                };
+
+                let case = builder.start_case(*location);
+
+                // Then we need to apply the operator. If any of the two sides
+                // has been bound to a variable we can use that name directly!
+                builder.binary_operator(*binop_location, erlang_operator);
+                self.runtime_value(builder, &left);
+                self.runtime_value(builder, &right);
+                let case = builder.end_case_subject(case);
+
+                // If the operator evaluates to true the assertion succeeded.
+                // We can just return nil.
+                let clause = builder.start_case_clause(*location);
+                builder.atom_pattern(*location, "true");
+                let clause = builder.end_clause_pattern(clause);
+                let clause = builder.end_clause_guards(clause);
+                builder.atom_expression(*location, "nil");
+                builder.end_clause_body(clause);
+
+                // Otherwise we want to throw a runtime error!
+                let clause = builder.start_case_clause(*location);
+                builder.atom_pattern(*location, "false");
+                let clause = builder.end_clause_pattern(clause);
+                let clause = builder.end_clause_guards(clause);
+                self.assert_binary_operator_error(
+                    builder,
+                    *operator,
+                    left,
+                    right,
+                    message.as_ref(),
+                    *location,
+                );
+                builder.end_clause_body(clause);
+
+                builder.end_case(case);
+            }
+
+            TypedExpr::Call {
+                fun,
+                arguments,
+                location: call_location,
+                ..
+            } => {
+                // When asserting on a call, we want to include the values of
+                // each argument in the assertion error in case of failure.
+                // This means we first have to evaluate each argument and bind
+                // it to a variable so that we can later reference them from the
+                // error message without evaluating each argument twice!
+                let mut call_arguments = Vec::with_capacity(arguments.len());
+                for argument in arguments {
+                    let argument = if !argument.value.is_var() {
+                        let name = self.new_generated_variable();
+                        builder.match_operator(argument.location);
+                        builder.variable_pattern(argument.location, &name);
+                        self.maybe_block_expr(builder, &argument.value);
+                        AssertionExpression::from_generated_variable(name, &argument.value)
+                    } else {
+                        AssertionExpression::from_expression(&argument.value)
+                    };
+                    call_arguments.push(argument);
+                }
+
+                let case = builder.start_case(*location);
+                self.call_in_assert(builder, *call_location, fun, &call_arguments);
+                let case = builder.end_case_subject(case);
+
+                // If the operator evaluates to true the assertion succeeded.
+                // We can just return nil.
+                let clause = builder.start_case_clause(*location);
+                builder.atom_pattern(*location, "true");
+                let clause = builder.end_clause_pattern(clause);
+                let clause = builder.end_clause_guards(clause);
+                builder.atom_expression(*location, "nil");
+                builder.end_clause_body(clause);
+
+                // Otherwise we want to throw a runtime error!
+                let clause = builder.start_case_clause(*location);
+                builder.atom_pattern(*location, "false");
+                let clause = builder.end_clause_pattern(clause);
+                let clause = builder.end_clause_guards(clause);
+                self.assert_call_error(
+                    builder,
+                    value,
+                    &call_arguments,
+                    message.as_ref(),
+                    *location,
+                );
+                builder.end_clause_body(clause);
+
+                builder.end_case(case);
+            }
+
+            TypedExpr::Int { .. }
+            | TypedExpr::Float { .. }
+            | TypedExpr::String { .. }
+            | TypedExpr::Block { .. }
+            | TypedExpr::Pipeline { .. }
+            | TypedExpr::Var { .. }
+            | TypedExpr::Fn { .. }
+            | TypedExpr::List { .. }
+            | TypedExpr::Case { .. }
+            | TypedExpr::RecordAccess { .. }
+            | TypedExpr::PositionalAccess { .. }
+            | TypedExpr::ModuleSelect { .. }
+            | TypedExpr::Tuple { .. }
+            | TypedExpr::TupleIndex { .. }
+            | TypedExpr::Todo { .. }
+            | TypedExpr::Panic { .. }
+            | TypedExpr::Echo { .. }
+            | TypedExpr::BitArray { .. }
+            | TypedExpr::RecordUpdate { .. }
+            | TypedExpr::NegateBool { .. }
+            | TypedExpr::NegateInt { .. }
+            | TypedExpr::Invalid { .. } => {
+                let case = builder.start_case(*location);
+                self.maybe_block_expr(builder, value);
+                let case = builder.end_case_subject(case);
+
+                // If the expression evaluates to true the assertion succeeded.
+                // We can just return nil.
+                let clause = builder.start_case_clause(*location);
+                builder.atom_pattern(*location, "true");
+                let clause = builder.end_clause_pattern(clause);
+                let clause = builder.end_clause_guards(clause);
+                builder.atom_expression(*location, "nil");
+                builder.end_clause_body(clause);
+
+                // Otherwise we want to throw a runtime error!
+                let clause = builder.start_case_clause(*location);
+                builder.atom_pattern(*location, "false");
+                let clause = builder.end_clause_pattern(clause);
+                let clause = builder.end_clause_guards(clause);
+                self.assert_expression_error(
+                    builder,
+                    AssertionExpression::from_expression(value).evaluated_to_bool(false),
+                    message.as_ref(),
+                    *location,
+                );
+                builder.end_clause_body(clause);
+
+                builder.end_case(case);
+            }
+        }
+    }
+
+    /// In Gleam, the `&&` operator is short-circuiting, meaning that we can't
+    /// pre-evaluate both sides of it, and use them in the exception that is
+    /// thrown.
+    /// Instead, we need to implement this short-circuiting logic ourself.
+    ///
+    /// If we short-circuit, we must leave the second expression unevaluated,
+    /// and signal that using the `unevaluated` variant, as detailed in the
+    /// exception format. For the first expression, we know it must be `false`,
+    /// otherwise we would have continued by evaluating the second expression.
+    ///
+    /// Similarly, if we do evaluate the second expression and fail, we know
+    /// that the first expression must have evaluated to `true`, and the second
+    /// to `false`. This way, we avoid needing to evaluate either expression
+    /// twice.
+    ///
+    /// The generated code then looks something like this:
+    /// ```erlang
+    /// case expr1 of
+    ///   true -> case expr2 of
+    ///     true -> true;
+    ///     false -> <throw exception>
+    ///   end;
+    ///   false -> <throw exception>
+    /// end
+    /// ```
+    ///
+    fn assert_and<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        left: &'a TypedExpr,
+        right: &'a TypedExpr,
+        message: Option<&'a TypedExpr>,
+        location: SrcSpan,
+    ) {
+        let case = builder.start_case(location);
+        self.maybe_block_expr(builder, left);
+        let case = builder.end_case_subject(case);
+
+        // In case the first expression is true, we get to evaluate the second
+        // one as well, then we will be able to tell if the assertion failed or
+        // not!
+        let clause = builder.start_case_clause(location);
+        builder.atom_pattern(location, "true");
+        let clause = builder.end_clause_pattern(clause);
+        let clause = builder.end_clause_guards(clause);
+        {
+            // Now we have to match on the right hand side!
+            let case = builder.start_case(location);
+            self.maybe_block_expr(builder, right);
+            let case = builder.end_case_subject(case);
+
+            // If it's true the assertion succeded! We can return `nil`.
+            let clause = builder.start_case_clause(location);
+            builder.atom_pattern(location, "true");
+            let clause = builder.end_clause_pattern(clause);
+            let clause = builder.end_clause_guards(clause);
+            builder.atom_expression(location, "nil");
+            builder.end_clause_body(clause);
+
+            // If it's false the assertion failed! The left hand side was true
+            // but this one evaluated to false :(
+            let clause = builder.start_case_clause(location);
+            builder.atom_pattern(location, "false");
+            let clause = builder.end_clause_pattern(clause);
+            let clause = builder.end_clause_guards(clause);
+            self.assert_binary_operator_error(
+                builder,
+                BinOp::And,
+                AssertionExpression::from_expression(left).evaluated_to_bool(true),
+                AssertionExpression::from_expression(right).evaluated_to_bool(false),
+                message,
+                location,
+            );
+            builder.end_clause_body(clause);
+            builder.end_case(case);
+        }
+        builder.end_clause_body(clause);
+
+        // In case the first expression is false, we want to fail fast. We are
+        // short circuiting without evaluating the right hand side! This side
+        // just build an error.
+        let clause = builder.start_case_clause(location);
+        builder.atom_pattern(location, "false");
+        let clause = builder.end_clause_pattern(clause);
+        let clause = builder.end_clause_guards(clause);
+        self.assert_binary_operator_error(
+            builder,
+            BinOp::And,
+            AssertionExpression::from_expression(left).evaluated_to_bool(false),
+            AssertionExpression::from_expression(right).was_unevaluated(),
+            message,
+            location,
+        );
+        builder.end_clause_body(clause);
+
+        builder.end_case(case);
+    }
+
+    /// Similar to `&&`, `||` is also short-circuiting in Gleam. However, if `||`
+    /// short-circuits, that's because the first expression evaluated to `true`,
+    /// meaning the whole assertion succeeds. This allows us to directly use Erlang's
+    /// `orelse` operator as the subject of the `case` expression.
+    ///
+    /// The only difference is that due to the nature of `||`, if the assertion fails,
+    /// we know that both sides must have evaluated to `false`, so we don't
+    /// need to store the values of them in variables beforehand.
+    fn assert_or<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        left: &'a TypedExpr,
+        right: &'a TypedExpr,
+        message: Option<&'a TypedExpr>,
+        location: SrcSpan,
+    ) {
+        let case = builder.start_case(location);
+        builder.binary_operator(location, "orelse");
+        self.maybe_block_expr(builder, left);
+        self.maybe_block_expr(builder, right);
+        let case = builder.end_case_subject(case);
+
+        // If the result is true, then the assertion succeeded, we can return
+        // nil.
+        let clause = builder.start_case_clause(location);
+        builder.atom_pattern(location, "true");
+        let clause = builder.end_clause_pattern(clause);
+        let clause = builder.end_clause_guards(clause);
+        builder.atom_expression(location, "nil");
+        builder.end_clause_body(clause);
+
+        // But if it fails we know that both sides of the assertion resulted in
+        // a false value. In that case we throw an error.
+
+        let clause = builder.start_case_clause(location);
+        builder.atom_pattern(location, "false");
+        let clause = builder.end_clause_pattern(clause);
+        let clause = builder.end_clause_guards(clause);
+        self.assert_binary_operator_error(
+            builder,
+            BinOp::Or,
+            AssertionExpression::from_expression(left).evaluated_to_bool(false),
+            AssertionExpression::from_expression(right).evaluated_to_bool(false),
+            message,
+            location,
+        );
+        builder.end_clause_body(clause);
+
+        builder.end_case(case);
+    }
+
+    /// This generates the code that throws a runtime error whan an `assert`
+    /// that is checking the result of a binary operator fails.
+    fn assert_binary_operator_error<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        operator: BinOp,
+        left: AssertionExpression<'a>,
+        right: AssertionExpression<'a>,
+        message: Option<&'a TypedExpr>,
+        location: SrcSpan,
+    ) {
+        let error = self.start_runtime_error(builder, RuntimeErrorKind::Assert, location, message);
+
+        builder.map_field(location);
+        builder.atom_expression(location, "kind");
+        builder.atom_expression(location, "binary_operator");
+
+        builder.map_field(location);
+        builder.atom_expression(location, "operator");
+        builder.atom_expression(location, operator.name());
+
+        builder.map_field(location);
+        builder.atom_expression(location, "left");
+        self.assertion_expression_map(builder, location, &left);
+
+        builder.map_field(location);
+        builder.atom_expression(location, "right");
+        self.assertion_expression_map(builder, location, &right);
+
+        builder.map_field(location);
+        builder.atom_expression(location, "start");
+        builder.int_expression(location, location.start.into());
+
+        builder.map_field(location);
+        builder.atom_expression(location, "end");
+        builder.int_expression(location, right.location.end.into());
+
+        builder.map_field(location);
+        builder.atom_expression(location, "expression_start");
+        builder.int_expression(location, left.location.start.into());
+
+        self.end_runtime_error(builder, error);
+    }
+
+    /// This generates the code that throws a runtime error whan an `assert`
+    /// that is checking the result of an arbitrary expression fails.
+    fn assert_expression_error<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        expression: AssertionExpression<'a>,
+        message: Option<&'a TypedExpr>,
+        location: SrcSpan,
+    ) {
+        let error = self.start_runtime_error(builder, RuntimeErrorKind::Assert, location, message);
+
+        builder.map_field(location);
+        builder.atom_expression(location, "kind");
+        builder.atom_expression(location, "expression");
+
+        // If assert fails on an expression's result then we know it must have
+        // evaluated to false!
+        builder.map_field(location);
+        builder.atom_expression(location, "expression");
+        self.assertion_expression_map(builder, location, &expression);
+
+        builder.map_field(location);
+        builder.atom_expression(location, "start");
+        builder.int_expression(location, location.start.into());
+
+        builder.map_field(location);
+        builder.atom_expression(location, "end");
+        builder.int_expression(location, expression.location.end.into());
+
+        builder.map_field(location);
+        builder.atom_expression(location, "expression_start");
+        builder.int_expression(location, expression.location.start.into());
+
+        self.end_runtime_error(builder, error);
+    }
+
+    fn assert_call_error<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        call: &'a TypedExpr,
+        arguments: &[AssertionExpression<'a>],
+        message: Option<&'a TypedExpr>,
+        location: SrcSpan,
+    ) {
+        let error = self.start_runtime_error(builder, RuntimeErrorKind::Assert, location, message);
+
+        builder.map_field(location);
+        builder.atom_expression(location, "kind");
+        builder.atom_expression(location, "function_call");
+
+        builder.map_field(location);
+        builder.atom_expression(location, "arguments");
+        for argument in arguments {
+            builder.cons_list(location);
+            self.assertion_expression_map(builder, location, argument);
+        }
+        builder.empty_list(location);
+
+        builder.map_field(location);
+        builder.atom_expression(location, "start");
+        builder.int_expression(location, location.start.into());
+
+        builder.map_field(location);
+        builder.atom_expression(location, "end");
+        builder.int_expression(location, call.location().end.into());
+
+        builder.map_field(location);
+        builder.atom_expression(location, "expression_start");
+        builder.int_expression(location, call.location().start.into());
+
+        self.end_runtime_error(builder, error);
+    }
+
+    /// Given an expression being asserted on. This generates the code for an
+    /// Erlang map that describes it: with a field for its kind, its value, and
+    /// its location in the source code.
+    fn assertion_expression_map<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        assertion_location: SrcSpan,
+        expression: &AssertionExpression<'a>,
+    ) {
+        let AssertionExpression {
+            kind,
+            runtime_value,
+            location,
+        } = expression;
+
+        let map = builder.start_map(assertion_location);
+
+        builder.map_field(assertion_location);
+        builder.atom_expression(assertion_location, "kind");
+        builder.atom_expression(
+            assertion_location,
+            match kind {
+                AssertedExpressionKind::Literal => "literal",
+                AssertedExpressionKind::Expression => "expression",
+                AssertedExpressionKind::Unevaluated => "unevaluated",
+            },
+        );
+
+        if runtime_value.is_some() {
+            builder.map_field(assertion_location);
+            builder.atom_expression(assertion_location, "value");
+            self.runtime_value(builder, expression);
+        }
+
+        builder.map_field(assertion_location);
+        builder.atom_expression(assertion_location, "start");
+        builder.int_expression(assertion_location, location.start.into());
+
+        builder.map_field(assertion_location);
+        builder.atom_expression(assertion_location, "end");
+        builder.int_expression(assertion_location, location.end.into());
+
+        builder.end_map(map);
+    }
+
+    /// This takes a value that is in an assertion (and might have been bound
+    /// to a variable somewhere) and produces the code that will reference
+    /// such value.
+    ///
+    fn runtime_value<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        expression: &AssertionExpression<'a>,
+    ) {
+        match expression
+            .runtime_value
+            .as_ref()
+            .expect("trying to reference unevaluated assert value")
+        {
+            AssertedExpressionRuntimeValue::KnownBool(true) => {
+                builder.atom_expression(expression.location, "true")
+            }
+            AssertedExpressionRuntimeValue::KnownBool(false) => {
+                builder.atom_expression(expression.location, "false")
+            }
+            AssertedExpressionRuntimeValue::Variable(name) => {
+                builder.variable(expression.location, name)
+            }
+            AssertedExpressionRuntimeValue::Expression(expr) => {
+                self.maybe_block_expr(builder, expr);
+            }
+        }
+    }
+
+    fn tuple_index<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        location: SrcSpan,
+        tuple: &'a TypedExpr,
+        index: u64,
+    ) {
+        let call = builder.start_remote_call(location, ErlangModuleName::erlang(), "element");
+        builder.int_expression(location, (index + 1).into());
+        self.maybe_block_expr(builder, tuple);
+        builder.end_call(call);
+    }
+
+    fn var<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        variable_location: SrcSpan,
+        name: &'a str,
+        constructor: &'a ValueConstructor,
+    ) {
+        match &constructor.variant {
+            ValueConstructorVariant::Record {
+                name: record_name, ..
+            } => match constructor.type_.deref() {
+                // We have a variable referencing a record: we are either
+                // referencing a record constructor function, or building a
+                // record that has no fields:
+                //
+                // ```gleam
+                // type Wibble {
+                //   Wibble
+                //   Wobble(Int)
+                // }
+                //
+                // pub fn main() {
+                //   Wibble
+                // //^^^^^^ Building record with no fields
+                //   Wobble
+                // //^^^^^^ Referencing record constructor function
+                // }
+                // ```
+                Type::Named { .. } | Type::Var { .. } | Type::Tuple { .. } => {
+                    builder.atom_expression(variable_location, &to_snake_case(record_name));
+                }
+                Type::Fn { arguments, .. } => {
+                    self.record_builder_anonymous_function(
+                        builder,
+                        variable_location,
+                        record_name,
+                        arguments.len(),
+                    );
+                }
+            },
+
+            ValueConstructorVariant::LocalVariable { location, .. } => {
+                builder.variable(variable_location, &self.local_var_name(location));
+            }
+
+            ValueConstructorVariant::ModuleConstant { literal, .. } => {
+                self.inlined_constant(builder, literal);
+            }
+
+            ValueConstructorVariant::ModuleFn {
+                arity,
+                external_erlang: Some((module, name)),
+                ..
+            } => {
+                let name = escape_erlang_existing_name(name);
+                if *module == self.module_generator.module.name {
+                    builder.function_reference(variable_location, None, name, *arity);
+                } else {
+                    builder.function_reference(
+                        variable_location,
+                        Some(ErlangModuleName::new(module)),
+                        name,
+                        *arity,
+                    );
+                }
+            }
+
+            ValueConstructorVariant::ModuleFn { arity, module, .. }
+                if *module == self.module_generator.module.name =>
+            {
+                builder.function_reference(
+                    variable_location,
+                    None,
+                    escape_erlang_existing_name(name),
+                    *arity,
+                );
+            }
+
+            ValueConstructorVariant::ModuleFn {
+                arity,
+                module,
+                name,
+                ..
+            } => builder.function_reference(
+                variable_location,
+                Some(ErlangModuleName::new(module)),
+                escape_erlang_existing_name(name),
+                *arity,
+            ),
+        }
+    }
+
+    fn call<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        call_location: SrcSpan,
+        fun: &'a TypedExpr,
+        arguments: &'a [TypedCallArg],
+    ) {
+        match how_to_call(fun) {
+            // If we're building a record then we want to just output a
+            // tagged tuple, there's no function call at all!
+            FunctionCall::BuildRecord { name } => {
+                self.build_record(builder, call_location, name, arguments)
+            }
+            // If we're calling some module function like `io.println`, `main`,
+            // `list.map` then we can call the function using its name (and
+            // module name if it comes from a different module).
+            FunctionCall::Call { module, name } => {
+                let call = if module != self.module_generator.module.name {
+                    builder.start_remote_call(
+                        call_location,
+                        ErlangModuleName::new(module),
+                        escape_erlang_existing_name(name),
+                    )
+                } else {
+                    let call = builder.start_call(call_location);
+                    builder.atom_expression(fun.location(), escape_erlang_existing_name(name));
+                    builder.end_called_expression(call)
+                };
+                for argument in arguments {
+                    self.maybe_block_expr(builder, &argument.value);
+                }
+                builder.end_call(call);
+            }
+            // If we're calling anything else (like an anonymous function, or
+            // the result of another function call) we generate its code and
+            // call that result directly.
+            FunctionCall::DirectCall => {
+                let call = builder.start_call(call_location);
+                self.maybe_block_expr(builder, fun);
+                let call = builder.end_called_expression(call);
+                for argument in arguments {
+                    self.maybe_block_expr(builder, &argument.value);
+                }
+                builder.end_call(call);
+            }
+        }
+    }
+
+    /// This generates the code for a call that happens in an `assert`.
+    /// For example: `assert wibble.wobble(a, b)`.
+    ///
+    /// This is a function separate from the regular `self.call` since the call
+    /// arguments are not just TypedExpressions but values that might have been
+    /// bound to variables in previous statements.
+    /// Assert has to do it when a call is asserted so that those arguments can
+    /// be referenced later in the error thrown at runtime!
+    ///
+    fn call_in_assert<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        call_location: SrcSpan,
+        fun: &'a TypedExpr,
+        arguments: &[AssertionExpression<'a>],
+    ) {
+        match how_to_call(fun) {
+            // What comes after `assert` has to produce a boolean, so type
+            // checking should make it impossible to build a record here.
+            FunctionCall::BuildRecord { .. } => {
+                panic!("type checking should make it impossible to call a record in an assert")
+            }
+
+            // If we're calling some module function like `io.println`, `main`,
+            // `list.map` then we can call the function using its name (and
+            // module name if it comes from a different module).
+            FunctionCall::Call { module, name } => {
+                let call = if module != self.module_generator.module.name {
+                    builder.start_remote_call(
+                        call_location,
+                        ErlangModuleName::new(module),
+                        escape_erlang_existing_name(name),
+                    )
+                } else {
+                    let call = builder.start_call(call_location);
+                    builder.atom_expression(fun.location(), escape_erlang_existing_name(name));
+                    builder.end_called_expression(call)
+                };
+                for argument in arguments {
+                    self.runtime_value(builder, argument);
+                }
+                builder.end_call(call);
+            }
+
+            // If we're calling anything else (like an anonymous function, or
+            // the result of another function call) we generate its code and
+            // call that result directly.
+            FunctionCall::DirectCall => {
+                let call = builder.start_call(call_location);
+                self.maybe_block_expr(builder, fun);
+                let call = builder.end_called_expression(call);
+                for argument in arguments {
+                    self.runtime_value(builder, argument);
+                }
+                builder.end_call(call);
+            }
+        }
+    }
+
+    /// Given a Gleam record name and the arguments it's called with, this
+    /// generates the code to build such record.
+    /// For example: `Wibble(1, 2)` would be `record_builder("Wibble", [1, 2])`.
+    /// It would result in a tuple like this: `{wibble, 1, 2}`.
+    ///
+    /// Notice how the name you have to specify is the _Gleam name_ of the
+    /// record. This function will take care of turning it to snake case!
+    fn build_record<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        location: SrcSpan,
+        record_name: &str,
+        arguments: &'a [TypedCallArg],
+    ) {
+        if arguments.is_empty() {
+            builder.atom_expression(location, &to_snake_case(record_name));
+        } else {
+            let tuple = builder.start_tuple(location);
+            builder.atom_expression(location, &to_snake_case(record_name));
+            for argument in arguments {
+                self.maybe_block_expr(builder, &argument.value);
+            }
+            builder.end_tuple(tuple);
+        }
+    }
+
+    fn case<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        case_location: SrcSpan,
+        subjects: &'a [TypedExpr],
+        clauses: &'a [TypedClause],
+    ) {
+        let case = builder.start_case(case_location);
+
+        // If there's more than a single subject we will need to wrap those in a
+        // tuple and start matching on tuple patterns. That's because Erlang
+        // doesn't support matching on multiple subjects like Gleam.
+        match subjects {
+            [subject] => self.maybe_block_expr(builder, subject),
+            subjects => {
+                let first_subject_location = subjects
+                    .first()
+                    .map_or(case_location, |subject| subject.location());
+                let last_subject_location = subjects
+                    .last()
+                    .map_or(case_location, |subject| subject.location());
+                let tuple =
+                    builder.start_tuple(first_subject_location.merge(&last_subject_location));
+                for subject in subjects {
+                    self.maybe_block_expr(builder, subject);
+                }
+                builder.end_tuple(tuple);
+            }
+        }
+        let case = builder.end_case_subject(case);
+
+        for clause in clauses.iter() {
+            let taken_names_before_clause = self.taken_names.clone();
+            self.clause_branch(builder, &clause.pattern, clause);
+
+            // Erlang doesn't support alternative patterns so we're gonna have
+            // to turn those into separate branches!
+            // Since those are going to have the exact same body we don't want
+            // it to use different updated variable names.
+            // So they should have the same scope that existed before generating
+            // the first clause branch.
+            // For example:
+            //
+            // ```gleam
+            // case x {
+            //   1 | 2 -> { let a = Nil }
+            //   _ -> Nil
+            // }
+            // ```
+            //
+            // We want the generated code to look like this:
+            //
+            // ```erl
+            // case x of
+            //    1 -> A = nil;
+            //    2 -> A = nil;
+            // %       ^ We're still using `A`, not `A@1`!
+            //    _ -> nil
+            // end
+            // ```
+            //
+            for pattern in &clause.alternative_patterns {
+                self.taken_names = taken_names_before_clause.clone();
+                self.clause_branch(builder, pattern, clause);
+            }
+        }
+
+        builder.end_case(case);
+    }
+
+    /// Given a pattern and the branch it belongs to this generates an Erlang
+    /// case clause for that pattern.
+    fn clause_branch<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        patterns: &'a Vec<Pattern<Arc<Type>>>,
+        clause: &'a Clause<TypedExpr, Arc<Type>>,
+    ) {
+        let clause_pattern = builder.start_case_clause(clause.location);
+
+        // We start by generating the case clause pattern. If we're matching on
+        // multiple subjects (and so patterns has more that a single item) those
+        // are gonna be wrapped in a tuple pattern.
+        // That's how we match on multiple things on the Erlang target.
+        let mut pattern_generator = PatternGenerator::new(self);
+        match patterns.as_slice() {
+            [pattern] => pattern_generator.pattern(builder, pattern),
+            patterns => {
+                let first_pattern_location = patterns
+                    .first()
+                    .map_or(clause.location, |pattern| pattern.location());
+                let last_pattern_location = patterns
+                    .last()
+                    .map_or(clause.location, |pattern| pattern.location());
+                let tuple = builder
+                    .start_tuple_pattern(first_pattern_location.merge(&last_pattern_location));
+                for pattern in patterns {
+                    pattern_generator.pattern(builder, pattern);
+                }
+                builder.end_tuple_pattern(tuple);
+            }
+        }
+
+        let variables_to_add_later = pattern_generator.variables_to_add_later;
+
+        let clause_guards = builder.end_clause_pattern(clause_pattern);
+        if let Some(guard) = clause.guard.as_ref() {
+            let guard_ender = builder.start_clause_guard();
+            self.clause_guard(builder, guard, &variables_to_add_later);
+            builder.end_clause_guard(guard_ender);
+        }
+
+        // Finally we can generate the clause body. If the clause is
+        // followed by a single block then we want it to be a statements
+        // sequence (and not wrapped in a begin ... end block as we usually
+        // would when generating code for a block expression).
+        let clause_body = builder.end_clause_guards(clause_guards);
+        self.pattern_assignments(builder, variables_to_add_later);
+        if let TypedExpr::Block { statements, .. } = &clause.then {
+            self.statement_sequence(builder, statements);
+        } else {
+            self.expression(builder, &clause.then);
+        }
+        builder.end_clause_body(clause_body);
+    }
+
+    /// Erlang doesn't have a special constant declaration syntax; so each Gleam
+    /// constant is simply inlined anywhere it is used.
+    ///
+    /// This function produces the code of a constant expression.
+    ///
+    fn inlined_constant<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        literal: &'a TypedConstant,
+    ) {
+        match literal {
+            Constant::Int {
+                int_value,
+                location,
+                ..
+            } => builder.int_expression(*location, int_value.clone()),
+            Constant::Float {
+                float_value,
+                location,
+                ..
+            } => builder.float_expression(*location, float_value.value()),
+            Constant::String {
+                value, location, ..
+            } => builder.string(*location, value),
+            Constant::Var {
+                name,
+                constructor,
+                location,
+                ..
+            } => self.var(
+                builder,
+                *location,
+                name,
+                constructor
+                    .as_ref()
+                    .expect("This is guaranteed to hold a value."),
+            ),
+
+            Constant::Tuple {
+                elements, location, ..
+            } => {
+                let tuple = builder.start_tuple(*location);
+                for element in elements {
+                    self.inlined_constant(builder, element);
+                }
+                builder.end_tuple(tuple);
+            }
+
+            Constant::List {
+                elements,
+                tail,
+                location,
+                ..
+            } => {
+                for element in elements {
+                    builder.cons_list(element.location());
+                    self.inlined_constant(builder, element);
+                }
+                match tail {
+                    // If there's no tail we simply add an empty list cell to
+                    // end the cons list.
+                    None => builder.empty_list(SrcSpan {
+                        start: location.end,
+                        end: location.end,
+                    }),
+                    Some(tail) => match tail.list_elements() {
+                        // If there's a tail and we don't statically know the
+                        // elements it's made of, we add it as a regular Erlang
+                        // tail and it will be `[1, 2 | Tail]`.
+                        None => self.inlined_constant(builder, tail),
+                        // But if we can tell it has some fixed amount of
+                        // constant elements, then those are inlined too!
+                        Some(list_elements) => {
+                            for element in list_elements {
+                                builder.cons_list(element.location());
+                                self.inlined_constant(builder, element);
+                            }
+                            builder.empty_list(SrcSpan {
+                                start: location.end,
+                                end: location.end,
+                            });
+                        }
+                    },
+                }
+            }
+
+            Constant::BitArray {
+                segments, location, ..
+            } => {
+                let bit_array = builder.start_bit_array(*location);
+                for segment in segments {
+                    self.bit_array_constant_segment(builder, segment);
+                }
+                builder.end_bit_array(bit_array);
+            }
+
+            Constant::Record {
+                type_,
+                arguments,
+                location,
+                ..
+            } => {
+                let tag = literal
+                    .constant_record_tag()
+                    .expect("record without inferred constructor made it to code generation");
+
+                match arguments {
+                    // This is a regular record call, we're building a record as
+                    // usual as a tagged tuple.
+                    Some(arguments) => {
+                        let tuple = builder.start_tuple(*location);
+                        builder.atom_expression(*location, &to_snake_case(&tag));
+                        for argument in arguments {
+                            self.inlined_constant(builder, &argument.value);
+                        }
+                        builder.end_tuple(tuple);
+                    }
+                    // Otherwise we are either referencing a record constructor
+                    // function, or building a record that has no fields:
+                    //
+                    // ```gleam
+                    // type Wibble {
+                    //   Wibble
+                    //   Wobble(Int)
+                    // }
+                    //
+                    // const a = Wibble
+                    // //        ^^^^^^ Building record with no fields
+                    // const b = Wobble
+                    // //        ^^^^^^ Referencing record constructor function
+                    // ```
+                    None => match type_::collapse_links(type_.clone()).deref() {
+                        Type::Named { .. } | Type::Var { .. } | Type::Tuple { .. } => {
+                            builder.atom_expression(*location, &to_snake_case(&tag));
+                        }
+                        Type::Fn { arguments, .. } => {
+                            self.record_builder_anonymous_function(
+                                builder,
+                                *location,
+                                &tag,
+                                arguments.len(),
+                            );
+                        }
+                    },
+                }
+            }
+
+            Constant::BinaryOperator {
+                left,
+                right,
+                operator,
+                location,
+                ..
+            } => match operator {
+                BinOp::Concatenate => {
+                    self.constant_string_concatenate(builder, *location, left, right)
+                }
+
+                BinOp::And
+                | BinOp::Or
+                | BinOp::Eq
+                | BinOp::NotEq
+                | BinOp::LtInt
+                | BinOp::LtEqInt
+                | BinOp::LtFloat
+                | BinOp::LtEqFloat
+                | BinOp::GtEqInt
+                | BinOp::GtInt
+                | BinOp::GtEqFloat
+                | BinOp::GtFloat
+                | BinOp::AddInt
+                | BinOp::AddFloat
+                | BinOp::SubInt
+                | BinOp::SubFloat
+                | BinOp::MultInt
+                | BinOp::MultFloat
+                | BinOp::DivInt
+                | BinOp::DivFloat
+                | BinOp::RemainderInt => {
+                    unreachable!("invalid constant binop made it to code generation")
+                }
+            },
+
+            Constant::RecordUpdate { .. } => {
+                panic!("record updates should not reach code generation")
+            }
+            Constant::Todo { .. } => panic!("todo constants should not reach code generation"),
+            Constant::Invalid { .. } => {
+                panic!("invalid constants should not reach code generation")
+            }
+        }
+    }
+
+    fn bit_array_constant_segment<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        segment: &'a TypedConstantBitArraySegment,
+    ) {
+        builder.bit_array_segment(segment.location);
+        self.inlined_constant(builder, &segment.value);
+        match segment.size() {
+            Some(TypedConstant::Int {
+                int_value,
+                location,
+                ..
+            }) if int_value.is_negative() => {
+                builder.int_expression(*location, BigInt::ZERO);
+            }
+            Some(size) => self.inlined_constant(builder, size),
+            None => builder.bit_array_segment_default_size(),
+        }
+        self.bit_array_segment_specifiers(builder, segment);
+    }
+
+    fn bit_array_segment_specifiers<Output, Expr>(
+        &self,
+        builder: &mut impl ErlangBuilder<Output>,
+        segment: &'a BitArraySegment<Expr, Arc<Type>>,
+    ) {
+        let options = segment.options.iter();
+        builder.bit_array_segment_specifiers(options.filter_map(|option| match option {
+            BitArrayOption::Utf8 { .. } | BitArrayOption::Utf8Codepoint { .. } => {
+                Some(BitArraySegmentSpecifier::Utf8)
+            }
+            BitArrayOption::Utf16 { .. } | BitArrayOption::Utf16Codepoint { .. } => {
+                Some(BitArraySegmentSpecifier::Utf16)
+            }
+            BitArrayOption::Utf32 { .. } | BitArrayOption::Utf32Codepoint { .. } => {
+                Some(BitArraySegmentSpecifier::Utf32)
+            }
+            BitArrayOption::Int { .. } => Some(BitArraySegmentSpecifier::Integer),
+            BitArrayOption::Float { .. } => Some(BitArraySegmentSpecifier::Float),
+            BitArrayOption::Bytes { .. } => Some(BitArraySegmentSpecifier::Binary),
+            BitArrayOption::Bits { .. } => Some(BitArraySegmentSpecifier::Bitstring),
+            BitArrayOption::Signed { .. } => Some(BitArraySegmentSpecifier::Signed),
+            BitArrayOption::Unsigned { .. } => Some(BitArraySegmentSpecifier::Unsigned),
+            BitArrayOption::Big { .. } => Some(BitArraySegmentSpecifier::Big),
+            BitArrayOption::Little { .. } => Some(BitArraySegmentSpecifier::Little),
+            BitArrayOption::Native { .. } => Some(BitArraySegmentSpecifier::Native),
+            BitArrayOption::Unit { value, .. } => Some(BitArraySegmentSpecifier::Unit(*value)),
+            BitArrayOption::Size { .. } => None,
+        }));
+    }
+
+    fn constant_string_concatenate<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        location: SrcSpan,
+        left: &'a TypedConstant,
+        right: &'a TypedConstant,
+    ) {
+        let mut items = VecDeque::new();
+        items.push_back(left);
+        items.push_back(right);
+
+        let bit_array = builder.start_bit_array(location);
+        while let Some(segment) = items.pop_front() {
+            match segment {
+                // When concatenating constant strings we flatten out all
+                // strings that are being concatenated: so that
+                // `"a" <> "b" <> "c"` becomes a single bitstring like this:
+                // `<<~"a", ~"b", ~"c">>` rather than nested bitstrings:
+                // `<<<<~"a", ~"b">>/binary, ~"c">>`.
+                // If we find a string concatenation we push its separate items
+                // to be printed next!
+                Constant::BinaryOperator {
+                    left,
+                    right,
+                    operator: BinOp::Concatenate,
+                    ..
+                } => {
+                    items.push_front(right);
+                    items.push_front(left);
+                    continue;
+                }
+                // When concatenating constant strings we want all constant
+                // variables to also be fully expanded, so that if we have
+                //
+                // ```gleam
+                // const a = "one"
+                // const b = a <> "two"
+                // ```
+                //
+                // Any use of b will be replaced with `<<~"one", ~"two">>`.
+                Constant::Var {
+                    constructor: Some(constructor),
+                    ..
+                } if let ValueConstructorVariant::ModuleConstant { literal, .. } =
+                    &constructor.variant =>
+                {
+                    items.push_front(literal);
+                    continue;
+                }
+
+                Constant::Int { .. }
+                | Constant::Float { .. }
+                | Constant::String { .. }
+                | Constant::Tuple { .. }
+                | Constant::List { .. }
+                | Constant::Record { .. }
+                | Constant::RecordUpdate { .. }
+                | Constant::BitArray { .. }
+                | Constant::Var { .. }
+                | Constant::Invalid { .. }
+                | Constant::BinaryOperator { .. }
+                | Constant::Todo { .. } => (),
+            }
+
+            builder.bit_array_segment(segment.location());
+            self.inlined_constant(builder, segment);
+            builder.bit_array_segment_default_size();
+            builder.bit_array_segment_specifiers([BitArraySegmentSpecifier::Utf8]);
+        }
+        builder.end_bit_array(bit_array);
+    }
+
+    fn string_concatenate<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        location: SrcSpan,
+        left: &'a TypedExpr,
+        right: &'a TypedExpr,
+    ) {
+        let bit_array = builder.start_bit_array(location);
+        self.string_concatenate_argument(builder, left);
+        self.string_concatenate_argument(builder, right);
+        builder.end_bit_array(bit_array);
+    }
+
+    fn string_concatenate_argument<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        value: &'a TypedExpr,
+    ) {
+        // String concatenation is basically building a bit array with two
+        // elements. Anything is going to be simply added as a `/binary` segment
+        // with one exception: if we're dealing with a literal string that needs
+        // the `/utf8` specifier instead!
+        // In both cases the size is alwaus automatic, so we generate the
+        // `default` atom.
+        builder.bit_array_segment(value.location());
+        self.maybe_block_expr(builder, value);
+        builder.bit_array_segment_default_size();
+        builder.bit_array_segment_specifiers(if produces_literal_string(value) {
+            [BitArraySegmentSpecifier::Utf8]
+        } else {
+            [BitArraySegmentSpecifier::Binary]
+        });
+    }
+
+    fn binary_operator<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        expression_location: SrcSpan,
+        name: &'a BinOp,
+        left: &'a TypedExpr,
+        right: &'a TypedExpr,
+    ) {
+        let operator = match name {
+            BinOp::And => "andalso",
+            BinOp::Or => "orelse",
+            BinOp::LtInt | BinOp::LtFloat => "<",
+            BinOp::LtEqInt | BinOp::LtEqFloat => "=<",
+            BinOp::Eq => "=:=",
+            BinOp::NotEq => "/=",
+            BinOp::GtInt | BinOp::GtFloat => ">",
+            BinOp::GtEqInt | BinOp::GtEqFloat => ">=",
+            BinOp::AddInt | BinOp::AddFloat => "+",
+            BinOp::SubInt | BinOp::SubFloat => "-",
+            BinOp::MultInt | BinOp::MultFloat => "*",
+
+            // Division needs some extra case, in Gleam dividing by 0 results
+            // in 0; while in Erlang that's an exception.
+            BinOp::DivFloat => {
+                return self.float_division(builder, expression_location, left, right);
+            }
+            BinOp::DivInt => {
+                return self.int_division(builder, expression_location, left, right, "div");
+            }
+            BinOp::RemainderInt => {
+                return self.int_division(builder, expression_location, left, right, "rem");
+            }
+
+            // String concatenation is not a binop at all! It's just building a
+            // bit array.
+            BinOp::Concatenate => {
+                return self.string_concatenate(builder, expression_location, left, right);
+            }
+        };
+
+        builder.binary_operator(expression_location, operator);
+        self.maybe_block_expr(builder, left);
+        self.maybe_block_expr(builder, right);
+    }
+
+    fn float_division<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        division_location: SrcSpan,
+        left: &'a TypedExpr,
+        right: &'a TypedExpr,
+    ) {
+        match how_to_divide(left, right) {
+            HowToDivide::ReplaceWithZero => builder.float_expression(division_location, 0.0),
+            HowToDivide::EvaluateLeftAndReturnZero => {
+                // We first evaluate the left hand side, and ignore its return
+                // value, and then we return zero directly!
+                self.maybe_block_expr(builder, left);
+                builder.float_expression(division_location, 0.0);
+            }
+            HowToDivide::PlainErlangDivision => {
+                builder.binary_operator(division_location, "/");
+                self.maybe_block_expr(builder, left);
+                self.maybe_block_expr(builder, right);
+            }
+            HowToDivide::MatchOnRight {
+                is_left_hand_side_pure,
+            } => {
+                // We first have to evaluate the left hand side, and store its
+                // result in a variable to use later.
+                let left_name = if !is_left_hand_side_pure {
+                    let left_name = self.new_generated_variable();
+                    builder.match_operator(left.location());
+                    builder.variable_pattern(left.location(), &left_name);
+                    self.maybe_block_expr(builder, left);
+                    Some(left_name)
+                } else {
+                    None
+                };
+
+                let case = builder.start_case(division_location);
+                self.maybe_block_expr(builder, right);
+                let case = builder.end_case_subject(case);
+
+                // +0.0 -> +0.0
+                let clause = builder.start_case_clause(division_location);
+                builder.float_pattern(right.location(), 0.0);
+                let guards = builder.end_clause_pattern(clause);
+                let body = builder.end_clause_guards(guards);
+                builder.float_expression(right.location(), 0.0);
+                builder.end_clause_body(body);
+
+                // -0.0 -> -0.0
+                let clause = builder.start_case_clause(division_location);
+                builder.float_pattern(right.location(), -0.0);
+                let guards = builder.end_clause_pattern(clause);
+                let body = builder.end_clause_guards(guards);
+                builder.float_expression(right.location(), -0.0);
+                builder.end_clause_body(body);
+
+                // _value -> left / _value
+                let denominator = self.new_generated_variable();
+                let clause = builder.start_case_clause(division_location);
+                builder.variable_pattern(right.location(), &denominator);
+                let guards = builder.end_clause_pattern(clause);
+                let body = builder.end_clause_guards(guards);
+                builder.binary_operator(division_location, "/");
+                // If we had bound the left hand side to a variabe we just
+                // reference it, otherwise we will generate the code for the
+                // numerator.
+                if let Some(left_name) = left_name {
+                    builder.variable(left.location(), &left_name);
+                } else {
+                    self.maybe_block_expr(builder, left);
+                }
+                builder.variable(right.location(), &denominator);
+                builder.end_clause_body(body);
+
+                builder.end_case(case);
+            }
+        }
+    }
+
+    fn int_division<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        division_location: SrcSpan,
+        left: &'a TypedExpr,
+        right: &'a TypedExpr,
+        op: &'static str,
+    ) {
+        match how_to_divide(left, right) {
+            HowToDivide::ReplaceWithZero => builder.int_expression(division_location, BigInt::ZERO),
+            HowToDivide::EvaluateLeftAndReturnZero => {
+                // We first evaluate the left hand side, and ignore its return
+                // value, and then we return zero directly!
+                self.maybe_block_expr(builder, left);
+                builder.int_expression(division_location, BigInt::ZERO);
+            }
+            HowToDivide::PlainErlangDivision => {
+                builder.binary_operator(division_location, op);
+                self.maybe_block_expr(builder, left);
+                self.maybe_block_expr(builder, right);
+            }
+            HowToDivide::MatchOnRight {
+                is_left_hand_side_pure,
+            } => {
+                // If the left hand side is not a pure expression we will have
+                // to evaluate it before the right hand side of the expression.
+                // So we assign it to a generated variable that we will then
+                // reference in the case expression's body.
+                // It will look something like this:
+                //
+                // ```erl
+                // _value = <left_hand_side>,
+                // case <right_hand_side> of
+                //   0 -> 0;
+                //   _value@1 -> _value div _value@1
+                // end
+                // ```
+                //
+                let left_name = if !is_left_hand_side_pure {
+                    let left_name = self.new_generated_variable();
+                    builder.match_operator(left.location());
+                    builder.variable_pattern(left.location(), &left_name);
+                    self.maybe_block_expr(builder, left);
+                    Some(left_name)
+                } else {
+                    None
+                };
+
+                let case = builder.start_case(division_location);
+                self.maybe_block_expr(builder, right);
+                let case = builder.end_case_subject(case);
+
+                // 0 -> 0
+                let clause = builder.start_case_clause(division_location);
+                builder.int_pattern(right.location(), BigInt::ZERO);
+                let guards = builder.end_clause_pattern(clause);
+                let body = builder.end_clause_guards(guards);
+                builder.int_expression(right.location(), BigInt::ZERO);
+                builder.end_clause_body(body);
+
+                // _value -> left div _value
+                let denominator = self.new_generated_variable();
+                let clause = builder.start_case_clause(division_location);
+                builder.variable_pattern(right.location(), &denominator);
+                let guards = builder.end_clause_pattern(clause);
+                let body = builder.end_clause_guards(guards);
+                builder.binary_operator(division_location, op);
+                // If we had bound the left hand side to a variabe we just
+                // reference it, otherwise we will generate the code for the
+                // numerator.
+                if let Some(left_name) = left_name {
+                    builder.variable(left.location(), &left_name);
+                } else {
+                    self.maybe_block_expr(builder, left);
+                }
+                builder.variable(right.location(), &denominator);
+                builder.end_clause_body(body);
+
+                builder.end_case(case);
+            }
+        }
+    }
+
+    /// This is used to print segments of a bit array expression.
+    /// Those are different enough from the constant and pattern ones that it would
+    /// no longer make sense to try and adapt the `bit_array_segment` generic
+    /// function to work with the three of them.
+    /// So you should use this one for printing expression segments, and the generic
+    /// `bit_array_segment` function for constant and pattern segments instead.
+    ///
+    fn bit_array_expression_segment<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        segment: &'a TypedExprBitArraySegment,
+    ) {
+        // Literal strings can have the `utf8`, `utf16`, or `utf32` options just
+        // fine, and that would be no issue on the Erlang side:
+        //
+        // ```erl
+        // <<"wibble"/utf8>>
+        // <<"wibble"/utf16>>
+        // <<"wibble"/utf32>>
+        // ```
+        //
+        // However there's issues when we try and use those options with _variables_
+        // with the string type. That will result in errors on the Erlang target:
+        //
+        // ```erl
+        // % These are all runtime errors!!
+        // <<SomeString/utf8>>
+        // <<SomeString/utf16>>
+        // <<SomeString/utf32>>
+        // ```
+        //
+        // In Gleam we support those options for all string values, not just
+        // literals. So we need to do something about them:
+        //
+        // - `utf8`: strings are already `utf8` binaries in Gleam, so if we have a
+        //   string value with that option we can put it in the bit array like any
+        //   other binary value:
+        //   ```gleam
+        //   <<some_string:utf8>>
+        //   // becomes <<SomeString/binary>>
+        //   ```
+        // - `utf16` and `utf32`: these are a bit tricker since they will require
+        //   some conversion (which is what we also do on the JavaScript target!).
+        //   So in this case we need to use the `unicode:characters_to_binary`
+        //   function that will return a binary value we can then put in the bit
+        //   array:
+        //   ```gleam
+        //   <<some_string:utf16-little>>
+        //   // becomes
+        //   // <<(unicode:characters_to_binary(
+        //   //     SomeString,
+        //   //     utf8,               the current encoding
+        //   //     {utf16, little})    the encoding we want
+        //   //  )/binary>>
+        //   ```
+        //
+        if segment.type_.is_string()
+            && !produces_literal_string(&segment.value)
+            && let Some(encoding) = expression_segment_string_encoding(segment)
+        {
+            let (size, endiannes) = match encoding {
+                ExpressionSegmentStringEncoding::Utf16 { endiannes } => (16, endiannes),
+                ExpressionSegmentStringEncoding::Utf32 { endiannes } => (32, endiannes),
+                ExpressionSegmentStringEncoding::Utf8 => {
+                    // Gleam strings are utf8 encoded binaries, so we just need
+                    // to add the binary option and we can call it a day.
+                    builder.bit_array_segment(segment.location);
+                    self.maybe_block_expr(builder, &segment.value);
+                    builder.bit_array_segment_default_size();
+                    builder.bit_array_segment_specifiers([BitArraySegmentSpecifier::Binary]);
+                    return;
+                }
+            };
+
+            builder.bit_array_segment(segment.location);
+
+            // For utf16 and utf32 we need an explicit conversion using Erlang's
+            // `unicode:characters_to_binary`. The segment value will be
+            // something like this:
+            // ```erl
+            // unicode:characters_to_binary(<segment_value>, utf8, {utf16, big})
+            // ```
+            let call = builder.start_remote_call(
+                segment.location,
+                ErlangModuleName::unicode(),
+                "characters_to_binary",
+            );
+            {
+                self.maybe_block_expr(builder, &segment.value);
+                builder.atom_expression(segment.location, "utf8");
+                let tuple = builder.start_tuple(segment.location);
+                builder.atom_expression(segment.location, &format!("utf{size}"));
+                match endiannes {
+                    Endianness::Big => builder.atom_expression(segment.location, "big"),
+                    Endianness::Little => builder.atom_expression(segment.location, "little"),
+                }
+                builder.end_tuple(tuple);
+            }
+            builder.end_call(call);
+
+            builder.bit_array_segment_default_size();
+            builder.bit_array_segment_specifiers([BitArraySegmentSpecifier::Binary]);
+        } else {
+            // If the bit array segment doesn't need any special handling we use the
+            // regular printing functions to format its value and options.
+            builder.bit_array_segment(segment.location);
+            self.maybe_block_expr(builder, &segment.value);
+            self.bit_array_expression_segment_size(builder, segment);
+            self.bit_array_segment_specifiers(builder, segment);
+        }
+    }
+
+    /// This generates the code that will produce the size expression of a bit
+    /// array segment.
+    ///
+    /// Make sure to only call this when you're expected to generate a bit array
+    /// size!
+    fn bit_array_expression_segment_size<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        segment: &'a TypedExprBitArraySegment,
+    ) {
+        let Some(size) = segment.size() else {
+            builder.bit_array_segment_default_size();
+            return;
+        };
+
+        // Sizes need some care: in Erlang, having a negative segment size
+        // results in a runtime error. We can't do that in Gleam! So any
+        // negative value must be turned to zero instead:
+        if let TypedExpr::Int {
+            int_value,
+            location: size_location,
+            ..
+        } = &size
+        {
+            if int_value.is_negative() {
+                builder.int_expression(*size_location, BigInt::ZERO);
+            } else {
+                builder.int_expression(*size_location, int_value.clone());
+            }
+        } else {
+            let call =
+                builder.start_remote_call(size.location(), ErlangModuleName::erlang(), "max");
+            builder.int_expression(size.location(), BigInt::ZERO);
+            self.maybe_block_expr(builder, size);
+            builder.end_call(call);
+        }
+    }
+
+    fn clause_guard<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        guard: &'a TypedClauseGuard,
+        assignments: &HashMap<EcoString, AliasedLiteral>,
+    ) {
+        match guard {
+            ClauseGuard::Invalid { .. } => unreachable!("invalid guard made it to code generation"),
+
+            ClauseGuard::ModuleSelect { literal, .. } => self.inlined_constant(builder, literal),
+            ClauseGuard::Constant(constant) => self.inlined_constant(builder, constant),
+
+            ClauseGuard::Block { value, .. } => self.clause_guard(builder, value, assignments),
+
+            ClauseGuard::TupleIndex {
+                tuple,
+                index,
+                location,
+                ..
+            } => {
+                self.clause_guard_tuple_index(builder, *location, tuple, *index);
+            }
+
+            ClauseGuard::FieldAccess {
+                container,
+                index,
+                label_location,
+                ..
+            } => self.clause_guard_tuple_index(
+                builder,
+                container.location().merge(label_location),
+                container,
+                index.expect("Unable to find index") + 1,
+            ),
+            ClauseGuard::Not {
+                expression,
+                location,
+            } => {
+                builder.unary_operator(*location, "not");
+                self.clause_guard(builder, expression, assignments);
+            }
+
+            ClauseGuard::BinaryOperator {
+                operator,
+                left,
+                right,
+                location,
+                ..
+            } => {
+                let operator = match operator {
+                    BinOp::Or => "orelse",
+                    BinOp::And => "andalso",
+                    BinOp::Eq => "=:=",
+                    BinOp::NotEq => "=/=",
+                    BinOp::GtInt | BinOp::GtFloat => ">",
+                    BinOp::GtEqInt | BinOp::GtEqFloat => ">=",
+                    BinOp::LtInt | BinOp::LtFloat => "<",
+                    BinOp::LtEqInt | BinOp::LtEqFloat => "=<",
+                    BinOp::AddInt | BinOp::AddFloat => "+",
+                    BinOp::SubInt | BinOp::SubFloat => "-",
+                    BinOp::MultInt | BinOp::MultFloat => "*",
+                    BinOp::DivFloat => "/",
+                    BinOp::DivInt => "div",
+                    BinOp::RemainderInt => "rem",
+                    BinOp::Concatenate => {
+                        return self.clause_guard_string_concatenate(
+                            builder,
+                            *location,
+                            left,
+                            right,
+                            assignments,
+                        );
+                    }
+                };
+
+                builder.binary_operator(*location, operator);
+                self.clause_guard(builder, left, assignments);
+                self.clause_guard(builder, right, assignments);
+            }
+
+            // Only local variables are supported and the typer ensures that all
+            // ClauseGuard::Vars are local variables
+            ClauseGuard::Var {
+                name,
+                definition_location,
+                location,
+                ..
+            } => {
+                // If we're referencing a variable introduced by an alias pattern
+                // we need to replace it with its actual literal value: in the
+                // generated code the variable is only defined later, so just
+                // referencing its name would result in an error.
+                match assignments.get(name) {
+                    Some(AliasedLiteral::String { value, .. }) => builder.string(*location, value),
+                    Some(AliasedLiteral::Int { value, .. }) => {
+                        builder.int_expression(*location, value.clone())
+                    }
+                    Some(AliasedLiteral::Float { value, .. }) => {
+                        builder.float_expression(*location, value.value())
+                    }
+                    None => {
+                        builder.variable(*location, &self.local_var_name(definition_location));
+                    }
+                }
+            }
+        }
+    }
+
+    fn clause_guard_tuple_index<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        location: SrcSpan,
+        tuple: &'a TypedClauseGuard,
+        index: u64,
+    ) {
+        let call = builder.start_remote_call(location, ErlangModuleName::erlang(), "element");
+        builder.int_expression(location, (index + 1).into());
+        self.clause_guard(builder, tuple, &HashMap::new());
+        builder.end_call(call);
+    }
+
+    fn clause_guard_string_concatenate<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        location: SrcSpan,
+        left: &'a TypedClauseGuard,
+        right: &'a TypedClauseGuard,
+        assignments: &HashMap<EcoString, AliasedLiteral>,
+    ) {
+        let bit_array = builder.start_bit_array(location);
+        self.clause_guard_string_concatenate_argument(builder, left, assignments);
+        self.clause_guard_string_concatenate_argument(builder, right, assignments);
+        builder.end_bit_array(bit_array);
+    }
+
+    fn clause_guard_string_concatenate_argument<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        guard: &'a TypedClauseGuard,
+        assignments: &HashMap<EcoString, AliasedLiteral>,
+    ) {
+        // String concatenation is basically building a bit array with two
+        // elements. Anything is going to be simply added as a `/binary` segment
+        // with one exception: if we're dealing with a literal string that needs
+        // the `/utf8` specifier instead!
+        // In both cases the size is alwaus automatic, so we generate the
+        // `default` atom.
+        builder.bit_array_segment(guard.location());
+        self.clause_guard(builder, guard, assignments);
+        builder.bit_array_segment_default_size();
+        builder.bit_array_segment_specifiers(if guard_produces_literal_string(guard) {
+            [BitArraySegmentSpecifier::Utf8]
+        } else {
+            [BitArraySegmentSpecifier::Binary]
+        });
+    }
+
+    /// Given a record name and the number of arguments it accepts, this outputs
+    /// the code to generate an anonymous function that builds that record.
+    ///
+    /// For example, given:
+    ///
+    /// ```gleam
+    /// pub type Wibble {
+    ///   Wibble(Int, String)
+    /// }
+    ///
+    /// pub fn main() {
+    ///   Wibble
+    /// //^^^^^^ This has to return the builder function!
+    /// }
+    /// ```
+    ///
+    /// We will produce the following Erlang code:
+    ///
+    /// ```erl
+    /// main() ->
+    ///   fun(_value, _value@1) ->
+    ///     {wibble, _value, _value@1}
+    ///   end.
+    /// ```
+    ///
+    fn record_builder_anonymous_function<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        builder_location: SrcSpan,
+        record_name: &str,
+        arguments: usize,
+    ) {
+        let arguments = (0..arguments)
+            .map(|_| self.new_generated_variable())
+            .collect_vec();
+
+        let function = builder.start_anonymous_function(
+            builder_location,
+            arguments
+                .iter()
+                .map(|argument| (builder_location, argument)),
+        );
+
+        if arguments.is_empty() {
+            builder.atom_expression(builder_location, &to_snake_case(record_name));
+        } else {
+            let tuple = builder.start_tuple(builder_location);
+            builder.atom_expression(builder_location, &to_snake_case(record_name));
+            for argument in arguments {
+                builder.variable(builder_location, &argument);
+            }
+            builder.end_tuple(tuple);
+        }
+
+        builder.end_function(function);
+    }
+
+    /// After generating a pattern we might have to generate additional variable
+    /// bindings in the body following a clause pattern.
+    /// This adds those variable to the current body.
+    fn pattern_assignments<Output>(
+        &mut self,
+        builder: &mut impl ErlangBuilder<Output>,
+        variables_to_add_later: HashMap<EcoString, AliasedLiteral>,
+    ) {
+        let variables_to_add_later = variables_to_add_later
+            .into_iter()
+            .sorted_by(|(one, _), (other, _)| one.cmp(other));
+
+        for (gleam_name, value) in variables_to_add_later {
+            match value {
+                AliasedLiteral::String { location, value } => {
+                    builder.match_operator(location);
+                    builder.variable_pattern(
+                        location,
+                        &self.new_erlang_variable(&gleam_name, location),
+                    );
+                    builder.string(location, &value);
+                }
+                AliasedLiteral::Float { location, value } => {
+                    builder.match_operator(location);
+                    builder.variable_pattern(
+                        location,
+                        &self.new_erlang_variable(&gleam_name, location),
+                    );
+                    builder.float_expression(location, value.value());
+                }
+                AliasedLiteral::Int { location, value } => {
+                    builder.match_operator(location);
+                    builder.variable_pattern(
+                        location,
+                        &self.new_erlang_variable(&gleam_name, location),
+                    );
+                    builder.int_expression(location, value.clone());
+                }
+            }
+        }
     }
 }
 
@@ -108,13 +3374,13 @@ pub fn records(module: &TypedModule) -> Vec<(&str, String)> {
                     |RecordConstructorArg {
                          label,
                          ast: _,
-                         location: _,
+                         location,
                          type_,
                          ..
                      }| {
                         label
                             .as_ref()
-                            .map(|(_, label)| (label.as_str(), type_.clone()))
+                            .map(|(_, label)| (*location, label.as_str(), type_.clone()))
                     },
                 )
                 .collect::<Option<Vec<_>>>()
@@ -124,712 +3390,290 @@ pub fn records(module: &TypedModule) -> Vec<(&str, String)> {
         .collect()
 }
 
-pub fn record_definition(name: &str, fields: &[(&str, Arc<Type>)]) -> String {
-    let name = to_snake_case(name);
-    let type_printer = TypePrinter::new("").var_as_any();
-    let fields = fields.iter().map(move |(name, type_)| {
-        let type_ = type_printer.print(type_);
-        docvec![atom_string((*name).into()), " :: ", type_.group()]
-    });
-    let fields = break_("", "")
-        .append(join(fields, break_(",", ", ")))
-        .nest(INDENT)
-        .append(break_("", ""))
-        .group();
-    docvec!["-record(", atom_string(name), ", {", fields, "}).", line()]
-        .to_pretty_string(MAX_COLUMNS)
-}
+/// Given an expression, this tells us how we should be calling it as a
+/// function in the generated Erlang code.
+fn how_to_call<'a>(function: &'a TypedExpr) -> FunctionCall<'a> {
+    match function {
+        // This is a record constructor from the current module.
+        // For example:
+        //
+        // ```gleam
+        // pub type Wibble { Wibble(Int) }
+        // pub fn main() {
+        //   Wibble(1)
+        // //^^^^^^^^^ This!
+        // }
+        // ```
+        //
+        // On the Erlang side we have to build a tagged tuple
+        //
+        TypedExpr::ModuleSelect {
+            constructor: ModuleValueConstructor::Record { name, .. },
+            ..
+        } => FunctionCall::BuildRecord { name },
 
-pub fn module<'a>(
-    module: &'a TypedModule,
-    line_numbers: &'a LineNumbers,
-    root: &'a Utf8Path,
-) -> Result<String> {
-    Ok(module_document(module, line_numbers, root)?.to_pretty_string(MAX_COLUMNS))
-}
-
-fn module_document<'a>(
-    module: &'a TypedModule,
-    line_numbers: &'a LineNumbers,
-    root: &'a Utf8Path,
-) -> Result<Document<'a>> {
-    let mut exports = vec![];
-    let mut type_defs = vec![];
-    let mut type_exports = vec![];
-
-    let header = "-module("
-        .to_doc()
-        .append(module.erlang_name())
-        .append(").")
-        .append(line());
-
-    // We need to know which private functions are referenced in importable
-    // constants so that we can export them anyway in the generated Erlang.
-    // This is because otherwise when the constant is used in another module it
-    // would result in an error as it tries to reference this private function.
-    let overridden_publicity = find_private_functions_referenced_in_importable_constants(module);
-
-    for function in &module.definitions.functions {
-        register_function_exports(function, &mut exports, &overridden_publicity);
-    }
-
-    for custom_type in &module.definitions.custom_types {
-        register_custom_type_exports(custom_type, &mut type_exports, &mut type_defs, &module.name);
-    }
-
-    let exports = match (!exports.is_empty(), !type_exports.is_empty()) {
-        (false, false) => return Ok(header),
-        (true, false) => "-export(["
-            .to_doc()
-            .append(join(exports, ", ".to_doc()))
-            .append("]).")
-            .append(lines(2)),
-
-        (true, true) => "-export(["
-            .to_doc()
-            .append(join(exports, ", ".to_doc()))
-            .append("]).")
-            .append(line())
-            .append("-export_type([")
-            .to_doc()
-            .append(join(type_exports, ", ".to_doc()))
-            .append("]).")
-            .append(lines(2)),
-
-        (false, true) => "-export_type(["
-            .to_doc()
-            .append(join(type_exports, ", ".to_doc()))
-            .append("]).")
-            .append(lines(2)),
-    };
-
-    let type_defs = if type_defs.is_empty() {
-        nil()
-    } else {
-        join(type_defs, lines(2)).append(lines(2))
-    };
-
-    let src_path_full = &module.type_info.src_path;
-    let src_path_relative = EcoString::from(
-        src_path_full
-            .strip_prefix(root)
-            .unwrap_or(src_path_full)
-            .as_str(),
-    )
-    .replace("\\", "\\\\");
-
-    let mut needs_function_docs = false;
-    let mut echo_used = false;
-    let mut statements = vec![];
-    for function in &module.definitions.functions {
-        if let Some((statement_document, env)) = module_function(
-            function,
-            &module.name,
-            module.type_info.is_internal,
-            line_numbers,
-            src_path_relative.clone(),
-            &module.unused_definition_positions,
-        ) {
-            needs_function_docs = needs_function_docs || env.needs_function_docs;
-            echo_used = echo_used || env.echo_used;
-            statements.push(statement_document);
-        }
-    }
-
-    let module_doc = if module.type_info.is_internal {
-        Some(hidden_module_doc().append(lines(2)))
-    } else if module.documentation.is_empty() {
-        None
-    } else {
-        Some(module_doc(&module.documentation).append(lines(2)))
-    };
-
-    // We're going to need the documentation directives if any of the module's
-    // functions need it, or if the module has a module comment that we want to
-    // include in the generated Erlang source, or if the module is internal.
-    let needs_doc_directive = needs_function_docs || module_doc.is_some();
-    let documentation_directive = if needs_doc_directive {
-        "-if(?OTP_RELEASE >= 27).
--define(MODULEDOC(Str), -moduledoc(Str)).
--define(DOC(Str), -doc(Str)).
--else.
--define(MODULEDOC(Str), -compile([])).
--define(DOC(Str), -compile([])).
--endif."
-            .to_doc()
-            .append(lines(2))
-    } else {
-        nil()
-    };
-
-    let module = docvec![
-        header,
-        "-compile([no_auto_import, nowarn_unused_vars, nowarn_unused_function, nowarn_nomatch, inline]).",
-        line(),
-        "-define(FILEPATH, \"",
-        src_path_relative,
-        "\").",
-        line(),
-        exports,
-        documentation_directive,
-        module_doc,
-        type_defs,
-        join(statements, lines(2)),
-    ];
-
-    let module = if echo_used {
-        module
-            .append(lines(2))
-            .append(std::include_str!("../templates/echo.erl").to_doc())
-    } else {
-        module
-    };
-
-    Ok(module.append(line()))
-}
-
-fn register_function_exports(
-    function: &TypedFunction,
-    exports: &mut Vec<Document<'_>>,
-    overridden_publicity: &im::HashSet<EcoString>,
-) {
-    let Function {
-        publicity,
-        name: Some((_, name)),
-        arguments,
-        implementations,
-        ..
-    } = function
-    else {
-        return;
-    };
-
-    // If the function isn't for this target then don't attempt to export it
-    if implementations.supports(Target::Erlang)
-        && (publicity.is_importable() || overridden_publicity.contains(name))
-    {
-        let function_name = escape_erlang_existing_name(name);
-        exports.push(
-            atom_string(function_name.into())
-                .append("/")
-                .append(arguments.len()),
-        )
-    }
-}
-
-fn register_custom_type_exports(
-    custom_type: &TypedCustomType,
-    type_exports: &mut Vec<Document<'_>>,
-    type_defs: &mut Vec<Document<'_>>,
-    module_name: &str,
-) {
-    let TypedCustomType {
-        name,
-        constructors,
-        opaque,
-        typed_parameters,
-        external_erlang,
-        ..
-    } = custom_type;
-
-    // Erlang doesn't allow phantom type variables in type definitions but gleam does
-    // so we check the type declaratinon against its constroctors and generate a phantom
-    // value that uses the unused type variables.
-    let type_var_usages = collect_type_var_usages(HashMap::new(), typed_parameters);
-    let mut constructor_var_usages = HashMap::new();
-    for c in constructors {
-        constructor_var_usages =
-            collect_type_var_usages(constructor_var_usages, c.arguments.iter().map(|a| &a.type_));
-    }
-    let phantom_vars: Vec<_> = type_var_usages
-        .keys()
-        .filter(|&id| !constructor_var_usages.contains_key(id))
-        .sorted()
-        .map(|&id| Type::Var {
-            type_: Arc::new(std::cell::RefCell::new(TypeVar::Generic { id })),
-        })
-        .collect();
-    let phantom_vars_constructor = if !phantom_vars.is_empty() {
-        let type_printer = TypePrinter::new(module_name);
-        Some(tuple(
-            std::iter::once("gleam_phantom".to_doc())
-                .chain(phantom_vars.iter().map(|pv| type_printer.print(pv))),
-        ))
-    } else {
-        None
-    };
-    // Type Exports
-    type_exports.push(
-        erl_safe_type_name(to_snake_case(name))
-            .to_doc()
-            .append("/")
-            .append(typed_parameters.len()),
-    );
-    // Type definitions
-    let definition = if constructors.is_empty() {
-        if let Some((module, external_type, _location)) = external_erlang {
-            let printer = TypePrinter::new(module_name);
-            docvec![
-                module,
-                ":",
-                external_type,
-                "(",
-                join(
-                    typed_parameters
-                        .iter()
-                        .map(|parameter| printer.print(parameter)),
-                    ", ".to_doc()
-                ),
-                ")"
-            ]
-        } else {
-            let constructors = std::iter::once("any()".to_doc()).chain(phantom_vars_constructor);
-            join(constructors, break_(" |", " | "))
-        }
-    } else {
-        let constructors = constructors
-            .iter()
-            .map(|constructor| {
-                let name = atom_string(to_snake_case(&constructor.name));
-                if constructor.arguments.is_empty() {
-                    name
-                } else {
-                    let type_printer = TypePrinter::new(module_name);
-                    let arguments = constructor
-                        .arguments
-                        .iter()
-                        .map(|argument| type_printer.print(&argument.type_));
-                    tuple(std::iter::once(name).chain(arguments))
+        // Notice how whenever we have a function that has an Erlang
+        // external definition we will always directly call that and not go
+        // through the Gleam function. For example:
+        //
+        // ```gleam
+        // pub fn main() {
+        //   format("hello", [])
+        // }
+        //
+        // @external(erlang, "io", "format")
+        // fn format(string: String, args: List(String)) -> Nil
+        // ```
+        //
+        // Will result in:
+        //
+        // ```erl
+        // main() ->
+        //   io:format(~"hello", []).
+        // ```
+        //
+        // This enables the Erlang compiler to further optimise those calls.
+        //
+        TypedExpr::ModuleSelect {
+            constructor:
+                ModuleValueConstructor::Fn {
+                    external_erlang: Some((module, name)),
+                    ..
                 }
-            })
-            .chain(phantom_vars_constructor);
-        join(constructors, break_(" |", " | "))
+                | ModuleValueConstructor::Fn { module, name, .. },
+            ..
+        } => FunctionCall::Call { module, name },
+
+        // We're calling a variable as a function.
+        TypedExpr::Var { constructor, .. } => match &constructor.variant {
+            // The variable is the constructor for a record.
+            // That's a tagged tuple.
+            ValueConstructorVariant::Record { name, .. } => FunctionCall::BuildRecord { name },
+            // The variable is a module function, we can call that as usual
+            // just like we did for `TypedExpr::ModuleSelect`.
+            ValueConstructorVariant::ModuleFn {
+                external_erlang: Some((module, name)),
+                ..
+            }
+            | ValueConstructorVariant::ModuleFn { module, name, .. } => {
+                FunctionCall::Call { module, name }
+            }
+            // The variable is a variable defined inside the function, we
+            // can call it directly:
+            //
+            // ```erl
+            // SomeVariable = fun() -> ... end,
+            // SomeVariable()
+            // ```
+            ValueConstructorVariant::LocalVariable { .. } => FunctionCall::DirectCall,
+            // The variable is a module constant, if it refers to a module
+            // function we want to call it directly.
+            ValueConstructorVariant::ModuleConstant { literal, .. } => {
+                if let Constant::Var {
+                    constructor: Some(constructor),
+                    ..
+                } = literal
+                    && let ValueConstructorVariant::ModuleFn {
+                        external_erlang: Some((module, name)),
+                        ..
+                    }
+                    | ValueConstructorVariant::ModuleFn { module, name, .. } =
+                        &constructor.variant
+                {
+                    FunctionCall::Call { module, name }
+                } else {
+                    FunctionCall::DirectCall
+                }
+            }
+        },
+
+        TypedExpr::Fn { .. }
+        | TypedExpr::Call { .. }
+        | TypedExpr::Todo { .. }
+        | TypedExpr::Panic { .. }
+        | TypedExpr::RecordAccess { .. }
+        | TypedExpr::TupleIndex { .. }
+        | TypedExpr::Int { .. }
+        | TypedExpr::Float { .. }
+        | TypedExpr::String { .. }
+        | TypedExpr::Block { .. }
+        | TypedExpr::Pipeline { .. }
+        | TypedExpr::List { .. }
+        | TypedExpr::BinOp { .. }
+        | TypedExpr::Case { .. }
+        | TypedExpr::PositionalAccess { .. }
+        | TypedExpr::ModuleSelect { .. }
+        | TypedExpr::Tuple { .. }
+        | TypedExpr::Echo { .. }
+        | TypedExpr::BitArray { .. }
+        | TypedExpr::RecordUpdate { .. }
+        | TypedExpr::NegateBool { .. }
+        | TypedExpr::NegateInt { .. }
+        | TypedExpr::Invalid { .. } => FunctionCall::DirectCall,
     }
-    .nest(INDENT);
-    let type_printer = TypePrinter::new(module_name);
-    let params = join(
-        typed_parameters
-            .iter()
-            .map(|type_| type_printer.print(type_)),
-        ", ".to_doc(),
-    );
-    let doc = if *opaque { "-opaque " } else { "-type " }
-        .to_doc()
-        .append(erl_safe_type_name(to_snake_case(name)))
-        .append("(")
-        .append(params)
-        .append(") :: ")
-        .append(definition)
-        .group()
-        .append(".");
-    type_defs.push(doc);
 }
 
-fn module_function<'a>(
-    function: &'a TypedFunction,
-    module: &'a str,
-    is_internal_module: bool,
+/// This represents the different ways a Gleam division could be turned into an
+/// Erlang division.
+/// In Gleam dividing by zero results in a 0, not in an exception. This means
+/// we can't always just use the plain Erlang division operator.
+enum HowToDivide {
+    /// Means we can divide two expression by just doing `One / Other`.
+    PlainErlangDivision,
+
+    /// The entire division can be safely replaced with a literal `0`.
+    ReplaceWithZero,
+
+    /// This means the left hand side could have side effects, but then we're
+    /// dividing it by zero, so we can just ignore its result and directly
+    /// return 0.
+    EvaluateLeftAndReturnZero,
+
+    /// This means we have to pattern match on the right hand side to make sure
+    /// that it is not zero, otherwise we'll have to return zero, or the
+    /// division operation would result in an exception.
+    ///
+    /// It will look something like this:
+    ///
+    /// ```erl
+    /// case right_hand_side of
+    ///   0 -> 0;
+    ///   _denominator -> left_hand_side / _denominator
+    /// ```
+    ///
+    MatchOnRight { is_left_hand_side_pure: bool },
+}
+
+fn how_to_divide(left: &TypedExpr, right: &TypedExpr) -> HowToDivide {
+    if right.is_non_zero_compile_time_number() {
+        // Right can't be zero, so it's safe to just divide!
+        HowToDivide::PlainErlangDivision
+    } else if left.is_pure_value_constructor() {
+        if right.is_zero_compile_time_number() {
+            // Left has no side effects and `right` is `0`, so we can just
+            // replace the result with zero!
+            HowToDivide::ReplaceWithZero
+        } else {
+            // Left has no side effects, but `right` could still be zero at
+            // runtime, we need to match on it.
+            HowToDivide::MatchOnRight {
+                is_left_hand_side_pure: true,
+            }
+        }
+    } else {
+        // Left can have side effects, but the right hand side is zero!
+        // In that case we have to evaluate `left`, but then we can directly
+        // return 0.
+        if right.is_zero_compile_time_number() {
+            HowToDivide::EvaluateLeftAndReturnZero
+        } else {
+            // Otherwise we'll have to make sure things are evaluated in the
+            // correct order.
+            HowToDivide::MatchOnRight {
+                is_left_hand_side_pure: false,
+            }
+        }
+    }
+}
+
+pub fn record_definition(record_name: &str, fields: &[(SrcSpan, &str, Arc<Type>)]) -> String {
+    let mut builder = ErlangSourceBuilder::default();
+
+    let attribute = builder.start_record_attribute(&to_snake_case(record_name));
+
+    let type_printer = TypeGenerator::new("").var_as_any();
+    for (field_location, field_name, field_type) in fields {
+        builder.record_field();
+        builder.atom_expression(*field_location, field_name);
+        type_printer.type_(&mut builder, field_type);
+    }
+
+    builder.end_record_attribute(attribute);
+    builder.into_output()
+}
+
+pub fn module<'a, Output>(
+    mut builder: impl ErlangBuilder<Output>,
+    module: &'a TypedModule,
     line_numbers: &'a LineNumbers,
-    src_path: EcoString,
-    unused_definition_positions: &HashSet<u32>,
-) -> Option<(Document<'a>, Env<'a>)> {
-    // We don't generate any code for unused functions.
-    if unused_definition_positions.contains(&function.location.start) {
-        return None;
-    }
+    root: &'a Utf8Path,
+) -> Output {
+    let mut generator = Generator::new(module, line_numbers, root);
+    generator.module(&mut builder);
+    builder.into_output()
+}
 
-    // Private external functions don't need to render anything, the underlying
-    // Erlang implementation is used directly at the call site.
-    if function.external_erlang.is_some() && function.publicity.is_private() {
-        return None;
-    }
+/// If the given function should be exported from the current Erlang module then
+/// this function will return its name and arity to be used when exporting it.
+/// For example: `pub fn wibble(a, b)` will produce `Some(("wibble", 2))`, so
+/// we can export `wibble/2`.
+fn function_export<'a>(
+    function: &'a TypedFunction,
+    overridden_publicity: &imbl::HashSet<EcoString>,
+) -> Option<(&'a str, usize)> {
+    let (_, name) = function
+        .name
+        .as_ref()
+        .expect("module function with no name");
 
-    // If the function has no suitable Erlang implementation then there is nothing
-    // to generate for it.
+    // If the function is not implemented for this target, don't attempt to
+    // export it.
     if !function.implementations.supports(Target::Erlang) {
         return None;
     }
 
-    let (_, function_name) = function
-        .name
-        .as_ref()
-        .expect("A module's function must be named");
-    let function_name = escape_erlang_existing_name(function_name);
-    let file_attribute = file_attribute(src_path, function, line_numbers);
-
-    let mut env = Env::new(module, function_name, line_numbers);
-    let var_usages = collect_type_var_usages(
-        HashMap::new(),
-        std::iter::once(&function.return_type).chain(function.arguments.iter().map(|a| &a.type_)),
-    );
-    let type_printer = TypePrinter::new(module).with_var_usages(&var_usages);
-    let arguments_spec = function
-        .arguments
-        .iter()
-        .map(|a| type_printer.print(&a.type_));
-    let return_spec = type_printer.print(&function.return_type);
-
-    let spec = fun_spec(function_name, arguments_spec, return_spec);
-    let arguments = if function.external_erlang.is_some() {
-        external_fun_arguments(&function.arguments, &mut env)
-    } else {
-        fun_arguments(&function.arguments, &mut env)
-    };
-
-    let body = function
-        .external_erlang
-        .as_ref()
-        .map(|(module, function, _location)| {
-            docvec![
-                atom(module),
-                ":",
-                atom(escape_erlang_existing_name(function)),
-                arguments.clone()
-            ]
-        })
-        .unwrap_or_else(|| statement_sequence(&function.body, &mut env));
-
-    let attributes = file_attribute;
-    let attributes = if is_internal_module || function.publicity.is_internal() {
-        // If a function is marked as internal or comes from an internal module
-        // we want to hide its documentation in the Erlang shell!
-        // So the doc directive will look like this: `-doc(false).`
-        env.needs_function_docs = true;
-        docvec![attributes, line(), hidden_function_doc()]
-    } else {
-        match &function.documentation {
-            Some((_, documentation)) => {
-                env.needs_function_docs = true;
-                let doc_lines = documentation
-                    .trim_end()
-                    .split('\n')
-                    .map(EcoString::from)
-                    .collect_vec();
-                docvec![attributes, line(), function_doc(&doc_lines)]
-            }
-            _ => attributes,
-        }
-    };
-
-    Some((
-        docvec![
-            attributes,
-            line(),
-            spec,
-            atom_string(escape_erlang_existing_name(function_name).into()),
-            arguments,
-            " ->",
-            line().append(body).nest(INDENT).group(),
-            ".",
-        ],
-        env,
-    ))
-}
-
-fn file_attribute<'a>(
-    path: EcoString,
-    function: &'a TypedFunction,
-    line_numbers: &'a LineNumbers,
-) -> Document<'a> {
-    let line = line_numbers.line_number(function.location.start);
-    docvec!["-file(\"", path, "\", ", line, ")."]
-}
-
-enum DocCommentKind {
-    Module,
-    Function,
-}
-
-enum DocCommentContent<'a> {
-    String(&'a Vec<EcoString>),
-    False,
-}
-
-fn hidden_module_doc<'a>() -> Document<'a> {
-    doc_attribute(DocCommentKind::Module, DocCommentContent::False)
-}
-
-fn module_doc<'a>(content: &Vec<EcoString>) -> Document<'a> {
-    doc_attribute(DocCommentKind::Module, DocCommentContent::String(content))
-}
-
-fn hidden_function_doc<'a>() -> Document<'a> {
-    doc_attribute(DocCommentKind::Function, DocCommentContent::False)
-}
-
-fn function_doc<'a>(content: &Vec<EcoString>) -> Document<'a> {
-    doc_attribute(DocCommentKind::Function, DocCommentContent::String(content))
-}
-
-fn doc_attribute<'a>(kind: DocCommentKind, content: DocCommentContent<'_>) -> Document<'a> {
-    let prefix = match kind {
-        DocCommentKind::Module => "?MODULEDOC",
-        DocCommentKind::Function => "?DOC",
-    };
-
-    match content {
-        DocCommentContent::False => prefix.to_doc().append("(false)."),
-        DocCommentContent::String(doc_lines) => {
-            let is_multiline_doc_comment = doc_lines.len() > 1;
-            let doc_lines = join(
-                doc_lines.iter().map(|line| {
-                    let line = line.replace("\\", "\\\\").replace("\"", "\\\"");
-                    docvec!["\"", line, "\\n\""]
-                }),
-                line(),
-            );
-            if is_multiline_doc_comment {
-                let nested_documentation = docvec![line(), doc_lines].nest(INDENT);
-                docvec![prefix, "(", nested_documentation, line(), ")."]
-            } else {
-                docvec![prefix, "(", doc_lines, ")."]
-            }
-        }
+    // If the function is not importable and it's publicity has not been
+    // overridden, don't attempt to export it.
+    if !function.publicity.is_importable() && !overridden_publicity.contains(name) {
+        return None;
     }
+
+    let name = escape_erlang_existing_name(name);
+    Some((name, function.arguments.len()))
 }
 
-fn external_fun_arguments<'a>(arguments: &'a [TypedArg], env: &mut Env<'a>) -> Document<'a> {
-    wrap_arguments(arguments.iter().map(|argument| {
-        let name = match &argument.names {
-            ArgNames::Discard { name, .. }
-            | ArgNames::LabelledDiscard { name, .. }
-            | ArgNames::Named { name, .. }
-            | ArgNames::NamedLabelled { name, .. } => name,
-        };
-        if name.chars().all(|c| c == '_') {
-            env.next_local_var_name("argument")
-        } else {
-            env.next_local_var_name(name)
-        }
-    }))
+/// Given a custom type this returns the name it should be used to export it and
+/// its arity. For example: `pub type Wibble(a, b)` will produce `("wibble", 2)`,
+/// so we can export `wibble/2`.
+fn type_export(custom_type: &TypedCustomType) -> (EcoString, usize) {
+    let name = erl_safe_type_name(to_snake_case(&custom_type.name));
+    let arity = custom_type.typed_parameters.len();
+    (name, arity)
 }
 
-fn fun_arguments<'a>(arguments: &'a [TypedArg], env: &mut Env<'a>) -> Document<'a> {
-    wrap_arguments(arguments.iter().map(|argument| match &argument.names {
-        ArgNames::Discard { .. } | ArgNames::LabelledDiscard { .. } => "_".to_doc(),
-        ArgNames::Named { name, .. } | ArgNames::NamedLabelled { name, .. } => {
-            env.next_local_var_name(name)
-        }
-    }))
-}
-
-fn wrap_arguments<'a, I>(arguments: I) -> Document<'a>
-where
-    I: IntoIterator<Item = Document<'a>>,
-{
-    break_("", "")
-        .append(join(arguments, break_(",", ", ")))
-        .nest(INDENT)
-        .append(break_("", ""))
-        .surround("(", ")")
-        .group()
-}
-
-fn fun_spec<'a>(
-    name: &'a str,
-    arguments: impl IntoIterator<Item = Document<'a>>,
-    return_: Document<'a>,
-) -> Document<'a> {
-    "-spec "
-        .to_doc()
-        .append(atom(name))
-        .append(wrap_arguments(arguments))
-        .append(" -> ")
-        .append(return_)
-        .append(".")
-        .append(line())
-        .group()
-}
-
-fn atom_string(value: EcoString) -> Document<'static> {
-    escape_atom_string(value).to_doc()
-}
-
-fn atom_pattern() -> &'static Regex {
-    static ATOM_PATTERN: OnceLock<Regex> = OnceLock::new();
-    ATOM_PATTERN.get_or_init(|| Regex::new(r"^[a-z][a-z0-9_@]*$").expect("atom RE regex"))
-}
-
-fn atom(value: &str) -> Document<'_> {
-    if is_erlang_reserved_word(value) {
-        // Escape because of keyword collision
-        eco_format!("'{value}'").to_doc()
-    } else if atom_pattern().is_match(value) {
-        // No need to escape
-        EcoString::from(value).to_doc()
-    } else {
-        // Escape because of characters contained
-        eco_format!("'{value}'").to_doc()
-    }
-}
-
-pub fn escape_atom_string(value: EcoString) -> EcoString {
-    if is_erlang_reserved_word(&value) {
-        // Escape because of keyword collision
-        eco_format!("'{value}'")
-    } else if atom_pattern().is_match(&value) {
-        value
-    } else {
-        // Escape because of characters contained
-        eco_format!("'{value}'")
-    }
-}
-
-fn unicode_escape_sequence_pattern() -> &'static Regex {
-    static PATTERN: OnceLock<Regex> = OnceLock::new();
-    PATTERN.get_or_init(|| {
-        Regex::new(r#"(\\+)(u)"#).expect("Unicode escape sequence regex cannot be constructed")
-    })
-}
-
-fn string_inner(value: &str) -> Document<'_> {
-    let content = unicode_escape_sequence_pattern()
-        // `\\u`-s should not be affected, so that "\\u..." is not converted to
-        // "\\x...". That's why capturing groups is used to exclude cases that
-        // shouldn't be replaced.
-        .replace_all(value, |caps: &Captures<'_>| {
-            let slashes = caps.get(1).map_or("", |m| m.as_str());
-
-            if slashes.len().is_multiple_of(2) {
-                format!("{slashes}u")
-            } else {
-                format!("{slashes}x")
-            }
-        });
-    EcoString::from(content).to_doc()
-}
-
-fn string(value: &str) -> Document<'_> {
-    string_inner(value).surround("<<\"", "\"/utf8>>")
-}
-
-fn string_length_utf8_bytes(str: &EcoString) -> usize {
-    convert_string_escape_chars(str).len()
-}
-
-fn tuple<'a>(elements: impl IntoIterator<Item = Document<'a>>) -> Document<'a> {
-    join(elements, break_(",", ", "))
-        .nest(INDENT)
-        .surround("{", "}")
-        .group()
-}
-
-fn const_string_concatenate_bit_array<'a>(
-    elements: impl IntoIterator<Item = Document<'a>>,
-) -> Document<'a> {
-    join(elements, break_(",", ", "))
-        .nest(INDENT)
-        .surround("<<", ">>")
-        .group()
-}
-
-fn const_string_concatenate<'a>(
-    left: &'a TypedConstant,
-    right: &'a TypedConstant,
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    let left = const_string_concatenate_argument(left, env);
-    let right = const_string_concatenate_argument(right, env);
-    const_string_concatenate_bit_array([left, right])
-}
-
-fn const_string_concatenate_inner<'a>(
-    left: &'a TypedConstant,
-    right: &'a TypedConstant,
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    let left = const_string_concatenate_argument(left, env);
-    let right = const_string_concatenate_argument(right, env);
-    join([left, right], break_(",", ", "))
-}
-
-fn const_string_concatenate_argument<'a>(
-    value: &'a TypedConstant,
-    env: &mut Env<'a>,
-) -> Document<'a> {
+/// This returns true if the given expression is going to be compiled to a
+/// single literal Erlang string.
+/// This is not only true for literal Gleam strings like `"abc"`, but also for
+/// variables referencing string constants (as those are inlined)
+fn produces_literal_string(value: &TypedExpr) -> bool {
     match value {
-        Constant::String { value, .. } => docvec!['"', string_inner(value), "\"/utf8"],
-
-        Constant::Var {
-            constructor: Some(constructor),
+        TypedExpr::String { .. } => true,
+        // Constants are inlined on the Erlang target, so we need to check if
+        // those produce literal strings too!
+        TypedExpr::ModuleSelect {
+            constructor: ModuleValueConstructor::Constant { literal, .. },
             ..
-        } => match &constructor.variant {
-            ValueConstructorVariant::ModuleConstant {
-                literal: Constant::String { value, .. },
-                ..
-            } => docvec!['"', string_inner(value), "\"/utf8"],
-            ValueConstructorVariant::ModuleConstant {
-                literal: Constant::StringConcatenation { left, right, .. },
-                ..
-            } => const_string_concatenate_inner(left, right, env),
-            ValueConstructorVariant::LocalVariable { .. }
-            | ValueConstructorVariant::ModuleConstant { .. }
-            | ValueConstructorVariant::ModuleFn { .. }
-            | ValueConstructorVariant::Record { .. } => const_inline(value, env),
-        },
-
-        Constant::StringConcatenation { left, right, .. } => {
-            const_string_concatenate_inner(left, right, env)
         }
-
-        Constant::Int { .. }
-        | Constant::Float { .. }
-        | Constant::Tuple { .. }
-        | Constant::List { .. }
-        | Constant::Record { .. }
-        | Constant::RecordUpdate { .. }
-        | Constant::BitArray { .. }
-        | Constant::Var { .. }
-        | Constant::Invalid { .. } => const_inline(value, env),
-    }
-}
-
-fn string_concatenate<'a>(
-    left: &'a TypedExpr,
-    right: &'a TypedExpr,
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    let left = string_concatenate_argument(left, env);
-    let right = string_concatenate_argument(right, env);
-    bit_array([left, right])
-}
-
-fn string_concatenate_argument<'a>(value: &'a TypedExpr, env: &mut Env<'a>) -> Document<'a> {
-    match value {
-        TypedExpr::Var {
+        | TypedExpr::Var {
             constructor:
                 ValueConstructor {
-                    variant:
-                        ValueConstructorVariant::ModuleConstant {
-                            literal: Constant::String { value, .. },
-                            ..
-                        },
+                    variant: ValueConstructorVariant::ModuleConstant { literal, .. },
                     ..
                 },
             ..
+        } => constant_produces_literal_string(literal),
+        TypedExpr::Block { statements, .. }
+            if statements.len() == 1
+                && let Statement::Expression(expression) = statements.first() =>
+        {
+            produces_literal_string(expression)
         }
-        | TypedExpr::String { value, .. } => docvec!['"', string_inner(value), "\"/utf8"],
-
-        TypedExpr::Var {
-            name,
-            constructor:
-                ValueConstructor {
-                    variant: ValueConstructorVariant::LocalVariable { .. },
-                    ..
-                },
-            ..
-        } => docvec![env.local_var_name(name), "/binary"],
-
-        TypedExpr::BinOp {
-            name: BinOp::Concatenate,
-            ..
-        } => docvec![expr(value, env), "/binary"],
 
         TypedExpr::Int { .. }
+        | TypedExpr::Var { .. }
         | TypedExpr::Float { .. }
         | TypedExpr::Block { .. }
         | TypedExpr::Pipeline { .. }
-        | TypedExpr::Var { .. }
         | TypedExpr::Fn { .. }
         | TypedExpr::List { .. }
         | TypedExpr::Call { .. }
@@ -847,1312 +3691,146 @@ fn string_concatenate_argument<'a>(value: &'a TypedExpr, env: &mut Env<'a>) -> D
         | TypedExpr::RecordUpdate { .. }
         | TypedExpr::NegateBool { .. }
         | TypedExpr::NegateInt { .. }
-        | TypedExpr::Invalid { .. } => docvec!["(", maybe_block_expr(value, env), ")/binary"],
+        | TypedExpr::Invalid { .. } => false,
     }
 }
 
-fn bit_array<'a>(elements: impl IntoIterator<Item = Document<'a>>) -> Document<'a> {
-    join(elements, break_(",", ", "))
-        .nest(INDENT)
-        .surround("<<", ">>")
-        .group()
-}
-
-fn const_segment<'a>(
-    value: &'a TypedConstant,
-    options: &'a [TypedConstantBitArraySegmentOption],
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    let value_is_a_string_literal = matches!(value, Constant::String { .. });
-
-    let create_document = |env: &mut Env<'a>| {
-        match value {
-            // Skip the normal <<value/utf8>> surrounds
-            Constant::String { value, .. } => value.to_doc().surround("\"", "\""),
-
-            // As normal
-            Constant::Int { .. } | Constant::Float { .. } | Constant::BitArray { .. } => {
-                const_inline(value, env)
-            }
-
-            // Wrap anything else in parentheses
-            Constant::Tuple { .. }
-            | Constant::List { .. }
-            | Constant::Record { .. }
-            | Constant::RecordUpdate { .. }
-            | Constant::Var { .. }
-            | Constant::StringConcatenation { .. }
-            | Constant::Invalid { .. } => const_inline(value, env).surround("(", ")"),
-        }
-    };
-
-    let size = |value: &'a TypedConstant, env: &mut Env<'a>| {
-        if let Constant::Int { .. } = value {
-            Some(":".to_doc().append(const_inline(value, env)))
-        } else {
-            Some(
-                ":".to_doc()
-                    .append(const_inline(value, env).surround("(", ")")),
-            )
-        }
-    };
-
-    let unit = |value: &'a u8| Some(eco_format!("unit:{value}").to_doc());
-
-    bit_array_segment(
-        create_document,
-        options,
-        size,
-        unit,
-        value_is_a_string_literal,
-        false,
-        env,
-    )
-}
-
-enum Position {
-    Tail,
-    NotTail,
-}
-
-fn statement<'a>(
-    statement: &'a TypedStatement,
-    env: &mut Env<'a>,
-    position: Position,
-) -> Document<'a> {
-    match statement {
-        Statement::Expression(e) => expr(e, env),
-        Statement::Assignment(a) => assignment(a, env, position),
-        Statement::Use(use_) => expr(&use_.call, env),
-        Statement::Assert(a) => assert(a, env),
-    }
-}
-
-fn expr_segment<'a>(
-    value: &'a TypedExpr,
-    options: &'a [BitArrayOption<TypedExpr>],
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    let value_is_a_string_literal = matches!(value, TypedExpr::String { .. });
-
-    let create_document = |env: &mut Env<'a>| {
-        match value {
-            // Skip the normal <<value/utf8>> surrounds and set the string literal flag
-            TypedExpr::String { value, .. } => string_inner(value).surround("\"", "\""),
-
-            // As normal
-            TypedExpr::Int { .. }
-            | TypedExpr::Float { .. }
-            | TypedExpr::Var { .. }
-            | TypedExpr::BitArray { .. } => expr(value, env),
-
-            // Wrap anything else in parentheses
-            TypedExpr::Block { .. }
-            | TypedExpr::Pipeline { .. }
-            | TypedExpr::Fn { .. }
-            | TypedExpr::List { .. }
-            | TypedExpr::Call { .. }
-            | TypedExpr::BinOp { .. }
-            | TypedExpr::Case { .. }
-            | TypedExpr::RecordAccess { .. }
-            | TypedExpr::PositionalAccess { .. }
-            | TypedExpr::ModuleSelect { .. }
-            | TypedExpr::Tuple { .. }
-            | TypedExpr::TupleIndex { .. }
-            | TypedExpr::Todo { .. }
-            | TypedExpr::Panic { .. }
-            | TypedExpr::Echo { .. }
-            | TypedExpr::RecordUpdate { .. }
-            | TypedExpr::NegateBool { .. }
-            | TypedExpr::NegateInt { .. }
-            | TypedExpr::Invalid { .. } => expr(value, env).surround("(", ")"),
-        }
-    };
-
-    let size = |expression: &'a TypedExpr, env: &mut Env<'a>| {
-        if let TypedExpr::Int { value, .. } = expression {
-            let v = value.replace("_", "");
-            let v = u64::from_str(&v).unwrap_or(0);
-            Some(eco_format!(":{v}").to_doc())
-        } else {
-            let inner_expr = maybe_block_expr(expression, env).surround("(", ")");
-            // The value of size must be a non-negative integer, we use lists:max here to ensure
-            // it is at least 0;
-            let value_guard = ":(lists:max(["
-                .to_doc()
-                .append(inner_expr)
-                .append(", 0]))")
-                .group();
-            Some(value_guard)
-        }
-    };
-
-    let unit = |value: &'a u8| Some(eco_format!("unit:{value}").to_doc());
-
-    bit_array_segment(
-        create_document,
-        options,
-        size,
-        unit,
-        value_is_a_string_literal,
-        false,
-        env,
-    )
-}
-
-fn bit_array_segment<'a, Value: 'a, CreateDoc, SizeToDoc, UnitToDoc, State>(
-    mut create_document: CreateDoc,
-    options: &'a [BitArrayOption<Value>],
-    mut size_to_doc: SizeToDoc,
-    mut unit_to_doc: UnitToDoc,
-    value_is_a_string_literal: bool,
-    value_is_a_discard: bool,
-    state: &mut State,
-) -> Document<'a>
-where
-    CreateDoc: FnMut(&mut State) -> Document<'a>,
-    SizeToDoc: FnMut(&'a Value, &mut State) -> Option<Document<'a>>,
-    UnitToDoc: FnMut(&'a u8) -> Option<Document<'a>>,
-{
-    let mut size: Option<Document<'a>> = None;
-    let mut unit: Option<Document<'a>> = None;
-    let mut others = Vec::new();
-
-    // Erlang only allows valid codepoint integers to be used as values for utf segments
-    // We want to support <<string_var:utf8>> for all string variables, but <<StringVar/utf8>> is invalid
-    // To work around this we use the binary type specifier for these segments instead
-    let override_type = if !value_is_a_string_literal && !value_is_a_discard {
-        Some("binary")
-    } else {
-        None
-    };
-
-    for option in options {
-        use BitArrayOption as Opt;
-        if !others.is_empty() && !matches!(option, Opt::Size { .. } | Opt::Unit { .. }) {
-            others.push("-".to_doc());
-        }
-        match option {
-            Opt::Utf8 { .. } => others.push(override_type.unwrap_or("utf8").to_doc()),
-            Opt::Utf16 { .. } => others.push(override_type.unwrap_or("utf16").to_doc()),
-            Opt::Utf32 { .. } => others.push(override_type.unwrap_or("utf32").to_doc()),
-            Opt::Int { .. } => others.push("integer".to_doc()),
-            Opt::Float { .. } => others.push("float".to_doc()),
-            Opt::Bytes { .. } => others.push("binary".to_doc()),
-            Opt::Bits { .. } => others.push("bitstring".to_doc()),
-            Opt::Utf8Codepoint { .. } => others.push("utf8".to_doc()),
-            Opt::Utf16Codepoint { .. } => others.push("utf16".to_doc()),
-            Opt::Utf32Codepoint { .. } => others.push("utf32".to_doc()),
-            Opt::Signed { .. } => others.push("signed".to_doc()),
-            Opt::Unsigned { .. } => others.push("unsigned".to_doc()),
-            Opt::Big { .. } => others.push("big".to_doc()),
-            Opt::Little { .. } => others.push("little".to_doc()),
-            Opt::Native { .. } => others.push("native".to_doc()),
-            Opt::Size { value, .. } => size = size_to_doc(value, state),
-            Opt::Unit { value, .. } => unit = unit_to_doc(value),
-        }
-    }
-
-    let mut document = create_document(state);
-
-    document = document.append(size);
-    let others_is_empty = others.is_empty();
-
-    if !others_is_empty {
-        document = document.append("/").append(others);
-    }
-
-    if unit.is_some() {
-        if !others_is_empty {
-            document = document.append("-").append(unit)
-        } else {
-            document = document.append("/").append(unit)
-        }
-    }
-
-    document
-}
-
-fn block<'a>(statements: &'a Vec1<TypedStatement>, env: &mut Env<'a>) -> Document<'a> {
-    if statements.len() == 1
-        && let Statement::Expression(expression) = statements.first()
-        && !needs_begin_end_wrapping(expression)
-    {
-        return docvec!['(', expr(expression, env), ')'];
-    }
-
-    let vars = env.current_scope_vars.clone();
-    let document = statement_sequence(statements, env);
-    env.current_scope_vars = vars;
-
-    begin_end(document)
-}
-
-fn statement_sequence<'a>(statements: &'a [TypedStatement], env: &mut Env<'a>) -> Document<'a> {
-    let count = statements.len();
-    let mut documents = Vec::with_capacity(count * 3);
-    for (i, expression) in statements.iter().enumerate() {
-        let position = if i + 1 == count {
-            Position::Tail
-        } else {
-            Position::NotTail
-        };
-        documents.push(statement(expression, env, position).group());
-
-        if i + 1 < count {
-            // This isn't the final expression so add the delimeters
-            documents.push(",".to_doc());
-            documents.push(line());
-        }
-    }
-    if count == 1 {
-        documents.to_doc()
-    } else {
-        documents.to_doc().force_break()
-    }
-}
-
-fn float_div<'a>(left: &'a TypedExpr, right: &'a TypedExpr, env: &mut Env<'a>) -> Document<'a> {
-    if right.is_non_zero_compile_time_number() {
-        return binop_exprs(left, "/", right, env);
-    } else if right.is_zero_compile_time_number() {
-        return "+0.0".to_doc();
-    }
-
-    let left = expr(left, env);
-    let right = expr(right, env);
-    let denominator = env.next_local_var_name("gleam@denominator");
-    let clauses = docvec![
-        line(),
-        "+0.0 -> +0.0;",
-        line(),
-        "-0.0 -> -0.0;",
-        line(),
-        denominator.clone(),
-        " -> ",
-        binop_documents(left, "/", denominator)
-    ];
-    docvec!["case ", right, " of", clauses.nest(INDENT), line(), "end"]
-}
-
-fn int_div<'a>(
-    left: &'a TypedExpr,
-    right: &'a TypedExpr,
-    op: &'static str,
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    if right.is_non_zero_compile_time_number() {
-        return binop_exprs(left, op, right, env);
-    }
-
-    // If we have a constant value divided by zero then it's safe to replace it
-    // directly with 0.
-    if left.is_literal() && right.is_zero_compile_time_number() {
-        return "0".to_doc();
-    }
-
-    let left = expr(left, env);
-    let right = expr(right, env);
-    let denominator = env.next_local_var_name("gleam@denominator");
-    let clauses = docvec![
-        line(),
-        "0 -> 0;",
-        line(),
-        denominator.clone(),
-        " -> ",
-        binop_documents(left, op, denominator)
-    ];
-    docvec!["case ", right, " of", clauses.nest(INDENT), line(), "end"]
-}
-
-fn bin_op<'a>(
-    name: &'a BinOp,
-    left: &'a TypedExpr,
-    right: &'a TypedExpr,
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    let op = match name {
-        BinOp::And => "andalso",
-        BinOp::Or => "orelse",
-        BinOp::LtInt | BinOp::LtFloat => "<",
-        BinOp::LtEqInt | BinOp::LtEqFloat => "=<",
-        BinOp::Eq => "=:=",
-        BinOp::NotEq => "/=",
-        BinOp::GtInt | BinOp::GtFloat => ">",
-        BinOp::GtEqInt | BinOp::GtEqFloat => ">=",
-        BinOp::AddInt => "+",
-        BinOp::AddFloat => "+",
-        BinOp::SubInt => "-",
-        BinOp::SubFloat => "-",
-        BinOp::MultInt => "*",
-        BinOp::MultFloat => "*",
-        BinOp::DivFloat => return float_div(left, right, env),
-        BinOp::DivInt => return int_div(left, right, "div", env),
-        BinOp::RemainderInt => return int_div(left, right, "rem", env),
-        BinOp::Concatenate => return string_concatenate(left, right, env),
-    };
-
-    binop_exprs(left, op, right, env)
-}
-
-fn binop_exprs<'a>(
-    left: &'a TypedExpr,
-    op: &'static str,
-    right: &'a TypedExpr,
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    let left = if let TypedExpr::BinOp { .. } = left {
-        expr(left, env).surround("(", ")")
-    } else {
-        maybe_block_expr(left, env)
-    };
-    let right = if let TypedExpr::BinOp { .. } = right {
-        expr(right, env).surround("(", ")")
-    } else {
-        maybe_block_expr(right, env)
-    };
-    binop_documents(left, op, right)
-}
-
-fn binop_documents<'a>(left: Document<'a>, op: &'static str, right: Document<'a>) -> Document<'a> {
-    left.append(break_("", " "))
-        .append(op)
-        .group()
-        .append(" ")
-        .append(right)
-}
-
-fn let_assert<'a>(
-    value: &'a TypedExpr,
-    pattern: &'a TypedPattern,
-    environment: &mut Env<'a>,
-    message: Option<&'a TypedExpr>,
-    position: Position,
-    location: SrcSpan,
-) -> Document<'a> {
-    // If the pattern will never fail, like a tuple or a simple variable, we
-    // simply treat it as if it were a `let` assignment.
-    if pattern.always_matches() {
-        return let_(value, pattern, environment);
-    }
-
-    let message = match message {
-        Some(message) => expr(message, environment),
-        None => string("Pattern match failed, no pattern matched the value."),
-    };
-
-    let subject = maybe_block_expr(value, environment);
-
-    // The code we generated for a `let assert` assignment looks something like
-    // this. For this Gleam code:
-    //
-    // ```gleam
-    // let assert [a, b, c] = [1, 2, 3]
-    // ```
-    //
-    // We generate (roughly) the following Erlang:
-    //
-    // ```erlang
-    // {A, B, C} = case [1, 2, 3] of
-    //   [A, B, C] -> {A, B, C};
-    //   _ -> erlang:error(...)
-    // end.
-    // ```
-    // This is the most efficient way to properly extract all the required
-    // variables from the pattern. However, if the `let assert` assignment is
-    // the last in a block, like this:
-    //
-    // ```gleam
-    // let x = {
-    //   let assert [a, b, c] = [1, 2, 3]
-    // }
-    // ```
-    //
-    // The generated Erlang code will end up assigning the value `#(1, 2, 3)`
-    // to the variable `x`, instead of `[1, 2, 3]`. In this case, we must
-    // generate slightly different code. Since we know we won't be using the
-    // bound variables anywhere (there is nothing else in this scope to
-    // reference them), we can safely remove the assignment from the generated
-    // code, and generate the following:
-    //
-    // ```erlang
-    // X = begin
-    //   _assert_subject = [1, 2, 3]
-    //   case _assert_subject of
-    //     [A, B, C] -> _assert_subject;
-    //     _ -> erlang:error(...)
-    //   end
-    // end.
-    // ```
-    //
-    // That correctly assigns `[1, 2, 3]` to the `x` variable.
-    //
-    let is_tail = match position {
-        Position::Tail => true,
-        Position::NotTail => false,
-    };
-
-    let (subject_assignment, subject) = if is_tail && !value.is_var() {
-        let variable = environment.next_local_var_name(ASSERT_SUBJECT_VARIABLE);
-        let assignment = docvec![variable.clone(), " = ", subject, ",", line()];
-        (assignment, variable)
-    } else {
-        (nil(), subject)
-    };
-
-    let mut pattern_printer = PatternPrinter::new(environment);
-    let pattern_document = pattern_printer.print(pattern);
-    let PatternPrinter {
-        environment,
-        variables,
-        guards,
-        assignments,
-    } = pattern_printer;
-
-    let assignments_map = assignments
-        .iter()
-        .map(|assignment| (assignment.gleam_name.clone(), assignment))
-        .collect();
-    let clause_guard = optional_clause_guard(None, guards, environment, &assignments_map);
-
-    let value_document = match variables.as_slice() {
-        _ if is_tail => subject.clone(),
-        [] => "nil".to_doc(),
-        [variable] => environment.local_var_name(variable),
-        variables => {
-            let variables = variables
-                .iter()
-                .map(|variable| environment.local_var_name(variable));
-            docvec![
-                break_("{", "{"),
-                join(variables, break_(",", ", ")).nest(INDENT),
-                "}"
-            ]
-            .group()
-        }
-    };
-
-    let assignment = match variables.as_slice() {
-        _ if is_tail => nil(),
-        [] => nil(),
-        [variable] => environment.next_local_var_name(variable).append(" = "),
-        variables => {
-            let variables = variables
-                .iter()
-                .map(|variable| environment.next_local_var_name(variable));
-            docvec![
-                break_("{", "{"),
-                join(variables, break_(",", ", ")).nest(INDENT),
-                "} = "
-            ]
-            .group()
-        }
-    };
-
-    let clauses = docvec![
-        pattern_document,
-        clause_guard,
-        " -> ",
-        value_document,
-        ";",
-        line(),
-        environment.next_local_var_name(ASSERT_FAIL_VARIABLE),
-        " ->",
-        docvec![
-            line(),
-            erlang_error(
-                "let_assert",
-                &message,
-                location,
-                vec![
-                    ("value", environment.local_var_name(ASSERT_FAIL_VARIABLE)),
-                    ("start", location.start.to_doc()),
-                    ("'end'", value.location().end.to_doc()),
-                    ("pattern_start", pattern.location().start.to_doc()),
-                    ("pattern_end", pattern.location().end.to_doc()),
-                ],
-                environment,
-            )
-            .nest(INDENT)
-        ]
-        .nest(INDENT)
-    ];
-
-    let assignments = if assignments.is_empty() {
-        nil()
-    } else {
-        docvec![
-            ",",
-            line(),
-            join(
-                assignments
-                    .iter()
-                    .map(|assignment| assignment.to_assignment_doc()),
-                ",".to_doc().append(line())
-            )
-        ]
-    };
-
-    docvec![
-        subject_assignment,
-        assignment,
-        "case ",
-        subject,
-        " of",
-        docvec![line(), clauses].nest(INDENT),
-        line(),
-        "end",
-        assignments,
-    ]
-}
-
-fn let_<'a>(
-    value: &'a TypedExpr,
-    pattern: &'a TypedPattern,
-    environment: &mut Env<'a>,
-) -> Document<'a> {
-    let body = maybe_block_expr(value, environment).group();
-    PatternPrinter::new(environment)
-        .print(pattern)
-        .append(" = ")
-        .append(body)
-}
-
-fn float<'a>(value: &str) -> Document<'a> {
-    let mut value = value.replace('_', "");
-    if value.ends_with('.') {
-        value.push('0')
-    }
-
-    match value.split('.').collect_vec().as_slice() {
-        ["0", "0"] => "+0.0".to_doc(),
-        [before_dot, after_dot] if after_dot.starts_with('e') => {
-            eco_format!("{before_dot}.0{after_dot}").to_doc()
-        }
-        _ => EcoString::from(value).to_doc(),
-    }
-}
-
-fn expr_list<'a>(
-    elements: &'a [TypedExpr],
-    tail: &'a Option<Box<TypedExpr>>,
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    let elements = join(
-        elements
-            .iter()
-            .map(|element| maybe_block_expr(element, env)),
-        break_(",", ", "),
-    );
-    list(
-        elements,
-        tail.as_ref().map(|element| maybe_block_expr(element, env)),
-    )
-}
-
-fn list<'a>(elements: Document<'a>, tail: Option<Document<'a>>) -> Document<'a> {
-    let elements = match tail {
-        Some(tail) if elements.is_empty() => return tail.to_doc(),
-
-        Some(tail) => elements.append(break_(" |", " | ")).append(tail),
-
-        None => elements,
-    };
-
-    elements.to_doc().nest(INDENT).surround("[", "]").group()
-}
-
-fn var<'a>(name: &'a str, constructor: &'a ValueConstructor, env: &mut Env<'a>) -> Document<'a> {
-    match &constructor.variant {
-        ValueConstructorVariant::Record {
-            name: record_name, ..
-        } => match constructor.type_.deref() {
-            Type::Fn { arguments, .. } => {
-                let chars = incrementing_arguments_list(arguments.len());
-                "fun("
-                    .to_doc()
-                    .append(chars.clone())
-                    .append(") -> {")
-                    .append(atom_string(to_snake_case(record_name)))
-                    .append(", ")
-                    .append(chars)
-                    .append("} end")
-            }
-            Type::Named { .. } | Type::Var { .. } | Type::Tuple { .. } => {
-                atom_string(to_snake_case(record_name))
-            }
-        },
-
-        ValueConstructorVariant::LocalVariable { .. } => env.local_var_name(name),
-
-        ValueConstructorVariant::ModuleConstant { literal, .. } => const_inline(literal, env),
-
-        ValueConstructorVariant::ModuleFn {
-            arity,
-            external_erlang: Some((module, name)),
-            ..
-        } if module == env.module => function_reference(None, name, *arity),
-
-        ValueConstructorVariant::ModuleFn {
-            arity,
-            external_erlang: Some((module, name)),
-            ..
-        } => function_reference(Some(module), name, *arity),
-
-        ValueConstructorVariant::ModuleFn { arity, module, .. } if module == env.module => {
-            function_reference(None, name, *arity)
-        }
-
-        ValueConstructorVariant::ModuleFn {
-            arity,
-            module,
-            name,
-            ..
-        } => function_reference(Some(module), name, *arity),
-    }
-}
-
-fn function_reference<'a>(module: Option<&'a str>, name: &'a str, arity: usize) -> Document<'a> {
-    match module {
-        None => "fun ".to_doc(),
-        Some(module) => "fun ".to_doc().append(module_name_atom(module)).append(":"),
-    }
-    .append(atom(escape_erlang_existing_name(name)))
-    .append("/")
-    .append(arity)
-}
-
-fn int<'a>(value: &str) -> Document<'a> {
-    let mut value = value.replace('_', "");
-    if value.starts_with("0x") {
-        value.replace_range(..2, "16#");
-    } else if value.starts_with("0o") {
-        value.replace_range(..2, "8#");
-    } else if value.starts_with("0b") {
-        value.replace_range(..2, "2#");
-    }
-
-    EcoString::from(value).to_doc()
-}
-
-fn const_inline<'a>(literal: &'a TypedConstant, env: &mut Env<'a>) -> Document<'a> {
-    match literal {
-        Constant::Int { value, .. } => int(value),
-        Constant::Float { value, .. } => float(value),
-        Constant::String { value, .. } => string(value),
-        Constant::Tuple { elements, .. } => {
-            tuple(elements.iter().map(|element| const_inline(element, env)))
-        }
-
-        Constant::List { elements, .. } => join(
-            elements.iter().map(|element| const_inline(element, env)),
-            break_(",", ", "),
-        )
-        .nest(INDENT)
-        .surround("[", "]")
-        .group(),
-
-        Constant::BitArray { segments, .. } => bit_array(
-            segments
-                .iter()
-                .map(|s| const_segment(&s.value, &s.options, env)),
-        ),
-
-        Constant::Record {
-            tag,
-            type_,
-            arguments,
-            ..
-        } if arguments.is_empty() => match type_.deref() {
-            Type::Fn { arguments, .. } => record_constructor_function(tag, arguments.len()),
-            Type::Named { .. } | Type::Var { .. } | Type::Tuple { .. } => {
-                atom_string(to_snake_case(tag))
-            }
-        },
-
-        Constant::Record { tag, arguments, .. } => {
-            // Record updates are fully expanded during type checking, so we just handle arguments
-            let arguments_doc = arguments
-                .iter()
-                .map(|argument| const_inline(&argument.value, env));
-            let tag = atom_string(to_snake_case(tag));
-            tuple(std::iter::once(tag).chain(arguments_doc))
-        }
-
+/// This returns true if the given constant is going to be compiled to a
+/// single literal Erlang string.
+/// This is not only true for literal Gleam strings like `"abc"`, but also for
+/// variables referencing string constants (as those are inlined)
+fn constant_produces_literal_string(constant: &Constant<Arc<Type>>) -> bool {
+    match constant {
+        Constant::String { .. } => true,
         Constant::Var {
-            name, constructor, ..
-        } => var(
-            name,
-            constructor
-                .as_ref()
-                .expect("This is guaranteed to hold a value."),
-            env,
-        ),
-
-        Constant::StringConcatenation { left, right, .. } => {
-            const_string_concatenate(left, right, env)
-        }
-
-        Constant::RecordUpdate { .. } => panic!("record updates should not reach code generation"),
-        Constant::Invalid { .. } => panic!("invalid constants should not reach code generation"),
-    }
-}
-
-fn record_constructor_function(tag: &EcoString, arity: usize) -> Document<'_> {
-    let chars = incrementing_arguments_list(arity);
-    "fun("
-        .to_doc()
-        .append(chars.clone())
-        .append(") -> {")
-        .append(atom_string(to_snake_case(tag)))
-        .append(", ")
-        .append(chars)
-        .append("} end")
-}
-
-fn clause<'a>(clause: &'a TypedClause, environment: &mut Env<'a>) -> Document<'a> {
-    let Clause {
-        guard,
-        pattern,
-        alternative_patterns,
-        then,
-        ..
-    } = clause;
-
-    // These are required to get the alternative patterns working properly.
-    // Simply rendering the duplicate erlang clauses breaks the variable
-    // rewriting because each pattern would define different (rewritten)
-    // variables names.
-    let initial_erlang_vars = environment.erl_function_scope_vars.clone();
-    let initial_scope_vars = environment.current_scope_vars.clone();
-
-    let mut branches_docs = Vec::with_capacity(alternative_patterns.len() + 1);
-    for patterns in std::iter::once(pattern).chain(alternative_patterns) {
-        // Erlang doesn't support alternative patterns, so we turn each
-        // alternative into a branch of its own.
-        // For each alternative, before generating the body, we need to reset
-        // the variables in scope to what they are before the case expression,
-        // so that a branch will not interfere with the other ones!
-        environment.erl_function_scope_vars = initial_erlang_vars.clone();
-        environment.current_scope_vars = initial_scope_vars.clone();
-        let mut pattern_printer = PatternPrinter::new(environment);
-
-        let pattern = match patterns.as_slice() {
-            [pattern] => pattern_printer.print(pattern),
-            _ => tuple(patterns.iter().map(|pattern| {
-                pattern_printer.reset_variables();
-                pattern_printer.print(pattern)
-            })),
-        };
-
-        let PatternPrinter {
-            environment,
-            guards,
-            variables: _,
-            assignments,
-        } = pattern_printer;
-
-        let assignments_map = assignments
-            .iter()
-            .map(|assignment| (assignment.gleam_name.clone(), assignment))
-            .collect();
-
-        let guard = optional_clause_guard(guard.as_ref(), guards, environment, &assignments_map);
-        let then = clause_consequence(then, assignments, environment).group();
-        branches_docs.push(docvec![
-            pattern,
-            guard,
-            " ->",
-            docvec![line(), then].nest(INDENT),
-        ]);
-    }
-
-    join(branches_docs, ";".to_doc().append(lines(2)))
-}
-
-fn clause_consequence<'a>(
-    consequence: &'a TypedExpr,
-    // Further assignments that the pattern might need to introduce at the start
-    // of the new block.
-    assignments: Vec<StringPatternAssignment<'a>>,
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    let assignment_doc = if assignments.is_empty() {
-        nil()
-    } else {
-        let separator = ",".to_doc().append(line());
-        join(
-            assignments
-                .iter()
-                .map(|assignment| assignment.to_assignment_doc()),
-            separator.clone(),
-        )
-        .append(separator)
-    };
-
-    let consequence = if let TypedExpr::Block { statements, .. } = consequence {
-        statement_sequence(statements, env)
-    } else {
-        expr(consequence, env)
-    };
-    assignment_doc.append(consequence)
-}
-
-fn optional_clause_guard<'a>(
-    guard: Option<&'a TypedClauseGuard>,
-    additional_guards: Vec<Document<'a>>,
-    env: &mut Env<'a>,
-    assignments: &HashMap<EcoString, &StringPatternAssignment<'a>>,
-) -> Document<'a> {
-    let guard_doc = guard.map(|guard| bare_clause_guard(guard, env, assignments));
-
-    let guards_count = guard_doc.iter().len() + additional_guards.len();
-    let guards_docs = additional_guards.into_iter().chain(guard_doc).map(|guard| {
-        if guards_count > 1 {
-            guard.surround("(", ")")
-        } else {
-            guard
-        }
-    });
-    let doc = join(guards_docs, " andalso ".to_doc());
-    if doc.is_empty() {
-        doc
-    } else {
-        " when ".to_doc().append(doc)
-    }
-}
-
-fn bare_clause_guard<'a>(
-    guard: &'a TypedClauseGuard,
-    env: &mut Env<'a>,
-    assignments: &HashMap<EcoString, &StringPatternAssignment<'a>>,
-) -> Document<'a> {
-    match guard {
-        ClauseGuard::Block { value, .. } => {
-            bare_clause_guard(value, env, assignments).surround("(", ")")
-        }
-
-        ClauseGuard::Not { expression, .. } => {
-            docvec!["not ", bare_clause_guard(expression, env, assignments)]
-        }
-
-        ClauseGuard::BinaryOperator {
-            operator,
-            left,
-            right,
+            constructor: Some(constructor),
             ..
-        } => {
-            let left_document = clause_guard(left, env, assignments);
-            let right_document = clause_guard(right, env, assignments);
-
-            let operator = match operator {
-                BinOp::Or => "orelse",
-                BinOp::And => "andalso",
-                BinOp::Eq => "=:=",
-                BinOp::NotEq => "=/=",
-                BinOp::GtInt | BinOp::GtFloat => ">",
-                BinOp::GtEqInt | BinOp::GtEqFloat => ">=",
-                BinOp::LtInt | BinOp::LtFloat => "<",
-                BinOp::LtEqInt | BinOp::LtEqFloat => "=<",
-                BinOp::AddInt | BinOp::AddFloat => "+",
-                BinOp::SubInt | BinOp::SubFloat => "-",
-                BinOp::MultInt | BinOp::MultFloat => "*",
-                BinOp::DivFloat => "/",
-                BinOp::DivInt => "div",
-                BinOp::RemainderInt => "rem",
-                BinOp::Concatenate => {
-                    return clause_guard_string_concatenate(left, right, env, assignments);
-                }
-            };
-
-            docvec![left_document, " ", operator, " ", right_document]
-        }
-
-        // Only local variables are supported and the typer ensures that all
-        // ClauseGuard::Vars are local variables
-        ClauseGuard::Var { name, .. } => {
-            // If we're referencing a variable introduced by a string pattern
-            // assignment we need to replace it with its actual literal value:
-            // in the generated code the variable is only defined later, so
-            // just referencing its name would result in an error.
-            assignments
-                .get(name)
-                .map(|assignment| assignment.literal_value.clone())
-                .unwrap_or_else(|| env.local_var_name(name))
-        }
-
-        ClauseGuard::TupleIndex { tuple, index, .. } => tuple_index_inline(tuple, *index, env),
-
-        ClauseGuard::FieldAccess {
-            container, index, ..
-        } => tuple_index_inline(container, index.expect("Unable to find index") + 1, env),
-
-        ClauseGuard::ModuleSelect { literal, .. } => const_inline(literal, env),
-
-        ClauseGuard::Constant(constant) => const_inline(constant, env),
-    }
-}
-
-fn clause_guard_string_concatenate<'a>(
-    left: &'a TypedClauseGuard,
-    right: &'a TypedClauseGuard,
-    env: &mut Env<'a>,
-    assignments: &HashMap<EcoString, &StringPatternAssignment<'a>>,
-) -> Document<'a> {
-    let left = clause_guard_string_concatenate_argument(left, env, assignments);
-    let right = clause_guard_string_concatenate_argument(right, env, assignments);
-    bit_array([left, right])
-}
-
-fn clause_guard_string_concatenate_argument<'a>(
-    guard: &'a TypedClauseGuard,
-    env: &mut Env<'a>,
-    assignments: &HashMap<EcoString, &StringPatternAssignment<'a>>,
-) -> Document<'a> {
-    match guard {
-        ClauseGuard::Constant(Constant::String { value, .. }) => {
-            docvec!['"', string_inner(value), "\"/utf8"]
-        }
-
-        ClauseGuard::Constant(Constant::StringConcatenation { left, right, .. }) => {
-            const_string_concatenate_inner(left, right, env)
-        }
-
-        ClauseGuard::ModuleSelect { literal, .. } => match literal {
-            Constant::String { value, .. } => docvec!['"', string_inner(value), "\"/utf8"],
-            Constant::StringConcatenation { left, right, .. } => {
-                const_string_concatenate_inner(left, right, env)
-            }
-            Constant::Int { .. }
-            | Constant::Float { .. }
-            | Constant::Tuple { .. }
-            | Constant::List { .. }
-            | Constant::Record { .. }
-            | Constant::RecordUpdate { .. }
-            | Constant::BitArray { .. }
-            | Constant::Var { .. }
-            | Constant::Invalid { .. } => docvec!["(", const_inline(literal, env), ")/binary"],
-        },
-
-        ClauseGuard::Var { name, .. } => assignments
-            .get(name)
-            .map(|assignment| docvec![assignment.literal_value.clone(), "/binary"])
-            .unwrap_or_else(|| docvec![env.local_var_name(name), "/binary"]),
-
-        ClauseGuard::BinaryOperator {
-            operator: BinOp::Concatenate,
-            left,
-            right,
+        } if let ValueConstructor {
+            variant: ValueConstructorVariant::ModuleConstant { ref literal, .. },
             ..
-        } => docvec![
-            clause_guard_string_concatenate(left, right, env, assignments),
-            "/binary"
-        ],
-
-        ClauseGuard::Block { .. }
-        | ClauseGuard::BinaryOperator { .. }
-        | ClauseGuard::Not { .. }
-        | ClauseGuard::TupleIndex { .. }
-        | ClauseGuard::FieldAccess { .. }
-        | ClauseGuard::Constant(_) => docvec![
-            clause_guard(guard, env, assignments).surround("(", ")"),
-            "/binary"
-        ],
+        } = **constructor =>
+        {
+            constant_produces_literal_string(literal)
+        }
+        Constant::Int { .. }
+        | Constant::Float { .. }
+        | Constant::Tuple { .. }
+        | Constant::List { .. }
+        | Constant::Record { .. }
+        | Constant::RecordUpdate { .. }
+        | Constant::BitArray { .. }
+        | Constant::BinaryOperator { .. }
+        | Constant::Invalid { .. }
+        | Constant::Todo { .. }
+        | Constant::Var { .. } => false,
     }
 }
 
-fn tuple_index_inline<'a>(
-    tuple: &'a TypedClauseGuard,
-    index: u64,
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    let index_doc = eco_format!("{}", (index + 1)).to_doc();
-    let tuple_doc = bare_clause_guard(tuple, env, &HashMap::new());
-    "erlang:element"
-        .to_doc()
-        .append(wrap_arguments([index_doc, tuple_doc]))
-}
-
-fn clause_guard<'a>(
-    guard: &'a TypedClauseGuard,
-    env: &mut Env<'a>,
-    assignments: &HashMap<EcoString, &StringPatternAssignment<'a>>,
-) -> Document<'a> {
+/// This returns true if the given guard is going to be compiled to a
+/// single literal Erlang string.
+/// This is not only true for literal Gleam strings like `"abc"`, but also for
+/// variables referencing string constants (as those are inlined)
+fn guard_produces_literal_string(guard: &ClauseGuard<Arc<Type>>) -> bool {
     match guard {
-        // Binary operators are wrapped in parens
-        ClauseGuard::BinaryOperator { .. } => "("
-            .to_doc()
-            .append(bare_clause_guard(guard, env, assignments))
-            .append(")"),
+        ClauseGuard::Block { value, .. } => guard_produces_literal_string(value),
 
-        // Other expressions are not
-        ClauseGuard::Constant(_)
+        ClauseGuard::ModuleSelect {
+            literal: constant, ..
+        }
+        | ClauseGuard::Constant(constant) => constant_produces_literal_string(constant),
+
+        ClauseGuard::BinaryOperator { .. }
         | ClauseGuard::Not { .. }
         | ClauseGuard::Var { .. }
         | ClauseGuard::TupleIndex { .. }
         | ClauseGuard::FieldAccess { .. }
-        | ClauseGuard::ModuleSelect { .. }
-        | ClauseGuard::Block { .. } => bare_clause_guard(guard, env, assignments),
+        | ClauseGuard::Invalid { .. } => false,
     }
 }
 
-fn clauses<'a>(cs: &'a [TypedClause], env: &mut Env<'a>) -> Document<'a> {
-    join(
-        cs.iter().map(|c| {
-            let vars = env.current_scope_vars.clone();
-            let erl = clause(c, env);
-            env.current_scope_vars = vars; // Reset the known variables now the clauses' scope has ended
-            erl
-        }),
-        ";".to_doc().append(lines(2)),
-    )
+static ATOM_PATTERN: OnceLock<Regex> = OnceLock::new();
+
+fn atom_pattern() -> &'static Regex {
+    ATOM_PATTERN.get_or_init(|| Regex::new(r"^[a-z][a-z0-9_@]*$").expect("atom RE regex"))
 }
 
-fn case<'a>(subjects: &'a [TypedExpr], cs: &'a [TypedClause], env: &mut Env<'a>) -> Document<'a> {
-    let subjects_doc = if subjects.len() == 1 {
-        let subject = subjects
-            .first()
-            .expect("erl case printing of single subject");
-        maybe_block_expr(subject, env).group()
+pub fn escape_atom_string(value: EcoString) -> EcoString {
+    if is_erlang_reserved_word(&value) {
+        // Escape because of keyword collision
+        eco_format!("'{value}'")
+    } else if atom_pattern().is_match(&value) {
+        value
     } else {
-        tuple(
-            subjects
-                .iter()
-                .map(|element| maybe_block_expr(element, env)),
-        )
-    };
-    "case "
-        .to_doc()
-        .append(subjects_doc)
-        .append(" of")
-        .append(line().append(clauses(cs, env)).nest(INDENT))
-        .append(line())
-        .append("end")
-        .group()
-}
-
-fn call<'a>(fun: &'a TypedExpr, arguments: &'a [TypedCallArg], env: &mut Env<'a>) -> Document<'a> {
-    docs_arguments_call(
-        fun,
-        arguments
-            .iter()
-            .map(|argument| maybe_block_expr(&argument.value, env))
-            .collect(),
-        env,
-    )
-}
-
-fn module_fn_with_arguments<'a>(
-    module: &'a str,
-    name: &'a str,
-    arguments: Vec<Document<'a>>,
-    env: &Env<'a>,
-) -> Document<'a> {
-    let name = escape_erlang_existing_name(name);
-    let arguments = wrap_arguments(arguments);
-    if module == env.module {
-        atom(name).append(arguments)
-    } else {
-        atom_string(module.replace('/', "@").into())
-            .append(":")
-            .append(atom(name))
-            .append(arguments)
+        // Escape because of characters contained
+        eco_format!("'{value}'")
     }
 }
 
-fn docs_arguments_call<'a>(
-    fun: &'a TypedExpr,
-    mut arguments: Vec<Document<'a>>,
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    match fun {
-        TypedExpr::ModuleSelect {
-            constructor: ModuleValueConstructor::Record { name, .. },
-            ..
-        }
-        | TypedExpr::Var {
-            constructor:
-                ValueConstructor {
-                    variant: ValueConstructorVariant::Record { name, .. },
-                    ..
-                },
-            ..
-        } => tuple(std::iter::once(atom_string(to_snake_case(name))).chain(arguments)),
-
-        TypedExpr::Var {
-            constructor:
-                ValueConstructor {
-                    variant:
-                        ValueConstructorVariant::ModuleFn {
-                            external_erlang: Some((module, name)),
-                            ..
-                        }
-                        | ValueConstructorVariant::ModuleFn { module, name, .. },
-                    ..
-                },
-            ..
-        } => module_fn_with_arguments(module, name, arguments, env),
-
-        // Match against a Constant::Var that contains a function.
-        // We want this to be emitted like a normal function call, not a function variable
-        // substitution.
-        TypedExpr::Var {
-            constructor:
-                ValueConstructor {
-                    variant:
-                        ValueConstructorVariant::ModuleConstant {
-                            literal:
-                                Constant::Var {
-                                    constructor: Some(constructor),
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                },
-            ..
-        } if constructor.variant.is_module_fn() => match &constructor.variant {
-            ValueConstructorVariant::ModuleFn {
-                external_erlang: Some((module, name)),
-                ..
-            }
-            | ValueConstructorVariant::ModuleFn { module, name, .. } => {
-                module_fn_with_arguments(module, name, arguments, env)
-            }
-            ValueConstructorVariant::LocalVariable { .. }
-            | ValueConstructorVariant::ModuleConstant { .. }
-            | ValueConstructorVariant::Record { .. } => {
-                unreachable!("The above clause guard ensures that this is a module fn")
-            }
-        },
-
-        TypedExpr::ModuleSelect {
-            constructor:
-                ModuleValueConstructor::Fn {
-                    external_erlang: Some((module, name)),
-                    ..
-                }
-                | ModuleValueConstructor::Fn { module, name, .. },
-            ..
-        } => {
-            let arguments = wrap_arguments(arguments);
-            let name = escape_erlang_existing_name(name);
-            // We use the constructor Fn variant's `module` and function `name`.
-            // It would also be valid to use the module and label as in the
-            // Gleam code, but using the variant can result in an optimisation
-            // in which the target function is used for `external fn`s, removing
-            // one layer of wrapping.
-            // This also enables an optimisation in the Erlang compiler in which
-            // some Erlang BIFs can be replaced with literals if their arguments
-            // are literals, such as `binary_to_atom`.
-            atom_string(module_erlang_name(module))
-                .append(":")
-                .append(atom_string(name.into()))
-                .append(arguments)
-        }
-
-        TypedExpr::Fn { kind, body, .. } if kind.is_capture() => {
-            if let Statement::Expression(TypedExpr::Call {
-                fun,
-                arguments: inner_arguments,
-                ..
-            }) = body.first()
-            {
-                let mut merged_arguments = Vec::with_capacity(inner_arguments.len());
-                for arg in inner_arguments {
-                    if let TypedExpr::Var { name, .. } = &arg.value
-                        && name == CAPTURE_VARIABLE
-                    {
-                        merged_arguments.push(arguments.swap_remove(0))
-                    } else {
-                        merged_arguments.push(maybe_block_expr(&arg.value, env))
-                    }
-                }
-                docs_arguments_call(fun, merged_arguments, env)
-            } else {
-                panic!("Erl printing: Capture was not a call")
-            }
-        }
-
-        TypedExpr::Fn { .. }
-        | TypedExpr::Call { .. }
-        | TypedExpr::Todo { .. }
-        | TypedExpr::Panic { .. }
-        | TypedExpr::RecordAccess { .. }
-        | TypedExpr::TupleIndex { .. } => {
-            let arguments = wrap_arguments(arguments);
-            expr(fun, env).surround("(", ")").append(arguments)
-        }
-
-        TypedExpr::Int { .. }
-        | TypedExpr::Float { .. }
-        | TypedExpr::String { .. }
-        | TypedExpr::Block { .. }
-        | TypedExpr::Pipeline { .. }
-        | TypedExpr::Var { .. }
-        | TypedExpr::List { .. }
-        | TypedExpr::BinOp { .. }
-        | TypedExpr::Case { .. }
-        | TypedExpr::PositionalAccess { .. }
-        | TypedExpr::ModuleSelect { .. }
-        | TypedExpr::Tuple { .. }
-        | TypedExpr::Echo { .. }
-        | TypedExpr::BitArray { .. }
-        | TypedExpr::RecordUpdate { .. }
-        | TypedExpr::NegateBool { .. }
-        | TypedExpr::NegateInt { .. }
-        | TypedExpr::Invalid { .. } => {
-            let arguments = wrap_arguments(arguments);
-            maybe_block_expr(fun, env).append(arguments)
-        }
-    }
+enum ExpressionSegmentStringEncoding {
+    Utf8,
+    Utf16 { endiannes: Endianness },
+    Utf32 { endiannes: Endianness },
 }
 
-fn record_update<'a>(
-    record: &'a Option<Box<TypedAssignment>>,
-    constructor: &'a TypedExpr,
-    arguments: &'a [TypedCallArg],
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    let vars = env.current_scope_vars.clone();
+fn expression_segment_string_encoding(
+    segment: &TypedExprBitArraySegment,
+) -> Option<ExpressionSegmentStringEncoding> {
+    let endiannes = segment.endianness();
+    segment.options.iter().find_map(|option| match option {
+        BitArrayOption::Utf8 { .. } => Some(ExpressionSegmentStringEncoding::Utf8),
+        BitArrayOption::Utf16 { .. } => Some(ExpressionSegmentStringEncoding::Utf16 { endiannes }),
+        BitArrayOption::Utf32 { .. } => Some(ExpressionSegmentStringEncoding::Utf32 { endiannes }),
 
-    let document = match record.as_ref() {
-        Some(record) => docvec![
-            assignment(record, env, Position::NotTail),
-            ",",
-            line(),
-            call(constructor, arguments, env)
-        ],
-        None => call(constructor, arguments, env),
-    };
-
-    env.current_scope_vars = vars;
-
-    document
-}
-
-/// Wrap a document in begin end
-///
-fn begin_end(document: Document<'_>) -> Document<'_> {
-    docvec!["begin", line().append(document).nest(INDENT), line(), "end"].force_break()
-}
-
-fn maybe_block_expr<'a>(expression: &'a TypedExpr, env: &mut Env<'a>) -> Document<'a> {
-    if needs_begin_end_wrapping(expression) {
-        begin_end(expr(expression, env))
-    } else {
-        expr(expression, env)
-    }
+        BitArrayOption::Bytes { .. }
+        | BitArrayOption::Int { .. }
+        | BitArrayOption::Float { .. }
+        | BitArrayOption::Bits { .. }
+        | BitArrayOption::Utf8Codepoint { .. }
+        | BitArrayOption::Utf16Codepoint { .. }
+        | BitArrayOption::Utf32Codepoint { .. }
+        | BitArrayOption::Signed { .. }
+        | BitArrayOption::Unsigned { .. }
+        | BitArrayOption::Big { .. }
+        | BitArrayOption::Little { .. }
+        | BitArrayOption::Native { .. }
+        | BitArrayOption::Size { .. }
+        | BitArrayOption::Unit { .. } => None,
+    })
 }
 
 fn needs_begin_end_wrapping(expression: &TypedExpr) -> bool {
     match expression {
-        // Record updates are 1 expression if there's no assignment, multiple otherwise.
+        // Record updates are 1 expression if there's no assignment, multiple
+        // otherwise.
         TypedExpr::RecordUpdate {
-            record_assignment, ..
-        } => record_assignment.is_some(),
+            updated_record_assigned_name,
+            ..
+        } => updated_record_assigned_name.is_some(),
 
+        // Pipelines are always multiple assignments.
         TypedExpr::Pipeline { .. } => true,
+
+        // Binary operations that require division might have to be turned into
+        // multiple statements!
+        TypedExpr::BinOp {
+            operator: BinOp::DivFloat | BinOp::DivInt | BinOp::RemainderInt,
+            left,
+            right,
+            ..
+        } => match how_to_divide(left, right) {
+            // In these cases we'll have to generate two statements: a variable
+            // assignment for the left hand side, and one to return the value!
+            HowToDivide::MatchOnRight {
+                is_left_hand_side_pure: false,
+            }
+            | HowToDivide::EvaluateLeftAndReturnZero => true,
+            // Here we just generate a single statement.
+            HowToDivide::PlainErlangDivision
+            | HowToDivide::ReplaceWithZero
+            | HowToDivide::MatchOnRight {
+                is_left_hand_side_pure: true,
+            } => false,
+        },
 
         TypedExpr::Int { .. }
         | TypedExpr::Float { .. }
@@ -2179,775 +3857,135 @@ fn needs_begin_end_wrapping(expression: &TypedExpr) -> bool {
     }
 }
 
-fn todo<'a>(message: Option<&'a TypedExpr>, location: SrcSpan, env: &mut Env<'a>) -> Document<'a> {
-    let message = match message {
-        Some(m) => expr(m, env),
-        None => string("`todo` expression evaluated. This code has not yet been implemented."),
-    };
-    erlang_error("todo", &message, location, vec![], env)
-}
-
-fn panic<'a>(location: SrcSpan, message: Option<&'a TypedExpr>, env: &mut Env<'a>) -> Document<'a> {
-    let message = match message {
-        Some(m) => expr(m, env),
-        None => string("`panic` expression evaluated."),
-    };
-    erlang_error("panic", &message, location, vec![], env)
-}
-
-fn echo<'a>(
-    body: Document<'a>,
-    message: Option<&'a TypedExpr>,
-    location: &SrcSpan,
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    env.echo_used = true;
-
-    let message = message
-        .as_ref()
-        .map(|message| maybe_block_expr(message, env))
-        .unwrap_or("nil".to_doc());
-
-    "echo".to_doc().append(wrap_arguments(vec![
-        body,
-        message,
-        env.line_numbers.line_number(location.start).to_doc(),
-    ]))
-}
-
-fn erlang_error<'a>(
-    name: &'a str,
-    message: &Document<'a>,
+/// This represents an expression that appears in an expression, either because
+/// it is part of some larger expression (like a binop: `assert a && b`, or a
+/// call `assert wibble(wobble)`), or because it is being matched against
+/// directly (like `assert wibble`).
+struct AssertionExpression<'a> {
+    /// This tells us the kind of expression we're dealing with: whether that's a
+    /// literal, an expression that can't be known at compile time, or if it
+    /// hasn't been evaluated at all!
+    kind: AssertedExpressionKind,
+    /// If the expression has been evaluated, this is going to tell us how we
+    /// can reference its value.
+    runtime_value: Option<AssertedExpressionRuntimeValue<'a>>,
+    /// This is the location pointing to where in the Gleam source code this
+    /// expression comes from.
     location: SrcSpan,
-    fields: Vec<(&'a str, Document<'a>)>,
-    env: &Env<'a>,
-) -> Document<'a> {
-    let mut fields_doc = docvec![
-        "gleam_error => ",
-        name,
-        ",",
-        line(),
-        "message => ",
-        message.clone(),
-        ",",
-        line(),
-        "file => <<?FILEPATH/utf8>>,",
-        line(),
-        "module => ",
-        env.module.to_doc().surround("<<\"", "\"/utf8>>"),
-        ",",
-        line(),
-        "function => ",
-        string(env.function),
-        ",",
-        line(),
-        "line => ",
-        env.line_numbers.line_number(location.start),
-    ];
-    for (key, value) in fields {
-        fields_doc = fields_doc
-            .append(",")
-            .append(line())
-            .append(key)
-            .append(" => ")
-            .append(value);
-    }
-    let error = docvec!["#{", fields_doc.group().nest(INDENT), "}"];
-    docvec!["erlang:error", wrap_arguments([error.group()])]
 }
 
-fn expr<'a>(expression: &'a TypedExpr, env: &mut Env<'a>) -> Document<'a> {
-    match expression {
-        TypedExpr::Todo {
-            message: label,
-            location,
-            ..
-        } => todo(label.as_deref(), *location, env),
-
-        TypedExpr::Panic {
-            location, message, ..
-        } => panic(*location, message.as_deref(), env),
-
-        TypedExpr::Echo {
-            expression,
-            location,
-            message,
-            ..
-        } => {
-            let expression = expression
-                .as_ref()
-                .expect("echo with no expression outside of pipe");
-            let expression = maybe_block_expr(expression, env);
-            echo(expression, message.as_deref(), location, env)
+impl<'a> AssertionExpression<'a> {
+    fn from_expression(expression: &'a TypedExpr) -> Self {
+        Self {
+            runtime_value: Some(AssertedExpressionRuntimeValue::Expression(expression)),
+            kind: if expression.is_literal() {
+                AssertedExpressionKind::Literal
+            } else {
+                AssertedExpressionKind::Expression
+            },
+            location: expression.location(),
         }
-
-        TypedExpr::Int { value, .. } => int(value),
-        TypedExpr::Float { value, .. } => float(value),
-        TypedExpr::String { value, .. } => string(value),
-
-        TypedExpr::Pipeline {
-            first_value,
-            assignments,
-            finally,
-            ..
-        } => pipeline(first_value, assignments, finally, env),
-
-        TypedExpr::Block { statements, .. } => block(statements, env),
-
-        TypedExpr::TupleIndex { tuple, index, .. } => tuple_index(tuple, *index, env),
-
-        TypedExpr::Var {
-            name, constructor, ..
-        } => var(name, constructor, env),
-
-        TypedExpr::Fn {
-            arguments, body, ..
-        } => fun(arguments, body, env),
-
-        TypedExpr::NegateBool { value, .. } => negate_with("not ", value, env),
-
-        TypedExpr::NegateInt { value, .. } => negate_with("- ", value, env),
-
-        TypedExpr::List { elements, tail, .. } => expr_list(elements, tail, env),
-
-        TypedExpr::Call { fun, arguments, .. } => call(fun, arguments, env),
-
-        TypedExpr::ModuleSelect {
-            constructor: ModuleValueConstructor::Record { name, arity: 0, .. },
-            ..
-        } => atom_string(to_snake_case(name)),
-
-        TypedExpr::ModuleSelect {
-            constructor: ModuleValueConstructor::Constant { literal, .. },
-            ..
-        } => const_inline(literal, env),
-
-        TypedExpr::ModuleSelect {
-            constructor: ModuleValueConstructor::Record { name, arity, .. },
-            ..
-        } => record_constructor_function(name, *arity as usize),
-
-        TypedExpr::ModuleSelect {
-            type_,
-            constructor:
-                ModuleValueConstructor::Fn {
-                    external_erlang: Some((module, name)),
-                    ..
-                }
-                | ModuleValueConstructor::Fn { module, name, .. },
-            ..
-        } => module_select_fn(type_.clone(), module, name),
-
-        TypedExpr::RecordAccess { record, index, .. } => tuple_index(record, index + 1, env),
-        TypedExpr::PositionalAccess { record, index, .. } => tuple_index(record, index + 1, env),
-
-        TypedExpr::RecordUpdate {
-            record_assignment,
-            constructor,
-            arguments,
-            ..
-        } => record_update(record_assignment, constructor, arguments, env),
-
-        TypedExpr::Case {
-            subjects, clauses, ..
-        } => case(subjects, clauses, env),
-
-        TypedExpr::BinOp {
-            name, left, right, ..
-        } => bin_op(name, left, right, env),
-
-        TypedExpr::Tuple { elements, .. } => tuple(
-            elements
-                .iter()
-                .map(|element| maybe_block_expr(element, env)),
-        ),
-
-        TypedExpr::BitArray { segments, .. } => bit_array(
-            segments
-                .iter()
-                .map(|s| expr_segment(&s.value, &s.options, env)),
-        ),
-
-        TypedExpr::Invalid { .. } => panic!("invalid expressions should not reach code generation"),
-    }
-}
-
-fn pipeline<'a>(
-    first_value: &'a TypedPipelineAssignment,
-    assignments: &'a [(TypedPipelineAssignment, PipelineAssignmentKind)],
-    finally: &'a TypedExpr,
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    let mut documents = Vec::with_capacity((assignments.len() + 1) * 3);
-
-    let all_assignments = std::iter::once(first_value)
-        .chain(assignments.iter().map(|(assignment, _kind)| assignment));
-
-    let echo_doc = |var_name: &Option<Document<'a>>,
-                    message: Option<&'a TypedExpr>,
-                    location: &SrcSpan,
-                    env: &mut Env<'a>| {
-        let name = var_name
-            .to_owned()
-            .expect("echo with no previous step in a pipe");
-        echo(name, message, location, env)
-    };
-
-    let vars = env.current_scope_vars.clone();
-
-    let mut prev_local_var_name = None;
-    for a in all_assignments {
-        // An echo in a pipeline won't result in an assignment, instead it
-        // just prints the previous variable assigned in the pipeline.
-        if let TypedExpr::Echo {
-            expression: None,
-            message,
-            location,
-            ..
-        } = a.value.as_ref()
-        {
-            documents.push(echo_doc(
-                &prev_local_var_name,
-                message.as_deref(),
-                location,
-                env,
-            ))
-        } else {
-            // Otherwise we assign the intermediate pipe value to a variable.
-            let body = maybe_block_expr(&a.value, env).group();
-            let name = env.next_local_var_name(&a.name);
-            prev_local_var_name = Some(name.clone());
-            documents.push(docvec![name, " = ", body]);
-        };
-        documents.push(",".to_doc());
-        documents.push(line());
     }
 
-    if let TypedExpr::Echo {
-        expression: None,
-        message,
-        location,
-        ..
-    } = finally
-    {
-        documents.push(echo_doc(
-            &prev_local_var_name,
-            message.as_deref(),
-            location,
-            env,
-        ))
-    } else {
-        documents.push(expr(finally, env))
+    fn was_unevaluated(mut self) -> Self {
+        self.kind = AssertedExpressionKind::Unevaluated;
+        self.runtime_value = None;
+        self
     }
 
-    env.current_scope_vars = vars;
+    fn evaluated_to_bool(mut self, result: bool) -> Self {
+        self.runtime_value = Some(AssertedExpressionRuntimeValue::KnownBool(result));
+        self
+    }
 
-    documents.to_doc()
-}
-
-fn assignment<'a>(
-    assignment: &'a TypedAssignment,
-    env: &mut Env<'a>,
-    position: Position,
-) -> Document<'a> {
-    match &assignment.kind {
-        AssignmentKind::Let | AssignmentKind::Generated => {
-            let_(&assignment.value, &assignment.pattern, env)
+    fn from_generated_variable(name: EcoString, original_expression: &'a TypedExpr) -> Self {
+        Self {
+            runtime_value: Some(AssertedExpressionRuntimeValue::Variable(name)),
+            kind: if original_expression.is_literal() {
+                AssertedExpressionKind::Literal
+            } else {
+                AssertedExpressionKind::Expression
+            },
+            location: original_expression.location(),
         }
-        AssignmentKind::Assert {
-            message, location, ..
-        } => let_assert(
-            &assignment.value,
-            &assignment.pattern,
-            env,
-            message.as_ref(),
-            position,
-            *location,
-        ),
     }
 }
 
-fn assert<'a>(assert: &'a TypedAssert, env: &mut Env<'a>) -> Document<'a> {
-    let Assert {
-        value,
-        location,
-        message,
-    } = assert;
-
-    let message = match message {
-        Some(message) => expr(message, env),
-        None => string("Assertion failed."),
-    };
-
-    let mut assignments = Vec::new();
-
-    let (subject, mut fields) = match value {
-        TypedExpr::Call { fun, arguments, .. } => {
-            assert_call(fun, arguments, &mut assignments, env)
-        }
-        TypedExpr::BinOp {
-            name, left, right, ..
-        } => {
-            let operator = match name {
-                BinOp::And => {
-                    return assert_and(left, right, message, *location, env);
-                }
-                BinOp::Or => {
-                    return assert_or(left, right, message, *location, env);
-                }
-                BinOp::Eq => "=:=",
-                BinOp::NotEq => "/=",
-                BinOp::LtInt | BinOp::LtFloat => "<",
-                BinOp::LtEqInt | BinOp::LtEqFloat => "=<",
-                BinOp::GtInt | BinOp::GtFloat => ">",
-                BinOp::GtEqInt | BinOp::GtEqFloat => ">=",
-                BinOp::AddInt
-                | BinOp::AddFloat
-                | BinOp::SubInt
-                | BinOp::SubFloat
-                | BinOp::MultInt
-                | BinOp::MultFloat
-                | BinOp::DivInt
-                | BinOp::DivFloat
-                | BinOp::RemainderInt
-                | BinOp::Concatenate => {
-                    panic!("Non-boolean operators cannot appear here in well-typed code")
-                }
-            };
-
-            let left_document = assign_to_variable(left, &mut assignments, env);
-            let right_document = assign_to_variable(right, &mut assignments, env);
-            (
-                binop_documents(left_document.clone(), operator, right_document.clone()),
-                vec![
-                    ("kind", atom("binary_operator")),
-                    ("operator", atom(name.name())),
-                    (
-                        "left",
-                        asserted_expression(
-                            AssertExpression::from_expression(left),
-                            Some(left_document),
-                            left.location(),
-                        ),
-                    ),
-                    (
-                        "right",
-                        asserted_expression(
-                            AssertExpression::from_expression(right),
-                            Some(right_document),
-                            right.location(),
-                        ),
-                    ),
-                ],
-            )
-        }
-
-        TypedExpr::Int { .. }
-        | TypedExpr::Float { .. }
-        | TypedExpr::String { .. }
-        | TypedExpr::Block { .. }
-        | TypedExpr::Pipeline { .. }
-        | TypedExpr::Var { .. }
-        | TypedExpr::Fn { .. }
-        | TypedExpr::List { .. }
-        | TypedExpr::Case { .. }
-        | TypedExpr::RecordAccess { .. }
-        | TypedExpr::PositionalAccess { .. }
-        | TypedExpr::ModuleSelect { .. }
-        | TypedExpr::Tuple { .. }
-        | TypedExpr::TupleIndex { .. }
-        | TypedExpr::Todo { .. }
-        | TypedExpr::Panic { .. }
-        | TypedExpr::Echo { .. }
-        | TypedExpr::BitArray { .. }
-        | TypedExpr::RecordUpdate { .. }
-        | TypedExpr::NegateBool { .. }
-        | TypedExpr::NegateInt { .. }
-        | TypedExpr::Invalid { .. } => (
-            maybe_block_expr(value, env),
-            vec![
-                ("kind", atom("expression")),
-                (
-                    "expression",
-                    asserted_expression(
-                        AssertExpression::from_expression(value),
-                        Some("false".to_doc()),
-                        value.location(),
-                    ),
-                ),
-            ],
-        ),
-    };
-
-    fields.push(("start", location.start.to_doc()));
-    fields.push(("'end'", value.location().end.to_doc()));
-    fields.push(("expression_start", value.location().start.to_doc()));
-
-    let clauses = docvec![
-        line(),
-        "true -> nil;",
-        line(),
-        "false -> ",
-        erlang_error("assert", &message, *location, fields, env),
-    ];
-
-    docvec![
-        assignments,
-        "case ",
-        subject,
-        " of",
-        clauses.nest(INDENT),
-        line(),
-        "end"
-    ]
-}
-
-fn assert_call<'a>(
-    function: &'a TypedExpr,
-    arguments: &'a Vec<CallArg<TypedExpr>>,
-    assignments: &mut Vec<Document<'a>>,
-    env: &mut Env<'a>,
-) -> (Document<'a>, Vec<(&'static str, Document<'a>)>) {
-    let argument_variables = arguments
-        .iter()
-        .map(|argument| assign_to_variable(&argument.value, assignments, env))
-        .collect_vec();
-
-    let arguments = join(
-        argument_variables
-            .iter()
-            .zip(arguments)
-            .map(|(variable, argument)| {
-                asserted_expression(
-                    AssertExpression::from_expression(&argument.value),
-                    Some(variable.clone()),
-                    argument.location(),
-                )
-            }),
-        break_(",", ", "),
-    )
-    .nest(INDENT)
-    .surround("[", "]");
-
-    (
-        docs_arguments_call(function, argument_variables, env),
-        vec![("kind", atom("function_call")), ("arguments", arguments)],
-    )
-}
-
-/// In Gleam, the `&&` operator is short-circuiting, meaning that we can't
-/// pre-evaluate both sides of it, and use them in the exception that is
-/// thrown.
-/// Instead, we need to implement this short-circuiting logic ourself.
+/// This describes the kind of expression we're asserting against.
 ///
-/// If we short-circuit, we must leave the second expression unevaluated,
-/// and signal that using the `unevaluated` variant, as detailed in the
-/// exception format. For the first expression, we know it must be `false`,
-/// otherwise we would have continued by evaluating the second expression.
-///
-/// Similarly, if we do evaluate the second expression and fail, we know
-/// that the first expression must have evaluated to `true`, and the second
-/// to `false`. This way, we avoid needing to evaluate either expression
-/// twice.
-///
-/// The generated code then looks something like this:
-/// ```erlang
-/// case expr1 of
-///   true -> case expr2 of
-///     true -> true;
-///     false -> <throw exception>
-///   end;
-///   false -> <throw exception>
-/// end
-/// ```
-///
-fn assert_and<'a>(
-    left: &'a TypedExpr,
-    right: &'a TypedExpr,
-    message: Document<'a>,
-    location: SrcSpan,
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    let left_kind = AssertExpression::from_expression(left);
-    let right_kind = AssertExpression::from_expression(right);
-
-    let fields_if_short_circuiting = vec![
-        ("kind", atom("binary_operator")),
-        ("operator", atom("&&")),
-        (
-            "left",
-            asserted_expression(left_kind, Some("false".to_doc()), left.location()),
-        ),
-        (
-            "right",
-            asserted_expression(AssertExpression::Unevaluated, None, right.location()),
-        ),
-        ("start", location.start.to_doc()),
-        ("'end'", right.location().end.to_doc()),
-        ("expression_start", left.location().start.to_doc()),
-    ];
-
-    let fields = vec![
-        ("kind", atom("binary_operator")),
-        ("operator", atom("&&")),
-        (
-            "left",
-            asserted_expression(left_kind, Some("true".to_doc()), left.location()),
-        ),
-        (
-            "right",
-            asserted_expression(right_kind, Some("false".to_doc()), right.location()),
-        ),
-        ("start", location.start.to_doc()),
-        ("'end'", right.location().end.to_doc()),
-        ("expression_start", left.location().start.to_doc()),
-    ];
-
-    let right_clauses = docvec![
-        line(),
-        "true -> nil;",
-        line(),
-        "false -> ",
-        erlang_error("assert", &message, location, fields, env),
-    ];
-
-    let left_clauses = docvec![
-        line(),
-        "true -> ",
-        docvec![
-            "case ",
-            maybe_block_expr(right, env),
-            " of",
-            right_clauses.nest(INDENT),
-            line(),
-            "end"
-        ]
-        .nest(INDENT),
-        ";",
-        line(),
-        "false -> ",
-        erlang_error(
-            "assert",
-            &message,
-            location,
-            fields_if_short_circuiting,
-            env
-        ),
-    ];
-
-    docvec![
-        "case ",
-        maybe_block_expr(left, env),
-        " of",
-        left_clauses.nest(INDENT),
-        line(),
-        "end"
-    ]
-}
-
-/// Similar to `&&`, `||` is also short-circuiting in Gleam. However, if `||`
-/// short-circuits, that's because the first expression evaluated to `true`,
-/// meaning the whole assertion succeeds. This allows us to directly use Erlang's
-/// `orelse` operator as the subject of the `case` expression.
-///
-/// The only difference is that due to the nature of `||`, if the assertion fails,
-/// we know that both sides must have evaluated to `false`, so we don't
-/// need to store the values of them in variables beforehand.
-fn assert_or<'a>(
-    left: &'a TypedExpr,
-    right: &'a TypedExpr,
-    message: Document<'a>,
-    location: SrcSpan,
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    let fields = vec![
-        ("kind", atom("binary_operator")),
-        ("operator", atom("||")),
-        (
-            "left",
-            asserted_expression(
-                AssertExpression::from_expression(left),
-                Some("false".to_doc()),
-                left.location(),
-            ),
-        ),
-        (
-            "right",
-            asserted_expression(
-                AssertExpression::from_expression(right),
-                Some("false".to_doc()),
-                right.location(),
-            ),
-        ),
-        ("start", location.start.to_doc()),
-        ("'end'", right.location().end.to_doc()),
-        ("expression_start", left.location().start.to_doc()),
-    ];
-
-    let clauses = docvec![
-        line(),
-        "true -> nil;",
-        line(),
-        "false -> ",
-        erlang_error("assert", &message, location, fields, env),
-    ];
-
-    docvec![
-        "case ",
-        docvec![
-            maybe_block_expr(left, env),
-            " orelse ",
-            maybe_block_expr(right, env)
-        ]
-        .nest(INDENT),
-        " of",
-        clauses.nest(INDENT),
-        line(),
-        "end"
-    ]
-}
-
-fn assign_to_variable<'a>(
-    value: &'a TypedExpr,
-    assignments: &mut Vec<Document<'a>>,
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    if value.is_var() {
-        expr(value, env)
-    } else {
-        let value = maybe_block_expr(value, env);
-        let variable = env.next_local_var_name(ASSERT_SUBJECT_VARIABLE);
-        let definition = docvec![variable.clone(), " = ", value, ",", line()];
-        assignments.push(definition);
-        variable
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
-enum AssertExpression {
+enum AssertedExpressionKind {
+    /// The expression being asserted against is a literal value. For example:
+    ///
+    /// ```gleam
+    /// assert True && wibble
+    /// //     ^^^^ This is a literal value.
+    /// ```
+    ///
     Literal,
+    /// The expression being asserted against is anything but a literal, well
+    /// known, value.
+    /// For example:
+    ///
+    /// ```gleam
+    /// assert True && wibble
+    /// //             ^^^^^^ This is an expression.
+    /// ```
+    ///
     Expression,
+    /// The expression being asserted against has not been evaluated yet,
+    /// because of some short circuiting behaviour.
+    ///
+    /// ```gleam
+    /// assert False && something_else()
+    /// //              ^^^^^^^^^^^^^^^^ This will never be evaluated.
+    /// ```
     Unevaluated,
 }
 
-impl AssertExpression {
-    fn from_expression(expression: &TypedExpr) -> Self {
-        if expression.is_literal() {
-            Self::Literal
-        } else {
-            Self::Expression
-        }
-    }
-}
-
-fn asserted_expression(
-    kind: AssertExpression,
-    value: Option<Document<'_>>,
-    location: SrcSpan,
-) -> Document<'_> {
-    let kind = match kind {
-        AssertExpression::Literal => atom("literal"),
-        AssertExpression::Expression => atom("expression"),
-        AssertExpression::Unevaluated => atom("unevaluated"),
-    };
-
-    let start = location.start.to_doc();
-    let end = location.end.to_doc();
-
-    let value_field = if let Some(value) = value {
-        docvec!["value => ", value, ",", line()]
-    } else {
-        nil()
-    };
-
-    let fields_doc = docvec![
-        "kind => ",
-        kind,
-        ",",
-        line(),
-        value_field,
-        "start => ",
-        start,
-        ",",
-        line(),
-        // `end` is a keyword in Erlang, so we have to quote it
-        "'end' => ",
-        end,
-        line(),
-    ];
-
-    "#{".to_doc()
-        .append(fields_doc.group().nest(INDENT))
-        .append("}")
-}
-
-fn negate_with<'a>(op: &'static str, value: &'a TypedExpr, env: &mut Env<'a>) -> Document<'a> {
-    docvec![op, maybe_block_expr(value, env)]
-}
-
-fn tuple_index<'a>(tuple: &'a TypedExpr, index: u64, env: &mut Env<'a>) -> Document<'a> {
-    let index_doc = eco_format!("{}", (index + 1)).to_doc();
-    let tuple_doc = maybe_block_expr(tuple, env);
-    "erlang:element"
-        .to_doc()
-        .append(wrap_arguments([index_doc, tuple_doc]))
-}
-
-fn module_select_fn<'a>(type_: Arc<Type>, module_name: &'a str, label: &'a str) -> Document<'a> {
-    match crate::type_::collapse_links(type_).as_ref() {
-        Type::Fn { arguments, .. } => function_reference(Some(module_name), label, arguments.len()),
-
-        Type::Named { .. } | Type::Var { .. } | Type::Tuple { .. } => module_name_atom(module_name)
-            .append(":")
-            .append(atom(label))
-            .append("()"),
-    }
-}
-
-fn fun<'a>(
-    arguments: &'a [TypedArg],
-    body: &'a [TypedStatement],
-    env: &mut Env<'a>,
-) -> Document<'a> {
-    let current_scope_vars = env.current_scope_vars.clone();
-    let doc = "fun"
-        .to_doc()
-        .append(fun_arguments(arguments, env).append(" ->"))
-        .append(
-            break_("", " ")
-                .append(statement_sequence(body, env))
-                .nest(INDENT),
-        )
-        .append(break_("", " "))
-        .append("end")
-        .group();
-    env.current_scope_vars = current_scope_vars;
-    doc
-}
-
-fn incrementing_arguments_list(arity: usize) -> EcoString {
-    let arguments = (0..arity).map(|c| format!("Field@{c}"));
-    Itertools::intersperse(arguments, ", ".into())
-        .collect::<String>()
-        .into()
+/// This is telling us what the runtime value of some asserted value is.
+/// Used to produce the code for such value in runtime errors if an assert
+/// fails.
+///
+/// For example:
+///
+/// ```gleam
+/// assert wibble()
+/// ```
+///
+/// If the assertion fails we know that `wibble()` must be `false` at runtime.
+/// It's `AssertedExpressionRuntimeValue` would be
+/// `AssertedExpressionRuntimeValue::Bool(false)`.
+///
+#[derive(Debug)]
+enum AssertedExpressionRuntimeValue<'a> {
+    /// We can tell that the asserted value must be a known bool.
+    /// That's because we know whether the assertion failed (it must be false),
+    /// or not (it must be true).
+    KnownBool(bool),
+    /// The asserted value was bound to a generated variable with the given
+    /// name, and we can reference it using that name.
+    Variable(EcoString),
+    /// The asserted value is an expression we need to inline in the error.
+    Expression(&'a TypedExpr),
 }
 
 fn variable_name(name: &str) -> EcoString {
     let mut chars = name.chars();
     let first_char = chars.next();
     let first_uppercased = first_char.into_iter().flat_map(char::to_uppercase);
-
-    first_uppercased.chain(chars).collect::<EcoString>()
+    first_uppercased.chain(chars).collect()
 }
 
-/// When rendering a type variable to an erlang type spec we need all type variables with the
-/// same id to end up with the same name in the generated erlang.
+/// When rendering a type variable to an Erlang type spec we need all type
+/// variables with the same id to end up with the same name in the generated
+/// Erlang.
 /// This function converts a usize into base 26 A-Z for this purpose.
-fn id_to_type_var(id: u64) -> Document<'static> {
+fn id_to_type_var_str(id: u64) -> EcoString {
     if id < 26 {
         let mut name = EcoString::from("");
         name.push(char::from_u32((id % 26 + 65) as u32).expect("id_to_type_var 0"));
-        return name.to_doc();
+        return name;
     }
     let mut name = vec![];
     let mut last_char = id;
@@ -2957,117 +3995,37 @@ fn id_to_type_var(id: u64) -> Document<'static> {
     }
     name.push(char::from_u32((last_char % 26 + 64) as u32).expect("id_to_type_var 2"));
     name.reverse();
-    name.into_iter().collect::<EcoString>().to_doc()
+    name.into_iter().collect()
 }
 
 pub fn is_erlang_reserved_word(name: &str) -> bool {
-    matches!(
-        name,
-        "!" | "receive"
-            | "bnot"
-            | "div"
-            | "rem"
-            | "band"
-            | "bor"
-            | "bxor"
-            | "bsl"
-            | "bsr"
-            | "not"
-            | "and"
-            | "or"
-            | "xor"
-            | "orelse"
-            | "andalso"
-            | "when"
-            | "end"
-            | "fun"
-            | "try"
-            | "catch"
-            | "after"
-            | "begin"
-            | "let"
-            | "query"
-            | "cond"
-            | "if"
-            | "of"
-            | "case"
-            | "maybe"
-            | "else"
-    )
+    match name {
+        "!" | "receive" | "bnot" | "div" | "rem" | "band" | "bor" | "bxor" | "bsl" | "bsr"
+        | "not" | "and" | "or" | "xor" | "orelse" | "andalso" | "when" | "end" | "fun" | "try"
+        | "catch" | "after" | "begin" | "let" | "query" | "cond" | "if" | "of" | "case"
+        | "maybe" | "else" => true,
+        _ => false,
+    }
 }
 
 // Includes shell_default & user_default which are looked for by the erlang shell
 pub fn is_erlang_standard_library_module(name: &str) -> bool {
-    matches!(
-        name,
-        "array"
-            | "base64"
-            | "beam_lib"
-            | "binary"
-            | "c"
-            | "calendar"
-            | "dets"
-            | "dict"
-            | "digraph"
-            | "digraph_utils"
-            | "epp"
-            | "erl_anno"
-            | "erl_eval"
-            | "erl_expand_records"
-            | "erl_id_trans"
-            | "erl_internal"
-            | "erl_lint"
-            | "erl_parse"
-            | "erl_pp"
-            | "erl_scan"
-            | "erl_tar"
-            | "ets"
-            | "file_sorter"
-            | "filelib"
-            | "filename"
-            | "gb_sets"
-            | "gb_trees"
-            | "gen_event"
-            | "gen_fsm"
-            | "gen_server"
-            | "gen_statem"
-            | "io"
-            | "io_lib"
-            | "lists"
-            | "log_mf_h"
-            | "maps"
-            | "math"
-            | "ms_transform"
-            | "orddict"
-            | "ordsets"
-            | "pool"
-            | "proc_lib"
-            | "proplists"
-            | "qlc"
-            | "queue"
-            | "rand"
-            | "random"
-            | "re"
-            | "sets"
-            | "shell"
-            | "shell_default"
-            | "shell_docs"
-            | "slave"
-            | "sofs"
-            | "string"
-            | "supervisor"
-            | "supervisor_bridge"
-            | "sys"
-            | "timer"
-            | "unicode"
-            | "uri_string"
-            | "user_default"
-            | "win32reg"
-            | "zip"
-    )
+    match name {
+        "array" | "base64" | "beam_lib" | "binary" | "c" | "calendar" | "dets" | "dict"
+        | "digraph" | "digraph_utils" | "epp" | "erl_anno" | "erl_eval" | "erl_expand_records"
+        | "erl_id_trans" | "erl_internal" | "erl_lint" | "erl_parse" | "erl_pp" | "erl_scan"
+        | "erl_tar" | "ets" | "file_sorter" | "filelib" | "filename" | "gb_sets" | "gb_trees"
+        | "gen_event" | "gen_fsm" | "gen_server" | "gen_statem" | "io" | "io_lib" | "lists"
+        | "log_mf_h" | "maps" | "math" | "ms_transform" | "orddict" | "ordsets" | "pool"
+        | "proc_lib" | "proplists" | "qlc" | "queue" | "rand" | "random" | "re" | "sets"
+        | "shell" | "shell_default" | "shell_docs" | "slave" | "sofs" | "string" | "supervisor"
+        | "supervisor_bridge" | "sys" | "timer" | "unicode" | "uri_string" | "user_default"
+        | "win32reg" | "zip" => true,
+        _ => false,
+    }
 }
 
-// Includes the functions that are autogenerated by erlang itself
+// Includes the functions that are autogenerated by Erlang itself
 pub fn escape_erlang_existing_name(name: &str) -> &str {
     match name {
         "module_info" => "moduleInfo",
@@ -3075,21 +4033,31 @@ pub fn escape_erlang_existing_name(name: &str) -> &str {
     }
 }
 
-// A TypeVar can either be rendered as an actual type variable such as `A` or `B`,
-// or it can be rendered as `any()` depending on how many usages it has. If it
-// has only 1 usage it is an `any()` type. If it has more than 1 usage it is a
-// type variable. This function gathers usages for this determination.
-//
-//   Examples:
-//     fn(a) -> String       // `a` is `any()`
-//     fn() -> Result(a, b)  // `a` and `b` are `any()`
-//     fn(a) -> a            // `a` is a type var
-fn collect_type_var_usages<'a>(
+/// A TypeVar can either be rendered as an actual type variable such as `A` or `B`,
+/// or it can be rendered as `any()` depending on how many usages it has. If it
+/// has only 1 usage it is an `any()` type. If it has more than 1 usage it is a
+/// type variable. This function gathers usages for this determination.
+///
+///   Examples:
+///     fn(a) -> String       // `a` is `any()`
+///     fn() -> Result(a, b)  // `a` and `b` are `any()`
+///     fn(a) -> a            // `a` is a type var
+fn collect_ref_type_var_usages<'a>(
     mut ids: HashMap<u64, u64>,
     types: impl IntoIterator<Item = &'a Arc<Type>>,
 ) -> HashMap<u64, u64> {
     for type_ in types {
         type_var_ids(type_, &mut ids);
+    }
+    ids
+}
+
+fn collect_type_var_usages(
+    mut ids: HashMap<u64, u64>,
+    types: impl IntoIterator<Item = Arc<Type>>,
+) -> HashMap<u64, u64> {
+    for type_ in types {
+        type_var_ids(&type_, &mut ids);
     }
     ids
 }
@@ -3138,85 +4106,105 @@ fn type_var_ids(type_: &Type, ids: &mut HashMap<u64, u64>) {
             ..
         } => match arguments[..] {
             [ref arg_ok, ref arg_err] if is_prelude_module(module) && name == "Result" => {
-                result_type_var_ids(ids, arg_ok, arg_err)
+                result_type_var_ids(ids, arg_ok, arg_err);
             }
             _ => {
                 for argument in arguments {
-                    type_var_ids(argument, ids)
+                    type_var_ids(argument, ids);
                 }
             }
         },
         Type::Fn { arguments, return_ } => {
             for argument in arguments {
-                type_var_ids(argument, ids)
+                type_var_ids(argument, ids);
             }
             type_var_ids(return_, ids);
         }
         Type::Tuple { elements } => {
             for element in elements {
-                type_var_ids(element, ids)
+                type_var_ids(element, ids);
             }
         }
     }
 }
 
 fn erl_safe_type_name(mut name: EcoString) -> EcoString {
-    if matches!(
-        name.as_str(),
+    match name.as_str() {
         "any"
-            | "arity"
-            | "atom"
-            | "binary"
-            | "bitstring"
-            | "boolean"
-            | "byte"
-            | "char"
-            | "dynamic"
-            | "float"
-            | "function"
-            | "identifier"
-            | "integer"
-            | "iodata"
-            | "iolist"
-            | "list"
-            | "map"
-            | "maybe_improper_list"
-            | "mfa"
-            | "module"
-            | "neg_integer"
-            | "nil"
-            | "no_return"
-            | "node"
-            | "non_neg_integer"
-            | "none"
-            | "nonempty_improper_list"
-            | "nonempty_list"
-            | "nonempty_string"
-            | "number"
-            | "pid"
-            | "port"
-            | "pos_integer"
-            | "reference"
-            | "string"
-            | "term"
-            | "timeout"
-            | "tuple"
-    ) {
-        name.push('_');
-        name
-    } else {
-        escape_atom_string(name)
+        | "arity"
+        | "atom"
+        | "binary"
+        | "bitstring"
+        | "boolean"
+        | "byte"
+        | "char"
+        | "dynamic"
+        | "float"
+        | "function"
+        | "identifier"
+        | "integer"
+        | "iodata"
+        | "iolist"
+        | "list"
+        | "map"
+        | "maybe_improper_list"
+        | "mfa"
+        | "module"
+        | "neg_integer"
+        | "nil"
+        | "no_return"
+        | "node"
+        | "non_neg_integer"
+        | "none"
+        | "nonempty_improper_list"
+        | "nonempty_list"
+        | "nonempty_string"
+        | "number"
+        | "pid"
+        | "port"
+        | "pos_integer"
+        | "record"
+        | "reference"
+        | "string"
+        | "term"
+        | "timeout"
+        | "tuple" => {
+            name.push('_');
+            name
+        }
+
+        _ => name,
     }
 }
 
 #[derive(Debug)]
-struct TypePrinter<'a> {
+struct TypeGenerator<'a> {
+    /// If this is true, all types that are generic or unbound are going to be
+    /// treated as `any()`.
+    ///
     var_as_any: bool,
-    current_module: &'a str,
+    /// A TypeVar can either be rendered as an actual type variable such as `A`
+    /// or `B`, or it can be rendered as `any()` depending on how many times it
+    /// is used.
+    /// If it is only ever used once, it is an `any()` type.
+    /// If it has more than 1 usage it is a regular type variable.
+    ///
+    /// For example:
+    ///
+    /// ```gleam
+    /// fn(a) -> String       // `a` is turned into `any()`
+    /// fn() -> Result(a, b)  // `a` and `b` are turned into `any()`
+    /// fn(a) -> a            // `a` is a type var
+    /// ```
+    ///
+    /// If present, this is a map telling us from generic variable id, to number
+    /// of times that variable is used.
+    ///
     var_usages: Option<&'a HashMap<u64, u64>>,
+    current_module: &'a str,
 }
 
-impl<'a> TypePrinter<'a> {
+impl<'a> TypeGenerator<'a> {
     fn new(current_module: &'a str) -> Self {
         Self {
             current_module,
@@ -3225,125 +4213,173 @@ impl<'a> TypePrinter<'a> {
         }
     }
 
+    /// Records the how type variables are used in order to correctly print
+    /// the type
     pub fn with_var_usages(mut self, var_usages: &'a HashMap<u64, u64>) -> Self {
         self.var_usages = Some(var_usages);
         self
     }
 
-    pub fn print(&self, type_: &Type) -> Document<'static> {
-        match type_ {
-            Type::Var { type_ } => self.print_var(&type_.borrow()),
-
-            Type::Named {
-                name,
-                module,
-                arguments,
-                ..
-            } if is_prelude_module(module) => self.print_prelude_type(name, arguments),
-
-            Type::Named {
-                name,
-                module,
-                arguments,
-                ..
-            } => self.print_type_app(module, name, arguments),
-
-            Type::Fn { arguments, return_ } => self.print_fn(arguments, return_),
-
-            Type::Tuple { elements } => tuple(elements.iter().map(|element| self.print(element))),
-        }
-    }
-
-    fn print_var(&self, type_: &TypeVar) -> Document<'static> {
-        match type_ {
-            TypeVar::Generic { .. } | TypeVar::Unbound { .. } if self.var_as_any => {
-                "any()".to_doc()
-            }
-            TypeVar::Generic { id, .. } | TypeVar::Unbound { id, .. } => match &self.var_usages {
-                Some(usages) => match usages.get(id) {
-                    Some(&0) => nil(),
-                    Some(&1) => "any()".to_doc(),
-                    _ => id_to_type_var(*id),
-                },
-                None => id_to_type_var(*id),
-            },
-            TypeVar::Link { type_ } => self.print(type_),
-        }
-    }
-
-    fn print_prelude_type(&self, name: &str, arguments: &[Arc<Type>]) -> Document<'static> {
-        match name {
-            "Nil" => "nil".to_doc(),
-            "Int" | "UtfCodepoint" => "integer()".to_doc(),
-            "String" => "binary()".to_doc(),
-            "Bool" => "boolean()".to_doc(),
-            "Float" => "float()".to_doc(),
-            "BitArray" => "bitstring()".to_doc(),
-            "List" => {
-                let arg0 = self.print(arguments.first().expect("print_prelude_type list"));
-                "list(".to_doc().append(arg0).append(")")
-            }
-            "Result" => match arguments {
-                [arg_ok, arg_err] => {
-                    let ok = tuple(["ok".to_doc(), self.print(arg_ok)]);
-                    let error = tuple(["error".to_doc(), self.print(arg_err)]);
-                    docvec![ok, break_(" |", " | "), error].nest(INDENT).group()
-                }
-                _ => panic!("print_prelude_type result expects ok and err"),
-            },
-            // Getting here should mean we either forgot a built-in type or there is a
-            // compiler error
-            name => panic!("{name} is not a built-in type."),
-        }
-    }
-
-    fn print_type_app(
-        &self,
-        module: &str,
-        name: &str,
-        arguments: &[Arc<Type>],
-    ) -> Document<'static> {
-        let arguments = join(
-            arguments.iter().map(|argument| self.print(argument)),
-            ", ".to_doc(),
-        );
-        let name = erl_safe_type_name(to_snake_case(name)).to_doc();
-        if self.current_module == module {
-            docvec![name, "(", arguments, ")"]
-        } else {
-            docvec![module_name_atom(module), ":", name, "(", arguments, ")"]
-        }
-    }
-
-    fn print_fn(&self, arguments: &[Arc<Type>], return_: &Type) -> Document<'static> {
-        let arguments = join(
-            arguments.iter().map(|argument| self.print(argument)),
-            ", ".to_doc(),
-        );
-        let return_ = self.print(return_);
-        "fun(("
-            .to_doc()
-            .append(arguments)
-            .append(") -> ")
-            .append(return_)
-            .append(")")
-    }
-
-    /// Print type vars as `any()`.
+    /// Print any type variable as `any()` rather than a generic type (like `A`,
+    /// `B`, ...).
     fn var_as_any(mut self) -> Self {
         self.var_as_any = true;
         self
+    }
+
+    pub fn type_<Output>(&self, builder: &mut impl ErlangBuilder<Output>, type_: &Type) {
+        match type_ {
+            Type::Var { type_ } => self.type_variable(builder, &type_.borrow()),
+            Type::Named {
+                name,
+                module,
+                arguments,
+                ..
+            } if is_prelude_module(module) => self.prelude_type(builder, name, arguments),
+            Type::Named {
+                name,
+                module,
+                arguments,
+                ..
+            } => self.named_type(builder, module.into(), name, arguments),
+            Type::Fn { arguments, return_ } => {
+                let function_type = builder.start_function_type();
+                for argument in arguments {
+                    self.type_(builder, argument);
+                }
+                let function_type = builder.end_function_type_arguments(function_type);
+                self.type_(builder, return_);
+                builder.end_function_type(function_type);
+            }
+            Type::Tuple { elements } => {
+                let tuple = builder.start_tuple_type();
+                for element in elements {
+                    self.type_(builder, element);
+                }
+                builder.end_tuple_type(tuple);
+            }
+        }
+    }
+
+    fn type_variable<Output>(&self, builder: &mut impl ErlangBuilder<Output>, type_: &TypeVar) {
+        match type_ {
+            TypeVar::Link { type_ } => self.type_(builder, type_),
+            TypeVar::Generic { id, .. } | TypeVar::Unbound { id, .. } => {
+                if self.var_as_any || self.type_variable_is_used_exactly_once(*id) {
+                    let any = builder.start_named_type("any");
+                    builder.end_named_type(any);
+                } else {
+                    builder.type_variable(&id_to_type_var_str(*id));
+                }
+            }
+        }
+    }
+
+    /// Given a type variable id, this returns true if the `var_usages` field
+    /// is set and the variable is used exactly once.
+    ///
+    #[must_use]
+    fn type_variable_is_used_exactly_once(&self, id: u64) -> bool {
+        match self.var_usages {
+            Some(usages) => usages.get(&id) == Some(&1),
+            None => false,
+        }
+    }
+
+    fn prelude_type<Output>(
+        &self,
+        builder: &mut impl ErlangBuilder<Output>,
+        name: &str,
+        arguments: &[Arc<Type>],
+    ) {
+        match name {
+            "Nil" => builder.literal_atom_type("nil"),
+            "Int" | "UtfCodepoint" => {
+                let integer = builder.start_named_type("integer");
+                builder.end_named_type(integer);
+            }
+            "String" => {
+                let string = builder.start_named_type("binary");
+                builder.end_named_type(string);
+            }
+            "Bool" => {
+                let boolean = builder.start_named_type("boolean");
+                builder.end_named_type(boolean);
+            }
+            "Float" => {
+                let float = builder.start_named_type("float");
+                builder.end_named_type(float);
+            }
+            "BitArray" => {
+                let bitstring = builder.start_named_type("bitstring");
+                builder.end_named_type(bitstring);
+            }
+            "List" => {
+                let list = builder.start_named_type("list");
+                let list_item = arguments
+                    .first()
+                    .expect("prelude type list with no argument");
+                self.type_(builder, list_item);
+                builder.end_named_type(list);
+            }
+            "Result" => {
+                let [ok_type, error_type] = arguments else {
+                    panic!("result type with no ok and err types")
+                };
+
+                let result = builder.start_union_type();
+
+                let ok = builder.start_tuple_type();
+                builder.literal_atom_type("ok");
+                self.type_(builder, ok_type);
+                builder.end_tuple_type(ok);
+
+                let error = builder.start_tuple_type();
+                builder.literal_atom_type("error");
+                self.type_(builder, error_type);
+                builder.end_tuple_type(error);
+
+                builder.end_union_type(result);
+            }
+
+            // Getting here should mean we either forgot a built-in type or there is a
+            // compiler error
+            name => panic!("{name} is not a prelude type."),
+        }
+    }
+
+    fn named_type<Output>(
+        &self,
+        builder: &mut impl ErlangBuilder<Output>,
+        module: EcoString,
+        name: &str,
+        arguments: &[Arc<Type>],
+    ) {
+        let name = erl_safe_type_name(to_snake_case(name));
+        if self.current_module == module {
+            let type_ = builder.start_named_type(&name);
+            for argument in arguments {
+                self.type_(builder, argument);
+            }
+            builder.end_named_type(type_);
+        } else {
+            let type_ = builder.start_remote_named_type(ErlangModuleName::new(&module), &name);
+            for argument in arguments {
+                self.type_(builder, argument);
+            }
+            builder.end_remote_named_type(type_);
+        };
     }
 }
 
 fn find_private_functions_referenced_in_importable_constants(
     module: &TypedModule,
-) -> im::HashSet<EcoString> {
-    let mut overridden_publicity = im::HashSet::new();
+) -> imbl::HashSet<EcoString> {
+    let mut overridden_publicity = imbl::HashSet::new();
 
     for constant in &module.definitions.constants {
         if constant.publicity.is_importable() {
-            find_referenced_private_functions(&constant.value, &mut overridden_publicity)
+            find_referenced_private_functions(&constant.value, &mut overridden_publicity);
         }
     }
     overridden_publicity
@@ -3351,9 +4387,10 @@ fn find_private_functions_referenced_in_importable_constants(
 
 fn find_referenced_private_functions(
     constant: &TypedConstant,
-    already_found: &mut im::HashSet<EcoString>,
+    already_found: &mut imbl::HashSet<EcoString>,
 ) {
     match constant {
+        Constant::Todo { .. } => panic!("todo constants should not reach code generation"),
         Constant::Invalid { .. } => panic!("invalid constants should not reach code generation"),
         Constant::RecordUpdate { .. } => {
             panic!("record updates should not reach code generation")
@@ -3376,15 +4413,26 @@ fn find_referenced_private_functions(
 
         TypedConstant::Record { arguments, .. } => arguments
             .iter()
+            .flatten()
             .for_each(|argument| find_referenced_private_functions(&argument.value, already_found)),
 
-        TypedConstant::StringConcatenation { left, right, .. } => {
+        TypedConstant::BinaryOperator { left, right, .. } => {
             find_referenced_private_functions(left, already_found);
             find_referenced_private_functions(right, already_found);
         }
 
-        Constant::Tuple { elements, .. } | Constant::List { elements, .. } => elements
+        Constant::Tuple { elements, .. } => elements
             .iter()
             .for_each(|element| find_referenced_private_functions(element, already_found)),
+
+        Constant::List { elements, tail, .. } => {
+            elements
+                .iter()
+                .for_each(|element| find_referenced_private_functions(element, already_found));
+
+            if let Some(tail) = tail {
+                find_referenced_private_functions(tail, already_found);
+            }
+        }
     }
 }

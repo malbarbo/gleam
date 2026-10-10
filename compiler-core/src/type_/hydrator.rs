@@ -1,12 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 use super::*;
 use crate::{
     analyse::name::check_name_case,
-    ast::{Layer, TypeAst, TypeAstConstructor, TypeAstFn, TypeAstHole, TypeAstTuple, TypeAstVar},
+    ast::{
+        Layer, TypeAst, TypeAstConstructor, TypeAstConstructorName, TypeAstFn, TypeAstHole,
+        TypeAstTuple, TypeAstVar,
+    },
     reference::ReferenceKind,
 };
 use std::sync::Arc;
 
-use im::hashmap;
+use imbl::hashmap;
 
 /// The Hydrator takes an AST representing a type (i.e. a type annotation
 /// for a function argument) and returns a Type for that annotation.
@@ -22,20 +28,20 @@ use im::hashmap;
 ///
 #[derive(Debug)]
 pub struct Hydrator {
-    created_type_variables: im::HashMap<EcoString, CreatedTypeVariable>,
+    created_type_variables: imbl::HashMap<EcoString, CreatedTypeVariable>,
     /// A rigid type is a generic type that was specified as being generic in
     /// an annotation. As such it should never be instantiated into an unbound
     /// variable. This type_id => name map is used for reporting the original
     /// annotated name on error.
-    rigid_type_names: im::HashMap<u64, EcoString>,
+    rigid_type_names: imbl::HashMap<u64, EcoString>,
     permit_new_type_variables: bool,
     permit_holes: bool,
 }
 
 #[derive(Debug)]
 pub struct ScopeResetData {
-    created_type_variables: im::HashMap<EcoString, CreatedTypeVariable>,
-    rigid_type_names: im::HashMap<u64, EcoString>,
+    created_type_variables: imbl::HashMap<EcoString, CreatedTypeVariable>,
+    rigid_type_names: imbl::HashMap<u64, EcoString>,
 }
 
 impl Default for Hydrator {
@@ -54,7 +60,7 @@ impl Hydrator {
         }
     }
 
-    pub fn named_type_variables(&self) -> im::HashMap<EcoString, CreatedTypeVariable> {
+    pub fn named_type_variables(&self) -> imbl::HashMap<EcoString, CreatedTypeVariable> {
         self.created_type_variables.clone()
     }
 
@@ -73,11 +79,11 @@ impl Hydrator {
     }
 
     pub fn disallow_new_type_variables(&mut self) {
-        self.permit_new_type_variables = false
+        self.permit_new_type_variables = false;
     }
 
     pub fn permit_holes(&mut self, flag: bool) {
-        self.permit_holes = flag
+        self.permit_holes = flag;
     }
 
     /// A rigid type is a generic type that was specified as being generic in
@@ -87,7 +93,7 @@ impl Hydrator {
         self.rigid_type_names.contains_key(id)
     }
 
-    pub fn rigid_names(&self) -> im::HashMap<u64, EcoString> {
+    pub fn rigid_names(&self) -> imbl::HashMap<u64, EcoString> {
         self.rigid_type_names.clone()
     }
 
@@ -114,8 +120,6 @@ impl Hydrator {
         match ast {
             TypeAst::Constructor(TypeAstConstructor {
                 location,
-                name_location,
-                module,
                 name,
                 arguments,
                 start_parentheses,
@@ -127,6 +131,36 @@ impl Hydrator {
                     argument_types.push((argument.location(), type_));
                 }
 
+                let module = match name {
+                    TypeAstConstructorName::Unqualified { .. } => None,
+                    TypeAstConstructorName::Qualified {
+                        module,
+                        module_location,
+                        ..
+                    } => Some((module.clone(), *module_location)),
+                };
+
+                // If the constructor has been typed incorrectly with no name,
+                // we can't figure out what type it's supposed to be, so it's
+                // going to be an error: `wibble.` <- the name is missing!
+                let (name, name_location) = match name {
+                    TypeAstConstructorName::Unqualified { name, location }
+                    | TypeAstConstructorName::Qualified {
+                        name: Some((name, location)),
+                        ..
+                    } => (name, location),
+                    TypeAstConstructorName::Qualified {
+                        name: None,
+                        module_location,
+                        dot_location,
+                        ..
+                    } => {
+                        return Err(Error::QualifiedTypeMissingName {
+                            location: SrcSpan::new(module_location.start, *dot_location),
+                        });
+                    }
+                };
+
                 // Look up the constructor
                 let TypeConstructor {
                     parameters,
@@ -134,20 +168,28 @@ impl Hydrator {
                     deprecation,
                     ..
                 } = environment
-                    .get_type_constructor(module, name)
-                    .map_err(|e| {
+                    .get_type_constructor(&module, name)
+                    .map_err(|error| {
+                        let parameter_names = generate_parameter_names(arguments);
                         convert_get_type_constructor_error(
-                            e,
+                            error,
                             location,
                             module.as_ref().map(|(_, location)| *location),
+                            parameter_names,
                         )
                     })?
                     .clone();
 
                 if let Some((type_module, type_name)) = return_type.named_type_name() {
-                    let reference_kind = if module.is_some() {
-                        ReferenceKind::Qualified
-                    } else if name != &type_name {
+                    let reference_kind = if let Some((module_alias, module_location)) = &module {
+                        ReferenceKind::Qualified {
+                            module_alias: module_alias.clone(),
+                            module_location: *module_location,
+                        }
+                    } else if let Some(UnqualifiedImport { has_alias, .. }) =
+                        &environment.unqualified_imported_types.get(name)
+                        && *has_alias
+                    {
                         ReferenceKind::Alias
                     } else {
                         ReferenceKind::Unqualified
@@ -170,9 +212,9 @@ impl Hydrator {
                     Deprecation::Deprecated { message } => {
                         problems.warning(Warning::DeprecatedItem {
                             location: *location,
-                            message: message.clone(),
+                            message,
                             layer: Layer::Type,
-                        })
+                        });
                     }
                 }
 
@@ -206,7 +248,6 @@ impl Hydrator {
 
                 // Instantiate the constructor type for this specific usage
                 let mut type_vars = hashmap![];
-                #[allow(clippy::needless_collect)] // Not needless, used for side effects
                 let parameter_types: Vec<_> = parameters
                     .into_iter()
                     .map(|type_| environment.instantiate(type_, &mut type_vars, self))
@@ -219,7 +260,8 @@ impl Hydrator {
                 for (parameter, (location, argument)) in
                     parameter_types.into_iter().zip(argument_types)
                 {
-                    unify(parameter, argument).map_err(|e| convert_unify_error(e, location))?;
+                    unify(parameter, argument)
+                        .map_err(|error| convert_unify_error(error, location))?;
                 }
 
                 Ok(return_type)
@@ -283,6 +325,7 @@ impl Hydrator {
                             name: name.clone(),
                             location: *location,
                             hint,
+                            parameter_names: vec![],
                         })
                     }
                 }
@@ -336,4 +379,55 @@ impl Hydrator {
 pub struct CreatedTypeVariable {
     pub type_: Arc<Type>,
     pub usage_count: usize,
+}
+
+/// Names for the parameters of an unknown type, used to suggest a definition.
+/// Type variables keep their name; other parameters get a generated one.
+fn generate_parameter_names(arguments: &[TypeAst]) -> Vec<EcoString> {
+    // Reserve the type variable names so generated ones don't collide with them.
+    let mut used: HashSet<EcoString> = arguments
+        .iter()
+        .filter_map(|argument| match argument {
+            TypeAst::Var(TypeAstVar { name, .. }) => Some(name.clone()),
+            TypeAst::Constructor(_) | TypeAst::Fn(_) | TypeAst::Tuple(_) | TypeAst::Hole(_) => None,
+        })
+        .collect();
+
+    let mut next = 0;
+    arguments
+        .iter()
+        .map(|argument| match argument {
+            TypeAst::Var(TypeAstVar { name, .. }) => name.clone(),
+            TypeAst::Constructor(_) | TypeAst::Fn(_) | TypeAst::Tuple(_) | TypeAst::Hole(_) => {
+                loop {
+                    let candidate = type_parameter_name(next);
+                    next += 1;
+                    if used.insert(candidate.clone()) {
+                        break candidate;
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+/// `0 -> "a"`, `25 -> "z"`, `26 -> "aa"`, ...
+fn type_parameter_name(index: usize) -> EcoString {
+    let alphabet_length = 26;
+    let char_offset = 97;
+    let mut chars = vec![];
+    let mut rest = index;
+
+    loop {
+        let n = rest % alphabet_length;
+        rest /= alphabet_length;
+        chars.push((n as u8 + char_offset) as char);
+
+        if rest == 0 {
+            break;
+        }
+        rest -= 1;
+    }
+
+    chars.into_iter().rev().collect()
 }

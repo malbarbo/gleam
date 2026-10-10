@@ -1,13 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 use super::*;
 use crate::analyse::Inferred;
 use crate::type_::{FieldMap, HasType};
 
-pub type TypedConstant = Constant<Arc<Type>, EcoString>;
-pub type UntypedConstant = Constant<(), ()>;
+pub type TypedConstant = Constant<Arc<Type>>;
+pub type UntypedConstant = Constant<()>;
 
-// TODO: remove RecordTag paramter
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Constant<T, RecordTag> {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Constant<T> {
     Int {
         location: SrcSpan,
         value: EcoString,
@@ -35,14 +37,28 @@ pub enum Constant<T, RecordTag> {
         location: SrcSpan,
         elements: Vec<Self>,
         type_: T,
+        tail: Option<Box<Self>>,
     },
 
     Record {
         location: SrcSpan,
+        arguments_start_position: u32,
         module: Option<(EcoString, SrcSpan)>,
         name: EcoString,
-        arguments: Vec<CallArg<Self>>,
-        tag: RecordTag,
+        /// These are the arguments used when calling the record.
+        /// If the record is not being called to build a value, then this will
+        /// be `None`. A couple of examples:
+        /// ```gleam
+        /// pub const a = Wibble
+        /// // arguments: None
+        ///
+        /// pub const b = Wibble()
+        /// // arguments: Some(vec![])
+        ///
+        /// pub const c = Wibble(1, 2)
+        /// // arguments: Some(vec![1, 2])
+        /// ```
+        arguments: Option<Vec<CallArg<Self>>>,
         type_: T,
         field_map: Inferred<FieldMap>,
         record_constructor: Option<Box<ValueConstructor>>,
@@ -55,7 +71,6 @@ pub enum Constant<T, RecordTag> {
         name: EcoString,
         record: RecordBeingUpdated<Self>,
         arguments: Vec<RecordUpdateArg<Self>>,
-        tag: RecordTag,
         type_: T,
         field_map: Inferred<FieldMap>,
     },
@@ -73,10 +88,17 @@ pub enum Constant<T, RecordTag> {
         type_: T,
     },
 
-    StringConcatenation {
+    /// A constant binary operation.
+    /// Most binops are not supported in constants yet, however we parse them
+    /// and produce an error during type analysis rather than during parsing so
+    /// we can get better error messages and language server code actions.
+    BinaryOperator {
         location: SrcSpan,
+        operator_start: u32,
+        operator: BinOp,
         left: Box<Self>,
         right: Box<Self>,
+        type_: T,
     },
 
     /// A placeholder constant used to allow module analysis to continue
@@ -89,6 +111,75 @@ pub enum Constant<T, RecordTag> {
         /// states.
         extra_information: Option<InvalidExpression>,
     },
+
+    Todo {
+        location: SrcSpan,
+        type_: T,
+        message: Option<Box<Self>>,
+    },
+}
+
+impl<T> Constant<T> {
+    pub fn bin_op_precedence(&self) -> u8 {
+        match self {
+            Self::BinaryOperator { operator, .. } => operator.precedence(),
+            Self::Int { .. }
+            | Self::Float { .. }
+            | Self::String { .. }
+            | Self::Var { .. }
+            | Self::List { .. }
+            | Self::Tuple { .. }
+            | Self::Todo { .. }
+            | Self::BitArray { .. }
+            | Self::Invalid { .. }
+            | Self::Record { .. }
+            | Self::RecordUpdate { .. } => u8::MAX,
+        }
+    }
+
+    pub fn bin_op_name(&self) -> Option<BinOp> {
+        if let Self::BinaryOperator { operator, .. } = self {
+            Some(*operator)
+        } else {
+            None
+        }
+    }
+
+    pub fn is_tuple(&self) -> bool {
+        match self {
+            Constant::Tuple { .. } => true,
+
+            Constant::Int { .. }
+            | Constant::Float { .. }
+            | Constant::String { .. }
+            | Constant::List { .. }
+            | Constant::Record { .. }
+            | Constant::RecordUpdate { .. }
+            | Constant::BitArray { .. }
+            | Constant::Var { .. }
+            | Constant::BinaryOperator { .. }
+            | Constant::Invalid { .. }
+            | Constant::Todo { .. } => false,
+        }
+    }
+
+    pub fn is_binop(&self) -> bool {
+        match self {
+            Constant::BinaryOperator { .. } => true,
+
+            Constant::Tuple { .. }
+            | Constant::Int { .. }
+            | Constant::Float { .. }
+            | Constant::String { .. }
+            | Constant::List { .. }
+            | Constant::Record { .. }
+            | Constant::RecordUpdate { .. }
+            | Constant::BitArray { .. }
+            | Constant::Var { .. }
+            | Constant::Invalid { .. }
+            | Constant::Todo { .. } => false,
+        }
+    }
 }
 
 impl TypedConstant {
@@ -96,14 +187,16 @@ impl TypedConstant {
         match self {
             Constant::Int { .. } => type_::int(),
             Constant::Float { .. } => type_::float(),
-            Constant::String { .. } | Constant::StringConcatenation { .. } => type_::string(),
+            Constant::String { .. } => type_::string(),
             Constant::BitArray { .. } => type_::bit_array(),
 
             Constant::List { type_, .. }
+            | Constant::BinaryOperator { type_, .. }
             | Constant::Tuple { type_, .. }
             | Constant::Record { type_, .. }
             | Constant::RecordUpdate { type_, .. }
             | Constant::Var { type_, .. }
+            | Constant::Todo { type_, .. }
             | Constant::Invalid { type_, .. } => type_.clone(),
         }
     }
@@ -117,6 +210,12 @@ impl TypedConstant {
             | Constant::Float { .. }
             | Constant::String { .. }
             | Constant::Invalid { .. } => Located::Constant(self),
+
+            Constant::Todo { message, .. } => message
+                .iter()
+                .find_map(|message| message.find_node(byte_index))
+                .unwrap_or(Located::Constant(self)),
+
             Constant::Var {
                 module: Some((module_alias, location)),
                 constructor: Some(constructor),
@@ -138,13 +237,24 @@ impl TypedConstant {
                 ValueConstructorVariant::LocalVariable { .. } => Located::Constant(self),
             },
             Constant::Var { .. } => Located::Constant(self),
-            Constant::Tuple { elements, .. } | Constant::List { elements, .. } => elements
+            Constant::Tuple { elements, .. } => elements
                 .iter()
                 .find_map(|element| element.find_node(byte_index))
                 .unwrap_or(Located::Constant(self)),
-            Constant::Record { arguments, .. } => arguments
+            Constant::List { elements, tail, .. } => elements
                 .iter()
-                .find_map(|argument| argument.find_node(byte_index))
+                .find_map(|element| element.find_node(byte_index))
+                .or_else(|| tail.as_deref().and_then(|tail| tail.find_node(byte_index)))
+                .unwrap_or(Located::Constant(self)),
+            Constant::Record {
+                arguments,
+                type_,
+                name,
+                ..
+            } => arguments
+                .iter()
+                .flatten()
+                .find_map(|argument| argument.find_node(byte_index, type_, name))
                 .unwrap_or(Located::Constant(self)),
             Constant::RecordUpdate {
                 record, arguments, ..
@@ -161,7 +271,7 @@ impl TypedConstant {
                 .iter()
                 .find_map(|segment| segment.find_node(byte_index))
                 .unwrap_or(Located::Constant(self)),
-            Constant::StringConcatenation { left, right, .. } => left
+            Constant::BinaryOperator { left, right, .. } => left
                 .find_node(byte_index)
                 .or_else(|| right.find_node(byte_index))
                 .unwrap_or(Located::Constant(self)),
@@ -176,7 +286,8 @@ impl TypedConstant {
             | Constant::Tuple { .. }
             | Constant::List { .. }
             | Constant::BitArray { .. }
-            | Constant::StringConcatenation { .. }
+            | Constant::Todo { .. }
+            | Constant::BinaryOperator { .. }
             | Constant::Invalid { .. } => None,
             Constant::Record {
                 record_constructor: value_constructor,
@@ -192,24 +303,36 @@ impl TypedConstant {
         }
     }
 
-    pub(crate) fn referenced_variables(&self) -> im::HashSet<&EcoString> {
+    pub(crate) fn referenced_variables(&self) -> imbl::HashSet<&EcoString> {
         match self {
-            Constant::Var { name, .. } => im::hashset![name],
+            Constant::Var { name, .. } => imbl::hashset![name],
 
             Constant::Invalid { .. }
             | Constant::Int { .. }
             | Constant::Float { .. }
-            | Constant::String { .. } => im::hashset![],
+            | Constant::String { .. } => imbl::hashset![],
 
-            Constant::List { elements, .. } | Constant::Tuple { elements, .. } => elements
+            Constant::Todo { message, .. } => message
+                .as_ref()
+                .map(|message| message.referenced_variables())
+                .unwrap_or(imbl::hashset![]),
+
+            Constant::Tuple { elements, .. } => elements
                 .iter()
                 .map(|element| element.referenced_variables())
-                .fold(im::hashset![], im::HashSet::union),
+                .fold(imbl::hashset![], imbl::HashSet::union),
+
+            Constant::List { elements, tail, .. } => elements
+                .iter()
+                .map(|element| element.referenced_variables())
+                .chain(tail.iter().map(|tail| tail.referenced_variables()))
+                .fold(imbl::hashset![], imbl::HashSet::union),
 
             Constant::Record { arguments, .. } => arguments
                 .iter()
+                .flatten()
                 .map(|argument| argument.value.referenced_variables())
-                .fold(im::hashset![], im::HashSet::union),
+                .fold(imbl::hashset![], imbl::HashSet::union),
 
             Constant::RecordUpdate {
                 record, arguments, ..
@@ -217,7 +340,7 @@ impl TypedConstant {
                 arguments
                     .iter()
                     .map(|arg| arg.value.referenced_variables())
-                    .fold(im::hashset![], im::HashSet::union),
+                    .fold(imbl::hashset![], imbl::HashSet::union),
             ),
 
             Constant::BitArray { segments, .. } => segments
@@ -227,11 +350,11 @@ impl TypedConstant {
                         .options
                         .iter()
                         .map(|option| option.referenced_variables())
-                        .fold(segment.value.referenced_variables(), im::HashSet::union)
+                        .fold(segment.value.referenced_variables(), imbl::HashSet::union)
                 })
-                .fold(im::hashset![], im::HashSet::union),
+                .fold(imbl::hashset![], imbl::HashSet::union),
 
-            Constant::StringConcatenation { left, right, .. } => left
+            Constant::BinaryOperator { left, right, .. } => left
                 .referenced_variables()
                 .union(right.referenced_variables()),
         }
@@ -239,6 +362,19 @@ impl TypedConstant {
 
     pub(crate) fn syntactically_eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (
+                Constant::Todo { message, .. },
+                Constant::Todo {
+                    message: other_message,
+                    ..
+                },
+            ) => match (message, other_message) {
+                (None, None) => true,
+                (Some(_), None) | (None, Some(_)) => false,
+                (Some(message), Some(other_message)) => message.syntactically_eq(other_message),
+            },
+            (Constant::Todo { .. }, _) => false,
+
             (Constant::Int { int_value: n, .. }, Constant::Int { int_value: m, .. }) => n == m,
             (Constant::Int { .. }, _) => false,
 
@@ -267,14 +403,23 @@ impl TypedConstant {
             (Constant::Tuple { .. }, _) => false,
 
             (
-                Constant::List { elements, .. },
+                Constant::List { elements, tail, .. },
                 Constant::List {
                     elements: other_elements,
+                    tail: other_tail,
                     ..
                 },
-            ) => pairwise_all(elements, other_elements, |(one, other)| {
-                one.syntactically_eq(other)
-            }),
+            ) => {
+                let tails_are_equal = match (tail, other_tail) {
+                    (None, None) => true,
+                    (None, Some(_)) | (Some(_), None) => false,
+                    (Some(tail), Some(other_tail)) => tail.syntactically_eq(other_tail),
+                };
+                tails_are_equal
+                    && pairwise_all(elements, other_elements, |(one, other)| {
+                        one.syntactically_eq(other)
+                    })
+            }
             (Constant::List { .. }, _) => false,
 
             (
@@ -297,11 +442,19 @@ impl TypedConstant {
                     (Some((one, _)), Some((other, _))) => one == other,
                 };
 
-                modules_are_equal
-                    && name == other_name
-                    && pairwise_all(arguments, other_arguments, |(one, other)| {
-                        one.label == other.label && one.value.syntactically_eq(&other.value)
-                    })
+                let arguments_are_equal = match (arguments, other_arguments) {
+                    (None, None) => true,
+                    (None, Some(_)) | (Some(_), None) => false,
+                    (Some(arguments), Some(other_arguments)) => {
+                        modules_are_equal
+                            && name == other_name
+                            && pairwise_all(arguments, other_arguments, |(one, other)| {
+                                one.label == other.label && one.value.syntactically_eq(&other.value)
+                            })
+                    }
+                };
+
+                modules_are_equal && arguments_are_equal
             }
             (Constant::Record { .. }, _) => false,
 
@@ -366,16 +519,97 @@ impl TypedConstant {
             (Constant::Var { .. }, _) => false,
 
             (
-                Constant::StringConcatenation { left, right, .. },
-                Constant::StringConcatenation {
-                    left: other_left,
-                    right: other_right,
+                Constant::BinaryOperator {
+                    left,
+                    right,
+                    operator,
                     ..
                 },
-            ) => left.syntactically_eq(other_left) && right.syntactically_eq(other_right),
-            (Constant::StringConcatenation { .. }, _) => false,
+                Constant::BinaryOperator {
+                    left: other_left,
+                    right: other_right,
+                    operator: other_operator,
+                    ..
+                },
+            ) => {
+                operator == other_operator
+                    && left.syntactically_eq(other_left)
+                    && right.syntactically_eq(other_right)
+            }
+            (Constant::BinaryOperator { .. }, _) => false,
 
             (Constant::Invalid { .. }, _) => false,
+        }
+    }
+
+    /// If the constant is a list whose elements are known at compile time, this
+    /// returns a vec of all its elements.
+    /// This can happen with:
+    /// - literal lists: `[1, 2]`
+    /// - literal lists whose tail is also known at compile time:
+    ///     - `[1, 2, ..[3, 4]]`
+    ///     - `[1, 2, ..a_known_module_constant]`
+    ///
+    pub fn list_elements(&self) -> Option<Vec<&Self>> {
+        match self {
+            Constant::List { elements, tail, .. } => {
+                if let Some(tail) = tail {
+                    // There's a tail, if it cannot be known at compile time,
+                    // then this entire list cannot be known at compile time!
+                    let tail_elements = tail.list_elements()?;
+                    Some(elements.iter().chain(tail_elements).collect())
+                } else {
+                    // There's no tail, we just return the elements
+                    Some(elements.iter().collect())
+                }
+            }
+            Constant::Var {
+                constructor: Some(constructor),
+                ..
+            } => match &constructor.variant {
+                ValueConstructorVariant::ModuleConstant { literal, .. } => literal.list_elements(),
+                ValueConstructorVariant::LocalVariable { .. }
+                | ValueConstructorVariant::ModuleFn { .. }
+                | ValueConstructorVariant::Record { .. } => None,
+            },
+
+            Constant::Int { .. }
+            | Constant::Float { .. }
+            | Constant::String { .. }
+            | Constant::Tuple { .. }
+            | Constant::Record { .. }
+            | Constant::RecordUpdate { .. }
+            | Constant::BitArray { .. }
+            | Constant::BinaryOperator { .. }
+            | Constant::Var { .. }
+            | Constant::Todo { .. }
+            | Constant::Invalid { .. } => None,
+        }
+    }
+
+    /// If the constant is a record or record update this returns its tag.
+    /// It might return `None` if the record constructor couldn't be inferred.
+    /// For example, if someone wrote a variant that doesn't exist:
+    ///
+    /// ```gleam
+    /// pub const wibble = ThisIsNotDefinedAnywhere(1, 2)
+    /// ```
+    ///
+    /// In this case the record wouldn't have a constructor, as there's no
+    /// custom type defining it anywhere!
+    ///
+    pub(crate) fn constant_record_tag(&self) -> Option<EcoString> {
+        if let Constant::Record {
+            record_constructor: Some(constructor),
+            ..
+        } = self
+            && let ValueConstructorVariant::Record { name, .. } = &constructor.variant
+        {
+            Some(name.clone())
+        } else if let Constant::RecordUpdate { name, .. } = self {
+            Some(name.clone())
+        } else {
+            None
         }
     }
 }
@@ -386,7 +620,7 @@ impl HasType for TypedConstant {
     }
 }
 
-impl<A, B> Constant<A, B> {
+impl<A> Constant<A> {
     pub fn location(&self) -> SrcSpan {
         match self {
             Constant::Int { location, .. }
@@ -399,7 +633,8 @@ impl<A, B> Constant<A, B> {
             | Constant::BitArray { location, .. }
             | Constant::Var { location, .. }
             | Constant::Invalid { location, .. }
-            | Constant::StringConcatenation { location, .. } => *location,
+            | Constant::Todo { location, .. }
+            | Constant::BinaryOperator { location, .. } => *location,
         }
     }
 
@@ -412,23 +647,24 @@ impl<A, B> Constant<A, B> {
             | Constant::Var { .. } => true,
 
             Constant::Tuple { .. }
+            | Constant::Todo { .. }
             | Constant::List { .. }
             | Constant::Record { .. }
             | Constant::RecordUpdate { .. }
             | Constant::BitArray { .. }
-            | Constant::StringConcatenation { .. }
+            | Constant::BinaryOperator { .. }
             | Constant::Invalid { .. } => false,
         }
     }
 }
 
-impl<A, B> HasLocation for Constant<A, B> {
+impl<A> HasLocation for Constant<A> {
     fn location(&self) -> SrcSpan {
         self.location()
     }
 }
 
-impl<A, B> bit_array::GetLiteralValue for Constant<A, B> {
+impl<A> bit_array::GetLiteralValue for Constant<A> {
     fn as_int_literal(&self) -> Option<BigInt> {
         if let Constant::Int { int_value, .. } = self {
             Some(int_value.clone())

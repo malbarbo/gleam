@@ -30,6 +30,7 @@ extra_applications = ["inets", "ssl"]
 
 [javascript]
 typescript_declarations = true
+source_maps = true
 runtime = "node"
 
 [javascript.deno]
@@ -97,6 +98,7 @@ allow_read = ["./database.sqlite"]
     },
     "javascript": {
       "typescript_declarations": true,
+      "source_maps": true,
       "runtime": "nodejs",
       "deno": {
         "allow_env": [
@@ -126,7 +128,6 @@ allow_read = ["./database.sqlite"]
     "target": "erlang",
     "internal_modules": [
       "my_app/internal"
-    ],
-    "tools": {}
+    ]
   }
 }

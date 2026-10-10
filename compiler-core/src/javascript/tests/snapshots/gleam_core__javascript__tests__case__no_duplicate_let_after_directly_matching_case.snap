@@ -1,0 +1,34 @@
+---
+source: compiler-core/src/javascript/tests/case.rs
+expression: "\npub fn go() {\n  let x =\n    case #(1, 2) {\n      #(1, b) -> b\n      #(_, b) -> b\n    }\n\n  let #(a, _b) = #(x, 3)\n\n  a\n}"
+---
+----- SOURCE CODE
+
+pub fn go() {
+  let x =
+    case #(1, 2) {
+      #(1, b) -> b
+      #(_, b) -> b
+    }
+
+  let #(a, _b) = #(x, 3)
+
+  a
+}
+
+----- COMPILED JAVASCRIPT
+export function go() {
+  let _block;
+  let $ = [1, 2];
+  if ($[0] === 1) {
+    let b = $[1];
+    _block = b;
+  } else {
+    let b = $[1];
+    _block = b;
+  }
+  let x = _block;
+  let $1 = [x, 3];
+  let a = $1[0];
+  return a;
+}

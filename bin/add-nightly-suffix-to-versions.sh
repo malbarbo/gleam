@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 #
 # Add the `-nightly-YYYYMMDD` suffix the version of all Rust crates in the
 # workspace. Used by the nightly build.

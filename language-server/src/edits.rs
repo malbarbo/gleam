@@ -1,11 +1,14 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2024 The Gleam contributors
+
 use ecow::EcoString;
 use lsp_types::{Position, Range, TextEdit};
 
 use gleam_core::{
-    ast::{Import, SrcSpan, TypedDefinitions},
+    ast::{Import, TypedDefinitions},
     build::Module,
-    line_numbers::LineNumbers,
 };
+use src_span::{LineNumbers, SrcSpan};
 
 use super::src_span_to_lsp_range;
 

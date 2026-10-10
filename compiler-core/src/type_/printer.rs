@@ -1,17 +1,17 @@
-use bimap::BiMap;
-use ecow::{EcoString, eco_format};
-use im::HashMap;
-use std::{collections::HashSet, sync::Arc};
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2024 The Gleam contributors
 
-use crate::{
-    ast::SrcSpan,
-    type_::{Type, TypeAliasConstructor, TypeVar},
-};
+use crate::type_::{Type, TypeAliasConstructor, TypeVar};
+use bimap::{BiHashMap, BiMap};
+use ecow::{EcoString, eco_format};
+use imbl::HashMap;
+use src_span::SrcSpan;
+use std::{collections::HashSet, sync::Arc};
 
 /// This class keeps track of what names are used for modules in the current
 /// scope, so they can be printed in errors, etc.
 ///
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Names {
     /// Types that exist in the current module, either defined or imported in an
     /// unqualified fashion.
@@ -161,11 +161,11 @@ fn compare_arguments(arguments: &[Arc<Type>], parameters: &[Arc<Type>]) -> bool 
 impl Names {
     pub fn new() -> Self {
         Self {
-            local_types: Default::default(),
-            imported_modules: Default::default(),
-            type_variables: Default::default(),
-            local_value_constructors: Default::default(),
-            reexport_aliases: Default::default(),
+            local_types: BiHashMap::new(),
+            imported_modules: HashMap::new(),
+            type_variables: HashMap::new(),
+            local_value_constructors: BiHashMap::new(),
+            reexport_aliases: HashMap::new(),
         }
     }
 
@@ -205,7 +205,7 @@ impl Names {
 
     /// Record a type variable in this module.
     pub fn type_variable_in_scope(&mut self, id: u64, local_alias: EcoString) {
-        _ = self.type_variables.insert(id, local_alias.clone());
+        _ = self.type_variables.insert(id, local_alias);
     }
 
     /// Record an imported module in this module.
@@ -267,7 +267,7 @@ impl Names {
         if print_mode == PrintMode::ExpandAliases {
             if let Some((module, _)) = self.imported_modules.get(module) {
                 return NameContextInformation::Qualified(module, name.as_str());
-            };
+            }
 
             return NameContextInformation::Unimported(module, name);
         }
@@ -291,7 +291,7 @@ impl Names {
         // This type is from a module that has been imported
         if let Some((module, _)) = self.imported_modules.get(module) {
             return NameContextInformation::Qualified(module, name.as_str());
-        };
+        }
 
         NameContextInformation::Unimported(module, name)
     }
@@ -306,7 +306,7 @@ impl Names {
         _ = self.local_value_constructors.remove_by_right(&local_alias);
         _ = self
             .local_value_constructors
-            .insert((module_name.clone(), value_name), local_alias.clone());
+            .insert((module_name, value_name), local_alias.clone());
     }
 
     /// Get the name and optional module qualifier for a named constructor.
@@ -325,7 +325,7 @@ impl Names {
         // This value is from a module that has been imported
         if let Some((module, _)) = self.imported_modules.get(module) {
             return NameContextInformation::Qualified(module, name.as_str());
-        };
+        }
 
         NameContextInformation::Unimported(module, name)
     }
@@ -405,8 +405,8 @@ impl<'a> Printer<'a> {
     pub fn new(names: &'a Names) -> Self {
         Printer {
             names,
-            uid: Default::default(),
-            printed_type_variables: Default::default(),
+            uid: 0,
+            printed_type_variables: HashMap::new(),
             printed_type_variable_names: names.type_variables.values().cloned().collect(),
         }
     }
@@ -432,9 +432,9 @@ impl<'a> Printer<'a> {
     pub fn new_without_type_variables(names: &'a Names) -> Self {
         Printer {
             names,
-            uid: Default::default(),
-            printed_type_variables: Default::default(),
-            printed_type_variable_names: Default::default(),
+            uid: 0,
+            printed_type_variables: HashMap::new(),
+            printed_type_variable_names: HashSet::new(),
         }
     }
 
@@ -514,7 +514,7 @@ impl<'a> Printer<'a> {
             Type::Var { type_, .. } => match *type_.borrow() {
                 TypeVar::Link { ref type_, .. } => self.print(type_, buffer, print_mode),
                 TypeVar::Unbound { id, .. } | TypeVar::Generic { id, .. } => {
-                    buffer.push_str(&self.type_variable(id))
+                    buffer.push_str(&self.type_variable(id));
                 }
             },
 
@@ -590,7 +590,7 @@ impl<'a> Printer<'a> {
             if rest == 0 {
                 break;
             }
-            rest -= 1
+            rest -= 1;
         }
 
         self.uid += 1;

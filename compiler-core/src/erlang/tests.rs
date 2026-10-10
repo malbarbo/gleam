@@ -1,22 +1,28 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2018 The Gleam contributors
+
 use std::time::SystemTime;
 
 use camino::Utf8PathBuf;
+use erlang_generation::{ErlangBuilder, ErlangSourceBuilder};
+use src_span::LineNumbers;
 
 use crate::analyse::TargetSupport;
+use crate::build;
 use crate::config::PackageConfig;
+use crate::erlang::echo::echo_with_helpers;
 use crate::type_::PRELUDE_MODULE_NAME;
 use crate::warning::WarningEmitter;
-use crate::{build, inline};
 use crate::{
     build::{Origin, Target},
     erlang::module,
-    line_numbers::LineNumbers,
     uid::UniqueIdGenerator,
     warning::TypeWarningEmitter,
 };
 use camino::Utf8Path;
 
 mod assert;
+mod binops;
 mod bit_arrays;
 mod case;
 mod conditional_compilation;
@@ -27,8 +33,8 @@ mod echo;
 mod external_fn;
 mod functions;
 mod guards;
-mod inlining;
 mod let_assert;
+mod lists;
 mod numbers;
 mod panic;
 mod patterns;
@@ -37,6 +43,7 @@ mod records;
 mod reserved;
 mod strings;
 mod todo;
+mod tuples;
 mod type_params;
 mod use_;
 mod variables;
@@ -46,7 +53,7 @@ pub fn compile_test_project(
     src_path: &str,
     dependencies: Vec<(&str, &str, &str)>,
 ) -> String {
-    let mut modules = im::HashMap::new();
+    let mut modules = imbl::HashMap::new();
     let ids = UniqueIdGenerator::new();
     // DUPE: preludeinsertion
     // TODO: Currently we do this here and also in the tests. It would be better
@@ -108,8 +115,6 @@ pub fn compile_test_project(
     .infer_module(ast, line_numbers, path.clone())
     .expect("should successfully infer root Erlang");
 
-    let ast = inline::module(ast, &modules);
-
     // After building everything we still need to attach the module comments, to
     // do that we're reusing the `attach_doc_and_module_comments` that's used
     // for the real thing. We just have to make a placeholder module wrapping
@@ -128,12 +133,13 @@ pub fn compile_test_project(
     built_module.attach_doc_and_module_comments();
 
     let line_numbers = LineNumbers::new(src);
-    module(&built_module.ast, &line_numbers, root)
-        .unwrap()
-        .replace(
-            std::include_str!("../../templates/echo.erl"),
-            "% ...omitted code from `templates/echo.erl`...",
-        )
+
+    let mut echo_builder = ErlangSourceBuilder::default();
+    echo_with_helpers(&mut echo_builder);
+
+    let source_builder = ErlangSourceBuilder::default();
+    module(source_builder, &built_module.ast, &line_numbers, root)
+        .replace(&echo_builder.into_output(), "\n% ...omitted echo code...")
 }
 
 #[macro_export]
@@ -992,7 +998,7 @@ pub fn main() {
 // https://github.com/gleam-lang/gleam/issues/3648
 #[test]
 fn windows_file_escaping_bug() {
-    let src = "pub fn main() { Nil }";
+    let src = "pub fn main() { panic }";
     let path = "C:\\root\\project\\test\\my\\mod.gleam";
     let output = compile_test_project(src, path, Vec::new());
     insta::assert_snapshot!(insta::internals::AutoName, output, src);

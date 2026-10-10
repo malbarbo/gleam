@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 use crate::assert_erl;
 
 #[test]
@@ -163,4 +166,42 @@ fn unused3() -> Int {
 }
 "#
     );
+}
+
+#[test]
+fn anonymous_function() {
+    assert_erl!(
+        "
+pub fn main() {
+  fn(wibble) { 1 }
+}
+"
+    )
+}
+
+#[test]
+fn anonymous_function_with_shadowing() {
+    assert_erl!(
+        "
+pub fn main() {
+  let wibble = 1
+  fn(wibble) { 1 }
+}
+"
+    )
+}
+
+#[test]
+fn nested_anonymous_functions() {
+    assert_erl!(
+        "
+pub fn main() {
+  fn(wibble) {
+    fn(wobble) {
+      wibble + wobble
+    }
+  }
+}
+"
+    )
 }

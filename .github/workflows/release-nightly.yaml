@@ -9,25 +9,23 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
-permissions:
-  contents: write
-  packages: write
-  id-token: write
-  attestations: write
-
 jobs:
   # Check if the actions already ran in the last 24 hours
   # * If yes: Don't run again
   # * If no: Clean out existing release assets
   prepare-nightly:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     name: Prepare Nightly Release
     outputs:
       should-run: ${{ steps.should-run.outputs.should-run }}
     # TODO: Re-add
     # if: ${{ github.repository == 'gleam-lang/gleam' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: print latest_commit
         run: echo ${{ github.sha }}
 
@@ -38,24 +36,20 @@ jobs:
         run: test -z $(git rev-list --after="24 hours" ${{ github.sha }}) && echo "should-run=false" >> $GITHUB_OUTPUT
 
       - name: Delete old release assets
-        uses: mknejp/delete-release-assets@v1
-        if: ${{ steps.should-run != 'false' }}
-        with:
-          token: ${{ github.token }}
-          tag: nightly
-          fail-if-no-assets: false
-          fail-if-no-release: false
-          assets: |
-            *.zip
-            *.tar.gz
-            *.sha256
-            *.sha512
-            *.sigstore
-            *.sbom.*.json
+        if: ${{ steps.should-run.outputs.should-run != 'false' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view nightly --json assets --jq '.assets[].name' | \
+            xargs -r -I {} gh release delete-asset nightly {} --yes
 
   build-release:
     name: build-release
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     environment: release
     outputs:
       release-id: ${{ steps.release.outputs.id }}
@@ -68,7 +62,7 @@ jobs:
           - aarch64-apple-darwin
           - x86_64-pc-windows-msvc
           - aarch64-pc-windows-msvc
-        toolchain: [ stable ]
+        toolchain: [stable]
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
@@ -99,7 +93,9 @@ jobs:
             cargo-tool: wasm-pack
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Update versions
         shell: bash
@@ -114,6 +110,7 @@ jobs:
           target: ${{ matrix.target }}
           cargo-tool: ${{ matrix.cargo-tool }}
           expected-binary-architecture: ${{ matrix.expected-binary-architecture }}
+          generate-gleam-licences-html: ${{ matrix.target == 'x86_64-unknown-linux-musl' }}
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -122,9 +119,7 @@ jobs:
 
       - name: Upload release archive
         id: release
-        # https://github.com/softprops/action-gh-release/issues/445
-        # uses: softprops/action-gh-release@v2
-        uses: softprops/action-gh-release@f2352b97da0095b4dbbd885a81023e3deabf4fef
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           draft: false
           prerelease: true
@@ -139,8 +134,12 @@ jobs:
 
   build-container-images:
     name: build-container-images
-    needs: [ prepare-nightly, build-release ]
+    needs: [prepare-nightly, build-release]
     runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
     if: ${{ needs.prepare-nightly.outputs.should-run != 'false' }}
     strategy:
       matrix:
@@ -158,11 +157,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: |
             .github/actions
             containers
+          persist-credentials: false
 
       - name: "Build & Push Container"
         uses: "./.github/actions/build-container"

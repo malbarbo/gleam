@@ -1,29 +1,258 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2025 The Gleam contributors
+
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Publicity, SrcSpan};
+use crate::ast::Publicity;
 use bimap::{BiMap, Overwritten};
 use ecow::EcoString;
 use petgraph::{
     Directed, Direction,
     stable_graph::{NodeIndex, StableGraph},
 };
+use src_span::SrcSpan;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Describes one of a number of situations where references can be generated.
+/// See each variant for an explanation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ReferenceKind {
-    Qualified,
+    /// A type or value which is referenced using the qualified syntax, along with
+    /// some information about the qualifier which is used for tracking module name
+    /// references. For example:
+    /// ```gleam
+    /// import gleam/option.{Some}
+    ///
+    /// pub fn main() -> option.Option(Int) {
+    /// //               ^^^^^^ `module_location` covers this
+    ///   Some(1)
+    /// }
+    /// ```
+    ///
+    /// Here, `module_alias` is `option`, as that's what's being used as a
+    /// qualifier.
+    ///
+    ///
+    /// ```gleam
+    /// import gleam/int as integer
+    ///
+    /// pub fn main() {
+    ///   integer.add(1, 2)
+    /// //^^^^^^^ `module_location` covers this
+    /// }
+    /// ```
+    ///
+    /// In this case, `module_alias` is `integer`, due to the aliased import.
+    ///
+    Qualified {
+        module_alias: EcoString,
+        module_location: SrcSpan,
+    },
+    /// A type or value is being referenced using unqualified syntax. This may
+    /// be due to being imported unqualified, or because it's from the same
+    /// module. For example:
+    ///
+    /// ```gleam
+    /// import gleam/option.{None}
+    ///
+    /// pub fn main() {
+    ///   none()
+    /// //^^^^ Unqualified
+    /// }
+    ///
+    /// fn none() {
+    ///   None
+    /// //^^^^ Unqualified
+    /// }
+    /// ```
+    ///
     Unqualified,
-    Import,
+    /// A value or type is being referenced inside an unqualified import. For
+    /// example:
+    /// ```gleam
+    /// import gleam/option.{None}
+    /// //                   ^^^^ Import
+    /// import gleam/dynamic/decode.{type Dynamic}
+    /// //                                ^^^^^^^ Import
+    /// ```
+    /// The contained span is the location of `as ...` part, if it exists,
+    /// otherwise it will just be empty. For example:
+    /// ```gleam
+    /// import gleam/option.{None as Nothing}
+    /// //                       ^^^^^^^^^^^ Alias span
+    /// ```
+    Import(SrcSpan),
+    /// The original definition location of a type or value. This also counts as
+    /// a reference for renaming and "find references" purposes. For example:
+    ///
+    /// ```gleam
+    /// pub type Wibble {
+    /// //       ^^^^^^ Definition
+    ///   Wibble(Int)
+    /// //^^^^^^ Definition
+    /// }
+    ///
+    /// pub fn extract(w: Wibble) {
+    /// //     ^^^^^^^ Definition
+    ///   let Wibble(x) = w
+    ///   x
+    /// }
+    /// ```
     Definition,
+    /// A value or type is being referenced using unqualified syntax, with a
+    /// name other than its original definition. This can be due to importing it
+    /// using an alias, or due to referencing it through a type alias. For example:
+    ///
+    /// ```gleam
+    /// import gleam/option.{None as Nothing, type Option as Maybe}
+    ///
+    /// pub fn nothing() -> Maybe(_) {
+    /// //                  ^^^^^ Alias
+    ///   Nothing
+    /// //^^^^^^^ Alias
+    /// }
+    /// ```
+    ///
     Alias,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Reference {
     pub location: SrcSpan,
     pub kind: ReferenceKind,
 }
 
+/// A reference to a module name. This is similar to a `Reference`, which covers
+/// types and values, but it is separate because we care about slightly different
+/// pieces of information when, for example, renaming modules vs. renaming types
+/// or values.
+///
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ModuleNameReference {
+    /// The location of a module name in a `ModuleSelect`, when the module name
+    /// is not aliased. For example:
+    /// ```gleam
+    /// import gleam/option
+    ///
+    /// pub fn main() -> option.Option(_) {
+    /// //               ^^^^^^ ModuleSelect
+    ///   option.None
+    /// //^^^^^^ ModuleSelect
+    /// }
+    /// ```
+    ///
+    ModuleSelect(SrcSpan),
+    /// The location of a module name in a `ModuleSelect`, when the module name
+    /// *is* aliased. For example:
+    /// ```gleam
+    /// import gleam/option as maybe
+    ///
+    /// pub fn main() -> maybe.Option(_) {
+    /// //               ^^^^^ AliasedModuleSelect
+    ///   maybe.None
+    /// //^^^^^ AliasedModuleSelect
+    /// }
+    /// ```
+    ///
+    AliasedModuleSelect(SrcSpan),
+    /// The location of a module name in an `import` statement, when the module
+    /// name is not aliased. For example:
+    /// ```gleam
+    /// import gleam/option.{None, Some}
+    /// //     ^^^^^^^^^^^^ Import     ^ `import_end`
+    /// ```
+    ///
+    Import {
+        module_location: SrcSpan,
+        import_end: u32,
+    },
+    /// The location of a module name in an `import` statement, when the module
+    /// name *is* aliased. Also stores the location of the alias (including the
+    /// `as` keyword), and what the alias is. For example:
+    /// ```gleam
+    /// import gleam/option.{None, Some} as maybe
+    /// //     ^^^^^^^^^^^^ `module_location`
+    /// //                               ^^^^^^^^ `alias_location`
+    /// ```
+    /// In this example, `alias` would be `maybe`.
+    ///
+    AliasedImport {
+        module_location: SrcSpan,
+        alias_location: SrcSpan,
+        alias: EcoString,
+    },
+}
+
 pub type ReferenceMap = HashMap<(EcoString, EcoString), Vec<Reference>>;
+
+/// A use of a record field label: a labelled argument in a record constructor
+/// call or pattern, a record update argument, or a `record.field` access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LabelReference {
+    /// The location of the label. For a shorthand (`label:`) this spans the
+    /// whole `label:`, mirroring how variable references record label
+    /// shorthands. For everything else it is just the label itself.
+    pub location: SrcSpan,
+    pub syntax: LabelSyntax,
+}
+
+/// The syntax used to write a record field label where it is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LabelSyntax {
+    /// The label is written out on its own, as in `Wibble(label: value)` or
+    /// `record.label`, so renaming it is a simple replacement.
+    Longhand,
+    /// The label shorthand syntax (`label:`), which stands for both the label
+    /// and a variable with the same name. Renaming the field then has to
+    /// expand it so the value keeps its name: `wibble:` becomes
+    /// `wobble: wibble`.
+    Shorthand,
+}
+
+/// The location at which a record field label is defined in one of the
+/// variants of a custom type.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LabelDefinition {
+    pub location: SrcSpan,
+    /// The name of the variant this label is defined in.
+    /// None means this label was not associated with a particular record's
+    /// variant, for example in the case of function argument labels
+    pub variant: Option<EcoString>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum LabelOwner {
+    /// Labels of record fields
+    Record {
+        /// The module the record is defined in.
+        module: EcoString,
+        /// The name of the type of the record.
+        name: EcoString,
+    },
+    /// Labels of function arguments
+    Function {
+        /// The module the function this label belongs to is defined in.
+        module: EcoString,
+        /// The name of the function this label is defined in.
+        name: EcoString,
+    },
+}
+
+impl LabelOwner {
+    /// The module the owner is defined in.
+    pub fn module(&self) -> &EcoString {
+        match self {
+            LabelOwner::Record { module, .. } | LabelOwner::Function { module, .. } => module,
+        }
+    }
+}
+
+/// Identifies a label within a custom type or function argument, used to look up the
+/// references to that label.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct LabelKey {
+    pub owner: LabelOwner,
+    pub label: EcoString,
+}
 
 #[derive(Debug, Clone)]
 pub struct EntityInformation {
@@ -93,9 +322,26 @@ pub struct ReferenceTracker {
     /// The locations of the references to each type in this module, used for
     /// renaming and go-to reference.
     pub type_references: ReferenceMap,
+    /// The locations of the references to each imported module, used for
+    /// renaming and go-to reference.
+    pub module_references: HashMap<EcoString, Vec<ModuleNameReference>>,
+    /// The locations of the references to each record field label in this
+    /// module, used for renaming and go-to reference.
+    pub label_references: HashMap<LabelKey, Vec<LabelReference>>,
+    /// The locations at which each record field label is defined, one per
+    /// variant that defines it, used for renaming and go-to definition.
+    pub label_definitions: HashMap<LabelKey, Vec<LabelDefinition>>,
+    pub echo_usages: Vec<SrcSpan>,
+    /// Usages of `todo`. It is different from going through warnings about
+    /// `todo`, because this field also covers `todo`s in constants.
+    pub todo_usages: Vec<SrcSpan>,
+    pub panic_usages: Vec<SrcSpan>,
 
-    /// This map is used to access the nodes of modules that were not
-    /// aliased, given their name.
+    /// Maps a module's canonical name to the node of the import it was brought
+    /// in by. Every import is inserted here (aliased or not), keyed by its full
+    /// module name, _except_ imports with a discarded alias (`as _name`), which
+    /// have no reachable node and so are absent.
+    ///
     /// We need this to keep track of references made to imports by unqualified
     /// values/types: when an unqualified item is used we want to add an edge
     /// pointing to the import it comes from, so that if the item is used the
@@ -110,7 +356,8 @@ pub struct ReferenceTracker {
     /// ```
     ///
     /// And each imported entity carries around the _name of the module_ and not
-    /// just the alias (here it would be `wibble/wobble` and not just `wobble`).
+    /// just the alias (here it would be `wibble/wobble` and not just `wobble`),
+    /// so this map is keyed by that full name rather than the local name.
     ///
     module_name_to_node: HashMap<EcoString, NodeIndex>,
 }
@@ -163,6 +410,15 @@ impl ReferenceTracker {
                 }
             }
         }
+    }
+
+    /// Add a call-graph edge from the current node to the entity with the given
+    /// name and layer, creating its node if it doesn't exist yet. If the target
+    /// is used then the current node counts as used too.
+    ///
+    fn add_reference_edge(&mut self, name: EcoString, layer: EntityLayer) {
+        let target = self.get_or_create_node(name, layer);
+        _ = self.graph.add_edge(self.current_node, target, ());
     }
 
     /// This function exists because of a specific edge-case where constants
@@ -277,11 +533,16 @@ impl ReferenceTracker {
         module_name: EcoString,
         alias_location: SrcSpan,
         import_location: SrcSpan,
+        module_location: SrcSpan,
     ) {
-        // We first record a node for the module being aliased. We use its entire
-        // name to identify it in this case and keep track of the node it's
-        // associated with.
-        self.register_module(module_name.clone(), module_name.clone(), import_location);
+        // We first record a node for the module being aliased.
+        self.register_module(
+            used_name.clone(),
+            module_name.clone(),
+            import_location,
+            module_location,
+            Some(alias_location),
+        );
 
         // Then we create a node for the alias, as the alias itself might be
         // unused!
@@ -289,7 +550,7 @@ impl ReferenceTracker {
         // Also we want to register the fact that if this alias is used then the
         // import is used: so we add a reference from the alias to the import
         // we've just added.
-        self.register_module_reference(module_name.clone());
+        self.register_module_reference_by_module_name(module_name.clone());
 
         // Finally we can add information for this alias:
         let entity = Entity {
@@ -312,11 +573,28 @@ impl ReferenceTracker {
         used_name: EcoString,
         module_name: EcoString,
         location: SrcSpan,
+        module_location: SrcSpan,
+        alias_location: Option<SrcSpan>,
     ) {
         self.current_node = self.create_node(used_name.clone(), EntityLayer::Module);
         let _ = self
             .module_name_to_node
             .insert(module_name.clone(), self.current_node);
+
+        let reference = if let Some(alias_location) = alias_location {
+            ModuleNameReference::AliasedImport {
+                module_location,
+                alias_location,
+                alias: used_name.clone(),
+            }
+        } else {
+            ModuleNameReference::Import {
+                module_location,
+                import_end: location.end,
+            }
+        };
+
+        self.register_module_name_reference(module_name.clone(), reference);
 
         let entity = Entity {
             name: used_name,
@@ -344,7 +622,7 @@ impl ReferenceTracker {
             EntityKind::ImportedConstructor { module }
             | EntityKind::ImportedType { module }
             | EntityKind::ImportedValue { module } => {
-                self.register_module_reference(module.clone())
+                self.register_module_reference_by_module_name(module.clone());
             }
         }
     }
@@ -357,11 +635,22 @@ impl ReferenceTracker {
         location: SrcSpan,
         kind: ReferenceKind,
     ) {
-        match kind {
-            ReferenceKind::Qualified | ReferenceKind::Import | ReferenceKind::Definition => {}
+        match &kind {
+            ReferenceKind::Qualified {
+                module_alias,
+                module_location,
+            } => {
+                let last_module_segment = module.split('/').next_back().unwrap_or(&module);
+                let reference = if last_module_segment == module_alias {
+                    ModuleNameReference::ModuleSelect(*module_location)
+                } else {
+                    ModuleNameReference::AliasedModuleSelect(*module_location)
+                };
+                self.register_module_name_reference(module.clone(), reference);
+            }
+            ReferenceKind::Import(_) | ReferenceKind::Definition => {}
             ReferenceKind::Alias | ReferenceKind::Unqualified => {
-                let target = self.get_or_create_node(referenced_name.clone(), EntityLayer::Value);
-                _ = self.graph.add_edge(self.current_node, target, ());
+                self.add_reference_edge(referenced_name.clone(), EntityLayer::Value);
             }
         }
 
@@ -379,10 +668,22 @@ impl ReferenceTracker {
         location: SrcSpan,
         kind: ReferenceKind,
     ) {
-        match kind {
-            ReferenceKind::Qualified | ReferenceKind::Import | ReferenceKind::Definition => {}
+        match &kind {
+            ReferenceKind::Qualified {
+                module_alias,
+                module_location,
+            } => {
+                let last_module_segment = module.split('/').next_back().unwrap_or(&module);
+                let reference = if last_module_segment == module_alias {
+                    ModuleNameReference::ModuleSelect(*module_location)
+                } else {
+                    ModuleNameReference::AliasedModuleSelect(*module_location)
+                };
+                self.register_module_name_reference(module.clone(), reference);
+            }
+            ReferenceKind::Import(_) | ReferenceKind::Definition => {}
             ReferenceKind::Alias | ReferenceKind::Unqualified => {
-                self.register_type_reference_in_call_graph(referenced_name.clone())
+                self.register_type_reference_in_call_graph(referenced_name.clone());
             }
         }
 
@@ -392,6 +693,58 @@ impl ReferenceTracker {
             .push(Reference { location, kind });
     }
 
+    /// Register a reference to a module name written explicitly in the source
+    /// code, when the module name or local alias appears. This is separate from
+    /// the call-graph edges added by `register_module_reference_by_alias`
+    /// and `register_module_reference_by_module_name`, which track references
+    /// created implicitly, for example when using unqualified imports.
+    ///
+    pub fn register_module_name_reference(
+        &mut self,
+        module: EcoString,
+        reference: ModuleNameReference,
+    ) {
+        self.module_references
+            .entry(module)
+            .or_default()
+            .push(reference);
+    }
+
+    /// Registers a use of a record field label.
+    ///
+    /// `type_` is the `(module, name)` of the type the label belongs to, as
+    /// returned by [`Type::named_type_name`].
+    pub fn register_label_reference(
+        &mut self,
+        owner: LabelOwner,
+        label: EcoString,
+        location: SrcSpan,
+        syntax: LabelSyntax,
+    ) {
+        self.label_references
+            .entry(LabelKey { owner, label })
+            .or_default()
+            .push(LabelReference { location, syntax });
+    }
+
+    /// Registers the definition of a record field label in one of the
+    /// variants of a custom type.
+    ///
+    /// `type_` is the `(module, name)` of the type being defined, as returned
+    /// by [`Type::named_type_name`].
+    pub fn register_label_definition(
+        &mut self,
+        owner: LabelOwner,
+        label: EcoString,
+        location: SrcSpan,
+        variant: Option<EcoString>,
+    ) {
+        self.label_definitions
+            .entry(LabelKey { owner, label })
+            .or_default()
+            .push(LabelDefinition { location, variant });
+    }
+
     /// Like `register_type_reference`, but doesn't modify `self.type_references`.
     /// This is used when we define a constructor for a custom type. The constructor
     /// doesn't actually "reference" its type, but if the constructor is used, the
@@ -399,14 +752,28 @@ impl ReferenceTracker {
     /// is to make a connection between them in the call graph.
     ///
     pub fn register_type_reference_in_call_graph(&mut self, name: EcoString) {
-        let target = self.get_or_create_node(name, EntityLayer::Type);
-        _ = self.graph.add_edge(self.current_node, target, ());
+        self.add_reference_edge(name, EntityLayer::Type);
     }
 
-    pub fn register_module_reference(&mut self, name: EcoString) {
-        let target = match self.module_name_to_node.get(&name) {
-            Some(target) => *target,
-            None => self.get_or_create_node(name, EntityLayer::Module),
+    /// Add a call-graph edge to a module resolved by its local name: the
+    /// alias, or the last segment of the module path when there is no alias.
+    /// Use this for references that name the module as written at the use site,
+    /// such as a qualified `wobble.thing`.
+    ///
+    pub fn register_module_reference_by_alias(&mut self, name: EcoString) {
+        self.add_reference_edge(name, EntityLayer::Module);
+    }
+
+    /// Add a call-graph edge to an import resolved by its canonical module name
+    /// via `module_name_to_node`. Use this for references that carry the full
+    /// module name rather than the local alias, such as an unqualified item
+    /// that remembers which module it came from.
+    ///
+    fn register_module_reference_by_module_name(&mut self, name: EcoString) {
+        // If the module has no node then it was imported with a discarded
+        // alias, meaning there's no import for the reference to point at.
+        let Some(target) = self.module_name_to_node.get(&name).copied() else {
+            return;
         };
         _ = self.graph.add_edge(self.current_node, target, ());
     }

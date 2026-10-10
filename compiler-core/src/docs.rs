@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 mod printer;
 mod source_links;
 #[cfg(test)]
@@ -13,6 +16,7 @@ use crate::{
     build::{Module, Package},
     config::{DocsPage, PackageConfig},
     docs::source_links::SourceLinker,
+    error::Error,
     io::{Content, FileSystemReader, OutputFile},
     package_interface::PackageInterface,
     paths::ProjectPaths,
@@ -66,7 +70,7 @@ pub fn generate_html<IO: FileSystemReader>(
     paths: &ProjectPaths,
     config: DocumentationConfig<'_>,
     fs: IO,
-) -> Vec<OutputFile> {
+) -> Result<Vec<OutputFile>, Error> {
     let DocumentationConfig {
         package_config: config,
         dependencies,
@@ -110,8 +114,8 @@ pub fn generate_html<IO: FileSystemReader>(
             path,
         });
 
-    let host = if is_hex_publish == DocContext::HexPublish {
-        "https://hexdocs.pm"
+    let url = if is_hex_publish == DocContext::HexPublish {
+        &format!("https://{}.hexdocs.pm", config.name.replace("_", "-"))
     } else {
         ""
     };
@@ -122,7 +126,7 @@ pub fn generate_html<IO: FileSystemReader>(
             .chain(repo_link)
             .chain([Link {
                 name: "Hex".into(),
-                path: format!("https://hex.pm/packages/{0}", config.name).to_string(),
+                path: format!("https://hex.pm/packages/{0}", config.name),
             }])
             .collect(),
         DocContext::Build => doc_links.chain(repo_link).collect(),
@@ -144,20 +148,35 @@ pub fn generate_html<IO: FileSystemReader>(
         .sorted()
         .collect();
 
+    let root = fs.canonicalise(paths.root())?;
+
     // Generate user-supplied (or README) pages
     for page in docs_pages {
-        let content = fs.read(&page.source).unwrap_or_default();
+        let path = paths.root().join(&page.source);
+        // Files are not permitted to be read from outside the project root.
+        let content = match fs.canonicalise(path.as_path()) {
+            Ok(path) => {
+                if path.starts_with(root.as_path()) {
+                    fs.read(&path)?
+                } else {
+                    return Err(Error::DocumentationPageOutsidePackage {
+                        path: path.to_path_buf(),
+                    });
+                }
+            }
+            Err(_) => "".into(),
+        };
         let rendered_content = render_markdown(&content, MarkdownSource::Standalone);
-        let unnest = page_unnest(&page.path);
+        let unnest = page_unnest(page.path.as_str());
 
-        let page_path_without_ext = page.path.split('.').next().unwrap_or("");
-        let page_title = match page_path_without_ext {
+        let page_path_without_extension = page.path.with_extension("");
+        let page_title = match page_path_without_extension.as_str() {
             // The index page, such as README, should not push it's page title
             "index" => format!("{} · v{}", config.name, config.version),
             // Other page title's should say so
             _other => format!("{} · {} · v{}", page.title, config.name, config.version),
         };
-        let page_meta_description = match page_path_without_ext {
+        let page_meta_description = match page_path_without_extension.as_str() {
             "index" => config.description.to_string().clone(),
             _other => "".to_owned(),
         };
@@ -175,7 +194,7 @@ pub fn generate_html<IO: FileSystemReader>(
             project_version: &config.version.to_string(),
             content: rendered_content,
             rendering_timestamp: &rendering_timestamp,
-            host,
+            url,
             unnest: &unnest,
         };
 
@@ -184,7 +203,11 @@ pub fn generate_html<IO: FileSystemReader>(
             content: Content::Text(temp.render().expect("Page template rendering")),
         });
 
-        search_items.push(search_item_for_page(&config.name, &page.path, content))
+        search_items.push(search_item_for_page(
+            &config.name,
+            page.path.as_str(),
+            content,
+        ));
     }
 
     // Generate module documentation pages
@@ -224,7 +247,7 @@ pub fn generate_html<IO: FileSystemReader>(
 
         let template = ModuleTemplate {
             gleam_version: COMPILER_VERSION,
-            host,
+            url,
             unnest,
             links: &links,
             pages: &pages,
@@ -331,7 +354,7 @@ pub fn generate_html<IO: FileSystemReader>(
 
     files.push(OutputFile {
         path: Utf8PathBuf::from("search-data.json"),
-        content: Content::Text(search_data_json.to_string()),
+        content: Content::Text(search_data_json),
     });
 
     files.push(OutputFile {
@@ -415,7 +438,14 @@ pub fn generate_html<IO: FileSystemReader>(
         ),
     });
 
-    files
+    files.push(OutputFile {
+        path: Utf8PathBuf::from("fonts/ubuntu-mono-v15-regular-box.woff2"),
+        content: Content::Binary(
+            include_bytes!("../templates/docs-fonts/ubuntu-mono-v15-regular-box.woff2").to_vec(),
+        ),
+    });
+
+    Ok(files)
 }
 
 fn search_item_for_page(package: &str, path: &str, content: String) -> SearchItem {
@@ -489,15 +519,20 @@ fn search_item_for_module(module: &Module) -> SearchItem {
 pub fn generate_json_package_interface(
     path: Utf8PathBuf,
     package: &Package,
-    cached_modules: &im::HashMap<EcoString, type_::ModuleInterface>,
+    cached_modules: &imbl::HashMap<EcoString, type_::ModuleInterface>,
 ) -> OutputFile {
     OutputFile {
         path,
-        content: Content::Text(
-            serde_json::to_string(&PackageInterface::from_package(package, cached_modules))
-                .expect("JSON module interface serialisation"),
-        ),
+        content: Content::Text(package_interface(package, cached_modules)),
     }
+}
+
+pub fn package_interface(
+    package: &Package,
+    cached_modules: &imbl::HashMap<EcoString, type_::ModuleInterface>,
+) -> String {
+    serde_json::to_string_pretty(&PackageInterface::from_package(package, cached_modules))
+        .expect("JSON module interface serialisation")
 }
 
 pub fn generate_json_package_information(path: Utf8PathBuf, config: PackageConfig) -> OutputFile {
@@ -507,7 +542,7 @@ pub fn generate_json_package_information(path: Utf8PathBuf, config: PackageConfi
     }
 }
 
-fn package_information_as_json(config: PackageConfig) -> String {
+pub fn package_information_as_json(config: PackageConfig) -> String {
     let info = PackageInformation {
         package_config: config,
     };
@@ -641,7 +676,7 @@ struct DocsValues<'a> {
 struct PageTemplate<'a> {
     gleam_version: &'a str,
     unnest: &'a str,
-    host: &'a str,
+    url: &'a str,
     page_title: &'a str,
     page_meta_description: &'a str,
     file_path: &'a Utf8PathBuf,
@@ -659,7 +694,7 @@ struct PageTemplate<'a> {
 struct ModuleTemplate<'a> {
     gleam_version: &'a str,
     unnest: String,
-    host: &'a str,
+    url: &'a str,
     page_title: &'a str,
     page_meta_description: &'a str,
     file_path: &'a Utf8PathBuf,
@@ -751,6 +786,7 @@ extra_applications = ["inets", "ssl"]
 
 [javascript]
 typescript_declarations = true
+source_maps = true
 runtime = "node"
 
 [javascript.deno]

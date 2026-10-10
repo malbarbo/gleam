@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use crate::{assert_js, assert_ts_def};
 
 #[test]
@@ -109,5 +112,66 @@ pub fn go(func) {
   let huuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuge_variable = []
 }
 "#,
+    );
+}
+
+#[test]
+fn comparison_with_empty_list() {
+    assert_js!(
+        "
+pub fn go(x) {
+  x == [] && [] == x
+}
+"
+    );
+}
+
+#[test]
+fn negated_comparison_with_empty_list() {
+    assert_js!(
+        "
+pub fn go(x) {
+  x != [] && [] != x
+}
+"
+    );
+}
+
+#[test]
+fn comparison_with_empty_list_ing_guard() {
+    assert_js!(
+        "
+pub fn go(x) {
+  case x {
+    _ if x == [] && [] == x -> 1
+    _ -> 2
+  }
+}
+"
+    );
+}
+
+#[test]
+fn negated_comparison_with_empty_list_ing_guard() {
+    assert_js!(
+        "
+pub fn go(x) {
+  case x {
+    _ if x != [] && [] != x -> 1
+    _ -> 2
+  }
+}
+"
+    );
+}
+
+#[test]
+fn long_list_is_generated_using_to_list_function() {
+    assert_js!(
+        "
+pub fn list() {
+  [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+}
+"
     );
 }

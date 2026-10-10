@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Gleam contributors
+
 use super::{compile_wasm, run_ok, wasm_type_names};
 
 #[test]

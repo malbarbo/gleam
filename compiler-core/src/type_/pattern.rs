@@ -1,6 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 use ecow::eco_format;
 use hexpm::version::{LowestVersion, Version};
-use im::hashmap;
+use imbl::hashmap;
 use itertools::Itertools;
 use num_bigint::BigInt;
 
@@ -11,11 +14,12 @@ use super::*;
 use crate::{
     analyse::{self, Inferred, name::check_name_case},
     ast::{
-        AssignName, BitArrayOption, BitArraySize, ImplicitCallArgOrigin, Layer, TailPattern,
-        TypedBitArraySize, UntypedPatternBitArraySegment,
+        AssignName, BitArrayOption, BitArraySize, ImplicitCallArgOrigin, Layer,
+        StringPrefixLeftSideAssignment, TailPattern, TypedBitArraySize,
+        UntypedPatternBitArraySegment,
     },
     parse::PatternPosition,
-    reference::ReferenceKind,
+    reference::{LabelOwner, ReferenceKind},
     type_::expression::FunctionDefinition,
 };
 use std::sync::Arc;
@@ -148,8 +152,8 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                     name.clone(),
                     LocalVariable {
                         location,
-                        origin: origin.clone(),
-                        type_: type_.clone(),
+                        origin,
+                        type_,
                         usage: Usage::UnusedSoFar,
                         scope: Scope::CurrentBitArrayPattern,
                     },
@@ -176,8 +180,12 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                                 self.problems.error(convert_unify_error(error, location));
                                 self.error_encountered = true;
                             }
-                        };
+                        }
                         unify_constructor_variants(Arc::make_mut(&mut initial.type_), &type_);
+
+                        // Register alternative pattern, so that we can mark all
+                        // alternatives as unused.
+                        self.environment.push_alternative(name, origin, location);
                     }
 
                     // This variable was not defined in the Initial multi-pattern
@@ -419,7 +427,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
     ) -> TypedPattern {
         // Any variables from other parts of the pattern are no longer in scope.
         // Only variables from the bit array pattern itself can be used.
-        for (_, variable) in self.variables.iter_mut() {
+        for variable in self.variables.values_mut() {
             variable.scope = Scope::OtherPattern;
         }
 
@@ -432,7 +440,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
 
         if let Some(s) = last_segment {
             let typed_last_segment = self.infer_pattern_segment(s, true);
-            typed_segments.push(typed_last_segment)
+            typed_segments.push(typed_last_segment);
         }
 
         TypedPattern::BitArray {
@@ -463,7 +471,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                     self.track_feature_usage(FeatureKind::UnannotatedFloatSegment, *location);
                     segment.options.push(BitArrayOption::Float {
                         location: SrcSpan::default(),
-                    })
+                    });
                 }
 
                 Pattern::Int { .. }
@@ -624,6 +632,11 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                     location: *location,
                 });
             }
+            Pattern::String { value, location } if value.is_empty() => {
+                self.problems.warning(Warning::EmptyStringBitArraySegment {
+                    location: *location,
+                });
+            }
             Pattern::Int { .. }
             | Pattern::Float { .. }
             | Pattern::String { .. }
@@ -637,14 +650,18 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
             | Pattern::BitArray { .. }
             | Pattern::StringPrefix { .. }
             | Pattern::Invalid { .. } => {}
-        };
+        }
 
-        BitArraySegment {
+        let typed_segment = BitArraySegment {
             location: segment.location,
             value: Box::new(typed_value),
             options,
             type_,
-        }
+        };
+
+        self.check_matched_int_is_in_js_bounds(&typed_segment);
+
+        typed_segment
     }
 
     /// When we have an assignment or a case expression we unify the pattern with the
@@ -733,13 +750,23 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                 self.unify_types(type_, string(), location);
 
                 // The left hand side may assign a variable, which is the prefix of the string
-                if let Some((left, left_location)) = &left_side_assignment {
+                if let Some(StringPrefixLeftSideAssignment {
+                    name: left_name,
+                    name_start_position: left_name_start_position,
+                    location: left_location,
+                }) = &left_side_assignment
+                {
+                    let left_name_location =
+                        SrcSpan::new(*left_name_start_position, left_location.end);
                     self.insert_variable(
-                        left,
+                        left_name,
                         string(),
-                        *left_location,
+                        left_name_location,
                         VariableOrigin {
-                            syntax: VariableSyntax::AssignmentPattern,
+                            syntax: VariableSyntax::AssignmentPattern {
+                                name: left_name.clone(),
+                                location: *left_location,
+                            },
                             declaration: self.position.to_declaration(),
                         },
                     );
@@ -765,7 +792,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                             .insert(right.clone(), right_location);
                         self.check_name_case(right_location, right, Named::Discard);
                     }
-                };
+                }
 
                 Pattern::StringPrefix {
                     location,
@@ -790,12 +817,21 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                         name: name.clone(),
                     });
                 }
+                // Full location of assignment from the end of pattern to the
+                // end of assignment itself, so it includes the `as` keyword.
+                let full_location = SrcSpan {
+                    start: pattern.location().end,
+                    end: location.end,
+                };
                 self.insert_variable(
                     &name,
-                    pattern.type_().clone(),
+                    pattern.type_(),
                     location,
                     VariableOrigin {
-                        syntax: VariableSyntax::AssignmentPattern,
+                        syntax: VariableSyntax::AssignmentPattern {
+                            name: name.clone(),
+                            location: full_location,
+                        },
                         declaration: self.position.to_declaration(),
                     },
                 );
@@ -1128,7 +1164,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                                     implicit: Some(ImplicitCallArgOrigin::PatternFieldSpread),
                                 });
                             }
-                        };
+                        }
                     }
                 }
 
@@ -1175,22 +1211,26 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                     Deprecation::Deprecated { message } => {
                         self.problems.warning(Warning::DeprecatedItem {
                             location,
-                            message: message.clone(),
+                            message,
                             layer: Layer::Value,
-                        })
+                        });
                     }
                 }
 
+                let kind = if let Some((module_alias, module_location)) = &module {
+                    ReferenceKind::Qualified {
+                        module_alias: module_alias.clone(),
+                        module_location: *module_location,
+                    }
+                } else {
+                    ReferenceKind::Unqualified
+                };
                 self.environment.references.register_value_reference(
                     pattern_constructor.module.clone(),
                     pattern_constructor.name.clone(),
                     &name,
                     name_location,
-                    if module.is_some() {
-                        ReferenceKind::Qualified
-                    } else {
-                        ReferenceKind::Unqualified
-                    },
+                    kind,
                 );
 
                 let instantiated_constructor_type =
@@ -1198,7 +1238,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                         .instantiate(constructor_type, &mut hashmap![], self.hydrator);
                 match instantiated_constructor_type.deref() {
                     Type::Fn { arguments, return_ } => {
-                        self.unify_types(type_.clone(), return_.clone(), location);
+                        self.unify_types(type_, return_.clone(), location);
 
                         if let Some((variable_to_infer, inferred_variant)) =
                             subject_variable.zip(return_.custom_type_inferred_variant())
@@ -1224,6 +1264,25 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                             arguments,
                             constructor_field_map,
                         );
+
+                        if let Some((type_module, type_name)) = return_.named_type_name() {
+                            for argument in &pattern_arguments {
+                                if let Some(label) = &argument.label
+                                    && let Some(label_location) = argument.label_location()
+                                    && !argument.is_implicit()
+                                {
+                                    self.environment.references.register_label_reference(
+                                        LabelOwner::Record {
+                                            module: type_module.clone(),
+                                            name: type_name.clone(),
+                                        },
+                                        label.clone(),
+                                        label_location,
+                                        argument.label_syntax(),
+                                    );
+                                }
+                            }
+                        }
 
                         Pattern::Constructor {
                             location,
@@ -1295,7 +1354,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                         && let Some(label) = &arg.label
                         && let Some(field) = field_map.fields.get(label)
                     {
-                        index = *field as usize
+                        index = *field as usize;
                     }
                 }
 
@@ -1377,10 +1436,38 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                                     .module_types
                                     .keys()
                                     .any(|type_| type_ == &name),
+                                possible_modules: self
+                                    .environment
+                                    .get_possible_modules_with_value(&name),
                             });
                         }
                     },
                 };
+
+                match &constructor.variant {
+                    ValueConstructorVariant::LocalVariable { .. } => (),
+                    ValueConstructorVariant::ModuleConstant {
+                        name: canonical,
+                        module,
+                        ..
+                    }
+                    | ValueConstructorVariant::ModuleFn {
+                        name: canonical,
+                        module,
+                        ..
+                    }
+                    | ValueConstructorVariant::Record {
+                        name: canonical,
+                        module,
+                        ..
+                    } => self.environment.references.register_value_reference(
+                        module.clone(),
+                        canonical.clone(),
+                        &name,
+                        location,
+                        ReferenceKind::Unqualified,
+                    ),
+                }
 
                 self.environment.increment_usage(&name);
                 let type_ = self.environment.instantiate(
@@ -1454,7 +1541,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                         feature_kind,
                         minimum_required_version: minimum_required_version.clone(),
                         wrongfully_allowed_version: lowest_allowed_version,
-                    })
+                    });
             }
         }
 
@@ -1496,8 +1583,54 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
             BitArraySize::Int { .. } | BitArraySize::Variable { .. } => (),
             BitArraySize::BinaryOperator { location, .. }
             | BitArraySize::Block { location, .. } => {
-                self.track_feature_usage(FeatureKind::ExpressionInSegmentSize, *location)
+                self.track_feature_usage(FeatureKind::ExpressionInSegmentSize, *location);
             }
+        }
+    }
+
+    /// This raises a warning if we're on the js target and we're matching on
+    /// an int segment that has an explicit literal size over 52 bits.
+    /// That's the maximum size of ints on the JS target, matching on anything
+    /// bigger would result in the number being truncated.
+    ///
+    fn check_matched_int_is_in_js_bounds(&mut self, segment: &TypedPatternBitArraySegment) {
+        // This only makes sense to check on the js target.
+        if self.environment.target != Target::JavaScript {
+            return;
+        }
+        // And if the current function doesn't have a JavaScript external.
+        if self.current_function.has_javascript_external {
+            return;
+        }
+        // And if the segment actually defines a variable that would end up
+        // being truncated and that is an int!
+        if !segment.type_.is_int() {
+            return;
+        }
+        let (Pattern::Assign { .. } | Pattern::Variable { .. }) = segment.value.as_ref() else {
+            return;
+        };
+
+        // The size must be a compile time known number, otherwise there's not
+        // much we can tell about it.
+        let Some(Pattern::BitArraySize(size)) = segment.size() else {
+            return;
+        };
+
+        // We need to check if there's an explicit size value for the segment.
+        let Some(size) = size.compile_time_number() else {
+            return;
+        };
+
+        let unit = segment.unit();
+        let bits = size * unit;
+
+        // If the size is above the JS limit we raise a warning.
+        if bits > BigInt::from(52) {
+            self.problems.warning(Warning::JavaScriptBitArrayUnsafeInt {
+                location: segment.location,
+                size: bits,
+            });
         }
     }
 }

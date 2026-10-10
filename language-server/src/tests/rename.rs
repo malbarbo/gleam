@@ -1,8 +1,14 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2025 The Gleam contributors
+
 use std::collections::HashMap;
 
 use lsp_types::{
-    Position, Range, RenameParams, TextDocumentPositionParams, Url, WorkDoneProgressParams,
+    Position, PrepareRenameParams, PrepareRenamePlaceholder, Range, RenameParams,
+    TextDocumentPositionParams, Uri as Url, WorkDoneProgressParams, WorkspaceEdit,
 };
+
+use crate::url_from_path;
 
 use super::{TestProject, find_position_of, hover};
 
@@ -14,24 +20,31 @@ fn rename(
     tester: &TestProject<'_>,
     new_name: &str,
     position: Position,
-) -> Result<Option<(Range, lsp_types::WorkspaceEdit)>, String> {
+) -> Result<Option<(Range, WorkspaceEdit)>, String> {
     let prepare_rename_response = tester.at(position, |engine, params, _| {
-        let params = TextDocumentPositionParams {
-            text_document: params.text_document,
-            position,
+        let params = PrepareRenameParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: params.text_document,
+                position,
+            },
+            work_done_progress_params: WorkDoneProgressParams {
+                work_done_token: None,
+            },
         };
         engine.prepare_rename(params).result.unwrap()
     });
 
     let range = match prepare_rename_response {
-        Some(lsp_types::PrepareRenameResponse::Range(range)) => range,
-        Some(lsp_types::PrepareRenameResponse::RangeWithPlaceholder { range, .. }) => range,
+        Some(lsp_types::PrepareRenameResult::Range(range)) => range,
+        Some(lsp_types::PrepareRenameResult::PrepareRenamePlaceholder(
+            PrepareRenamePlaceholder { range, .. },
+        )) => range,
         _ => return Ok(None),
     };
 
     let outcome = tester.at(position, |engine, params, _| {
         let params = RenameParams {
-            text_document_position: TextDocumentPositionParams {
+            text_document_position_params: TextDocumentPositionParams {
                 text_document: params.text_document,
                 position,
             },
@@ -46,6 +59,29 @@ fn rename(
         Ok(None) => Ok(None),
         Err(error) => Err(error.message),
     }
+}
+
+fn rename_files(tester: &TestProject<'_>, renames: &[(&str, &str)]) -> HashMap<String, String> {
+    let edit = tester.run(|engine| {
+        let params = renames
+            .iter()
+            .map(|(old_name, new_name)| {
+                let old_url =
+                    url_from_path(engine.path_for_module_name(old_name).as_str()).unwrap();
+                let new_url =
+                    url_from_path(engine.path_for_module_name(new_name).as_str()).unwrap();
+                (old_url, new_url)
+            })
+            .collect();
+        engine.rename_files(params).result.unwrap()
+    });
+
+    let changes = edit
+        .expect("No text edit found")
+        .changes
+        .expect("No text edit found");
+
+    apply_code_edit(tester, changes)
 }
 
 fn apply_rename(
@@ -75,6 +111,59 @@ fn apply_code_edit(
     modules
 }
 
+fn display_result(
+    project: &TestProject<'_>,
+    modules: HashMap<String, String>,
+    renamed_modules: HashMap<&str, &str>,
+    range: Option<Range>,
+) -> String {
+    let mut output = String::from("----- BEFORE RENAME\n");
+    for (name, src) in project.root_package_modules.iter() {
+        output.push_str("-- ");
+        output.push_str(name);
+        output.push_str(".gleam\n");
+        output.push_str(src);
+        output.push_str("\n\n");
+    }
+
+    let src = project.src;
+    let app_src_before = if let Some(range) = range {
+        hover::show_hover(src, range, range.start)
+    } else {
+        src.to_string()
+    };
+    output.push_str("-- app.gleam\n");
+    output.push_str(&app_src_before);
+    output.push_str("\n\n----- AFTER RENAME\n");
+
+    for &(name, src) in project.root_package_modules.iter() {
+        let used_name = if let Some(new_name) = renamed_modules.get(name) {
+            new_name
+        } else {
+            name
+        };
+
+        output.push_str("-- ");
+        output.push_str(used_name);
+        output.push_str(".gleam\n");
+        output.push_str(
+            modules
+                .get(name)
+                .map(|string| string.as_str())
+                .unwrap_or(src),
+        );
+        output.push_str("\n\n");
+    }
+    output.push_str("-- app.gleam\n");
+    output.push_str(
+        modules
+            .get("app")
+            .map(|string| string.as_str())
+            .unwrap_or(src),
+    );
+    output
+}
+
 macro_rules! assert_rename {
     ($code:literal, $new_name:literal, $position:expr $(,)?) => {
         assert_rename!(TestProject::for_source($code), $new_name, $position);
@@ -94,30 +183,7 @@ macro_rules! assert_rename {
         let position = $position.find_position(src);
         let (range, result) = apply_rename(&project, $new_name, position);
 
-        let mut output = String::from("----- BEFORE RENAME\n");
-        for (name, src) in project.root_package_modules.iter() {
-            output.push_str(&format!("-- {name}.gleam\n{src}\n\n"));
-        }
-        output.push_str(&format!(
-            "-- app.gleam\n{}\n\n----- AFTER RENAME\n",
-            hover::show_hover(src, range, range.start)
-        ));
-        for (name, src) in project.root_package_modules.iter() {
-            output.push_str(&format!(
-                "-- {name}.gleam\n{}\n\n",
-                result
-                    .get(*name)
-                    .map(|string| string.as_str())
-                    .unwrap_or(*src)
-            ));
-        }
-        output.push_str(&format!(
-            "-- app.gleam\n{}",
-            result
-                .get("app")
-                .map(|string| string.as_str())
-                .unwrap_or(src)
-        ));
+        let output = display_result(&project, result, HashMap::new(), Some(range));
 
         insta::assert_snapshot!(insta::internals::AutoName, output, src);
     };
@@ -149,6 +215,18 @@ macro_rules! assert_rename_error {
         let error = rename($project, $new_name, position).unwrap_err();
         let snapshot = format!("Error response message:\n\n{error}");
         insta::assert_snapshot!(insta::internals::AutoName, snapshot, src);
+    };
+}
+
+macro_rules! assert_rename_files {
+    ($(($old_name:literal, $new_name:literal, $module_src:literal)),+, $code:literal, $(,)?) => {
+        let project = TestProject::for_source($code)$(.add_module($old_name, $module_src))*;
+
+        let renames = [$(($old_name, $new_name),)*];
+        let result = rename_files(&project, &renames);
+        let output = display_result(&project, result, renames.into(), None);
+
+        insta::assert_snapshot!(insta::internals::AutoName, output, project.src);
     };
 }
 
@@ -531,6 +609,78 @@ pub fn main() {
 }
 
 #[test]
+fn rename_function_from_import() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub fn wibble() {
+  wibble()
+}
+"
+        ),
+        "
+import mod.{wibble}
+
+pub fn main() {
+  wibble()
+  mod.wibble()
+}
+",
+        "some_function",
+        find_position_of("wibble")
+    );
+}
+
+#[test]
+fn rename_function_from_aliased_import() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub fn wibble() {
+  wibble()
+}
+"
+        ),
+        "
+import mod.{wibble as wobble}
+
+pub fn main() {
+  wobble()
+  mod.wibble()
+}
+",
+        "some_function",
+        find_position_of("wobble")
+    );
+}
+
+#[test]
+fn rename_function_from_aliased_import_to_original_name() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub fn wibble() {
+  wibble()
+}
+"
+        ),
+        "
+import mod.{wibble as wobble}
+
+pub fn main() {
+  wobble()
+  mod.wibble()
+}
+",
+        "wibble",
+        find_position_of("wobble")
+    );
+}
+
+#[test]
 fn rename_aliased_function() {
     assert_rename!(
         (
@@ -738,6 +888,81 @@ pub fn main() {
 }
 
 #[test]
+fn rename_constant_from_import() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub const something = 10
+
+fn wibble() {
+  something
+}
+"
+        ),
+        "
+import mod.{something}
+
+pub fn main() {
+  something + mod.something
+}
+",
+        "ten",
+        find_position_of("something")
+    );
+}
+
+#[test]
+fn rename_constant_from_aliased_import() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub const something = 10
+
+fn wibble() {
+  something
+}
+"
+        ),
+        "
+import mod.{something as smth}
+
+pub fn main() {
+  smth + mod.something
+}
+",
+        "ten",
+        find_position_of("smth")
+    );
+}
+
+#[test]
+fn rename_constant_from_aliased_import_to_original_name() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub const something = 10
+
+fn wibble() {
+  something
+}
+"
+        ),
+        "
+import mod.{something as smth}
+
+pub fn main() {
+  smth + mod.something
+}
+",
+        "something",
+        find_position_of("smth")
+    );
+}
+
+#[test]
 fn rename_aliased_constant() {
     assert_rename!(
         (
@@ -940,6 +1165,87 @@ pub fn main() {
 ",
         "Number",
         find_position_of("Constructor(75")
+    );
+}
+
+#[test]
+fn rename_type_variant_from_import() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub type Wibble {
+  Constructor(Int)
+}
+
+fn wibble() {
+  Constructor(81)
+}
+"
+        ),
+        "
+import mod.{Constructor}
+
+pub fn main() {
+  #(Constructor(75), mod.Constructor(57))
+}
+",
+        "Number",
+        find_position_of("Constructor")
+    );
+}
+
+#[test]
+fn rename_type_variant_from_aliased_import() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub type Wibble {
+  Constructor(Int)
+}
+
+fn wibble() {
+  Constructor(81)
+}
+"
+        ),
+        "
+import mod.{Constructor as C}
+
+pub fn main() {
+  #(C(75), mod.Constructor(57))
+}
+",
+        "Number",
+        find_position_of("C")
+    );
+}
+
+#[test]
+fn rename_type_variant_from_aliased_import_to_original_name() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub type Wibble {
+  Constructor(Int)
+}
+
+fn wibble() {
+  Constructor(81)
+}
+"
+        ),
+        "
+import mod.{Constructor as C}
+
+pub fn main() {
+  #(C(75), mod.Constructor(57))
+}
+",
+        "Constructor",
+        find_position_of("C")
     );
 }
 
@@ -1269,6 +1575,69 @@ pub fn main(w: Wibble) -> mod.Wibble { todo }
 ",
         "SomeType",
         find_position_of("Wibble)")
+    );
+}
+
+#[test]
+fn rename_type_from_import() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub type Wibble { Constructor }
+
+fn wibble(w: Wibble) -> Wibble { todo }
+"
+        ),
+        "
+import mod.{type Wibble}
+
+pub fn main(w: Wibble) -> mod.Wibble { todo }
+",
+        "SomeType",
+        find_position_of("Wibble")
+    );
+}
+
+#[test]
+fn rename_type_from_aliased_import() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub type Wibble { Constructor }
+
+fn wibble(w: Wibble) -> Wibble { todo }
+"
+        ),
+        "
+import mod.{type Wibble as Wobble}
+
+pub fn main(w: Wobble) -> mod.Wibble { todo }
+",
+        "SomeType",
+        find_position_of("Wobble")
+    );
+}
+
+#[test]
+fn rename_type_from_aliased_import_to_original_name() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub type Wibble { Constructor }
+
+fn wibble(w: Wibble) -> Wibble { todo }
+"
+        ),
+        "
+import mod.{type Wibble as Wobble}
+
+pub fn main(w: Wobble) -> mod.Wibble { todo }
+",
+        "Wibble",
+        find_position_of("Wobble")
     );
 }
 
@@ -2353,5 +2722,1510 @@ pub fn main() {
         TestProject::for_source(src).add_module("maths", "pub const pi = 3.14"),
         "mth",
         find_position_of("m").nth_occurrence(5)
+    );
+}
+
+#[test]
+fn rename_local_variable_from_guard() {
+    assert_rename!(
+        "
+pub fn main() {
+  let wibble = True
+  let wobble = False
+  case wibble {
+    True if wobble -> !wibble
+    False if !wobble -> wibble
+    _ -> wobble
+  }
+}
+",
+        "something_else",
+        find_position_of("wobble").nth_occurrence(2).under_char('o')
+    );
+}
+
+#[test]
+fn alias_imported_module_from_guard() {
+    assert_rename!(
+        ("mod", "pub const wibble = 10"),
+        "
+import mod
+
+pub fn main() {
+  let wibble = True
+  case wibble {
+    True if mod.wibble < 5 -> !wibble
+    False if mod.wibble != 10 -> wibble
+    _ -> mod.wibble + 1
+  }
+}
+",
+        "module",
+        find_position_of("mod.wibble").under_char('m')
+    );
+}
+
+#[test]
+fn rename_module_select_from_guard() {
+    assert_rename!(
+        ("mod", "pub const wibble = 10"),
+        "
+import mod
+
+pub fn main() {
+  let wibble = True
+  case wibble {
+    True if mod.wibble < 5 -> !wibble
+    False if mod.wibble != 10 -> wibble
+    _ -> mod.wibble + 1
+  }
+}
+",
+        "ten",
+        find_position_of("mod.wibble").under_char('w')
+    );
+}
+
+#[test]
+fn rename_alias_with_weird_spacing() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub fn wibble() {
+  wibble()
+}
+"
+        ),
+        "
+import mod.{wibble     as         wobble}
+
+pub fn main() {
+  wobble()
+  mod.wibble()
+}
+",
+        "some_function",
+        find_position_of("wibble")
+    );
+}
+
+#[test]
+fn rename_alias_with_weird_spacing_to_original_name() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub fn wibble() {
+  wibble()
+}
+"
+        ),
+        "
+import mod.{wibble     as         wobble}
+
+pub fn main() {
+  wobble()
+  mod.wibble()
+}
+",
+        "wibble",
+        find_position_of("wibble")
+    );
+}
+
+#[test]
+fn rename_type_variable_in_function() {
+    assert_rename!(
+        "
+pub fn first(a: wibble, b: wobble) -> wibble {
+  a
+}
+",
+        "value",
+        find_position_of("wibble")
+    );
+}
+
+#[test]
+fn rename_type_variable_in_function_from_return() {
+    assert_rename!(
+        "
+pub fn first(a: wibble, b: wobble) -> wibble {
+  a
+}
+",
+        "value",
+        find_position_of("-> wibble").under_char('l')
+    );
+}
+
+#[test]
+fn rename_type_variable_in_function_body_not_used_in_head() {
+    assert_rename!(
+        "
+pub fn something() {
+  let x: Result(a, b) = todo
+  let y: a = case x {
+    Ok(a) -> a
+    Error(_) -> panic
+  }
+}
+",
+        "ok",
+        find_position_of(": a").under_char('a')
+    );
+}
+
+#[test]
+fn rename_type_variable_in_function_used_in_body() {
+    assert_rename!(
+        "
+pub fn first(a: wibble, b: wobble) -> wibble {
+  let x: wibble = a
+  let f = fn(a: wibble) -> wibble { a }
+  f(x)
+}
+",
+        "value",
+        find_position_of("wibble")
+    );
+}
+
+#[test]
+fn rename_type_variable_in_function_from_body() {
+    assert_rename!(
+        "
+pub fn first(a: wibble, b: wobble) -> wibble {
+  let x: wibble = a
+  let f = fn(a: wibble) -> wibble { a }
+  f(x)
+}
+",
+        "value",
+        find_position_of("x: wibble").under_char('i')
+    );
+}
+
+#[test]
+fn type_variable_in_separate_function_is_not_renamed() {
+    assert_rename!(
+        "
+pub fn first(a: wibble, b: wobble) -> wibble {
+  a
+}
+
+pub fn an_unrelated_function(a: wibble, b: wibble) -> wibble {
+  a
+}
+",
+        "value",
+        find_position_of("wibble")
+    );
+}
+
+#[test]
+fn rename_type_variable_in_constant() {
+    assert_rename!(
+        "
+pub const empty: List(#(anything, anything)) = []
+",
+        "a",
+        find_position_of("anything")
+    );
+}
+
+#[test]
+fn rename_type_variable_in_type_alias() {
+    assert_rename!(
+        "
+pub type Option(a) {
+  Some(a)
+  None
+}
+
+pub type Maybe(some_type) =
+  Option(some_type)
+",
+        "something",
+        find_position_of("Option(some_type").under_char('_')
+    );
+}
+
+#[test]
+fn rename_type_variable_in_type_alias_from_head() {
+    assert_rename!(
+        "
+pub type Option(a) {
+  Some(a)
+  None
+}
+
+pub type Maybe(some_type) =
+  Option(some_type)
+",
+        "something",
+        find_position_of("some_type")
+    );
+}
+
+#[test]
+fn rename_type_variable_in_custom_type_from_head() {
+    assert_rename!(
+        "
+pub type Option(anything) {
+  Some(anything)
+  None
+}
+",
+        "something",
+        find_position_of("anything")
+    );
+}
+
+#[test]
+fn rename_type_variable_in_custom_type_from_constructor() {
+    assert_rename!(
+        "
+pub type Option(anything) {
+  Some(anything)
+  None
+}
+",
+        "something",
+        find_position_of("Some(anything").under_char('i')
+    );
+}
+
+#[test]
+fn invalid_type_variable_name() {
+    assert_rename_error!(
+        "
+pub type Option(anything) {
+  Some(anything)
+  None
+}
+",
+        "SomeType",
+        find_position_of("anything")
+    );
+}
+#[test]
+fn renaming_file_modifies_imports_and_references() {
+    assert_rename_files!(
+        (
+            "wibble/wobble",
+            "wibble/wubble",
+            "
+pub type Wibble {
+  Wibble
+  Wobble
+}
+
+pub const wibble = Wibble
+"
+        ),
+        "
+import wibble/wobble.{Wibble}
+
+pub fn main() -> wobble.Wibble {
+  assert wobble.wibble == Wibble
+  wobble.Wobble
+}
+",
+    );
+}
+
+#[test]
+fn change_directory_of_file() {
+    assert_rename_files!(
+        (
+            "wobble",
+            "wibble/wobble",
+            "
+pub type Wibble {
+  Wibble
+  Wobble
+}
+
+pub const wibble = Wibble
+"
+        ),
+        "
+import wobble.{Wibble}
+
+pub fn main() -> wobble.Wibble {
+  assert wobble.wibble == Wibble
+  wobble.Wobble
+}
+",
+    );
+}
+
+#[test]
+fn rename_file_does_not_modify_aliased_imports() {
+    assert_rename_files!(
+        (
+            "wibble/wobble",
+            "wibble/wubble",
+            "
+pub type Wibble {
+  Wibble
+  Wobble
+}
+
+pub const wibble = Wibble
+"
+        ),
+        "
+import wibble/wobble.{Wibble} as wibble
+
+pub fn main() -> wibble.Wibble {
+  assert wibble.wibble == Wibble
+  wibble.Wobble
+}
+",
+    );
+}
+
+#[test]
+fn rename_file_removes_unnecessary_alias() {
+    assert_rename_files!(
+        (
+            "wibble/wobble",
+            "wibble/wibble",
+            "
+pub type Wibble {
+  Wibble
+  Wobble
+}
+
+pub const wibble = Wibble
+"
+        ),
+        "
+import wibble/wobble.{Wibble} as wibble
+
+pub fn main() -> wibble.Wibble {
+  assert wibble.wibble == Wibble
+  wibble.Wobble
+}
+",
+    );
+}
+
+#[test]
+fn rename_file_changes_all_correct_ast_nodes() {
+    assert_rename_files!(
+        (
+            "wibble",
+            "wobble",
+            "
+pub type Wibble {
+  Wibble
+  Wobble
+}
+
+pub const wibble = Wibble
+"
+        ),
+        "
+import wibble
+
+pub const one = wibble.Wibble
+
+pub const two = wibble.wibble
+
+pub fn main() -> wibble.Wibble {
+  case wibble.Wobble {
+    x if x == wibble.Wibble -> x
+    x if x == wibble.wibble -> x
+    wibble.Wobble -> wibble.wibble
+  }
+}
+",
+    );
+}
+
+#[test]
+fn rename_multiple_files() {
+    assert_rename_files!(
+        (
+            "wibble",
+            "wibble/wibble",
+            "pub type Wibble { Wibble Wobble }"
+        ),
+        (
+            "wobble",
+            "wibble/wobble",
+            "import wibble
+pub const wibble = wibble.Wobble"
+        ),
+        "
+import wibble
+import wobble
+
+pub fn main() -> wibble.Wibble {
+  wobble.wibble
+}
+",
+    );
+}
+
+#[test]
+fn rename_record_field_from_access() {
+    assert_rename!(
+        "
+type Wibble {
+  Wibble(wibble: Int)
+}
+
+pub fn main() {
+  let value = Wibble(wibble: 1)
+  value.wibble
+}
+",
+        "wobble",
+        find_position_of("value.wibble").under_char('i')
+    );
+}
+
+#[test]
+fn rename_record_field_from_constructor_label() {
+    assert_rename!(
+        "
+type Wibble {
+  Wibble(wibble: Int)
+}
+
+pub fn main() {
+  let value = Wibble(wibble: 1)
+  value.wibble
+}
+",
+        "wobble",
+        find_position_of("wibble: 1").under_char('w')
+    );
+}
+
+#[test]
+fn rename_record_field_from_pattern_label() {
+    assert_rename!(
+        "
+type Wibble {
+  Wibble(wibble: Int)
+}
+
+pub fn main(w: Wibble) {
+  case w {
+    Wibble(wibble: value) -> value
+  }
+}
+",
+        "wobble",
+        find_position_of("wibble: value").under_char('w')
+    );
+}
+
+#[test]
+fn rename_record_field_expands_label_shorthand() {
+    assert_rename!(
+        "
+type Wibble {
+  Wibble(wibble: Int)
+}
+
+pub fn main() {
+  let wibble = 1
+  let value = Wibble(wibble:)
+  value.wibble
+}
+",
+        "wobble",
+        find_position_of("value.wibble").under_char('i')
+    );
+}
+
+#[test]
+fn rename_record_field_in_record_update() {
+    assert_rename!(
+        "
+type Wibble {
+  Wibble(wibble: Int, wobble: Int)
+}
+
+pub fn main(w: Wibble) {
+  Wibble(..w, wibble: 2)
+}
+",
+        "wabble",
+        find_position_of("wibble: 2").under_char('w')
+    );
+}
+
+#[test]
+fn rename_record_field_across_modules() {
+    assert_rename!(
+        ("wibble", "pub type Wibble {\n  Wibble(wibble: Int)\n}"),
+        "
+import wibble
+
+pub fn main() {
+  let value = wibble.Wibble(wibble: 1)
+  value.wibble
+}
+",
+        "wobble",
+        find_position_of("value.wibble").under_char('i')
+    );
+}
+
+#[test]
+fn no_rename_record_field_from_other_package() {
+    let src = "
+import wibble
+
+pub fn main() {
+  let value = wibble.Wibble(wibble: 1)
+  value.wibble
+}
+";
+
+    assert_no_rename!(
+        &TestProject::for_source(src)
+            .add_hex_module("wibble", "pub type Wibble {\n  Wibble(wibble: Int)\n}"),
+        "wobble",
+        find_position_of("value.wibble").under_char('i')
+    );
+}
+
+#[test]
+fn rename_record_field_in_module_not_importing_the_type_module() {
+    assert_rename!(
+        TestProject::for_source(
+            "
+import wobble
+
+pub fn main() {
+  wobble.make().wibble
+}
+"
+        )
+        .add_module("wibble", "pub type Wibble {\n  Wibble(wibble: Int)\n}")
+        .add_module(
+            "wobble",
+            "import wibble\n\npub fn make() -> wibble.Wibble {\n  wibble.Wibble(wibble: 1)\n}"
+        ),
+        "wabble",
+        find_position_of("().wibble").under_char('b')
+    );
+}
+
+#[test]
+fn rename_record_field_with_invalid_name() {
+    assert_rename_error!(
+        "
+type Wibble {
+  Wibble(wibble: Int)
+}
+
+pub fn main() {
+  let value = Wibble(wibble: 1)
+  value.wibble
+}
+",
+        "Wobble",
+        find_position_of("value.wibble").under_char('i')
+    );
+}
+
+#[test]
+fn rename_record_field_from_definition() {
+    assert_rename!(
+        "
+type Wibble {
+  Wibble(wibble: Int)
+}
+
+pub fn main() {
+  let value = Wibble(wibble: 1)
+  value.wibble
+}
+",
+        "wobble",
+        find_position_of("wibble: Int").under_char('w')
+    );
+}
+
+#[test]
+fn rename_record_constructor_in_constant() {
+    assert_rename!(
+        "
+type Wibble {
+  Wibble(wibble: Int)
+}
+
+pub const zero = Wibble(0)
+",
+        "Wobble",
+        find_position_of("Wibble(wibble: Int)").under_char('W')
+    );
+}
+
+#[test]
+fn rename_record_field_renames_labelled_arguments_of_call_with_incorrect_arity() {
+    assert_rename!(
+        "
+type Wibble {
+  Wibble(wibble: Int, wobble: Int)
+}
+
+pub fn main() {
+  Wibble(wibble: 1)
+}
+",
+        "wabble",
+        find_position_of("wibble: Int").under_char('w')
+    );
+}
+
+#[test]
+fn rename_record_field_ignored_by_record_update_spread() {
+    // https://github.com/gleam-lang/gleam/pull/5533#pullrequestreview-4475156690
+    assert_rename!(
+        "
+type Wibble {
+  Wibble(wibble: Int, wobble: Int)
+}
+
+pub fn main(w: Wibble) {
+  Wibble(..w, wibble: 2)
+}
+",
+        "wabble",
+        find_position_of("wobble: Int").under_char('w')
+    );
+}
+
+#[test]
+fn rename_record_field_ignored_by_record_update_spread_with_expression() {
+    assert_rename!(
+        "
+type Wibble {
+  Wibble(wibble: Int, wobble: Int)
+}
+
+pub fn make() {
+  Wibble(wibble: 1, wobble: 2)
+}
+
+pub fn main() {
+  Wibble(..make(), wibble: 2)
+}
+",
+        "wabble",
+        find_position_of("wobble: Int").under_char('w')
+    );
+}
+
+#[test]
+fn rename_record_field_ignored_by_pattern_spread() {
+    assert_rename!(
+        "
+type Wibble {
+  Wibble(wibble: Int, wobble: Int)
+}
+
+pub fn main(w: Wibble) {
+  case w {
+    Wibble(wibble: a, ..) -> a
+  }
+}
+",
+        "wabble",
+        find_position_of("wobble: Int").under_char('w')
+    );
+}
+
+#[test]
+fn rename_record_field_ignored_by_bare_pattern_spread() {
+    assert_rename!(
+        "
+type Wibble {
+  Wibble(wibble: Int, wobble: Int)
+}
+
+pub fn main(w: Wibble) {
+  case w {
+    Wibble(..) -> 1
+  }
+}
+",
+        "wabble",
+        find_position_of("wibble: Int").under_char('w')
+    );
+}
+
+#[test]
+fn rename_record_field_shared_between_variants() {
+    assert_rename!(
+        "
+pub type Shape {
+  Square(colour: Int, width: Int)
+  Circle(colour: Int, radius: Int)
+}
+
+pub fn main() {
+  let shape = Square(colour: 1, width: 10)
+  case shape {
+    Circle(colour:, ..) -> colour
+    Square(..) -> shape.colour
+  }
+}
+",
+        "shade",
+        find_position_of("colour: Int, width").under_char('c')
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5861
+#[test]
+fn rename_item_with_import_alias() {
+    assert_rename!(
+        TestProject::for_source(
+            "
+import wibble.{Wibble as Wobble}
+
+pub fn main() {
+  let _ = Wobble
+}
+"
+        )
+        .add_module(
+            "wibble",
+            "
+pub type Wibble {
+  Wibble
+}
+"
+        ),
+        "Wubble",
+        find_position_of("= Wobble").under_char('b')
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5861
+#[test]
+fn rename_type_with_import_alias() {
+    assert_rename!(
+        TestProject::for_source(
+            "
+import wibble.{type Wibble as Wobble}
+
+pub fn main() -> Wobble {
+  todo
+}
+"
+        )
+        .add_module(
+            "wibble",
+            "
+pub type Wibble {
+  Wibble
+}
+"
+        ),
+        "Wubble",
+        find_position_of("-> Wobble").under_char('b')
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5861
+#[test]
+fn rename_type_with_import_alias_and_other_imported_items() {
+    assert_rename!(
+        TestProject::for_source(
+            "
+import wibble.{Wibble as Wobble, type Wibble as Wobble}
+
+pub fn main() -> Wobble {
+  Wobble
+}
+"
+        )
+        .add_module(
+            "wibble",
+            "
+pub type Wibble {
+  Wibble
+}
+"
+        ),
+        "Wubble",
+        find_position_of("-> Wobble").under_char('b')
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5861
+#[test]
+fn rename_value_with_import_alias_and_other_imported_items() {
+    assert_rename!(
+        TestProject::for_source(
+            "
+import wibble.{Wibble as Wobble, type Wibble as Wobble}
+
+pub fn main() -> Wobble {
+  Wobble
+}
+"
+        )
+        .add_module(
+            "wibble",
+            "
+pub type Wibble {
+  Wibble
+}
+"
+        ),
+        "Wubble",
+        find_position_of("Wobble").nth_occurrence(4).under_char('b')
+    );
+}
+
+#[test]
+fn rename_item_with_import_alias_to_original_name() {
+    assert_rename!(
+        TestProject::for_source(
+            "
+import wibble.{Wibble as Wobble}
+
+pub fn main() {
+  let _ = Wobble
+}
+"
+        )
+        .add_module(
+            "wibble",
+            "
+pub type Wibble {
+  Wibble
+}
+"
+        ),
+        "Wibble",
+        find_position_of("= Wobble").under_char('b')
+    );
+}
+
+#[test]
+fn rename_type_with_import_alias_to_original_name() {
+    assert_rename!(
+        TestProject::for_source(
+            "
+import wibble.{type Wibble as Wobble}
+
+pub fn main() -> Wobble {
+  todo
+}
+"
+        )
+        .add_module(
+            "wibble",
+            "
+pub type Wibble {
+  Wibble
+}
+"
+        ),
+        "Wibble",
+        find_position_of("-> Wobble").under_char('b')
+    );
+}
+
+#[test]
+fn rename_type_with_import_alias_to_original_name_with_other_items() {
+    assert_rename!(
+        TestProject::for_source(
+            "
+import wibble.{type Wibble as Wobble, Wibble as Wobble}
+
+pub fn main() -> Wobble {
+  Wobble
+}
+"
+        )
+        .add_module(
+            "wibble",
+            "
+pub type Wibble {
+  Wibble
+}
+"
+        ),
+        "Wibble",
+        find_position_of("-> Wobble").under_char('b')
+    );
+}
+
+#[test]
+fn rename_item_with_import_alias_to_original_name_with_other_items() {
+    assert_rename!(
+        TestProject::for_source(
+            "
+import wibble.{type Wibble as Wobble, Wibble as Wobble}
+
+pub fn main() -> Wobble {
+  Wobble
+}
+"
+        )
+        .add_module(
+            "wibble",
+            "
+pub type Wibble {
+  Wibble
+}
+"
+        ),
+        "Wibble",
+        find_position_of("Wobble").nth_occurrence(4).under_char('b')
+    );
+}
+
+#[test]
+fn rename_value_from_aliased_import_imported_name() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub fn wibble() {
+  wibble()
+}
+"
+        ),
+        "
+import mod.{wibble as wobble}
+
+pub fn main() {
+  wobble()
+  mod.wibble()
+}
+",
+        "some_function",
+        find_position_of("wibble")
+    );
+}
+
+#[test]
+fn rename_value_from_aliased_import_as() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub fn wibble() {
+  wibble()
+}
+"
+        ),
+        "
+import mod.{wibble as wobble}
+
+pub fn main() {
+  wobble()
+  mod.wibble()
+}
+",
+        "some_function",
+        find_position_of("as")
+    );
+}
+
+#[test]
+fn rename_value_from_aliased_import_alias_name() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub fn wibble() {
+  wibble()
+}
+"
+        ),
+        "
+import mod.{wibble as wobble}
+
+pub fn main() {
+  wobble()
+  mod.wibble()
+}
+",
+        "some_function",
+        find_position_of("wobble")
+    );
+}
+
+#[test]
+fn rename_type_from_aliased_import_type() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub type Wibble { Constructor }
+
+fn wibble(w: Wibble) -> Wibble { todo }
+"
+        ),
+        "
+import mod.{type Wibble as Wobble}
+
+pub fn main(w: Wobble) -> mod.Wibble { todo }
+",
+        "SomeType",
+        find_position_of("type")
+    );
+}
+
+#[test]
+fn rename_type_from_aliased_import_imported_name() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub type Wibble { Constructor }
+
+fn wibble(w: Wibble) -> Wibble { todo }
+"
+        ),
+        "
+import mod.{type Wibble as Wobble}
+
+pub fn main(w: Wobble) -> mod.Wibble { todo }
+",
+        "SomeType",
+        find_position_of("Wibble")
+    );
+}
+
+#[test]
+fn rename_type_from_aliased_import_as() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub type Wibble { Constructor }
+
+fn wibble(w: Wibble) -> Wibble { todo }
+"
+        ),
+        "
+import mod.{type Wibble as Wobble}
+
+pub fn main(w: Wobble) -> mod.Wibble { todo }
+",
+        "SomeType",
+        find_position_of("as")
+    );
+}
+
+#[test]
+fn rename_type_from_aliased_import_aliased_name() {
+    assert_rename!(
+        (
+            "mod",
+            "
+pub type Wibble { Constructor }
+
+fn wibble(w: Wibble) -> Wibble { todo }
+"
+        ),
+        "
+import mod.{type Wibble as Wobble}
+
+pub fn main(w: Wobble) -> mod.Wibble { todo }
+",
+        "SomeType",
+        find_position_of("Wobble")
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5681
+#[test]
+fn rename_value_with_same_named_import_alias() {
+    assert_rename!(
+        TestProject::for_source(
+            "
+pub type Wibble {
+  Wibble
+}
+"
+        )
+        .add_module(
+            "wibble",
+            "
+import app.{Wibble as Wibble}
+
+pub fn go() {
+  Wibble
+}
+"
+        ),
+        "Wobble",
+        find_position_of("Wibble").nth_occurrence(2).under_char('b')
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5681
+#[test]
+fn rename_type_with_same_named_import_alias() {
+    assert_rename!(
+        TestProject::for_source(
+            "
+pub type Wibble {
+  Wibble
+}
+"
+        )
+        .add_module(
+            "wibble",
+            "
+import app.{type Wibble as Wibble}
+
+pub fn go() -> Wibble {
+  todo
+}
+"
+        ),
+        "Wobble",
+        find_position_of("Wibble").under_char('b')
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5681
+#[test]
+fn rename_type_with_same_named_import_alias_and_other_import() {
+    assert_rename!(
+        TestProject::for_source(
+            "
+pub type Wibble {
+  Wibble
+}
+"
+        )
+        .add_module(
+            "wibble",
+            "
+import app.{type Wibble as Wibble, Wibble as Wibble}
+
+pub fn go() -> Wibble {
+  Wibble
+}
+"
+        ),
+        "Wobble",
+        find_position_of("Wibble").under_char('b')
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5681
+#[test]
+fn rename_value_with_same_named_import_alias_and_other_import() {
+    assert_rename!(
+        TestProject::for_source(
+            "
+pub type Wibble {
+  Wibble
+}
+"
+        )
+        .add_module(
+            "wibble",
+            "
+import app.{type Wibble as Wibble, Wibble as Wibble}
+
+pub fn go() -> Wibble {
+  Wibble
+}
+"
+        ),
+        "Wobble",
+        find_position_of("Wibble").nth_occurrence(2).under_char('b')
+    );
+}
+
+#[test]
+fn rename_prelude_type_to_original_name_do_not_import() {
+    assert_rename!(
+        "pub fn go() -> Nil {
+  Nil
+}",
+        "Nil",
+        find_position_of("Nil")
+    );
+}
+
+#[test]
+fn rename_prelude_value_to_original_name_do_not_import() {
+    assert_rename!(
+        "pub fn go() -> Nil {
+  Nil
+}",
+        "Nil",
+        find_position_of("Nil").nth_occurrence(2)
+    );
+}
+
+#[test]
+fn rename_prelude_type_to_original_name_remove_full_import() {
+    assert_rename!(
+        "import gleam.{type Nil as Null}
+
+pub fn go() -> Null {
+  Nil
+}",
+        "Nil",
+        find_position_of("Null").nth_occurrence(2)
+    );
+}
+
+#[test]
+fn rename_prelude_value_to_original_name_remove_full_import() {
+    assert_rename!(
+        "import gleam.{Nil as Null}
+
+pub fn go() -> Nil {
+  Null
+}",
+        "Nil",
+        find_position_of("Null").nth_occurrence(2)
+    );
+}
+
+#[test]
+fn rename_prelude_value_to_original_name_remove_item_import() {
+    assert_rename!(
+        "import gleam.{Nil as Null, type Nil as Wibble}
+
+pub fn go() -> Wibble {
+  Null
+}",
+        "Nil",
+        find_position_of("Null").nth_occurrence(2)
+    );
+}
+
+#[test]
+fn rename_function_argument_label_from_definition() {
+    assert_rename!(
+        "
+pub fn replace(in string: String, each pattern: String) -> String {
+  todo
+}
+
+pub fn main() {
+  replace(in: \"hello\", each: \"l\")
+}
+",
+        "inside",
+        find_position_of("in string").under_char('i')
+    );
+}
+
+#[test]
+fn rename_function_argument_label_from_call() {
+    assert_rename!(
+        "
+pub fn replace(in string: String, each pattern: String) -> String {
+  todo
+}
+
+pub fn main() {
+  replace(in: \"hello\", each: \"l\")
+}
+",
+        "inside",
+        find_position_of("in: \"hello\"").under_char('i')
+    );
+}
+
+#[test]
+fn rename_function_argument_label_from_qualified_call() {
+    assert_rename!(
+        (
+            "wibble",
+            "pub fn replace(in string: String, each pattern: String) -> String {\n  todo\n}"
+        ),
+        "
+import wibble
+
+pub fn main() {
+  wibble.replace(in: \"hello\", each: \"l\")
+}
+",
+        "inside",
+        find_position_of("in: \"hello\"").under_char('i')
+    );
+}
+
+#[test]
+fn rename_function_argument_label_across_modules() {
+    assert_rename!(
+        (
+            "wibble",
+            "pub fn replace(in string: String, each pattern: String) -> String {\n  todo\n}"
+        ),
+        "
+import wibble.{replace}
+
+pub fn main() {
+  replace(in: \"hello\", each: \"l\")
+  wibble.replace(in: \"world\", each: \"o\")
+}
+",
+        "inside",
+        find_position_of("in: \"hello\"").under_char('i')
+    );
+}
+
+#[test]
+fn rename_function_argument_label_expands_label_shorthand() {
+    assert_rename!(
+        "
+pub fn replace(in string: String, each pattern: String) -> String {
+  todo
+}
+
+pub fn main() {
+  let in = \"hello\"
+  replace(in:, each: \"l\")
+}
+",
+        "inside",
+        find_position_of("in string").under_char('i')
+    );
+}
+
+#[test]
+fn rename_function_argument_label_with_invalid_name() {
+    assert_rename_error!(
+        "
+pub fn replace(in string: String, each pattern: String) -> String {
+  todo
+}
+
+pub fn main() {
+  replace(in: \"hello\", each: \"l\")
+}
+",
+        "Inside",
+        find_position_of("in string").under_char('i')
+    );
+}
+
+#[test]
+fn no_rename_function_argument_label_from_other_package() {
+    let src = "
+import wibble
+
+pub fn main() {
+  wibble.replace(in: \"hello\", each: \"l\")
+}
+";
+
+    assert_no_rename!(
+        &TestProject::for_source(src).add_hex_module(
+            "wibble",
+            "pub fn replace(in string: String, each pattern: String) -> String {\n  todo\n}"
+        ),
+        "inside",
+        find_position_of("in: \"hello\"").under_char('i')
+    );
+}
+
+#[test]
+fn rename_function_argument_label_of_discarded_argument() {
+    assert_rename!(
+        "
+pub fn replace(in _string: String, each pattern: String) -> String {
+  todo
+}
+
+pub fn main() {
+  replace(in: \"hello\", each: \"l\")
+}
+",
+        "inside",
+        find_position_of("in _string").under_char('i')
+    );
+}
+
+#[test]
+fn rename_function_argument_label_of_call_with_incorrect_arity() {
+    assert_rename!(
+        "
+pub fn replace(in string: String, each pattern: String) -> String {
+  todo
+}
+
+pub fn main() {
+  replace(in: \"hello\")
+}
+",
+        "inside",
+        find_position_of("in string").under_char('i')
+    );
+}
+
+#[test]
+fn rename_function_argument_label_does_not_rename_other_function() {
+    assert_rename!(
+        "
+pub fn replace(in string: String) -> String {
+  todo
+}
+
+pub fn insert(in list: List(a)) -> List(a) {
+  todo
+}
+
+pub fn main() {
+  replace(in: \"hello\")
+  insert(in: [])
+}
+",
+        "inside",
+        find_position_of("in string").under_char('i')
+    );
+}
+
+#[test]
+fn rename_function_argument_label_of_external_function() {
+    assert_rename!(
+        "
+@external(erlang, \"wibble\", \"replace\")
+pub fn replace(in string: String, each pattern: String) -> String
+
+pub fn main() {
+  replace(in: \"hello\", each: \"l\")
+}
+",
+        "inside",
+        find_position_of("in string").under_char('i')
+    );
+}
+
+#[test]
+fn rename_function_argument_label_ignored_by_pipe() {
+    assert_rename!(
+        "
+pub fn replace(in string: String, each pattern: String) -> String {
+  todo
+}
+
+pub fn main() {
+  \"hello\" |> replace(each: \"l\")
+}
+",
+        "inside",
+        find_position_of("in string").under_char('i')
     );
 }

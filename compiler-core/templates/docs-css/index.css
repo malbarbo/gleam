@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2020 The Gleam contributors
+ */
 /* karla regular latin-ext */
 @font-face {
   font-family: "Karla";
@@ -98,6 +102,15 @@
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
     U+02DC, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
     U+FEFF, U+FFFD;
+}
+/* ubuntu mono box drawing characters */
+@font-face {
+  font-family: "Ubuntu Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../fonts/ubuntu-mono-v15-regular-box.woff2") format("woff2");
+  unicode-range: U+2500-257F, U+2580-259F;
 }
 
 :root {
@@ -596,12 +609,20 @@ body.drawer-open .label-closed {
 /* Tables */
 
 table {
+  display: block;
+  overflow-inline: auto;
   border-spacing: 0;
   border-collapse: collapse;
 }
 
 table td,
 table th {
+  /* Inside table cells we don't won't to break words anywhere, otherwise in
+  narrow columns or in tables with many columns we'd end up with columns with
+  a single character per line.
+  */
+  word-break: normal;
+  overflow-wrap: normal;
   padding: 6px 13px;
   border: 1px solid var(--table-border);
 }

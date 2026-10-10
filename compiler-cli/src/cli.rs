@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
+use ecow::EcoString;
 use gleam_core::{
     build::Telemetry,
     error::{Error, StandardIoAction},
@@ -9,7 +13,7 @@ use std::{
     io::{IsTerminal, Write},
     time::{Duration, Instant},
 };
-use termcolor::{BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
+use termcolor::{Buffer, BufferWriter, Color, ColorChoice, ColorSpec, HyperlinkSpec, WriteColor};
 
 #[derive(Debug, Default, Clone)]
 pub struct Reporter;
@@ -38,15 +42,15 @@ impl Telemetry for Reporter {
     }
 
     fn downloading_package(&self, name: &str) {
-        print_downloading(name)
+        print_downloading(name);
     }
 
     fn packages_downloaded(&self, start: Instant, count: usize) {
-        print_packages_downloaded(start, count)
+        print_packages_downloaded(start, count);
     }
 
     fn resolving_package_versions(&self) {
-        print_resolving_versions()
+        print_resolving_versions();
     }
 
     fn running(&self, name: &str) {
@@ -54,11 +58,11 @@ impl Telemetry for Reporter {
     }
 
     fn waiting_for_build_directory_lock(&self) {
-        print_waiting_for_build_directory_lock()
+        print_waiting_for_build_directory_lock();
     }
 
     fn resolved_package_versions(&self, changes: &PackageChanges) {
-        print_package_changes(changes)
+        print_package_changes(changes);
     }
 }
 
@@ -68,9 +72,9 @@ pub fn ask(question: &str) -> Result<String, Error> {
     let mut answer = String::new();
     let _ = std::io::stdin()
         .read_line(&mut answer)
-        .map_err(|e| Error::StandardIo {
+        .map_err(|error| Error::StandardIo {
             action: StandardIoAction::Read,
-            err: Some(e.kind()),
+            err: Some(error.kind()),
         })?;
     Ok(answer.trim().to_string())
 }
@@ -88,30 +92,30 @@ pub fn confirm_with_text(response: &str) -> Result<bool, Error> {
     Ok(response == answer)
 }
 
-pub fn ask_password(question: &str) -> Result<String, Error> {
+pub fn ask_password(question: &str) -> Result<EcoString, Error> {
     let prompt = format!("{question} (will not be printed as you type): ");
     rpassword::prompt_password(prompt)
-        .map_err(|e| Error::StandardIo {
+        .map_err(|error| Error::StandardIo {
             action: StandardIoAction::Read,
-            err: Some(e.kind()),
+            err: Some(error.kind()),
         })
-        .map(|s| s.trim().to_string())
+        .map(|s| EcoString::from(s.trim()))
 }
 
 pub fn print_publishing(name: &str, version: &Version) {
-    print_colourful_prefix("Publishing", &format!("{name} v{version}"))
+    print_colourful_prefix("Publishing", &format!("{name} v{version}"));
 }
 
-pub fn print_published(duration: Duration) {
-    print_colourful_prefix("Published", &format!("in {}", seconds(duration)))
+pub fn print_published(detail: &str) {
+    print_colourful_prefix("Published", detail);
 }
 
 pub fn print_retired(package: &str, version: &str) {
-    print_colourful_prefix("Retired", &format!("{package} {version}"))
+    print_colourful_prefix("Retired", &format!("{package} {version}"));
 }
 
 pub fn print_unretired(package: &str, version: &str) {
-    print_colourful_prefix("Unretired", &format!("{package} {version}"))
+    print_colourful_prefix("Unretired", &format!("{package} {version}"));
 }
 
 pub fn print_publishing_documentation() {
@@ -119,47 +123,58 @@ pub fn print_publishing_documentation() {
 }
 
 fn print_downloading(text: &str) {
-    print_colourful_prefix("Downloading", text)
+    print_colourful_prefix("Downloading", text);
 }
 
 fn print_waiting_for_build_directory_lock() {
-    print_colourful_prefix("Waiting", "for build directory lock")
+    print_colourful_prefix("Waiting", "for build directory lock");
 }
 
 fn print_resolving_versions() {
-    print_colourful_prefix("Resolving", "versions")
+    print_colourful_prefix("Resolving", "versions");
 }
 
 fn print_compiling(text: &str) {
-    print_colourful_prefix("Compiling", text)
+    print_colourful_prefix("Compiling", text);
 }
 
 pub(crate) fn print_exported(text: &str) {
-    print_colourful_prefix("Exported", text)
+    print_colourful_prefix("Exported", text);
 }
 
 pub(crate) fn print_checking(text: &str) {
-    print_colourful_prefix("Checking", text)
+    print_colourful_prefix("Checking", text);
 }
 
 pub(crate) fn print_compiled(duration: Duration) {
-    print_colourful_prefix("Compiled", &format!("in {}", seconds(duration)))
+    print_colourful_prefix("Compiled", &format!("in {}", seconds(duration)));
 }
 
 pub(crate) fn print_checked(duration: Duration) {
-    print_colourful_prefix("Checked", &format!("in {}", seconds(duration)))
+    print_colourful_prefix("Checked", &format!("in {}", seconds(duration)));
 }
 
 pub(crate) fn print_running(text: &str) {
-    print_colourful_prefix("Running", text)
+    print_colourful_prefix("Running", text);
 }
 
 pub(crate) fn print_package_changes(changes: &PackageChanges) {
     for (name, version) in changes.added.iter().sorted() {
         print_added(&format!("{name} v{version}"));
     }
-    for Changed { name, old, new } in changes.changed.iter().sorted_by_key(|p| &p.name) {
-        print_changed(&format!("{name} v{old} -> v{new}"));
+    for Changed {
+        name,
+        old,
+        new,
+        from_hex,
+    } in changes.changed.iter().sorted_by_key(|p| &p.name)
+    {
+        let text = format!("{name} v{old} -> v{new}");
+        if *from_hex {
+            print_changed_with_link(&text, &format!("https://hex.pm/diff/{name}/{old}..{new}"));
+        } else {
+            print_changed(&text);
+        }
     }
     for ChangedGit {
         name,
@@ -175,19 +190,47 @@ pub(crate) fn print_package_changes(changes: &PackageChanges) {
 }
 
 fn print_added(text: &str) {
-    print_colourful_prefix("Added", text)
+    print_colourful_prefix("Added", text);
 }
 
 fn print_changed(text: &str) {
-    print_colourful_prefix("Changed", text)
+    print_colourful_prefix("Changed", text);
+}
+
+fn print_changed_with_link(text: &str, url: &str) {
+    let buffer_writer = stderr_buffer_writer();
+    let mut buffer = buffer_writer.buffer();
+    write_colourful_prefix(&mut buffer, "Changed", text);
+    buffer
+        .set_color(
+            ColorSpec::new()
+                .set_intense(true)
+                .set_fg(Some(Color::Black)),
+        )
+        .expect("print_changed_with_link");
+    write!(buffer, " (").expect("print_changed_with_link");
+    // Hyperlinks are only emitted when colours are enabled for the terminal
+    buffer
+        .set_hyperlink(&HyperlinkSpec::open(url.as_bytes()))
+        .expect("print_changed_with_link");
+    write!(buffer, "{url}").expect("print_changed_with_link");
+    buffer
+        .set_hyperlink(&HyperlinkSpec::close())
+        .expect("print_changed_with_link");
+    write!(buffer, ")").expect("print_changed_with_link");
+    buffer.reset().expect("print_changed_with_link");
+    writeln!(buffer).expect("print_changed_with_link");
+    buffer_writer
+        .print(&buffer)
+        .expect("print_changed_with_link");
 }
 
 fn print_removed(text: &str) {
-    print_colourful_prefix("Removed", text)
+    print_colourful_prefix("Removed", text);
 }
 
 pub(crate) fn print_generating_documentation() {
-    print_colourful_prefix("Generating", "documentation")
+    print_colourful_prefix("Generating", "documentation");
 }
 
 pub(crate) fn print_transferring_ownership() {
@@ -198,13 +241,21 @@ pub(crate) fn print_transferred_ownership() {
     print_colourful_prefix("Transferred", "ownership");
 }
 
+pub(crate) fn print_adding_owner() {
+    print_colourful_prefix("Adding", "owner");
+}
+
+pub(crate) fn print_added_owner() {
+    print_colourful_prefix("Added", "owner");
+}
+
 fn print_packages_downloaded(start: Instant, count: usize) {
     let elapsed = seconds(start.elapsed());
     let msg = match count {
         1 => format!("1 package in {elapsed}"),
         _ => format!("{count} packages in {elapsed}"),
     };
-    print_colourful_prefix("Downloaded", &msg)
+    print_colourful_prefix("Downloaded", &msg);
 }
 
 pub fn seconds(duration: Duration) -> String {
@@ -214,6 +265,12 @@ pub fn seconds(duration: Duration) -> String {
 pub fn print_colourful_prefix(prefix: &str, text: &str) {
     let buffer_writer = stderr_buffer_writer();
     let mut buffer = buffer_writer.buffer();
+    write_colourful_prefix(&mut buffer, prefix, text);
+    writeln!(buffer).expect("print_green_prefix");
+    buffer_writer.print(&buffer).expect("print_green_prefix");
+}
+
+fn write_colourful_prefix(buffer: &mut Buffer, prefix: &str, text: &str) {
     buffer
         .set_color(
             ColorSpec::new()
@@ -225,8 +282,7 @@ pub fn print_colourful_prefix(prefix: &str, text: &str) {
     buffer
         .set_color(&ColorSpec::new())
         .expect("print_green_prefix");
-    writeln!(buffer, " {text}").expect("print_green_prefix");
-    buffer_writer.print(&buffer).expect("print_green_prefix");
+    write!(buffer, " {text}").expect("print_green_prefix");
 }
 
 pub fn stderr_buffer_writer() -> BufferWriter {

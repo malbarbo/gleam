@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 use std::collections::HashSet;
 use std::time::SystemTime;
 
@@ -7,8 +10,8 @@ use gleam_core::{
     Result,
     error::Error,
     io::{
-        BeamCompiler, Command, CommandExecutor, FileSystemReader, FileSystemWriter, ReadDir, Stdio,
-        WrappedReader, memory::InMemoryFileSystem,
+        BeamCompilerIO, Command, CommandExecutor, FileSystemReader, FileSystemWriter, ReadDir,
+        Stdio, WrappedReader, memory::InMemoryFileSystem,
     },
 };
 
@@ -151,6 +154,10 @@ where
     fn canonicalise(&self, path: &Utf8Path) -> Result<Utf8PathBuf, Error> {
         self.io.canonicalise(path)
     }
+
+    fn is_same_file(&self, _left: &Utf8Path, _right: &Utf8Path) -> Result<bool, Error> {
+        unreachable!("is_same_file unimplemented")
+    }
 }
 
 impl<IO> CommandExecutor for FileSystemProxy<IO>
@@ -162,9 +169,9 @@ where
     }
 }
 
-impl<IO> BeamCompiler for FileSystemProxy<IO>
+impl<IO> BeamCompilerIO for FileSystemProxy<IO>
 where
-    IO: BeamCompiler,
+    IO: BeamCompilerIO,
 {
     fn compile_beam(
         &self,
@@ -172,7 +179,7 @@ where
         _lib: &Utf8Path,
         _modules: &HashSet<Utf8PathBuf>,
         _stdio: Stdio,
-    ) -> Result<Vec<String>, Error> {
+    ) -> Result<(), Error> {
         panic!("The language server is not permitted to create subprocesses")
     }
 }

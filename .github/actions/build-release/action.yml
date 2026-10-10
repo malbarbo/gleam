@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Gleam contributors
+
 name: "Build Gleam"
 description: "Build Gleam Release"
 inputs:
@@ -17,6 +20,10 @@ inputs:
     description: "Expected Binary Architecture"
     required: false
     default: ""
+  generate-gleam-licences-html:
+    description: "Generate gleam-licences.html"
+    required: false
+    default: "false"
   azure-tenant-id:
     description: "Azure Tenant ID for Windows Code Signing"
     required: false
@@ -34,9 +41,6 @@ inputs:
     required: false
 
 outputs:
-  archive:
-    description: "Path to build asset"
-    value: "${{ steps.build.outputs.archive }}"
   files:
     description: "Path to all files"
     value: |
@@ -46,12 +50,13 @@ outputs:
       ${{ steps.build.outputs.archive }}.sigstore
       ${{ steps.build.outputs.archive }}.sbom.spdx.json
       ${{ steps.build.outputs.archive }}.sbom.cyclonedx.json
+      ${{ inputs.generate-gleam-licences-html == 'true' && 'gleam-licences.html' || '' }}
 
 runs:
   using: "composite"
   steps:
     - name: Install Rust toolchain
-      uses: actions-rust-lang/setup-rust-toolchain@v1
+      uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
       with:
         toolchain: ${{ inputs.toolchain }}
         target: ${{ inputs.target }}
@@ -65,7 +70,7 @@ runs:
 
     - name: Build WASM release binary
       if: ${{ inputs.target != 'wasm32-unknown-unknown' }}
-      uses: clechasseur/rs-cargo@v3
+      uses: clechasseur/rs-cargo@a12d4742fa9b832ccb29dc394a68ab577b0c9fb8 # v5.1.0
       with:
         command: build
         args: --release --target ${{ inputs.target }}
@@ -85,18 +90,21 @@ runs:
       if: ${{ inputs.expected-binary-architecture }}
       shell: bash
       run: |
-        BINARY_PATH="target/${{ inputs.target }}/release/gleam"
-        if [[ "${{ inputs.target }}" == *"windows"* ]]; then
+        BINARY_PATH="target/${INPUTS_TARGET}/release/gleam"
+        if [[ "${INPUTS_TARGET}" == *"windows"* ]]; then
           BINARY_PATH="${BINARY_PATH}.exe"
         fi
 
-        if ! file -b "$BINARY_PATH" | grep -iq "${{ inputs.expected-binary-architecture }}"; then
+        if ! file -b "$BINARY_PATH" | grep -iq "${INPUTS_EXPECTED_BINARY_ARCHITECTURE}"; then
           echo "error: Architecture mismatch"
-          echo "Expected architecture: '${{ inputs.expected-binary-architecture }}'"
+          echo "Expected architecture: '${INPUTS_EXPECTED_BINARY_ARCHITECTURE}'"
           echo "Found binary type: '$(file -b "$BINARY_PATH")'"
           exit 1
         fi
         echo "ok: Architecture match"
+      env:
+        INPUTS_TARGET: ${{ inputs.target }}
+        INPUTS_EXPECTED_BINARY_ARCHITECTURE: ${{ inputs.expected-binary-architecture }}
 
     # We use Azure Trusted Signing to sign the Windows binaries.
     # This is done to ensure that the binaries are trusted and can be
@@ -113,22 +121,24 @@ runs:
     # * https://azure.microsoft.com/en-us/products/trusted-signing
     - name: Log in to Azure
       if: ${{ contains(inputs.target, '-windows-') && inputs.azure-tenant-id && inputs.azure-subscription-id && inputs.azure-client-id && inputs.azure-trusted-signing-account-name && inputs.azure-certificate-profile-name }}
-      uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+      uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
       with:
         client-id: ${{ inputs.azure-client-id }}
         tenant-id: ${{ inputs.azure-tenant-id }}
         subscription-id: ${{ inputs.azure-subscription-id }}
     - name: Windows Code Signing
       if: ${{ contains(inputs.target, '-windows-') && inputs.azure-tenant-id && inputs.azure-subscription-id && inputs.azure-client-id && inputs.azure-trusted-signing-account-name && inputs.azure-certificate-profile-name }}
-      uses: azure/trusted-signing-action@0d74250c661747df006298d0fb49944c10f16e03 # v0.5.1
+      uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
       with:
         endpoint: https://eus.codesigning.azure.net/
-        trusted-signing-account-name: ${{ inputs.azure-trusted-signing-account-name }}
+        signing-account-name: ${{ inputs.azure-trusted-signing-account-name }}
         certificate-profile-name: ${{ inputs.azure-certificate-profile-name }}
         files: ${{ github.workspace }}\target\${{ inputs.target }}\release\gleam.exe
         file-digest: SHA256
         timestamp-rfc3161: http://timestamp.acs.microsoft.com
         timestamp-digest: SHA256
+        # https://github.com/Azure/artifact-signing-action/issues/146
+        cache-dependencies: false
 
     - name: Build archive
       id: build
@@ -180,6 +190,33 @@ runs:
         TARGET: "${{ inputs.target }}"
         ARCHIVE: "${{ steps.build.outputs.archive }}"
 
+    - name: Install Erlang
+      if: ${{ inputs.generate-gleam-licences-html == 'true' }}
+      uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+      with:
+        otp-version: "29"
+        rebar3-version: "3"
+
+    - name: Generate licences HTML
+      if: ${{ inputs.generate-gleam-licences-html == 'true' }}
+      shell: bash
+      working-directory: licence-bundler
+      run: |
+        case "$TARGET" in
+          wasm*)
+            echo "error: cannot generate gleam-licences.html from a wasm build"
+            exit 1
+            ;;
+          *windows*)
+            ../target/"$TARGET"/release/gleam.exe run
+            ;;
+          *)
+            ../target/"$TARGET"/release/gleam run
+            ;;
+        esac
+      env:
+        TARGET: "${{ inputs.target }}"
+
     # By using `cargo-sbom``, we create two formats of Build SBoMs
     # (SPDX and CycloneDX) for the gleam build.
     # We store those files alongside the build artifacts on the GitHub Release
@@ -228,7 +265,7 @@ runs:
     # * https://github.com/actions/attest-sbom
     - name: Attest Distribution Assets with SBoM
       id: attest-sbom
-      uses: actions/attest-sbom@v2
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
       with:
         subject-path: |
           ${{ steps.build.outputs.archive }}
@@ -248,7 +285,7 @@ runs:
         ATTESTATION: "${{ steps.attest-sbom.outputs.bundle-path }}"
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: release-${{ matrix.target }}
         path: |
@@ -258,4 +295,5 @@ runs:
           ${{ steps.build.outputs.archive }}.sigstore
           ${{ steps.build.outputs.archive }}.sbom.spdx.json
           ${{ steps.build.outputs.archive }}.sbom.cyclonedx.json
+          ${{ inputs.generate-gleam-licences-html == 'true' && 'gleam-licences.html' || '' }}
         overwrite: true

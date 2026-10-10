@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2024 The Gleam contributors
+
 use hexpm::version::Version;
 
 use super::compile_module;
@@ -410,4 +413,30 @@ pub fn main(x) {
 }",
     );
     assert_eq!(version, Version::new(1, 12, 0));
+}
+
+#[test]
+fn constant_list_prepending_requires_v1_16() {
+    let version = infer_version(
+        "
+const one = []
+const other = [1, ..one]
+",
+    );
+    assert_eq!(version, Version::new(1, 16, 0));
+}
+
+#[test]
+fn constant_list_prepending_in_guard_requires_v1_16() {
+    let version = infer_version(
+        "
+pub fn go(x: List(_)) {
+  case x {
+    _ if [1, 2, ..x] == [] -> Nil
+    _ -> Nil
+  }
+}
+",
+    );
+    assert_eq!(version, Version::new(1, 16, 0));
 }

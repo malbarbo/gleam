@@ -2,6 +2,7 @@
 source: language-server/src/tests/completion.rs
 expression: "\npub fn main() {\n  case todo {\n    something -> s\n    something_else -> Nil\n  }\n  s\n}\n"
 ---
+
 pub fn main() {
   case todo {
     something -> s|
@@ -12,37 +13,21 @@ pub fn main() {
 
 
 ----- Completion content -----
-Error
-  kind:   Constructor
-  detail: gleam
-  sort:   4_Error
-False
-  kind:   EnumMember
-  detail: gleam
-  sort:   4_False
 Nil
   kind:   EnumMember
   detail: gleam
-  sort:   04_Nil
-Ok
-  kind:   Constructor
-  detail: gleam
-  sort:   4_Ok
-True
-  kind:   EnumMember
-  detail: gleam
-  sort:   4_True
+  sort:   05_Nil
 main
   kind:   Function
   detail: fn() -> a
-  sort:   2_main
+  sort:   3_main
   desc:   app
   edits:
     [3:17-3:18]: "main"
 something
   kind:   Variable
   detail: a
-  sort:   02_something
+  sort:   03_something
   desc:   app
   docs:   "A locally defined variable."
   edits:

@@ -1,5 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 #![warn(
     clippy::all,
+    clippy::redundant_clone,
     clippy::dbg_macro,
     clippy::todo,
     clippy::mem_forget,
@@ -20,6 +24,8 @@
     clippy::option_option,
     clippy::verbose_file_reads,
     clippy::unnested_or_patterns,
+    clippy::default_trait_access,
+    clippy::format_push_string,
     rust_2018_idioms,
     missing_debug_implementations,
     missing_copy_implementations,
@@ -51,6 +57,7 @@
     clippy::match_like_matches_macro,
     clippy::inconsistent_struct_constructor,
     clippy::len_without_is_empty,
+    clippy::let_unit_value,
     // TODO: fix
     clippy::arc_with_non_send_sync,
 )]
@@ -71,18 +78,14 @@ pub mod docs;
 pub mod encryption;
 pub mod erlang;
 pub mod error;
-pub mod fix;
-pub mod format;
 pub mod hex;
 pub mod io;
 pub mod javascript;
-pub mod line_numbers;
 pub mod manifest;
 pub mod metadata;
 pub mod package_interface;
 pub mod parse;
 pub mod paths;
-pub mod pretty;
 pub mod requirement;
 pub mod strings;
 pub mod type_;
@@ -96,24 +99,13 @@ mod call_graph;
 mod dep_tree;
 pub(crate) mod derivation_tree;
 pub mod exhaustiveness;
-pub(crate) mod graph;
-pub(crate) mod inline;
 pub mod reference;
+
+#[cfg(test)]
+mod tests;
 
 pub use error::{Error, Result};
 pub use warning::Warning;
 
 const GLEAM_CORE_PACKAGE_NAME: &str = "";
 pub const STDLIB_PACKAGE_NAME: &str = "gleam_stdlib";
-
-mod schema_capnp {
-    #![allow(
-        dead_code,
-        unused_qualifications,
-        clippy::all,
-        clippy::unwrap_used,
-        missing_debug_implementations,
-        missing_copy_implementations
-    )]
-    include!("../generated/schema_capnp.rs");
-}

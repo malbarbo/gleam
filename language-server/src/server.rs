@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 use super::{
     DownloadDependencies, MakeLocker,
     engine::{self, LanguageServerEngine},
@@ -13,15 +16,18 @@ use debug_ignore::DebugIgnore;
 use gleam_core::{
     Result,
     diagnostic::{Diagnostic, ExtraLabel, Level},
-    io::{BeamCompiler, CommandExecutor, FileSystemReader, FileSystemWriter},
-    line_numbers::LineNumbers,
+    io::{BeamCompilerIO, CommandExecutor, FileSystemReader, FileSystemWriter},
 };
+use itertools::Itertools;
 use lsp_server::ResponseError;
 use lsp_types::{
-    self as lsp, HoverProviderCapability, InitializeParams, Position, PublishDiagnosticsParams,
-    Range, RenameOptions, TextEdit, Url,
+    self as lsp, FileOperationFilter, FileOperationOptions, FileOperationPattern,
+    FileOperationPatternKind, FileOperationRegistrationOptions, InitializeParams, Position,
+    PublishDiagnosticsParams, Range, RenameFilesParams, RenameOptions, TextEdit, Uri as Url,
+    WorkspaceOptions,
 };
 use serde_json::Value as Json;
+use src_span::LineNumbers;
 use std::collections::{HashMap, HashSet};
 
 /// This class is responsible for handling the language server protocol and
@@ -48,14 +54,14 @@ impl<'a, IO> LanguageServer<'a, IO>
 where
     IO: FileSystemReader
         + FileSystemWriter
-        + BeamCompiler
+        + BeamCompilerIO
         + CommandExecutor
         + DownloadDependencies
         + MakeLocker
         + Clone,
 {
     pub fn new(connection: &'a lsp_server::Connection, io: IO) -> Result<Self> {
-        let initialise_params = initialisation_handshake(connection);
+        let initialise_params = initialisation_handshake(connection)?;
         let reporter = ConnectionProgressReporter::new(connection, &initialise_params);
         let io = FileSystemProxy::new(io);
         let router = Router::new(reporter, io.clone());
@@ -70,16 +76,16 @@ where
     }
 
     pub fn run(&mut self) -> Result<()> {
-        self.start_watching_gleam_toml();
+        self.start_watching_gleam_toml()?;
         let mut buffer = MessageBuffer::new();
 
         loop {
-            match buffer.receive(*self.connection) {
+            match buffer.receive(*self.connection)? {
                 Next::Stop => break,
                 Next::MorePlease => (),
                 Next::Handle(messages) => {
                     for message in messages {
-                        self.handle_message(message);
+                        self.handle_message(message)?;
                     }
                 }
             }
@@ -88,14 +94,14 @@ where
         Ok(())
     }
 
-    fn handle_message(&mut self, message: Message) {
+    fn handle_message(&mut self, message: Message) -> Result<()> {
         match message {
             Message::Request(id, request) => self.handle_request(id, request),
             Message::Notification(notification) => self.handle_notification(notification),
         }
     }
 
-    fn handle_request(&mut self, id: lsp_server::RequestId, request: Request) {
+    fn handle_request(&mut self, id: lsp_server::RequestId, request: Request) -> Result<()> {
         let (outcome, feedback) = match request {
             Request::Format(param) => self.format(param),
             Request::Hover(param) => self.hover(param),
@@ -104,51 +110,55 @@ where
             Request::CodeAction(param) => self.code_action(param),
             Request::SignatureHelp(param) => self.signature_help(param),
             Request::DocumentSymbol(param) => self.document_symbol(param),
+            Request::FoldingRange(param) => self.folding_range(param),
             Request::PrepareRename(param) => self.prepare_rename(param),
             Request::Rename(param) => self.rename(param),
             Request::GoToTypeDefinition(param) => self.goto_type_definition(param),
             Request::FindReferences(param) => self.find_references(param),
+            Request::DocumentHighlight(param) => self.document_highlight(param),
+            Request::RenameFiles(param) => self.rename_files(param),
         };
 
-        self.publish_feedback(feedback);
+        self.publish_feedback(feedback)?;
 
-        let response = match outcome {
-            Ok(payload) => lsp_server::Response {
-                id,
-                error: None,
-                result: Some(payload),
-            },
-            Err(error) => lsp_server::Response {
-                id,
-                error: Some(error),
-                result: None,
-            },
+        let response = lsp_server::Response {
+            id,
+            response_result: outcome,
         };
 
         self.connection
             .sender
             .send(lsp_server::Message::Response(response))
-            .expect("channel send LSP response")
+            .map_err(|error| gleam_core::Error::LspMessageSendFailed {
+                error: error.to_string(),
+            })?;
+        Ok(())
     }
 
-    fn handle_notification(&mut self, notification: Notification) {
+    fn handle_notification(&mut self, notification: Notification) -> Result<()> {
         let feedback = match notification {
             Notification::CompilePlease => self.compile_please(),
-            Notification::SourceFileMatchesDisc { path } => self.discard_in_memory_cache(path),
+            Notification::SourceFileOpened { path, text } => self.source_file_opened(path, text),
+            Notification::SourceFileClosed { path } => self.source_file_closed(path),
+            Notification::SourceFileSaved { path } => self.discard_in_memory_cache(path),
             Notification::SourceFileChangedInMemory { path, text } => {
                 self.cache_file_in_memory(path, text)
             }
             Notification::ConfigFileChanged { path } => self.watched_files_changed(path),
         };
-        self.publish_feedback(feedback);
+        self.publish_feedback(feedback)
     }
 
-    fn publish_feedback(&self, feedback: Feedback) {
-        self.publish_diagnostics(feedback.diagnostics);
-        self.publish_messages(feedback.messages);
+    fn publish_feedback(&self, feedback: Feedback) -> Result<()> {
+        self.publish_diagnostics(feedback.diagnostics)?;
+        self.publish_messages(feedback.messages)?;
+        Ok(())
     }
 
-    fn publish_diagnostics(&self, diagnostics: HashMap<Utf8PathBuf, Vec<Diagnostic>>) {
+    fn publish_diagnostics(
+        &self,
+        diagnostics: HashMap<Utf8PathBuf, Vec<Diagnostic>>,
+    ) -> Result<()> {
         for (path, diagnostics) in diagnostics {
             let diagnostics = diagnostics
                 .into_iter()
@@ -170,11 +180,14 @@ where
             self.connection
                 .sender
                 .send(lsp_server::Message::Notification(notification))
-                .expect("send textDocument/publishDiagnostics");
+                .map_err(|error| gleam_core::Error::LspMessageSendFailed {
+                    error: error.to_string(),
+                })?;
         }
+        Ok(())
     }
 
-    fn start_watching_gleam_toml(&mut self) {
+    fn start_watching_gleam_toml(&mut self) -> Result<()> {
         let supports_watch_files = self
             .initialise_params
             .capabilities
@@ -186,7 +199,7 @@ where
 
         if !supports_watch_files {
             tracing::warn!("lsp_client_cannot_watch_gleam_toml");
-            return;
+            return Ok(());
         }
 
         // Register gleam.toml as a watched file so we get a notification when
@@ -215,15 +228,18 @@ where
         self.connection
             .sender
             .send(lsp_server::Message::Request(request))
-            .expect("send client/registerCapability");
+            .map_err(|error| gleam_core::Error::LspMessageSendFailed {
+                error: error.to_string(),
+            })?;
+        Ok(())
     }
 
-    fn publish_messages(&self, messages: Vec<Diagnostic>) {
+    fn publish_messages(&self, messages: Vec<Diagnostic>) -> Result<()> {
         for message in messages {
             let params = lsp::ShowMessageParams {
-                typ: match message.level {
-                    Level::Error => lsp::MessageType::ERROR,
-                    Level::Warning => lsp::MessageType::WARNING,
+                kind: match message.level {
+                    Level::Error => lsp::MessageType::Error,
+                    Level::Warning => lsp::MessageType::Warning,
                 },
                 message: message.text,
             };
@@ -234,8 +250,11 @@ where
             self.connection
                 .sender
                 .send(lsp_server::Message::Notification(notification))
-                .expect("send window/showMessage");
+                .map_err(|error| gleam_core::Error::LspMessageSendFailed {
+                    error: error.to_string(),
+                })?;
         }
+        Ok(())
     }
 
     fn respond_with_engine<T, Handler>(
@@ -327,7 +346,7 @@ where
             Err(error) => return self.path_error_response(path, error),
         };
 
-        if let Err(error) = gleam_core::format::pretty(&mut new_text, &src, &path) {
+        if let Err(error) = gleam_format::pretty(&mut new_text, &src, &path) {
             return self.path_error_response(path, error);
         }
 
@@ -349,7 +368,7 @@ where
 
     fn goto_definition(
         &mut self,
-        params: lsp::GotoDefinitionParams,
+        params: lsp::DefinitionParams,
     ) -> (Result<Json, ResponseError>, Feedback) {
         let path = super::path(&params.text_document_position_params.text_document.uri);
         self.respond_with_engine(path, |engine| engine.goto_definition(params))
@@ -357,7 +376,7 @@ where
 
     fn goto_type_definition(
         &mut self,
-        params: lsp_types::GotoDefinitionParams,
+        params: lsp_types::TypeDefinitionParams,
     ) -> (Result<Json, ResponseError>, Feedback) {
         let path = super::path(&params.text_document_position_params.text_document.uri);
         self.respond_with_engine(path, |engine| engine.goto_type_definition(params))
@@ -367,14 +386,14 @@ where
         &mut self,
         params: lsp::CompletionParams,
     ) -> (Result<Json, ResponseError>, Feedback) {
-        let path = super::path(&params.text_document_position.text_document.uri);
+        let path = super::path(&params.text_document_position_params.text_document.uri);
 
         let src = match self.io.read(&path) {
             Ok(src) => src.into(),
             Err(error) => return self.path_error_response(path, error),
         };
         self.respond_with_engine(path, |engine| {
-            engine.completion(params.text_document_position, src)
+            engine.completion(params.text_document_position_params, src)
         })
     }
 
@@ -402,16 +421,24 @@ where
         self.respond_with_engine(path, |engine| engine.document_symbol(params))
     }
 
-    fn prepare_rename(
+    fn folding_range(
         &mut self,
-        params: lsp::TextDocumentPositionParams,
+        params: lsp::FoldingRangeParams,
     ) -> (Result<Json, ResponseError>, Feedback) {
         let path = super::path(&params.text_document.uri);
+        self.respond_with_engine(path, |engine| engine.folding_range(params))
+    }
+
+    fn prepare_rename(
+        &mut self,
+        params: lsp::PrepareRenameParams,
+    ) -> (Result<Json, ResponseError>, Feedback) {
+        let path = super::path(&params.text_document_position_params.text_document.uri);
         self.respond_with_engine(path, |engine| engine.prepare_rename(params))
     }
 
     fn rename(&mut self, params: lsp::RenameParams) -> (Result<Json, ResponseError>, Feedback) {
-        let path = super::path(&params.text_document_position.text_document.uri);
+        let path = super::path(&params.text_document_position_params.text_document.uri);
         self.fallible_respond_with_engine(
             path,
             |engine: &mut LanguageServerEngine<IO, ConnectionProgressReporter<'a>>| {
@@ -420,12 +447,44 @@ where
         )
     }
 
+    fn rename_files(
+        &mut self,
+        params: RenameFilesParams,
+    ) -> (Result<Json, ResponseError>, Feedback) {
+        let renames = params
+            .files
+            .into_iter()
+            .map(|file| {
+                (
+                    Url::parse(&file.old_uri).expect("Uri should be valid"),
+                    Url::parse(&file.new_uri).expect("Uri should be valid"),
+                )
+            })
+            .collect_vec();
+
+        let Some((_, first_renamed_file)) = renames.first() else {
+            return (Ok(serde_json::json!(null)), Feedback::none());
+        };
+
+        self.respond_with_engine(super::path(first_renamed_file), |engine| {
+            engine.rename_files(renames)
+        })
+    }
+
     fn find_references(
         &mut self,
         params: lsp_types::ReferenceParams,
     ) -> (Result<Json, ResponseError>, Feedback) {
-        let path = super::path(&params.text_document_position.text_document.uri);
+        let path = super::path(&params.text_document_position_params.text_document.uri);
         self.respond_with_engine(path, |engine| engine.find_references(params))
+    }
+
+    fn document_highlight(
+        &mut self,
+        params: lsp_types::DocumentHighlightParams,
+    ) -> (Result<Json, ResponseError>, Feedback) {
+        let path = super::path(&params.text_document_position_params.text_document.uri);
+        self.respond_with_engine(path, |engine| engine.document_highlight(params))
     }
 
     fn cache_file_in_memory(&mut self, path: Utf8PathBuf, text: String) -> Feedback {
@@ -465,25 +524,43 @@ where
             _ = self.changed_projects.insert(project_path);
         }
     }
+
+    fn source_file_opened(&mut self, path: Utf8PathBuf, text: String) -> Feedback {
+        let mut feedback = self.cache_file_in_memory(path.clone(), text);
+        if let Ok(Some(project)) = self.router.project_for_path(path.clone()) {
+            feedback.append_feedback(project.feedback.open_file(path));
+        }
+        feedback
+    }
+
+    fn source_file_closed(&mut self, path: Utf8PathBuf) -> Feedback {
+        let mut feedback = self.discard_in_memory_cache(path.clone());
+        if let Ok(Some(project)) = self.router.project_for_path(path.clone()) {
+            feedback.append_feedback(project.feedback.close_file(&path));
+        }
+        feedback
+    }
 }
 
-fn initialisation_handshake(connection: &lsp_server::Connection) -> InitializeParams {
+fn initialisation_handshake(connection: &lsp_server::Connection) -> Result<InitializeParams> {
     let server_capabilities = lsp::ServerCapabilities {
-        text_document_sync: Some(lsp::TextDocumentSyncCapability::Options(
+        text_document_sync: Some(
             lsp::TextDocumentSyncOptions {
                 open_close: Some(true),
-                change: Some(lsp::TextDocumentSyncKind::FULL),
+                change: Some(lsp::TextDocumentSyncKind::Full),
                 will_save: None,
                 will_save_wait_until: None,
-                save: Some(lsp::TextDocumentSyncSaveOptions::SaveOptions(
+                save: Some(
                     lsp::SaveOptions {
                         include_text: Some(false),
-                    },
-                )),
-            },
-        )),
+                    }
+                    .into(),
+                ),
+            }
+            .into(),
+        ),
         selection_range_provider: None,
-        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        hover_provider: Some(true.into()),
         completion_provider: Some(lsp::CompletionOptions {
             resolve_provider: None,
             trigger_characters: Some(vec![".".into()]),
@@ -500,30 +577,53 @@ fn initialisation_handshake(connection: &lsp_server::Connection) -> InitializePa
                 work_done_progress: None,
             },
         }),
-        definition_provider: Some(lsp::OneOf::Left(true)),
-        type_definition_provider: Some(lsp::TypeDefinitionProviderCapability::Simple(true)),
+        definition_provider: Some(true.into()),
+        type_definition_provider: Some(true.into()),
         implementation_provider: None,
-        references_provider: Some(lsp::OneOf::Left(true)),
-        document_highlight_provider: None,
-        document_symbol_provider: Some(lsp::OneOf::Left(true)),
+        references_provider: Some(true.into()),
+        document_highlight_provider: Some(true.into()),
+        document_symbol_provider: Some(true.into()),
         workspace_symbol_provider: None,
-        code_action_provider: Some(lsp::CodeActionProviderCapability::Simple(true)),
+        code_action_provider: Some(true.into()),
         code_lens_provider: None,
-        document_formatting_provider: Some(lsp::OneOf::Left(true)),
+        document_formatting_provider: Some(true.into()),
         document_range_formatting_provider: None,
         document_on_type_formatting_provider: None,
-        rename_provider: Some(lsp::OneOf::Right(RenameOptions {
-            prepare_provider: Some(true),
-            work_done_progress_options: lsp::WorkDoneProgressOptions {
-                work_done_progress: None,
-            },
-        })),
+        rename_provider: Some(
+            RenameOptions {
+                prepare_provider: Some(true),
+                work_done_progress_options: lsp::WorkDoneProgressOptions {
+                    work_done_progress: None,
+                },
+            }
+            .into(),
+        ),
         document_link_provider: None,
         color_provider: None,
-        folding_range_provider: None,
+        folding_range_provider: Some(true.into()),
         declaration_provider: None,
         execute_command_provider: None,
-        workspace: None,
+        workspace: Some(WorkspaceOptions {
+            workspace_folders: None,
+            file_operations: Some(FileOperationOptions {
+                did_create: None,
+                will_create: None,
+                will_rename: Some(FileOperationRegistrationOptions {
+                    filters: vec![FileOperationFilter {
+                        scheme: Some("file".into()),
+                        pattern: FileOperationPattern {
+                            glob: "**/*.gleam".into(),
+                            matches: Some(FileOperationPatternKind::File),
+                            options: None,
+                        },
+                    }],
+                }),
+                did_rename: None,
+                did_delete: None,
+                will_delete: None,
+            }),
+            text_document_content: None,
+        }),
         call_hierarchy_provider: None,
         semantic_tokens_provider: None,
         moniker_provider: None,
@@ -533,21 +633,27 @@ fn initialisation_handshake(connection: &lsp_server::Connection) -> InitializePa
         inline_value_provider: None,
         inlay_hint_provider: None,
         diagnostic_provider: None,
+        type_hierarchy_provider: None,
+        notebook_document_sync: None,
+        inline_completion_provider: None,
     };
     let server_capabilities_json =
         serde_json::to_value(server_capabilities).expect("server_capabilities_serde");
-    let initialise_params_json = connection
-        .initialize(server_capabilities_json)
-        .expect("LSP initialize");
+    let initialise_params_json =
+        connection
+            .initialize(server_capabilities_json)
+            .map_err(|error| gleam_core::Error::LspMessageReceiveFailed {
+                error: error.to_string(),
+            })?;
     let initialise_params: InitializeParams =
         serde_json::from_value(initialise_params_json).expect("LSP InitializeParams from json");
-    initialise_params
+    Ok(initialise_params)
 }
 
 fn diagnostic_to_lsp(diagnostic: Diagnostic) -> Vec<lsp::Diagnostic> {
     let severity = match diagnostic.level {
-        Level::Error => lsp::DiagnosticSeverity::ERROR,
-        Level::Warning => lsp::DiagnosticSeverity::WARNING,
+        Level::Error => lsp::DiagnosticSeverity::Error,
+        Level::Warning => lsp::DiagnosticSeverity::Warning,
     };
     let hint = diagnostic.hint;
     let mut text = diagnostic.title;
@@ -599,7 +705,7 @@ fn diagnostic_to_lsp(diagnostic: Diagnostic) -> Vec<lsp::Diagnostic> {
     match hint {
         Some(hint) => {
             let hint = lsp::Diagnostic {
-                severity: Some(lsp::DiagnosticSeverity::HINT),
+                severity: Some(lsp::DiagnosticSeverity::Hint),
                 message: hint,
                 // Some editors require this kind of "link" to group diagnostics.
                 // For example, in Zed "go to next diagnostic" would move you from

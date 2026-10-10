@@ -8,14 +8,16 @@ pub fn y() { fn() { Point }()(4, 6) }
 
 ----- COMPILED ERLANG
 -module(my@mod).
--compile([no_auto_import, nowarn_unused_vars, nowarn_unused_function, nowarn_nomatch, inline]).
--define(FILEPATH, "project/test/my/mod.gleam").
+-compile([no_auto_import, nowarn_ignored, nowarn_unused_vars, nowarn_unused_function, nowarn_nomatch, inline]).
 -export([y/0]).
 -export_type([point/0]).
 
 -type point() :: {point, integer(), integer()}.
 
--file("project/test/my/mod.gleam", 2).
 -spec y() -> point().
 y() ->
-    {point, 4, 6}.
+    (fun() ->
+        fun(_value, _value@1) ->
+            {point, _value, _value@1}
+        end
+    end())(4, 6).

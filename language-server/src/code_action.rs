@@ -1,4 +1,7 @@
-use std::{collections::HashSet, iter, sync::Arc};
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
+use std::{collections::HashSet, iter, ops::Neg, sync::Arc};
 
 use ecow::{EcoString, eco_format};
 use gleam_core::{
@@ -8,28 +11,36 @@ use gleam_core::{
         self, ArgNames, AssignName, AssignmentKind, BitArraySegmentTruncation, BoundVariable,
         BoundVariableName, CallArg, CustomType, FunctionLiteralKind, ImplicitCallArgOrigin, Import,
         InvalidExpression, PIPE_PRECEDENCE, Pattern, PatternUnusedArguments,
-        PipelineAssignmentKind, Publicity, RecordConstructor, SrcSpan, TodoKind, TypedArg,
-        TypedAssignment, TypedClauseGuard, TypedDefinitions, TypedExpr, TypedFunction,
-        TypedModuleConstant, TypedPattern, TypedPipelineAssignment, TypedRecordConstructor,
-        TypedStatement, TypedTailPattern, TypedUse, visit::Visit as _,
+        PipelineAssignmentKind, Publicity, RecordConstructor, StringPrefixLeftSideAssignment,
+        TodoKind, TypeAstConstructorName, TypedArg, TypedAssignment, TypedClauseGuard,
+        TypedDefinitions, TypedExpr, TypedFunction, TypedModuleConstant, TypedPattern,
+        TypedPipelineAssignment, TypedRecordConstructor, TypedStatement, TypedTailPattern,
+        TypedUse, visit::Visit as _,
     },
-    build::{Located, Module},
+    build::{Located, Module, Origin},
     config::PackageConfig,
     exhaustiveness::CompiledCase,
-    line_numbers::LineNumbers,
-    parse::{extra::ModuleExtra, lexer::str_to_keyword},
+    parse::{extra::ModuleExtra, lexer::string_to_keyword},
+    paths::ProjectPaths,
     strings::to_snake_case,
     type_::{
-        self, FieldMap, ModuleValueConstructor, Opaque, Type, TypeVar, TypedCallArg,
-        ValueConstructor,
+        self, Error as TypeError, FieldMap, ModuleValueConstructor, Opaque, Type, TypeVar,
+        TypedCallArg, ValueConstructor,
         error::{ModuleSuggestion, VariableDeclaration, VariableOrigin},
         printer::Printer,
     },
 };
-use im::HashMap;
+use imbl::HashMap;
 use itertools::Itertools;
-use lsp_types::{CodeAction, CodeActionKind, CodeActionParams, Position, Range, TextEdit, Url};
+use lsp_types::{
+    CodeAction, CodeActionKind, CodeActionParams, CreateFile, CreateFileOptions, DocumentChange,
+    Position, Range, TextEdit, Uri as Url,
+};
+use num_bigint::BigInt;
+use src_span::{LineNumbers, SrcSpan};
 use vec1::{Vec1, vec1};
+
+use crate::engine::{completely_within, position_within};
 
 use super::{
     TextEdits,
@@ -59,6 +70,7 @@ impl CodeActionBuilder {
                 is_preferred: None,
                 disabled: None,
                 data: None,
+                tags: None,
             },
         }
     }
@@ -74,6 +86,15 @@ impl CodeActionBuilder {
         _ = changes.insert(uri, edits);
 
         edit.changes = Some(changes);
+        self.action.edit = Some(edit);
+        self
+    }
+
+    pub fn document_changes(mut self, changes: Vec<DocumentChange>) -> Self {
+        let mut edit = self.action.edit.take().unwrap_or_default();
+
+        edit.document_changes = Some(changes);
+
         self.action.edit = Some(edit);
         self
     }
@@ -102,6 +123,28 @@ fn count_indentation(code: &str, line_numbers: &LineNumbers, line: u32) -> usize
     }
 
     indent_size
+}
+
+// Given a string and a position in it, if the position points to whitespace,
+// this function returns the next position which doesn't.
+fn next_nonwhitespace(string: &EcoString, position: u32) -> u32 {
+    let mut n = position;
+    let mut chars = string[position as usize..].chars();
+    while chars.next().is_some_and(char::is_whitespace) {
+        n += 1;
+    }
+    n
+}
+
+// Given a string and a position in it, if the position points after whitespace,
+// this function returns the previous position which doesn't.
+fn previous_nonwhitespace(string: &EcoString, position: u32) -> u32 {
+    let mut n = position;
+    let mut chars = string[..position as usize].chars();
+    while chars.next_back().is_some_and(char::is_whitespace) {
+        n -= 1;
+    }
+    n
 }
 
 /// Code action to remove literal tuples in case subjects, essentially making
@@ -194,7 +237,7 @@ impl<'ast> ast::visit::Visit<'ast> for RedundantTupleInCaseSubject<'_> {
                         elements.last().map(|element| element.location()),
                     ),
                     Some(Pattern::Discard { location, .. }) => {
-                        self.discard_tuple_items(*location, elements.len())
+                        self.discard_tuple_items(*location, elements.len());
                     }
                     _ => panic!("safe: we've just checked all patterns must be discards/tuples"),
                 }
@@ -203,7 +246,7 @@ impl<'ast> ast::visit::Visit<'ast> for RedundantTupleInCaseSubject<'_> {
             self.hovered = self.hovered || overlaps(self.params.range, range);
         }
 
-        ast::visit::visit_typed_expr_case(self, location, type_, subjects, clauses, compiled_case)
+        ast::visit::visit_typed_expr_case(self, location, type_, subjects, clauses, compiled_case);
     }
 }
 
@@ -233,7 +276,7 @@ impl<'a> RedundantTupleInCaseSubject<'a> {
 
         let mut actions = vec![];
         CodeActionBuilder::new("Remove redundant tuples")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(true)
             .push_to(&mut actions);
@@ -298,7 +341,7 @@ impl<'a> RedundantTupleInCaseSubject<'a> {
         self.edits.replace(
             discard_location,
             itertools::intersperse(iter::repeat_n("_", tuple_items), ", ").collect(),
-        )
+        );
     }
 }
 
@@ -393,7 +436,7 @@ impl<'ast> ast::visit::Visit<'ast> for LetAssertToCase<'_> {
         let uri = &self.params.text_document.uri;
 
         CodeActionBuilder::new("Convert to case")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(uri.clone(), vec![TextEdit { range, new_text }])
             .preferred(false)
             .push_to(&mut self.actions);
@@ -463,12 +506,12 @@ impl<'ast> ast::visit::Visit<'ast> for PatternVariableFinder {
         &mut self,
         _location: &'ast SrcSpan,
         _left_location: &'ast SrcSpan,
-        left_side_assignment: &'ast Option<(EcoString, SrcSpan)>,
+        left_side_assignment: &'ast Option<StringPrefixLeftSideAssignment>,
         _right_location: &'ast SrcSpan,
         _left_side_string: &'ast EcoString,
         right_side_assignment: &'ast AssignName,
     ) {
-        if let Some((name, _)) = left_side_assignment {
+        if let Some(StringPrefixLeftSideAssignment { name, .. }) = left_side_assignment {
             self.pattern_variables.push(name.clone());
         }
         if let AssignName::Variable(name) = right_side_assignment {
@@ -484,9 +527,10 @@ pub fn code_action_inexhaustive_let_to_case(
     error: &Option<Error>,
     actions: &mut Vec<CodeAction>,
 ) {
-    let Some(Error::Type { errors, .. }) = error else {
+    let Some(errors) = type_errors_for_module(error, module) else {
         return;
     };
+
     let inexhaustive_assignments = errors
         .iter()
         .filter_map(|error| {
@@ -506,8 +550,8 @@ pub fn code_action_inexhaustive_let_to_case(
         let mut text_edits = TextEdits::new(line_numbers);
 
         let range = text_edits.src_span_to_lsp_range(location);
-        if !overlaps(params.range, range) {
-            return;
+        if !within(params.range, range) {
+            continue;
         }
 
         let Some(Located::Statement(TypedStatement::Assignment(assignment))) =
@@ -574,11 +618,25 @@ pub fn code_action_inexhaustive_let_to_case(
         text_edits.replace(*location, new_text);
 
         CodeActionBuilder::new("Convert to case")
-            .kind(CodeActionKind::QUICKFIX)
+            .kind(CodeActionKind::QuickFix)
             .changes(uri.clone(), text_edits.edits)
             .preferred(true)
             .push_to(actions);
     }
+}
+
+pub(crate) fn type_errors_for_module<'a>(
+    error: &'a Option<Error>,
+    module: &Module,
+) -> Option<&'a Vec1<type_::Error>> {
+    let Some(Error::Type {
+        skipped_modules: _,
+        failed_modules,
+    }) = error
+    else {
+        return None;
+    };
+    Some(&failed_modules.get(&module.name)?.errors)
 }
 
 struct CaseClause<'a> {
@@ -650,7 +708,7 @@ impl<'a> UseLabelShorthandSyntax<'a> {
         }
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Use label shorthand syntax")
-            .kind(CodeActionKind::REFACTOR)
+            .kind(CodeActionKind::Refactor)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -669,12 +727,12 @@ impl<'ast> ast::visit::Visit<'ast> for UseLabelShorthandSyntax<'_> {
                 value: TypedExpr::Var { name, location, .. },
                 ..
             } if is_selected && !arg.uses_label_shorthand() && label == name => {
-                self.edits.delete(*location)
+                self.edits.delete(*location);
             }
             _ => (),
         }
 
-        ast::visit::visit_typed_call_arg(self, arg)
+        ast::visit::visit_typed_call_arg(self, arg);
     }
 
     fn visit_typed_pattern_call_arg(&mut self, arg: &'ast CallArg<TypedPattern>) {
@@ -687,12 +745,12 @@ impl<'ast> ast::visit::Visit<'ast> for UseLabelShorthandSyntax<'_> {
                 value: TypedPattern::Variable { name, location, .. },
                 ..
             } if is_selected && !arg.uses_label_shorthand() && label == name => {
-                self.edits.delete(*location)
+                self.edits.delete(*location);
             }
             _ => (),
         }
 
-        ast::visit::visit_typed_pattern_call_arg(self, arg)
+        ast::visit::visit_typed_pattern_call_arg(self, arg);
     }
 }
 
@@ -740,8 +798,7 @@ impl<'a> FillInMissingLabelledArgs<'a> {
 
     pub fn code_actions(mut self) -> Vec<CodeAction> {
         self.visit_typed_module(&self.module.ast);
-
-        if let Some(SelectedCall {
+        let Some(SelectedCall {
             location: call_location,
             field_map,
             arguments,
@@ -749,108 +806,109 @@ impl<'a> FillInMissingLabelledArgs<'a> {
             fun_type,
             enclosing_function,
         }) = self.selected_call
-        {
-            let is_use_call = arguments.iter().any(|arg| arg.is_use_implicit_callback());
-            let missing_labels = field_map.missing_labels(&arguments);
+        else {
+            return vec![];
+        };
 
-            // If we're applying the code action to a use call, then we know
-            // that the last missing argument is going to be implicitly inserted
-            // by the compiler, so in that case we don't want to also add that
-            // last label to the completions.
-            let missing_labels = missing_labels.iter().peekable();
-            let mut missing_labels = if is_use_call {
-                missing_labels.dropping_back(1)
-            } else {
-                missing_labels
-            };
+        let is_use_call = arguments.iter().any(|arg| arg.is_use_implicit_callback());
+        let missing_labels = field_map.missing_labels(&arguments);
 
-            // If we couldn't find any missing label to insert we just return.
-            if missing_labels.peek().is_none() {
-                return vec![];
-            }
+        // If we're applying the code action to a use call, then we know
+        // that the last missing argument is going to be implicitly inserted
+        // by the compiler, so in that case we don't want to also add that
+        // last label to the completions.
+        let missing_labels = missing_labels.iter().peekable();
+        let mut missing_labels = if is_use_call {
+            missing_labels.dropping_back(1)
+        } else {
+            missing_labels
+        };
 
-            // A pattern could have been written with no parentheses at all!
-            // So we need to check for the last character to see if parentheses
-            // are there or not before filling the arguments in
-            let has_parentheses = ")"
-                == code_at(
-                    self.module,
-                    SrcSpan::new(call_location.end - 1, call_location.end),
-                );
-            let label_insertion_start = if has_parentheses {
-                // If it ends with a parentheses we'll need to start inserting
-                // right before the closing one...
-                call_location.end - 1
-            } else {
-                // ...otherwise we just append the result
-                call_location.end
-            };
-
-            // Now we need to figure out if there's a comma at the end of the
-            // arguments list:
-            //
-            //   call(one, |)
-            //             ^ Cursor here, with a comma behind
-            //
-            //   call(one|)
-            //           ^ Cursor here, no comma behind, we'll have to add one!
-            //
-            let has_comma_after_last_argument =
-                if let Some(last_arg) = arguments.iter().rfind(|arg| !arg.is_implicit()) {
-                    self.module
-                        .code
-                        .get(last_arg.location.end as usize..=label_insertion_start as usize)
-                        .is_some_and(|text| text.contains(','))
-                } else {
-                    false
-                };
-
-            let variables_in_scope = enclosing_function
-                .map(|fun| {
-                    ScopeVariableCollector::new(call_location.start).collect_from_function(fun)
-                })
-                .unwrap_or_default();
-
-            let labels_list = missing_labels
-                .map(|label| {
-                    Self::format_label(label, &kind, &fun_type, field_map, &variables_in_scope)
-                })
-                .join(", ");
-
-            let has_no_explicit_arguments = arguments
-                .iter()
-                .filter(|arg| !arg.is_implicit())
-                .peekable()
-                .peek()
-                .is_none();
-
-            let labels_list = if has_no_explicit_arguments || has_comma_after_last_argument {
-                labels_list
-            } else {
-                format!(", {labels_list}")
-            };
-
-            let edit = if has_parentheses {
-                labels_list
-            } else {
-                // If the variant whose arguments we're filling in was written
-                // with no parentheses we need to add those as well to make it a
-                // valid constructor.
-                format!("({labels_list})")
-            };
-
-            self.edits.insert(label_insertion_start, edit);
-
-            let mut action = Vec::with_capacity(1);
-            CodeActionBuilder::new("Fill labels")
-                .kind(CodeActionKind::QUICKFIX)
-                .changes(self.params.text_document.uri.clone(), self.edits.edits)
-                .preferred(true)
-                .push_to(&mut action);
-            return action;
+        // If we couldn't find any missing label to insert we just return.
+        if missing_labels.peek().is_none() {
+            return vec![];
         }
 
-        vec![]
+        // A pattern could have been written with no parentheses at all!
+        // So we need to check for the last character to see if parentheses
+        // are there or not before filling the arguments in
+        let has_parentheses = ")"
+            == code_at(
+                self.module,
+                SrcSpan::new(call_location.end - 1, call_location.end),
+            );
+        let label_insertion_start = if has_parentheses {
+            // If it ends with a parentheses we'll need to start inserting
+            // right before the closing one...
+            call_location.end - 1
+        } else {
+            // ...otherwise we just append the result
+            call_location.end
+        };
+
+        // Now we need to figure out if there's a comma at the end of the
+        // arguments list:
+        //
+        //   call(one, |)
+        //             ^ Cursor here, with a comma behind
+        //
+        //   call(one|)
+        //           ^ Cursor here, no comma behind, we'll have to add one!
+        //
+        let has_comma_after_last_argument =
+            if let Some(last_arg) = arguments.iter().rfind(|arg| !arg.is_implicit()) {
+                self.module
+                    .code
+                    .get(last_arg.location.end as usize..=label_insertion_start as usize)
+                    .is_some_and(|text| text.contains(','))
+            } else {
+                false
+            };
+
+        let scope_variables =
+            ScopeVariableCollector::new(call_location.start, &self.module.ast.definitions);
+        let variables_in_scope = match enclosing_function {
+            Some(function) => scope_variables.collect_from_function(function),
+            None => scope_variables.variables,
+        };
+
+        let labels_list = missing_labels
+            .map(|label| {
+                Self::format_label(label, &kind, &fun_type, field_map, &variables_in_scope)
+            })
+            .join(", ");
+
+        let has_no_explicit_arguments = arguments
+            .iter()
+            .filter(|arg| !arg.is_implicit())
+            .peekable()
+            .peek()
+            .is_none();
+
+        let labels_list = if has_no_explicit_arguments || has_comma_after_last_argument {
+            labels_list
+        } else {
+            format!(", {labels_list}")
+        };
+
+        let edit = if has_parentheses {
+            labels_list
+        } else {
+            // If the variant whose arguments we're filling in was written
+            // with no parentheses we need to add those as well to make it a
+            // valid constructor.
+            format!("({labels_list})")
+        };
+
+        self.edits.insert(label_insertion_start, edit);
+
+        let mut action = Vec::with_capacity(1);
+        CodeActionBuilder::new("Fill labels")
+            .kind(CodeActionKind::QuickFix)
+            .changes(self.params.text_document.uri.clone(), self.edits.edits)
+            .preferred(true)
+            .push_to(&mut action);
+        action
     }
 
     /// Formats a label for insertion. Uses `label:` syntax if there's a variable
@@ -913,12 +971,61 @@ impl<'ast> ast::visit::Visit<'ast> for FillInMissingLabelledArgs<'ast> {
         self.use_right_hand_side_location = previous;
     }
 
+    fn visit_typed_constant_record(
+        &mut self,
+        location: &'ast SrcSpan,
+        arguments_start_position: &'ast u32,
+        module: &'ast Option<(EcoString, SrcSpan)>,
+        name: &'ast EcoString,
+        arguments: &'ast Option<Vec<CallArg<ast::TypedConstant>>>,
+        type_: &'ast Arc<Type>,
+        field_map: &'ast Inferred<FieldMap>,
+        record_constructor: &'ast Option<Box<ValueConstructor>>,
+    ) {
+        let record_range = self.edits.src_span_to_lsp_range(*location);
+        if !within(self.params.range, record_range) {
+            return;
+        }
+
+        if let Some(arguments) = arguments
+            && let Inferred::Known(field_map) = field_map
+        {
+            self.selected_call = Some(SelectedCall {
+                location: *location,
+                field_map,
+                arguments: arguments.iter().map(Self::empty_argument).collect(),
+                kind: SelectedCallKind::Value,
+                fun_type: record_constructor
+                    .as_ref()
+                    .map(|constructor| constructor.type_.clone()),
+                enclosing_function: None,
+            });
+        }
+
+        // We only want to take into account the innermost function call
+        // containing the current selection so we can't stop at the first call
+        // we find (the outermost one) and have to keep traversing it in case
+        // we're inside a nested call.
+        ast::visit::visit_typed_constant_record(
+            self,
+            location,
+            arguments_start_position,
+            module,
+            name,
+            arguments,
+            type_,
+            field_map,
+            record_constructor,
+        );
+    }
+
     fn visit_typed_expr_call(
         &mut self,
         location: &'ast SrcSpan,
         type_: &'ast Arc<Type>,
         fun: &'ast TypedExpr,
         arguments: &'ast [TypedCallArg],
+        open_parenthesis: &'ast Option<u32>,
     ) {
         let call_range = self.edits.src_span_to_lsp_range(*location);
         if !within(self.params.range, call_range) {
@@ -934,7 +1041,7 @@ impl<'ast> ast::visit::Visit<'ast> for FillInMissingLabelledArgs<'ast> {
                 kind: SelectedCallKind::Value,
                 fun_type: Some(fun.type_()),
                 enclosing_function: self.current_function,
-            })
+            });
         }
 
         // We only want to take into account the innermost function call
@@ -943,7 +1050,7 @@ impl<'ast> ast::visit::Visit<'ast> for FillInMissingLabelledArgs<'ast> {
         // we're inside a nested call.
         let previous = self.use_right_hand_side_location;
         self.use_right_hand_side_location = None;
-        ast::visit::visit_typed_expr_call(self, location, type_, fun, arguments);
+        ast::visit::visit_typed_expr_call(self, location, type_, fun, arguments, open_parenthesis);
         self.use_right_hand_side_location = previous;
     }
 
@@ -971,7 +1078,7 @@ impl<'ast> ast::visit::Visit<'ast> for FillInMissingLabelledArgs<'ast> {
                 kind: SelectedCallKind::Pattern,
                 fun_type: None,
                 enclosing_function: self.current_function,
-            })
+            });
         }
 
         ast::visit::visit_typed_pattern_constructor(
@@ -991,15 +1098,24 @@ impl<'ast> ast::visit::Visit<'ast> for FillInMissingLabelledArgs<'ast> {
 /// Collects variables that are in scope at a given cursor position.
 struct ScopeVariableCollector {
     cursor: u32,
-    variables: HashMap<EcoString, Arc<Type>>,
+    pub variables: HashMap<EcoString, Arc<Type>>,
 }
 
 impl ScopeVariableCollector {
-    fn new(cursor: u32) -> Self {
-        Self {
-            cursor,
-            variables: HashMap::new(),
-        }
+    fn new(cursor: u32, definitions: &TypedDefinitions) -> Self {
+        let TypedDefinitions { constants, .. } = definitions;
+
+        // When creating a collector, we add module constants to the variables
+        // that are in scope.
+        // These will always be available inside the body of any function we
+        // might want to analyse (unless they are shadowed and replaced in the
+        // map, that is)
+        let variables = constants
+            .iter()
+            .map(|constant| (constant.name.clone(), constant.type_.clone()))
+            .collect();
+
+        Self { cursor, variables }
     }
 
     fn collect_from_function(mut self, fun: &TypedFunction) -> HashMap<EcoString, Arc<Type>> {
@@ -1081,7 +1197,7 @@ impl<'ast> ast::visit::Visit<'ast> for ScopeVariableCollector {
     ) {
         self.visit_typed_pattern(pattern);
         if !name.starts_with('_') {
-            _ = self.variables.insert(name.clone(), pattern.type_().clone());
+            _ = self.variables.insert(name.clone(), pattern.type_());
         }
     }
 }
@@ -1106,18 +1222,18 @@ pub fn code_action_import_module(
     actions: &mut Vec<CodeAction>,
 ) {
     let uri = &params.text_document.uri;
-    let Some(Error::Type { errors, .. }) = error else {
+    let Some(errors) = type_errors_for_module(error, module) else {
         return;
     };
 
     let missing_imports = errors
         .into_iter()
-        .filter_map(|e| {
+        .filter_map(|error| {
             if let type_::Error::UnknownModule {
                 location,
                 suggestions,
                 ..
-            } = e
+            } = error
             {
                 suggest_imports(*location, suggestions)
             } else {
@@ -1153,8 +1269,8 @@ pub fn code_action_import_module(
                     import_location,
                     import,
                     &after_import_newlines,
-                ))
-            };
+                ));
+            }
 
             let title = match &suggestion.import {
                 Some(import) => &format!("Import `{import}`"),
@@ -1162,12 +1278,108 @@ pub fn code_action_import_module(
             };
 
             CodeActionBuilder::new(title)
-                .kind(CodeActionKind::QUICKFIX)
+                .kind(CodeActionKind::QuickFix)
                 .changes(uri.clone(), edits)
                 .preferred(true)
                 .push_to(actions);
         }
     }
+}
+
+pub fn code_action_generate_type(
+    module: &Module,
+    line_numbers: &LineNumbers,
+    params: &CodeActionParams,
+    error: &Option<Error>,
+    actions: &mut Vec<CodeAction>,
+) {
+    let uri = &params.text_document.uri;
+    let Some(errors) = type_errors_for_module(error, module) else {
+        return;
+    };
+
+    for error in errors {
+        let type_::Error::UnknownType {
+            location,
+            name,
+            parameter_names,
+            ..
+        } = error
+        else {
+            continue;
+        };
+
+        let range = src_span_to_lsp_range(*location, line_numbers);
+        if !within(params.range, range) {
+            continue;
+        }
+
+        // Insert the new type stub before the top-level definition that
+        // contains the error, so it appears close to where it is used.
+        let (insert_at, is_public) =
+            definition_start_and_publicity_containing(&module.ast.definitions, location.start)
+                .unwrap_or((module.code.len() as u32, false));
+        let insert_range = src_span_to_lsp_range(
+            SrcSpan {
+                start: insert_at,
+                end: insert_at,
+            },
+            line_numbers,
+        );
+
+        let pub_prefix = if is_public { "pub " } else { "" };
+        let new_text = if parameter_names.is_empty() {
+            format!("{pub_prefix}type {name}\n\n")
+        } else {
+            let parameters = parameter_names.join(", ");
+            format!("{pub_prefix}type {name}({parameters})\n\n")
+        };
+
+        let edit = TextEdit {
+            range: insert_range,
+            new_text,
+        };
+
+        CodeActionBuilder::new("Generate type")
+            .kind(CodeActionKind::QuickFix)
+            .changes(uri.clone(), vec![edit])
+            .preferred(true)
+            .push_to(actions);
+    }
+}
+
+/// Returns the source offset and publicity of the top-level definition that
+/// contains `position`, so the caller can insert code before it.
+fn definition_start_and_publicity_containing(
+    definitions: &TypedDefinitions,
+    position: u32,
+) -> Option<(u32, bool)> {
+    let functions = definitions
+        .functions
+        .iter()
+        .map(|function| (function.full_location(), function.publicity.is_public()));
+    let custom_types = definitions.custom_types.iter().map(|custom_type| {
+        (
+            custom_type.full_location(),
+            custom_type.publicity.is_public(),
+        )
+    });
+    let type_aliases = definitions
+        .type_aliases
+        .iter()
+        .map(|type_alias| (type_alias.location, type_alias.publicity.is_public()));
+    let constants = definitions
+        .constants
+        .iter()
+        .map(|constant| (constant.location, constant.publicity.is_public()));
+
+    functions
+        .chain(custom_types)
+        .chain(type_aliases)
+        .chain(constants)
+        .filter(|(span, _)| span.start <= position && position <= span.end)
+        .map(|(span, is_public)| (span.start, is_public))
+        .next()
 }
 
 fn suggest_imports(
@@ -1209,7 +1421,7 @@ pub fn code_action_add_missing_patterns(
     actions: &mut Vec<CodeAction>,
 ) {
     let uri = &params.text_document.uri;
-    let Some(Error::Type { errors, .. }) = error else {
+    let Some(errors) = type_errors_for_module(error, module) else {
         return;
     };
     let missing_patterns = errors
@@ -1230,8 +1442,8 @@ pub fn code_action_add_missing_patterns(
     for (location, missing) in missing_patterns {
         let mut edits = TextEdits::new(line_numbers);
         let range = edits.src_span_to_lsp_range(location);
-        if !overlaps(params.range, range) {
-            return;
+        if !within(params.range, range) {
+            continue;
         }
 
         let Some(Located::Expression {
@@ -1298,13 +1510,22 @@ pub fn code_action_add_missing_patterns(
                 }
             }
 
-            // Remove any blank spaces/lines between the start brace and end brace
-            edits.delete(SrcSpan::new(start_brace_location, insert_at));
+            // We remove any blank spaces/lines between the end of the last
+            // comment inside the case expression and the insertion point.
+            // If there's no comments we remove all empty space in between the
+            // two braces
+            let deletion_start = module
+                .extra
+                .last_comment_between(start_brace_location, insert_at)
+                .map(|src_span| src_span.end)
+                .unwrap_or(start_brace_location);
+
+            edits.delete(SrcSpan::new(deletion_start, insert_at));
             edits.insert(insert_at, format!("\n{indent}"));
         }
 
         CodeActionBuilder::new("Add missing patterns")
-            .kind(CodeActionKind::QUICKFIX)
+            .kind(CodeActionKind::QuickFix)
             .changes(uri.clone(), edits.edits)
             .preferred(true)
             .push_to(actions);
@@ -1447,7 +1668,7 @@ impl<'ast> ast::visit::Visit<'ast> for AddAnnotations<'_> {
         let location = match kind {
             // Function captures don't need any type annotations
             FunctionLiteralKind::Capture { .. } => return,
-            FunctionLiteralKind::Anonymous { head } => head,
+            FunctionLiteralKind::Anonymous { head, .. } => head,
             FunctionLiteralKind::Use { location } => location,
         };
 
@@ -1511,7 +1732,7 @@ impl<'a> AddAnnotations<'a> {
         };
 
         CodeActionBuilder::new(title)
-            .kind(CodeActionKind::REFACTOR)
+            .kind(CodeActionKind::Refactor)
             .changes(uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(actions);
@@ -1548,11 +1769,11 @@ impl<'a> AnnotateTopLevelDefinitions<'a> {
         // which is lacking some annotations in the module
         if !self.is_hovering_definition_requiring_annotations {
             return vec![];
-        };
+        }
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Annotate all top level definitions")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -1701,8 +1922,8 @@ impl<'a, IO> QualifiedToUnqualifiedImportFirstPass<'a, IO> {
                 // unqualify: we don't want to offer the action indiscriminately if
                 // it would generate invalid code!
                 let module_exports_constructor = match layer {
-                    ast::Layer::Value => module.get_public_value(constructor).is_some(),
-                    ast::Layer::Type => module.get_public_type(constructor).is_some(),
+                    ast::Layer::Value => module.get_importable_value(constructor).is_some(),
+                    ast::Layer::Type => module.get_importable_type(constructor).is_some(),
                 };
                 if module_exports_constructor {
                     matching_import = Some(import);
@@ -1747,14 +1968,14 @@ impl<'ast, IO> ast::visit::Visit<'ast> for QualifiedToUnqualifiedImportFirstPass
     fn visit_type_ast_constructor(
         &mut self,
         location: &'ast SrcSpan,
-        name_location: &'ast SrcSpan,
-        module: &'ast Option<(EcoString, SrcSpan)>,
-        name: &'ast EcoString,
-        arguments: &'ast Vec<ast::TypeAst>,
+        name: &'ast TypeAstConstructorName,
+        arguments: &'ast [ast::TypeAst],
+        arguments_types: Option<Vec<Arc<Type>>>,
     ) {
         let range = src_span_to_lsp_range(*location, self.line_numbers);
-        if overlaps(self.params.range, range)
-            && let Some((module_alias, _)) = module
+        if within(self.params.range, range)
+            && let Some(module_alias) = name.module_name()
+            && let Some(name) = name.name()
             && let Some(import) = self.get_module_import(module_alias, name, ast::Layer::Type)
         {
             self.qualified_constructor = Some(QualifiedConstructor {
@@ -1764,14 +1985,7 @@ impl<'ast, IO> ast::visit::Visit<'ast> for QualifiedToUnqualifiedImportFirstPass
                 layer: ast::Layer::Type,
             });
         }
-        ast::visit::visit_type_ast_constructor(
-            self,
-            location,
-            name_location,
-            module,
-            name,
-            arguments,
-        );
+        ast::visit::visit_type_ast_constructor(self, location, name, arguments, arguments_types);
     }
 
     fn visit_typed_expr_module_select(
@@ -1790,7 +2004,7 @@ impl<'ast, IO> ast::visit::Visit<'ast> for QualifiedToUnqualifiedImportFirstPass
         //  ↑
         // This allows us to offer a code action when hovering over the module name.
         let range = src_span_to_lsp_range(*location, self.line_numbers);
-        if overlaps(self.params.range, range)
+        if within(self.params.range, range)
             && let ModuleValueConstructor::Record {
                 name: constructor_name,
                 ..
@@ -1814,7 +2028,7 @@ impl<'ast, IO> ast::visit::Visit<'ast> for QualifiedToUnqualifiedImportFirstPass
             module_name,
             module_alias,
             constructor,
-        )
+        );
     }
 
     fn visit_typed_pattern_constructor(
@@ -1829,7 +2043,7 @@ impl<'ast, IO> ast::visit::Visit<'ast> for QualifiedToUnqualifiedImportFirstPass
         type_: &'ast Arc<Type>,
     ) {
         let range = src_span_to_lsp_range(*location, self.line_numbers);
-        if overlaps(self.params.range, range)
+        if within(self.params.range, range)
             && let Some((module_alias, _)) = module
             && let Inferred::Known(_) = constructor
             && let Some(import) = self.get_module_import(module_alias, name, ast::Layer::Value)
@@ -1857,16 +2071,16 @@ impl<'ast, IO> ast::visit::Visit<'ast> for QualifiedToUnqualifiedImportFirstPass
     fn visit_typed_constant_record(
         &mut self,
         location: &'ast SrcSpan,
+        arguments_start_position: &'ast u32,
         module: &'ast Option<(EcoString, SrcSpan)>,
         name: &'ast EcoString,
-        arguments: &'ast Vec<CallArg<ast::TypedConstant>>,
-        tag: &'ast EcoString,
+        arguments: &'ast Option<Vec<CallArg<ast::TypedConstant>>>,
         type_: &'ast Arc<Type>,
         field_map: &'ast Inferred<FieldMap>,
         record_constructor: &'ast Option<Box<ValueConstructor>>,
     ) {
         let range = src_span_to_lsp_range(*location, self.line_numbers);
-        if overlaps(self.params.range, range)
+        if within(self.params.range, range)
             && let Some((module_alias, _)) = module
             && let Some(import) = self.get_module_import(module_alias, name, ast::Layer::Value)
         {
@@ -1880,10 +2094,10 @@ impl<'ast, IO> ast::visit::Visit<'ast> for QualifiedToUnqualifiedImportFirstPass
         ast::visit::visit_typed_constant_record(
             self,
             location,
+            arguments_start_position,
             module,
             name,
             arguments,
-            tag,
             type_,
             field_map,
             record_constructor,
@@ -1899,7 +2113,7 @@ impl<'ast, IO> ast::visit::Visit<'ast> for QualifiedToUnqualifiedImportFirstPass
         type_: &'ast Arc<Type>,
     ) {
         let range = src_span_to_lsp_range(*location, self.line_numbers);
-        if overlaps(self.params.range, range)
+        if within(self.params.range, range)
             && let Some((module_alias, _)) = module
             && let Some(constructor) = constructor
             && let type_::ValueConstructorVariant::Record { .. } = &constructor.variant
@@ -1949,7 +2163,7 @@ impl<'a> QualifiedToUnqualifiedImportSecondPass<'a> {
             "Unqualify {}.{}",
             self.qualified_constructor.used_name, self.qualified_constructor.constructor
         ))
-        .kind(CodeActionKind::REFACTOR)
+        .kind(CodeActionKind::Refactor)
         .changes(self.params.text_document.uri.clone(), self.edits.edits)
         .preferred(false)
         .push_to(&mut action);
@@ -1960,7 +2174,7 @@ impl<'a> QualifiedToUnqualifiedImportSecondPass<'a> {
         self.edits.delete(SrcSpan {
             start: location.start,
             end: location.start + self.qualified_constructor.used_name.len() as u32 + 1, // plus .
-        })
+        });
     }
 
     fn edit_import(&mut self) {
@@ -1998,12 +2212,13 @@ impl<'ast> ast::visit::Visit<'ast> for QualifiedToUnqualifiedImportSecondPass<'a
     fn visit_type_ast_constructor(
         &mut self,
         location: &'ast SrcSpan,
-        name_location: &'ast SrcSpan,
-        module: &'ast Option<(EcoString, SrcSpan)>,
-        name: &'ast EcoString,
-        arguments: &'ast Vec<ast::TypeAst>,
+        name: &'ast TypeAstConstructorName,
+        arguments: &'ast [ast::TypeAst],
+        arguments_types: Option<Vec<Arc<Type>>>,
     ) {
-        if let Some((module_name, _)) = module {
+        if let Some(module_name) = name.module_name()
+            && let Some(name) = name.name()
+        {
             let QualifiedConstructor {
                 used_name,
                 constructor,
@@ -2015,14 +2230,7 @@ impl<'ast> ast::visit::Visit<'ast> for QualifiedToUnqualifiedImportSecondPass<'a
                 self.remove_module_qualifier(*location);
             }
         }
-        ast::visit::visit_type_ast_constructor(
-            self,
-            location,
-            name_location,
-            module,
-            name,
-            arguments,
-        );
+        ast::visit::visit_type_ast_constructor(self, location, name, arguments, arguments_types);
     }
 
     fn visit_typed_expr_module_select(
@@ -2056,7 +2264,7 @@ impl<'ast> ast::visit::Visit<'ast> for QualifiedToUnqualifiedImportSecondPass<'a
             module_name,
             module_alias,
             constructor,
-        )
+        );
     }
 
     fn visit_typed_pattern_constructor(
@@ -2100,10 +2308,10 @@ impl<'ast> ast::visit::Visit<'ast> for QualifiedToUnqualifiedImportSecondPass<'a
     fn visit_typed_constant_record(
         &mut self,
         location: &'ast SrcSpan,
+        arguments_start_position: &'ast u32,
         module: &'ast Option<(EcoString, SrcSpan)>,
         name: &'ast EcoString,
-        arguments: &'ast Vec<CallArg<ast::TypedConstant>>,
-        tag: &'ast EcoString,
+        arguments: &'ast Option<Vec<CallArg<ast::TypedConstant>>>,
         type_: &'ast Arc<Type>,
         field_map: &'ast Inferred<FieldMap>,
         record_constructor: &'ast Option<Box<ValueConstructor>>,
@@ -2123,10 +2331,10 @@ impl<'ast> ast::visit::Visit<'ast> for QualifiedToUnqualifiedImportSecondPass<'a
         ast::visit::visit_typed_constant_record(
             self,
             location,
+            arguments_start_position,
             module,
             name,
             arguments,
-            tag,
             type_,
             field_map,
             record_constructor,
@@ -2231,7 +2439,7 @@ impl<'a> UnqualifiedToQualifiedImportFirstPass<'a> {
                             layer: ast::Layer::Value,
                         })
                     })
-            })
+            });
     }
 
     fn get_module_import_from_type_constructor(&mut self, constructor_name: &EcoString) {
@@ -2254,7 +2462,7 @@ impl<'a> UnqualifiedToQualifiedImportFirstPass<'a> {
                         });
                     }
                     None
-                })
+                });
     }
 }
 
@@ -2262,13 +2470,13 @@ impl<'ast> ast::visit::Visit<'ast> for UnqualifiedToQualifiedImportFirstPass<'as
     fn visit_type_ast_constructor(
         &mut self,
         location: &'ast SrcSpan,
-        name_location: &'ast SrcSpan,
-        module: &'ast Option<(EcoString, SrcSpan)>,
-        name: &'ast EcoString,
-        arguments: &'ast Vec<ast::TypeAst>,
+        name: &'ast TypeAstConstructorName,
+        arguments: &'ast [ast::TypeAst],
+        arguments_types: Option<Vec<Arc<Type>>>,
     ) {
-        if module.is_none()
-            && overlaps(
+        if !name.is_qualified()
+            && let Some(name) = name.name()
+            && within(
                 self.params.range,
                 src_span_to_lsp_range(*location, self.line_numbers),
             )
@@ -2276,14 +2484,7 @@ impl<'ast> ast::visit::Visit<'ast> for UnqualifiedToQualifiedImportFirstPass<'as
             self.get_module_import_from_type_constructor(name);
         }
 
-        ast::visit::visit_type_ast_constructor(
-            self,
-            location,
-            name_location,
-            module,
-            name,
-            arguments,
-        );
+        ast::visit::visit_type_ast_constructor(self, location, name, arguments, arguments_types);
     }
 
     fn visit_typed_expr_var(
@@ -2293,7 +2494,7 @@ impl<'ast> ast::visit::Visit<'ast> for UnqualifiedToQualifiedImportFirstPass<'as
         name: &'ast EcoString,
     ) {
         let range = src_span_to_lsp_range(*location, self.line_numbers);
-        if overlaps(self.params.range, range)
+        if within(self.params.range, range)
             && let Some(module_name) = match &constructor.variant {
                 type_::ValueConstructorVariant::ModuleConstant { module, .. }
                 | type_::ValueConstructorVariant::ModuleFn { module, .. }
@@ -2319,7 +2520,7 @@ impl<'ast> ast::visit::Visit<'ast> for UnqualifiedToQualifiedImportFirstPass<'as
         type_: &'ast Arc<Type>,
     ) {
         if module.is_none()
-            && overlaps(
+            && within(
                 self.params.range,
                 src_span_to_lsp_range(*location, self.line_numbers),
             )
@@ -2344,16 +2545,16 @@ impl<'ast> ast::visit::Visit<'ast> for UnqualifiedToQualifiedImportFirstPass<'as
     fn visit_typed_constant_record(
         &mut self,
         location: &'ast SrcSpan,
+        arguments_start_position: &'ast u32,
         module: &'ast Option<(EcoString, SrcSpan)>,
         name: &'ast EcoString,
-        arguments: &'ast Vec<CallArg<ast::TypedConstant>>,
-        _tag: &'ast EcoString,
-        _type_: &'ast Arc<Type>,
-        _field_map: &'ast Inferred<FieldMap>,
+        arguments: &'ast Option<Vec<CallArg<ast::TypedConstant>>>,
+        type_: &'ast Arc<Type>,
+        field_map: &'ast Inferred<FieldMap>,
         record_constructor: &'ast Option<Box<ValueConstructor>>,
     ) {
         if module.is_none()
-            && overlaps(
+            && within(
                 self.params.range,
                 src_span_to_lsp_range(*location, self.line_numbers),
             )
@@ -2371,12 +2572,12 @@ impl<'ast> ast::visit::Visit<'ast> for UnqualifiedToQualifiedImportFirstPass<'as
         ast::visit::visit_typed_constant_record(
             self,
             location,
+            arguments_start_position,
             module,
             name,
             arguments,
-            _tag,
-            _type_,
-            _field_map,
+            type_,
+            field_map,
             record_constructor,
         );
     }
@@ -2390,7 +2591,7 @@ impl<'ast> ast::visit::Visit<'ast> for UnqualifiedToQualifiedImportFirstPass<'as
         type_: &'ast Arc<Type>,
     ) {
         if module.is_none()
-            && overlaps(
+            && within(
                 self.params.range,
                 src_span_to_lsp_range(*location, self.line_numbers),
             )
@@ -2465,7 +2666,7 @@ impl<'a> UnqualifiedToQualifiedImportSecondPass<'a> {
             module_name,
             constructor.name,
         ))
-        .kind(CodeActionKind::REFACTOR)
+        .kind(CodeActionKind::Refactor)
         .changes(self.params.text_document.uri.clone(), self.edits.edits)
         .preferred(false)
         .push_to(&mut action);
@@ -2504,12 +2705,13 @@ impl<'ast> ast::visit::Visit<'ast> for UnqualifiedToQualifiedImportSecondPass<'a
     fn visit_type_ast_constructor(
         &mut self,
         location: &'ast SrcSpan,
-        name_location: &'ast SrcSpan,
-        module: &'ast Option<(EcoString, SrcSpan)>,
-        name: &'ast EcoString,
-        arguments: &'ast Vec<ast::TypeAst>,
+        name: &'ast TypeAstConstructorName,
+        arguments: &'ast [ast::TypeAst],
+        arguments_types: Option<Vec<Arc<Type>>>,
     ) {
-        if module.is_none() {
+        if !name.is_qualified()
+            && let Some(name) = name.name()
+        {
             let UnqualifiedConstructor {
                 constructor, layer, ..
             } = &self.unqualified_constructor;
@@ -2517,14 +2719,7 @@ impl<'ast> ast::visit::Visit<'ast> for UnqualifiedToQualifiedImportSecondPass<'a
                 self.add_module_qualifier(*location);
             }
         }
-        ast::visit::visit_type_ast_constructor(
-            self,
-            location,
-            name_location,
-            module,
-            name,
-            arguments,
-        );
+        ast::visit::visit_type_ast_constructor(self, location, name, arguments, arguments_types);
     }
 
     fn visit_typed_expr_var(
@@ -2585,10 +2780,10 @@ impl<'ast> ast::visit::Visit<'ast> for UnqualifiedToQualifiedImportSecondPass<'a
     fn visit_typed_constant_record(
         &mut self,
         location: &'ast SrcSpan,
+        arguments_start_position: &'ast u32,
         module: &'ast Option<(EcoString, SrcSpan)>,
         name: &'ast EcoString,
-        arguments: &'ast Vec<CallArg<ast::TypedConstant>>,
-        tag: &'ast EcoString,
+        arguments: &'ast Option<Vec<CallArg<ast::TypedConstant>>>,
         type_: &'ast Arc<Type>,
         field_map: &'ast Inferred<FieldMap>,
         record_constructor: &'ast Option<Box<ValueConstructor>>,
@@ -2606,10 +2801,10 @@ impl<'ast> ast::visit::Visit<'ast> for UnqualifiedToQualifiedImportSecondPass<'a
         ast::visit::visit_typed_constant_record(
             self,
             location,
+            arguments_start_position,
             module,
             name,
             arguments,
-            tag,
             type_,
             field_map,
             record_constructor,
@@ -2807,9 +3002,9 @@ impl<'a> ConvertFromUse<'a> {
                 } else if needs_space_before_callback {
                     format!(" {callback_start}")
                 } else {
-                    callback_start.to_string()
+                    callback_start
                 },
-            )
+            );
         } else {
             // On the other hand, if the function on the right hand side doesn't
             // end with a closed parenthese then we have to manually add it.
@@ -2818,8 +3013,8 @@ impl<'a> ConvertFromUse<'a> {
             //                  ^ No parentheses
             //
             self.edits
-                .insert(use_line_end, format!("(fn({assignments}) {{"))
-        };
+                .insert(use_line_end, format!("(fn({assignments}) {{"));
+        }
 
         // Then we have to increase indentation for all the lines of the use
         // body.
@@ -2833,7 +3028,7 @@ impl<'a> ConvertFromUse<'a> {
                     end: Position { line, character: 0 },
                 },
                 new_text: "  ".to_string(),
-            })
+            });
         }
 
         let final_line_indentation = " ".repeat(use_body_range.start.character as usize);
@@ -2844,7 +3039,7 @@ impl<'a> ConvertFromUse<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Convert from `use`")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -2975,7 +3170,7 @@ impl<'a> ConvertToUse<'a> {
                 SrcSpan::new(arg_before_callback.end, callback_body_span.start),
                 format!(")\n{indentation}"),
             ),
-        };
+        }
 
         // Then we have to remove two spaces of indentation from each line of
         // the callback function's body.
@@ -2984,7 +3179,7 @@ impl<'a> ConvertToUse<'a> {
             self.edits.delete_range(Range::new(
                 Position { line, character: 0 },
                 Position { line, character: 2 },
-            ))
+            ));
         }
 
         // Then we have to remove the anonymous fn closing `}` and the call's
@@ -2994,7 +3189,7 @@ impl<'a> ConvertToUse<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Convert to `use`")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -3016,7 +3211,7 @@ impl<'ast> ast::visit::Visit<'ast> for ConvertToUse<'ast> {
             self.selected_call = Some(call_data);
         }
 
-        ast::visit::visit_typed_function(self, fun)
+        ast::visit::visit_typed_function(self, fun);
     }
 
     fn visit_typed_expr_fn(
@@ -3063,7 +3258,7 @@ impl<'ast> ast::visit::Visit<'ast> for ConvertToUse<'ast> {
         if within(self.params.range, statement_range) {
             // Only the last statement of a block can be turned into a use!
             if let Some(selected_call) = turn_statement_into_use(last_statement) {
-                self.selected_call = Some(selected_call)
+                self.selected_call = Some(selected_call);
             }
         }
 
@@ -3182,8 +3377,8 @@ pub struct ExtractVariable<'a> {
 }
 
 pub enum ExtractedToVariable {
-    Expression { location: SrcSpan, type_: Arc<Type> },
-    StartOfPipeline { location: SrcSpan, type_: Arc<Type> },
+    Expression { location: SrcSpan, name: EcoString },
+    StartOfPipeline { location: SrcSpan, name: EcoString },
 }
 
 /// The Position of the selected code
@@ -3196,7 +3391,7 @@ enum ExtractVariablePosition {
     PipelineCall,
     /// The right hand side of the `->` in a case expression.
     InsideCaseClause,
-    // A call argument. This can also be a `use` callback.
+    /// A call argument. This can also be a `use` callback.
     CallArg,
 }
 
@@ -3212,8 +3407,8 @@ impl<'a> ExtractVariable<'a> {
             edits: TextEdits::new(line_numbers),
             position: None,
             selected_expression: None,
-            latest_statement: None,
             statement_before_selected_expression: None,
+            latest_statement: None,
             to_be_wrapped: false,
             name_generator: NameGenerator::new(),
         }
@@ -3229,16 +3424,15 @@ impl<'a> ExtractVariable<'a> {
             return vec![];
         };
 
-        let expression_type = match &extracted_value {
-            ExtractedToVariable::Expression { type_, .. }
-            | ExtractedToVariable::StartOfPipeline { type_, .. } => type_,
+        let variable_name = match &extracted_value {
+            ExtractedToVariable::Expression { name, .. }
+            | ExtractedToVariable::StartOfPipeline { name, .. } => name,
         };
         let expression_span = match &extracted_value {
             ExtractedToVariable::Expression { location, .. }
             | ExtractedToVariable::StartOfPipeline { location, .. } => location,
         };
 
-        let variable_name = self.name_generator.generate_name_from_type(expression_type);
         let content = self
             .module
             .code
@@ -3272,7 +3466,7 @@ impl<'a> ExtractVariable<'a> {
             self.edits.insert(*line_end, format!("{indent}}}\n"));
             indent += "  ";
             insertion = format!("{{\n{indent}{insertion}");
-        };
+        }
 
         self.edits
             .insert(insert_location.start, format!("{insertion}\n{indent}"));
@@ -3282,11 +3476,35 @@ impl<'a> ExtractVariable<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Extract variable")
-            .kind(CodeActionKind::REFACTOR_EXTRACT)
+            .kind(CodeActionKind::RefactorExtract)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
         action
+    }
+
+    fn inside_new_scope<F>(&mut self, fun: F)
+    where
+        F: Fn(&mut Self),
+    {
+        let names = self.name_generator.clone();
+        fun(self);
+        self.name_generator = names;
+    }
+
+    fn generate_candidate_name(&mut self, type_: Arc<Type>) -> EcoString {
+        let name = self.name_generator.generate_name_from_type(&type_);
+        // When the generator generates a name, it rightfully inserts it in the
+        // current scope so that it cannot be used again.
+        // However, in our case it's not what we want: the name we're generating
+        // is a candidate for what we might use for a single variable, at the
+        // end of the whole process we're gonna pick just a single name.
+        // If we were to insert this name into scope, that means that all the
+        // other candidates would have a suffix `int_2`, `int_3`, ...
+        // When we finally pick one it would be strange if the picked name had
+        // a suffix but no `int`, `int_1`, ... were in scope!
+        let _ = self.name_generator.used_names.remove(&name);
+        name
     }
 
     fn at_position<F>(&mut self, position: ExtractVariablePosition, fun: F)
@@ -3349,8 +3567,9 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractVariable<'ast> {
             return;
         }
 
-        // We reset the name generator to purge the variable names from other scopes.
-        // We then add the reserve the constant names.
+        // We reset the name generator to purge the variable names from other
+        // scopes.
+        // We then reserve the names already used by top level definitions.
         self.name_generator = NameGenerator::new();
         self.name_generator
             .reserve_module_value_names(&self.module.ast.definitions);
@@ -3360,8 +3579,8 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractVariable<'ast> {
 
     fn visit_typed_assignment(&mut self, assignment: &'ast TypedAssignment) {
         if let Pattern::Variable { name, .. } = &assignment.pattern {
-            self.name_generator.add_used_name(name.clone())
-        };
+            self.name_generator.add_used_name(name.clone());
+        }
         ast::visit::visit_typed_assignment(self, assignment);
     }
 
@@ -3384,7 +3603,7 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractVariable<'ast> {
                 finally_kind,
             );
             return;
-        };
+        }
 
         // Visiting a pipeline requires a bit of care, we don't want to extract
         // intermediate steps as variables (those are function calls)!
@@ -3407,7 +3626,7 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractVariable<'ast> {
             let location = first_value.location.merge(&last.value.location());
             self.selected_expression = Some(ExtractedToVariable::StartOfPipeline {
                 location,
-                type_: last.type_(),
+                name: self.generate_candidate_name(last.type_()),
             });
             return;
         }
@@ -3425,8 +3644,83 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractVariable<'ast> {
         }
 
         self.at_position(ExtractVariablePosition::PipelineCall, |this| {
-            this.visit_typed_expr(finally)
+            this.visit_typed_expr(finally);
         });
+    }
+
+    fn visit_typed_expr_call(
+        &mut self,
+        location: &'ast SrcSpan,
+        type_: &'ast Arc<Type>,
+        fun: &'ast TypedExpr,
+        arguments: &'ast [TypedCallArg],
+        open_parenthesis: &'ast Option<u32>,
+    ) {
+        // Function calls need some extra care. If we're inspecting a record
+        // call like this one: `Wibble(wobble, woo)` and the cursor is over the
+        // constructor itself we never want to allow extracting it, or it would
+        // result in the following code:
+        //
+        // ```gleam
+        // Wibble(wobble, woo)
+        // // ^^ Cursor here
+        //
+        // let wibble = Wibble
+        // wibble(wobble, woo)
+        // // That's a bit silly!
+        // ```
+        let fun_range = self.edits.src_span_to_lsp_range(fun.location());
+        if within(self.params.range, fun_range) && fun.is_record_constructor_function() {
+            return;
+        }
+
+        // Otherwise we just keep visiting like usual, no special handling is
+        // required.
+        ast::visit::visit_typed_expr_call(self, location, type_, fun, arguments, open_parenthesis);
+    }
+
+    fn visit_typed_expr_record_update(
+        &mut self,
+        location: &'ast SrcSpan,
+        spread_start: &'ast u32,
+        type_: &'ast Arc<Type>,
+        updated_record: &'ast TypedExpr,
+        updated_record_assigned_name: &'ast Option<EcoString>,
+        constructor: &'ast TypedExpr,
+        arguments: &'ast [TypedCallArg],
+    ) {
+        // Record updates need some extra care. If we're inspecting a record
+        // update like this one: `Wibble(..wobble, woo)` and the cursor is over
+        // the constructor itself we never want to allow extracting it, or it
+        // would result in the following code:
+        //
+        // ```gleam
+        // Wibble(..wobble, woo)
+        // // ^^ Cursor here
+        //
+        // let wibble = Wibble
+        // wibble(..wobble, woo)
+        // // That's a bit silly!
+        // ```
+        let constructor_range = self.edits.src_span_to_lsp_range(constructor.location());
+        if within(self.params.range, constructor_range)
+            && constructor.is_record_constructor_function()
+        {
+            return;
+        }
+
+        // Otherwise we just keep visiting like usual, no special handling is
+        // required.
+        ast::visit::visit_typed_expr_record_update(
+            self,
+            location,
+            spread_start,
+            type_,
+            updated_record,
+            updated_record_assigned_name,
+            constructor,
+            arguments,
+        );
     }
 
     fn visit_typed_expr(&mut self, expr: &'ast TypedExpr) {
@@ -3484,15 +3778,6 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractVariable<'ast> {
                 return;
             }
 
-            // Expressions that don't make sense to extract
-            TypedExpr::Panic { .. }
-            | TypedExpr::Echo { .. }
-            | TypedExpr::Block { .. }
-            | TypedExpr::ModuleSelect { .. }
-            | TypedExpr::Invalid { .. }
-            | TypedExpr::PositionalAccess { .. }
-            | TypedExpr::Var { .. } => (),
-
             TypedExpr::Int { location, .. }
             | TypedExpr::Float { location, .. }
             | TypedExpr::String { location, .. }
@@ -3509,18 +3794,40 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractVariable<'ast> {
             | TypedExpr::BitArray { location, .. }
             | TypedExpr::RecordUpdate { location, .. }
             | TypedExpr::NegateBool { location, .. }
-            | TypedExpr::NegateInt { location, .. } => {
+            | TypedExpr::NegateInt { location, .. }
+            // It generally makes no sense to extract variables, the only
+            // exception is for records with no fields (like `True` and
+            // `False`): in the AST those are `Var`s with a `Record`
+            // constructor. Extracting them is allowed!
+            | TypedExpr::Var {
+                constructor:
+                    ValueConstructor {
+                        variant: type_::ValueConstructorVariant::Record { .. },
+                        ..
+                    },
+                location,
+                ..
+            } => {
                 if let Some(ExtractVariablePosition::CallArg) = self.position {
                     // Don't update latest statement, we don't want to insert the extracted
                     // variable inside the parenthesis where the call argument is located.
                 } else {
                     self.statement_before_selected_expression = self.latest_statement;
-                };
+                }
                 self.selected_expression = Some(ExtractedToVariable::Expression {
                     location: *location,
-                    type_: expr.type_(),
+                    name: self.generate_candidate_name(expr.type_()),
                 });
             }
+
+            // Expressions that don't make sense to extract
+            TypedExpr::Panic { .. }
+            | TypedExpr::Echo { .. }
+            | TypedExpr::Block { .. }
+            | TypedExpr::ModuleSelect { .. }
+            | TypedExpr::Invalid { .. }
+            | TypedExpr::PositionalAccess { .. }
+            | TypedExpr::Var { .. } => (),
         }
 
         ast::visit::visit_typed_expr(self, expr);
@@ -3543,7 +3850,9 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractVariable<'ast> {
     fn visit_typed_clause(&mut self, clause: &'ast ast::TypedClause) {
         let range = self.edits.src_span_to_lsp_range(clause.location());
         if !within(self.params.range, range) {
-            ast::visit::visit_typed_clause(self, clause);
+            self.inside_new_scope(|this| {
+                ast::visit::visit_typed_clause(this, clause);
+            });
             return;
         }
 
@@ -3551,7 +3860,9 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractVariable<'ast> {
         self.latest_statement = Some(clause.then.location());
         self.to_be_wrapped = true;
         self.at_position(ExtractVariablePosition::InsideCaseClause, |this| {
-            ast::visit::visit_typed_clause(this, clause);
+            this.inside_new_scope(|this| {
+                ast::visit::visit_typed_clause(this, clause);
+            });
         });
     }
 
@@ -3562,7 +3873,9 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractVariable<'ast> {
     ) {
         let range = self.edits.src_span_to_lsp_range(*location);
         if !within(self.params.range, range) {
-            ast::visit::visit_typed_expr_block(self, location, statements);
+            self.inside_new_scope(|this| {
+                ast::visit::visit_typed_expr_block(this, location, statements);
+            });
             return;
         }
 
@@ -3574,7 +3887,9 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractVariable<'ast> {
         }
 
         self.at_optional_position(position, |this| {
-            ast::visit::visit_typed_expr_block(this, location, statements);
+            this.inside_new_scope(|this| {
+                ast::visit::visit_typed_expr_block(this, location, statements);
+            });
         });
     }
 
@@ -3589,15 +3904,17 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractVariable<'ast> {
     ) {
         let range = self.edits.src_span_to_lsp_range(*location);
         if !within(self.params.range, range) {
-            ast::visit::visit_typed_expr_fn(
-                self,
-                location,
-                type_,
-                kind,
-                arguments,
-                body,
-                return_annotation,
-            );
+            self.inside_new_scope(|this| {
+                ast::visit::visit_typed_expr_fn(
+                    this,
+                    location,
+                    type_,
+                    kind,
+                    arguments,
+                    body,
+                    return_annotation,
+                );
+            });
             return;
         }
 
@@ -3611,15 +3928,17 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractVariable<'ast> {
         };
 
         self.at_optional_position(position, |this| {
-            ast::visit::visit_typed_expr_fn(
-                this,
-                location,
-                type_,
-                kind,
-                arguments,
-                body,
-                return_annotation,
-            );
+            this.inside_new_scope(|this| {
+                ast::visit::visit_typed_expr_fn(
+                    this,
+                    location,
+                    type_,
+                    kind,
+                    arguments,
+                    body,
+                    return_annotation,
+                );
+            });
         });
     }
 
@@ -3800,9 +4119,12 @@ fn can_be_constant(
 
         // Extract concat binary operation if both sides can be constants
         TypedExpr::BinOp {
-            name, left, right, ..
+            operator,
+            left,
+            right,
+            ..
         } => {
-            matches!(name, ast::BinOp::Concatenate)
+            matches!(operator, ast::BinOp::Concatenate)
                 && can_be_constant(module, left, Some(module_constants))
                 && can_be_constant(module, right, Some(module_constants))
         }
@@ -3911,7 +4233,7 @@ impl<'a> ExtractConstant<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Extract constant")
-            .kind(CodeActionKind::REFACTOR_EXTRACT)
+            .kind(CodeActionKind::RefactorExtract)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -4102,7 +4424,7 @@ impl<'a> ExpandFunctionCapture<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Expand function capture")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -4141,15 +4463,17 @@ impl<'ast> ast::visit::Visit<'ast> for ExpandFunctionCapture<'ast> {
             arguments,
             body,
             return_annotation,
-        )
+        );
     }
 }
 
+/// A set of variable names used in some gleam. Useful for passing to [NameGenerator::reserve_variable_names].
 struct VariablesNames {
     names: HashSet<EcoString>,
 }
 
 impl VariablesNames {
+    /// Creates a `VariableNames` by collecting all variables used in a list of statements.
     fn from_statements(statements: &[TypedStatement]) -> Self {
         let mut variables = Self {
             names: HashSet::new(),
@@ -4158,6 +4482,16 @@ impl VariablesNames {
         for statement in statements {
             variables.visit_typed_statement(statement);
         }
+        variables
+    }
+
+    /// Creates a `VariableNames` by collecting all variables used within an expression.
+    fn from_expression(expression: &TypedExpr) -> Self {
+        let mut variables = Self {
+            names: HashSet::new(),
+        };
+
+        variables.visit_typed_expr(expression);
         variables
     }
 }
@@ -4208,7 +4542,16 @@ impl<'a, IO> GenerateDynamicDecoder<'a, IO> {
     }
 
     pub fn code_actions(&mut self) {
-        self.visit_typed_module(&self.module.ast);
+        let project_config = &self.compiler.project_compiler.config;
+        if project_config
+            .dependencies
+            .contains_key(STDLIB_PACKAGE_NAME)
+            || project_config
+                .dev_dependencies
+                .contains_key(STDLIB_PACKAGE_NAME)
+        {
+            self.visit_typed_module(&self.module.ast);
+        }
     }
 
     fn custom_type_decoder_body(
@@ -4361,8 +4704,10 @@ impl<'a, IO> GenerateDynamicDecoder<'a, IO> {
 
 impl<'ast, IO> ast::visit::Visit<'ast> for GenerateDynamicDecoder<'ast, IO> {
     fn visit_typed_custom_type(&mut self, custom_type: &'ast ast::TypedCustomType) {
-        let range = self.edits.src_span_to_lsp_range(custom_type.location);
-        if !overlaps(self.params.range, range) {
+        let range = self
+            .edits
+            .src_span_to_lsp_range(custom_type.full_location());
+        if !within(self.params.range, range) {
             return;
         }
 
@@ -4401,7 +4746,7 @@ impl<'ast, IO> ast::visit::Visit<'ast> for GenerateDynamicDecoder<'ast, IO> {
         maybe_import(&mut self.edits, self.module, DECODE_MODULE);
 
         CodeActionBuilder::new("Generate dynamic decoder")
-            .kind(CodeActionKind::REFACTOR)
+            .kind(CodeActionKind::Refactor)
             .preferred(false)
             .changes(
                 self.params.text_document.uri.clone(),
@@ -4649,7 +4994,7 @@ impl<'a, 'b, IO> DecoderPrinter<'a, 'b, IO> {
             } else {
                 return Some(eco_format!("#({})", field_zeroes.iter().join(", ")));
             }
-        };
+        }
 
         let (module, name, _) = type_.named_type_information()?;
         match (module.as_str(), name.as_str()) {
@@ -4698,7 +5043,7 @@ impl<'a, 'b, IO> DecoderPrinter<'a, 'b, IO> {
 
         if already_seen_type {
             return None;
-        };
+        }
 
         let type_is_inside_current_module = &self.type_module == custom_type_module;
 
@@ -4788,7 +5133,7 @@ impl<'a, 'b, IO> DecoderPrinter<'a, 'b, IO> {
         // Only proceed if we were able to construct every field successfully
         if zero_params.len() < zero_constructor.parameters.len() {
             return None;
-        };
+        }
 
         let zero_constructor = if !type_is_inside_current_module {
             // Type constructors from other modules need to be qualified appropriately,
@@ -5010,8 +5355,10 @@ fn is_nil_like(type_: &Type) -> bool {
 
 impl<'ast> ast::visit::Visit<'ast> for GenerateJsonEncoder<'ast> {
     fn visit_typed_custom_type(&mut self, custom_type: &'ast ast::TypedCustomType) {
-        let range = self.edits.src_span_to_lsp_range(custom_type.location);
-        if !overlaps(self.params.range, range) {
+        let range = self
+            .edits
+            .src_span_to_lsp_range(custom_type.full_location());
+        if !within(self.params.range, range) {
             return;
         }
 
@@ -5053,7 +5400,7 @@ fn {name}({record_name}: {type_}) -> {json_type} {{
         maybe_import(&mut self.edits, self.module, JSON_MODULE);
 
         CodeActionBuilder::new("Generate to-JSON function")
-            .kind(CodeActionKind::REFACTOR)
+            .kind(CodeActionKind::Refactor)
             .preferred(false)
             .changes(
                 self.params.text_document.uri.clone(),
@@ -5278,6 +5625,27 @@ pub struct PatternMatchOnValue<'a, A> {
 ///
 #[derive(Clone)]
 pub enum PatternMatchedValue<'a> {
+    /// A statement we can match on. For example, function calls, record
+    /// and tuple accesses:
+    ///
+    /// ```gleam
+    /// pub fn wibble() {
+    ///   wobble(1, 2)
+    /// //^^^^ This
+    /// }
+    /// ```
+    ///
+    Statement {
+        /// The span covering the entire statement:
+        /// ```gleam
+        ///   wobble(1, 2)
+        /// //^^^^^^^^^^^^ This
+        /// ```
+        location: SrcSpan,
+        /// The statement's type defining what we will be pattern matching
+        /// on.
+        type_: Arc<Type>,
+    },
     FunctionArgument {
         /// The argument being pattern matched on.
         ///
@@ -5349,11 +5717,26 @@ pub enum PatternLocation {
         /// This location covers the entire list tail pattern, including the `..`
         location: SrcSpan,
     },
+    /// When the pattern being matched is a discard. For example:
+    /// ```gleam
+    /// case wibble {
+    ///   Ok(_) -> todo
+    /// //   ^ Hovering this!
+    /// }
+    /// ```
+    Discard { location: SrcSpan },
 }
 
 impl PatternLocation {
     fn regular(location: SrcSpan) -> Self {
         Self::Regular { location }
+    }
+
+    fn is_discard(&self) -> bool {
+        match self {
+            PatternLocation::Regular { .. } | PatternLocation::ListTail { .. } => false,
+            PatternLocation::Discard { .. } => true,
+        }
     }
 }
 
@@ -5402,19 +5785,31 @@ impl<'a, IO> PatternMatchOnValue<'a, IO> {
                 "Pattern match on variable"
             }
 
+            Some(PatternMatchedValue::Statement { location, type_ }) => {
+                self.match_on_statement(location, type_);
+                "Pattern match on value"
+            }
+
             Some(PatternMatchedValue::ClausePatternVariable {
                 variable_type,
                 variable_location,
                 clause_location,
                 bound_variables,
             }) => {
+                let title = if variable_location.is_discard() {
+                    "Pattern match on value"
+                } else {
+                    "Pattern match on variable"
+                };
+
                 self.match_on_clause_variable(
                     variable_type,
                     variable_location,
                     clause_location,
                     &bound_variables,
                 );
-                "Pattern match on variable"
+
+                title
             }
 
             None => return vec![],
@@ -5426,9 +5821,9 @@ impl<'a, IO> PatternMatchOnValue<'a, IO> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new(action_title)
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::QuickFix)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
-            .preferred(false)
+            .preferred(true)
             .push_to(&mut action);
         action
     }
@@ -5518,7 +5913,6 @@ impl<'a, IO> PatternMatchOnValue<'a, IO> {
 
         let assignment_range = self.edits.src_span_to_lsp_range(assignment_location);
         let nesting = " ".repeat(assignment_range.start.character as usize);
-
         let pattern_matching = if patterns.len() == 1 {
             let pattern = patterns.first();
             format!("let {pattern} = {variable_name}")
@@ -5534,6 +5928,32 @@ impl<'a, IO> PatternMatchOnValue<'a, IO> {
             assignment_location.end,
             format!("\n{nesting}{pattern_matching}"),
         );
+    }
+
+    fn match_on_statement(&mut self, statement_location: SrcSpan, type_: Arc<Type>) {
+        let Some(patterns) =
+            self.type_to_destructure_patterns(type_.as_ref(), &mut NameGenerator::new())
+        else {
+            return;
+        };
+
+        if patterns.len() == 1 {
+            let pattern = patterns.first();
+            self.edits
+                .insert(statement_location.start, format!("let {pattern} = "));
+        } else {
+            let statement_range = self.edits.src_span_to_lsp_range(statement_location);
+            let nesting = " ".repeat(statement_range.start.character as usize);
+            let patterns = patterns
+                .iter()
+                .map(|p| format!("  {nesting}{p} -> todo"))
+                .join("\n");
+            self.edits.insert(statement_location.start, "case ".into());
+            self.edits.insert(
+                statement_location.end,
+                format!(" {{\n{patterns}\n{nesting}}}"),
+            );
+        }
     }
 
     fn match_on_clause_variable(
@@ -5566,8 +5986,9 @@ impl<'a, IO> PatternMatchOnValue<'a, IO> {
         let nesting = " ".repeat(clause_range.start.character as usize);
 
         let variable_location = match variable_location {
-            PatternLocation::Regular { location } => location,
-            PatternLocation::ListTail { location } => location,
+            PatternLocation::Regular { location }
+            | PatternLocation::ListTail { location }
+            | PatternLocation::Discard { location } => location,
         };
 
         let variable_start = (variable_location.start - clause_location.start) as usize;
@@ -5620,6 +6041,10 @@ impl<'a, IO> PatternMatchOnValue<'a, IO> {
     ) -> Option<Vec1<EcoString>> {
         match type_ {
             Type::Fn { .. } => None,
+
+            // Pattern matchin on `Nil` is not all that useful.
+            Type::Named { .. } if type_.is_nil() => None,
+
             Type::Var { type_ } => self.type_var_to_destructure_patterns(&type_.borrow(), names),
 
             // We special case lists, they don't have "regular" constructors
@@ -5799,6 +6224,36 @@ impl<'ast, IO> ast::visit::Visit<'ast> for PatternMatchOnValue<'ast, IO> {
         ast::visit::visit_typed_function(self, fun);
     }
 
+    fn visit_typed_statement(&mut self, statement: &'ast TypedStatement) {
+        let statement_range = self.edits.src_span_to_lsp_range(statement.location());
+        if !within(self.params.range, statement_range) {
+            return;
+        }
+
+        ast::visit::visit_typed_statement(self, statement);
+        match statement {
+            // If we haven't found any more specific selected expression, then
+            // we are going to select the statement to pattern match on (if it
+            // can be meaningfully pattern matched on).
+            ast::Statement::Expression(
+                TypedExpr::Call { type_, .. }
+                | TypedExpr::ModuleSelect { type_, .. }
+                | TypedExpr::RecordAccess { type_, .. }
+                | TypedExpr::TupleIndex { type_, .. },
+            ) if self.selected_value.is_none() => {
+                self.selected_value = Some(PatternMatchedValue::Statement {
+                    location: statement.location(),
+                    type_: type_.clone(),
+                });
+            }
+
+            ast::Statement::Expression(_)
+            | ast::Statement::Assignment(_)
+            | ast::Statement::Use(_)
+            | ast::Statement::Assert(_) => (),
+        }
+    }
+
     fn visit_typed_expr_fn(
         &mut self,
         location: &'ast SrcSpan,
@@ -5852,7 +6307,18 @@ impl<'ast, IO> ast::visit::Visit<'ast> for PatternMatchOnValue<'ast, IO> {
         }
 
         ast::visit::visit_typed_assignment(self, assignment);
-        if let Some((name, _, ref type_)) = self.pattern_variable_under_cursor {
+        if let Some((name, _, ref type_)) = self.pattern_variable_under_cursor
+            // We must make sure that no other value was selected while visiting
+            // this. If it were `Some` that means that we have found _another_
+            // variable to match on inside the assignmemt itself. For example:
+            // ```gleam
+            // let a = {
+            //   let b = todo
+            //   //  ^ We're matching on this, not the outer one!
+            // }
+            // ```
+            && self.selected_value.is_none()
+        {
             self.selected_value = Some(PatternMatchedValue::LetVariable {
                 variable_name: name,
                 variable_type: type_.clone(),
@@ -5927,6 +6393,23 @@ impl<'ast, IO> ast::visit::Visit<'ast> for PatternMatchOnValue<'ast, IO> {
         ast::visit::visit_typed_use(self, use_);
     }
 
+    fn visit_typed_pattern_discard(
+        &mut self,
+        location: &'ast SrcSpan,
+        name: &'ast EcoString,
+        type_: &'ast Arc<Type>,
+    ) {
+        if within(
+            self.params.range,
+            self.edits.src_span_to_lsp_range(*location),
+        ) {
+            let location = PatternLocation::Discard {
+                location: *location,
+            };
+            self.pattern_variable_under_cursor = Some((name, location, type_.clone()));
+        }
+    }
+
     fn visit_typed_pattern_variable(
         &mut self,
         location: &'ast SrcSpan,
@@ -5965,19 +6448,25 @@ impl<'ast, IO> ast::visit::Visit<'ast> for PatternMatchOnValue<'ast, IO> {
         &mut self,
         _location: &'ast SrcSpan,
         _left_location: &'ast SrcSpan,
-        left_side_assignment: &'ast Option<(EcoString, SrcSpan)>,
+        left_side_assignment: &'ast Option<StringPrefixLeftSideAssignment>,
         right_location: &'ast SrcSpan,
         _left_side_string: &'ast EcoString,
         right_side_assignment: &'ast AssignName,
     ) {
-        if let Some((name, location)) = left_side_assignment
-            && within(
-                self.params.range,
-                self.edits.src_span_to_lsp_range(*location),
-            )
+        if let Some(StringPrefixLeftSideAssignment {
+            name,
+            name_start_position,
+            location,
+        }) = left_side_assignment
         {
-            let location = PatternLocation::regular(*location);
-            self.pattern_variable_under_cursor = Some((name, location, type_::string()));
+            let location = SrcSpan::new(*name_start_position, location.end);
+            if within(
+                self.params.range,
+                self.edits.src_span_to_lsp_range(location),
+            ) {
+                let location = PatternLocation::regular(location);
+                self.pattern_variable_under_cursor = Some((name, location, type_::string()));
+            }
         } else if let AssignName::Variable(name) = right_side_assignment
             && within(
                 self.params.range,
@@ -6014,7 +6503,7 @@ impl<'ast, IO> ast::visit::Visit<'ast> for PatternMatchOnValue<'ast, IO> {
         let location = PatternLocation::ListTail {
             location: tail_location,
         };
-        self.pattern_variable_under_cursor = Some((name, location, tail_type.clone()))
+        self.pattern_variable_under_cursor = Some((name, location, tail_type.clone()));
     }
 }
 
@@ -6231,7 +6720,7 @@ impl<'a> GenerateFunction<'a> {
                     argument_names.generate_label_and_name(call_argument, argument_type);
                 let pretty_type = printer.print_type(argument_type);
                 if let Some(label) = label {
-                    let label = label_names.rename_to_avoid_shadowing(label.clone());
+                    let label = label_names.rename_to_avoid_shadowing(label);
                     format!("{label} {name}: {pretty_type}")
                 } else {
                     format!("{name}: {pretty_type}")
@@ -6257,7 +6746,7 @@ impl<'a> GenerateFunction<'a> {
         };
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Generate function")
-            .kind(CodeActionKind::QUICKFIX)
+            .kind(CodeActionKind::QuickFix)
             .changes(uri, self.edits.edits)
             .preferred(true)
             .push_to(&mut action);
@@ -6280,7 +6769,7 @@ impl<'a> GenerateFunction<'a> {
                     return_type,
                     previous_definition_end: self.last_visited_definition_end,
                     module: None,
-                })
+                });
             }
         }
     }
@@ -6302,7 +6791,7 @@ impl<'a> GenerateFunction<'a> {
                 return_type,
                 previous_definition_end: self.last_visited_definition_end,
                 module: Some(module),
-            })
+            });
         }
     }
 }
@@ -6328,10 +6817,10 @@ impl<'ast> ast::visit::Visit<'ast> for GenerateFunction<'ast> {
         if within(self.params.range, invalid_range) {
             match extra_information {
                 Some(InvalidExpression::ModuleSelect { module_name, label }) => {
-                    self.try_save_function_from_other_module(module_name, label, type_, None)
+                    self.try_save_function_from_other_module(module_name, label, type_, None);
                 }
                 Some(InvalidExpression::UnknownVariable { name }) => {
-                    self.try_save_function_to_generate(name, type_, None)
+                    self.try_save_function_to_generate(name, type_, None);
                 }
                 None => {}
             }
@@ -6352,10 +6841,10 @@ impl<'ast> ast::visit::Visit<'ast> for GenerateFunction<'ast> {
         {
             match extra_information {
                 InvalidExpression::ModuleSelect { module_name, label } => {
-                    self.try_save_function_from_other_module(module_name, label, type_, None)
+                    self.try_save_function_from_other_module(module_name, label, type_, None);
                 }
                 InvalidExpression::UnknownVariable { name } => {
-                    self.try_save_function_to_generate(name, type_, None)
+                    self.try_save_function_to_generate(name, type_, None);
                 }
             }
         }
@@ -6367,6 +6856,7 @@ impl<'ast> ast::visit::Visit<'ast> for GenerateFunction<'ast> {
         type_: &'ast Arc<Type>,
         fun: &'ast TypedExpr,
         arguments: &'ast [TypedCallArg],
+        argument_parentheses: &'ast Option<u32>,
     ) {
         // If the function being called is invalid we need to generate a
         // function that has the proper labels.
@@ -6423,8 +6913,14 @@ impl<'ast> ast::visit::Visit<'ast> for GenerateFunction<'ast> {
                 | TypedExpr::Invalid { .. } => {}
             }
         }
-
-        ast::visit::visit_typed_expr_call(self, location, type_, fun, arguments);
+        ast::visit::visit_typed_expr_call(
+            self,
+            location,
+            type_,
+            fun,
+            arguments,
+            argument_parentheses,
+        );
     }
 }
 
@@ -6450,12 +6946,42 @@ pub struct GenerateVariant<'a, IO> {
     params: &'a CodeActionParams,
     line_numbers: &'a LineNumbers,
     variant_to_generate: Option<VariantToGenerate<'a>>,
+    printer: Printer<'a>,
 }
 
 struct VariantToGenerate<'a> {
     name: &'a str,
-    end_position: u32,
+
     arguments_types: Vec<Arc<Type>>,
+
+    /// The start of the variant where the code action was triggered.
+    /// For example:
+    ///
+    /// ```gleam
+    /// Wobble
+    ///     ^ Trigger here to generate `Wobble`
+    /// ^ The start is here!
+    /// ```
+    variant_start: u32,
+
+    /// If the variant where we triggered the code action is already qualified.
+    /// For example:
+    ///
+    /// ```gleam
+    /// wibble.Wobble // -> true
+    /// Wobble        // -> false
+    /// ```
+    ///
+    is_qualified: bool,
+
+    /// Where the custom type to add this variant to ends.
+    ///
+    end_position: u32,
+
+    /// The already existing constructors of the custom type this new variant is
+    /// going to be added to.
+    ///
+    constructors: &'a [RecordConstructor<Arc<Type>>],
 
     /// Wether the type we're adding the variant to is written with braces or
     /// not. We need this information to add braces when missing.
@@ -6465,6 +6991,9 @@ struct VariantToGenerate<'a> {
     /// The module this variant will be added to.
     ///
     module_name: EcoString,
+
+    /// The type to add this variant to.
+    type_: Arc<Type>,
 
     /// The arguments actually supplied as input to the variant, if any.
     /// A variant to generate might as well be just a name passed as an argument
@@ -6539,6 +7068,16 @@ impl Argument<'_> {
     }
 }
 
+enum GenerateVariantEdits<'a> {
+    GenerateInCurrentModule {
+        current_module_edits: TextEdits<'a>,
+    },
+    GenerateInDifferentModule {
+        current_module_edits: TextEdits<'a>,
+        variant_module_edits: TextEdits<'a>,
+    },
+}
+
 impl<'a, IO> GenerateVariant<'a, IO> {
     pub fn new(
         module: &'a Module,
@@ -6552,6 +7091,7 @@ impl<'a, IO> GenerateVariant<'a, IO> {
             compiler,
             line_numbers,
             variant_to_generate: None,
+            printer: Printer::new(&module.ast.names),
         }
     }
 
@@ -6560,33 +7100,103 @@ impl<'a, IO> GenerateVariant<'a, IO> {
 
         let Some(VariantToGenerate {
             name,
+            type_,
+            constructors,
             arguments_types,
             given_arguments,
             module_name,
             end_position,
             type_braces,
+            variant_start,
+            is_qualified,
         }) = &self.variant_to_generate
         else {
             return vec![];
         };
 
-        let Some((variant_module, variant_edits)) = self.edits_to_create_variant(
+        // Now we need to figure out if we're going to have to edit just the current
+        // module (because the variant will be added to a type that is defined there),
+        // or if we'll have to edit both the current module (to import the newly
+        // generated variant) and a different module (where the variant definition
+        // is going to end up).
+        let current_module_line_numbers = LineNumbers::new(&self.module.code);
+        let current_module_edits = TextEdits::new(&current_module_line_numbers);
+        let Some(variant_module) = self.compiler.modules.get(module_name) else {
+            return vec![];
+        };
+        let variant_module_line_numbers = LineNumbers::new(&variant_module.code);
+        let variant_module_edits = TextEdits::new(&variant_module_line_numbers);
+
+        let mut edits = if *module_name == self.module.name {
+            GenerateVariantEdits::GenerateInCurrentModule {
+                current_module_edits,
+            }
+        } else {
+            GenerateVariantEdits::GenerateInDifferentModule {
+                current_module_edits,
+                variant_module_edits,
+            }
+        };
+
+        self.edits_to_create_variant(
+            &mut edits,
             name,
             arguments_types,
             given_arguments,
-            module_name,
             *end_position,
             *type_braces,
-        ) else {
-            return vec![];
-        };
+        );
+        // If the variant is qualified already we don't have to do anything,
+        // otherwise we need to import it in the current module.
+        if !is_qualified {
+            self.edits_to_import_variant(
+                &mut edits,
+                module_name,
+                name,
+                *variant_start,
+                self.module,
+                constructors,
+            );
+        }
+
+        let mut builder = CodeActionBuilder::new(&format!(
+            "Generate `{}` variant",
+            self.printer.print_type(type_)
+        ))
+        .kind(CodeActionKind::QuickFix)
+        .preferred(true);
+
+        match edits {
+            GenerateVariantEdits::GenerateInCurrentModule {
+                current_module_edits,
+            } => {
+                builder = builder.changes(
+                    self.params.text_document.uri.clone(),
+                    current_module_edits.edits,
+                );
+            }
+            GenerateVariantEdits::GenerateInDifferentModule {
+                current_module_edits,
+                variant_module_edits,
+            } => {
+                let Some(variant_module_path) = url_from_path(variant_module.input_path.as_str())
+                else {
+                    return vec![];
+                };
+
+                if !current_module_edits.edits.is_empty() {
+                    builder = builder.changes(
+                        self.params.text_document.uri.clone(),
+                        current_module_edits.edits,
+                    );
+                }
+
+                builder = builder.changes(variant_module_path, variant_module_edits.edits);
+            }
+        }
 
         let mut action = Vec::with_capacity(1);
-        CodeActionBuilder::new("Generate variant")
-            .kind(CodeActionKind::QUICKFIX)
-            .changes(variant_module, variant_edits)
-            .preferred(true)
-            .push_to(&mut action);
+        builder.push_to(&mut action);
         action
     }
 
@@ -6595,13 +7205,13 @@ impl<'a, IO> GenerateVariant<'a, IO> {
     ///
     fn edits_to_create_variant(
         &self,
+        edits: &mut GenerateVariantEdits<'_>,
         variant_name: &str,
         arguments_types: &[Arc<Type>],
         given_arguments: &Option<Arguments<'_>>,
-        module_name: &EcoString,
         end_position: u32,
         type_braces: TypeBraces,
-    ) -> Option<(Url, Vec<TextEdit>)> {
+    ) {
         let mut label_names = NameGenerator::new();
         let mut printer = Printer::new(&self.module.ast.names);
         let arguments = arguments_types
@@ -6633,36 +7243,30 @@ impl<'a, IO> GenerateVariant<'a, IO> {
             TypeBraces::NoBraces => (format!(" {{\n  {variant}\n}}"), end_position),
         };
 
-        if *module_name == self.module.name {
-            // If we're editing the current module we can use the line numbers that
-            // were already computed before-hand without wasting any time to add the
-            // new edit.
-            let mut edits = TextEdits::new(self.line_numbers);
-            edits.insert(insert_at, new_text);
-            Some((self.params.text_document.uri.clone(), edits.edits))
-        } else {
-            // Otherwise we're changing a different module and we need to get its
-            // code and line numbers to properly apply the new edit.
-            let module = self
-                .compiler
-                .modules
-                .get(module_name)
-                .expect("module to exist");
-            let line_numbers = LineNumbers::new(&module.code);
-            let mut edits = TextEdits::new(&line_numbers);
-            edits.insert(insert_at, new_text);
-            Some((url_from_path(module.input_path.as_str())?, edits.edits))
+        match edits {
+            GenerateVariantEdits::GenerateInCurrentModule {
+                current_module_edits,
+            } => current_module_edits.insert(insert_at, new_text),
+            GenerateVariantEdits::GenerateInDifferentModule {
+                variant_module_edits,
+                ..
+            } => variant_module_edits.insert(insert_at, new_text),
         }
     }
 
     fn try_save_variant_to_generate(
         &mut self,
+        is_qualified: bool,
         function_name_location: SrcSpan,
         function_type: &Arc<Type>,
         given_arguments: Option<Arguments<'a>>,
     ) {
-        let variant_to_generate =
-            self.variant_to_generate(function_name_location, function_type, given_arguments);
+        let variant_to_generate = self.variant_to_generate(
+            is_qualified,
+            function_name_location,
+            function_type,
+            given_arguments,
+        );
         if variant_to_generate.is_some() {
             self.variant_to_generate = variant_to_generate;
         }
@@ -6670,6 +7274,7 @@ impl<'a, IO> GenerateVariant<'a, IO> {
 
     fn variant_to_generate(
         &mut self,
+        is_qualified: bool,
         function_name_location: SrcSpan,
         type_: &Arc<Type>,
         given_arguments: Option<Arguments<'a>>,
@@ -6687,35 +7292,124 @@ impl<'a, IO> GenerateVariant<'a, IO> {
 
         let (module_name, type_name, _) = custom_type.named_type_information()?;
         let module = self.compiler.modules.get(&module_name)?;
-        let (end_position, type_braces) = (module.ast.definitions.custom_types.iter())
-            .filter(|custom_type| custom_type.name == type_name)
-            .find_map(|custom_type| {
-                // If there's already a variant with this name then we definitely
-                // don't want to generate a new variant with the same name!
-                let variant_with_this_name_already_exists = custom_type
-                    .constructors
-                    .iter()
-                    .map(|constructor| &constructor.name)
-                    .any(|existing_constructor_name| existing_constructor_name == name);
-                if variant_with_this_name_already_exists {
-                    return None;
-                }
-                let type_braces = if custom_type.end_position == custom_type.location.end {
-                    TypeBraces::NoBraces
-                } else {
-                    TypeBraces::HasBraces
-                };
-                Some((custom_type.end_position, type_braces))
-            })?;
+        let (end_position, type_braces, constructors) =
+            (module.ast.definitions.custom_types.iter())
+                .filter(|custom_type| custom_type.name == type_name)
+                .find_map(|custom_type| {
+                    // If there's already a variant with this name then we definitely
+                    // don't want to generate a new variant with the same name!
+                    let variant_with_this_name_already_exists = custom_type
+                        .constructors
+                        .iter()
+                        .map(|constructor| &constructor.name)
+                        .any(|existing_constructor_name| existing_constructor_name == name);
+                    if variant_with_this_name_already_exists {
+                        return None;
+                    }
+                    let type_braces = if custom_type.end_position == custom_type.location.end {
+                        TypeBraces::NoBraces
+                    } else {
+                        TypeBraces::HasBraces
+                    };
+                    Some((
+                        custom_type.end_position,
+                        type_braces,
+                        &custom_type.constructors,
+                    ))
+                })?;
 
         Some(VariantToGenerate {
             name,
+            is_qualified,
+            constructors,
             arguments_types,
             given_arguments,
             module_name,
+            type_: custom_type,
             end_position,
             type_braces,
+            variant_start: function_name_location.start,
         })
+    }
+
+    /// If the variant is generated in a module different from the current one,
+    /// this will add the edits needed to correctly import the variant so that
+    /// it's readily available.
+    /// It will also respect the developer's choice of how variants for the type
+    /// are imported:
+    ///
+    /// ```diff
+    /// - import wibble.{ Wibble }
+    /// + import wibble.{ Wibble, Wobble }
+    /// // If generating `Wobble`, and other variants of that type are
+    /// // unqualified already the new variant is imported unqualified as well.
+    /// ```
+    ///
+    /// ```diff
+    /// import wibble
+    ///
+    /// pub fn main() {
+    /// -  let assert Wobble = todo
+    /// +  let assert wibble.Wobble = todo
+    /// }
+    /// // If no variant is used in an unqualified manner, than the variant
+    /// // that triggered the generation is also qualified!
+    /// ```
+    fn edits_to_import_variant(
+        &self,
+        edits: &mut GenerateVariantEdits<'_>,
+        variant_module_name: &str,
+        variant_name: &str,
+        variant_start: u32,
+        module: &'a Module,
+        constructors: &[RecordConstructor<Arc<Type>>],
+    ) {
+        let GenerateVariantEdits::GenerateInDifferentModule {
+            current_module_edits,
+            ..
+        } = edits
+        else {
+            // If the variant is added to the current module, then no further
+            // edits are needed. The variant is already available in the current
+            // module!
+            return;
+        };
+
+        let constructors_names: HashSet<_> = constructors
+            .iter()
+            .map(|constructor| &constructor.name)
+            .collect();
+
+        // We start by getting the import for the module where the variant
+        // is going to be added...
+        let Some(variant_module_import) = module
+            .ast
+            .definitions
+            .imports
+            .iter()
+            .find(|import_| import_.module == variant_module_name)
+        else {
+            return;
+        };
+        // ...and then check if any of the variants of the type where the variant
+        // is going to be added have already been imported in an unqualified way.
+        let constructors_for_this_type_are_unqualified = variant_module_import
+            .unqualified_values
+            .iter()
+            .any(|value| constructors_names.contains(&value.name));
+
+        if constructors_for_this_type_are_unqualified {
+            // We need to add an unqualified import!
+            let (insert_positions, new_text) = edits::insert_unqualified_import(
+                variant_module_import,
+                &self.module.code,
+                variant_name.into(),
+            );
+            current_module_edits.insert(insert_positions, new_text);
+        } else {
+            // We need to qualify the variant that triggered the code action!
+            current_module_edits.insert(variant_start, format!("{variant_module_name}."));
+        }
     }
 }
 
@@ -6728,7 +7422,13 @@ impl<'ast, IO> ast::visit::Visit<'ast> for GenerateVariant<'ast, IO> {
     ) {
         let invalid_range = src_span_to_lsp_range(*location, self.line_numbers);
         if within(self.params.range, invalid_range) {
-            self.try_save_variant_to_generate(*location, type_, None);
+            let is_qualified =
+                if let Some(InvalidExpression::ModuleSelect { .. }) = extra_information {
+                    true
+                } else {
+                    false
+                };
+            self.try_save_variant_to_generate(is_qualified, *location, type_, None);
         }
         ast::visit::visit_typed_expr_invalid(self, location, type_, extra_information);
     }
@@ -6739,27 +7439,46 @@ impl<'ast, IO> ast::visit::Visit<'ast> for GenerateVariant<'ast, IO> {
         type_: &'ast Arc<Type>,
         fun: &'ast TypedExpr,
         arguments: &'ast [TypedCallArg],
+        open_parenthesis: &'ast Option<u32>,
     ) {
         // If the function being called is invalid we need to generate a
         // function that has the proper labels.
         let fun_range = src_span_to_lsp_range(fun.location(), self.line_numbers);
         if within(self.params.range, fun_range) && fun.is_invalid() {
             if labels_are_correct(arguments) {
+                let is_qualified = if let TypedExpr::Invalid {
+                    extra_information: Some(InvalidExpression::ModuleSelect { .. }),
+                    ..
+                } = fun
+                {
+                    true
+                } else {
+                    fun.is_module_select()
+                };
+
                 self.try_save_variant_to_generate(
+                    is_qualified,
                     fun.location(),
                     &fun.type_(),
                     Some(Arguments::Expressions(arguments)),
                 );
             }
         } else {
-            ast::visit::visit_typed_expr_call(self, location, type_, fun, arguments);
+            ast::visit::visit_typed_expr_call(
+                self,
+                location,
+                type_,
+                fun,
+                arguments,
+                open_parenthesis,
+            );
         }
     }
 
     fn visit_typed_pattern_invalid(&mut self, location: &'ast SrcSpan, type_: &'ast Arc<Type>) {
         let invalid_range = src_span_to_lsp_range(*location, self.line_numbers);
         if within(self.params.range, invalid_range) {
-            self.try_save_variant_to_generate(*location, type_, None);
+            self.try_save_variant_to_generate(false, *location, type_, None);
         }
         ast::visit::visit_typed_pattern_invalid(self, location, type_);
     }
@@ -6779,6 +7498,7 @@ impl<'ast, IO> ast::visit::Visit<'ast> for GenerateVariant<'ast, IO> {
         if within(self.params.range, pattern_range) {
             if labels_are_correct(arguments) {
                 self.try_save_variant_to_generate(
+                    module.is_some(),
                     *name_location,
                     type_,
                     Some(Arguments::Patterns(arguments)),
@@ -6827,13 +7547,13 @@ fn labels_are_correct<A>(arguments: &[CallArg<A>]) -> bool {
 
 #[derive(Clone)]
 struct NameGenerator {
-    used_names: HashSet<EcoString>,
+    used_names: imbl::HashSet<EcoString>,
 }
 
 impl NameGenerator {
     pub fn new() -> Self {
         NameGenerator {
-            used_names: HashSet::new(),
+            used_names: imbl::HashSet::new(),
         }
     }
 
@@ -7011,7 +7731,7 @@ fn is_valid_lowercase_name(name: &str) -> bool {
         }
     }
 
-    str_to_keyword(name).is_none()
+    string_to_keyword(name).is_none()
 }
 
 #[must_use]
@@ -7120,7 +7840,7 @@ impl<'a> ConvertToFunctionCall<'a> {
             // missing parentheses:
             // `[1, 2] |> length` becomes `length([1, 2])`
             PipelineAssignmentKind::FunctionCall => {
-                self.edits.insert(call.end, format!("({first_value_text})"))
+                self.edits.insert(call.end, format!("({first_value_text})"));
             }
 
             // When the piped value is inserted as the first argument there's two
@@ -7141,13 +7861,13 @@ impl<'a> ConvertToFunctionCall<'a> {
             // have to insert the value after the `echo` with no parentheses:
             // `a |> echo` is rewritten as `echo a`.
             PipelineAssignmentKind::Echo => {
-                self.edits.insert(call.end, format!(" {first_value_text}"))
+                self.edits.insert(call.end, format!(" {first_value_text}"));
             }
         }
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Convert to function call")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -7166,18 +7886,47 @@ impl<'ast> ast::visit::Visit<'ast> for ConvertToFunctionCall<'ast> {
     ) {
         let pipeline_range = self.edits.src_span_to_lsp_range(*location);
         if within(self.params.range, pipeline_range) {
-            // We will always desugar the pipeline's first step. If there's no
-            // intermediate assignment it means we're dealing with a single step
-            // pipeline and the call is `finally`.
-            let (call, call_kind) = assignments
-                .first()
+            // Add final assignment to the list
+            let all_assignments = assignments
+                .iter()
                 .map(|(call, kind)| (call.location, *kind))
-                .unwrap_or_else(|| (finally.location(), *finally_kind));
+                .chain(iter::once((finally.location(), *finally_kind)));
+            let mut call_information = None;
+            // Span, containing content that will be extracted as call argument
+            let mut accumulated_span = first_value.location;
+
+            for (current_location, current_kind) in all_assignments {
+                if within(
+                    self.params.range,
+                    self.edits.src_span_to_lsp_range(current_location),
+                ) {
+                    call_information = Some((accumulated_span, current_location, current_kind));
+                    break;
+                }
+                accumulated_span = accumulated_span.merge(&current_location);
+            }
+
+            let (final_prev, final_call, final_kind) = match call_information {
+                Some(triple) => triple,
+
+                // Here two situations are possible:
+                // - If the cursor is not on any of the assignments (for example, it is on first value), then we need
+                // to use that first value as accumulated location, and the first call location and kind
+                // - If there are no assignments, then we are dealing with a single
+                // step pipeline and the call is `finally`
+                None => {
+                    let (call, call_kind) = &assignments
+                        .first()
+                        .map(|(call, call_kind)| (call.location, *call_kind))
+                        .unwrap_or_else(|| (finally.location(), *finally_kind));
+                    (first_value.location, *call, *call_kind)
+                }
+            };
 
             self.locations = Some(ConvertToFunctionCallLocations {
-                first_value: first_value.location,
-                call,
-                call_kind,
+                first_value: final_prev,
+                call: final_call,
+                call_kind: final_kind,
             });
 
             ast::visit::visit_typed_expr_pipeline(
@@ -7274,17 +8023,12 @@ impl<'a> InlineVariable<'a> {
         }
 
         let mut location = assignment.location;
-
-        let mut chars = self.module.code[location.end as usize..].chars();
-        // Delete any whitespace after the removed statement
-        while chars.next().is_some_and(char::is_whitespace) {
-            location.end += 1;
-        }
+        location.end = next_nonwhitespace(&self.module.code, location.end);
 
         self.edits.delete(location);
 
         CodeActionBuilder::new("Inline variable")
-            .kind(CodeActionKind::REFACTOR_INLINE)
+            .kind(CodeActionKind::RefactorInline)
             .changes(
                 self.params.text_document.uri.clone(),
                 std::mem::take(&mut self.edits.edits),
@@ -7481,8 +8225,8 @@ impl<'a> ConvertToPipe<'a> {
         // If the expression being piped is a binary operation with
         // precedence lower than pipes then we have to wrap it in curly
         // braces to not mess with the order of operations.
-        let arg_text = if let TypedExpr::BinOp { name, .. } = arg.value
-            && name.precedence() < PIPE_PRECEDENCE
+        let arg_text = if let TypedExpr::BinOp { operator, .. } = arg.value
+            && operator.precedence() < PIPE_PRECEDENCE
         {
             &format!("{{ {arg_text} }}")
         } else {
@@ -7514,7 +8258,7 @@ impl<'a> ConvertToPipe<'a> {
             // In all other cases we're piping something that is not the first
             // argument so we just replace it with an `_`.
             _ => self.edits.replace(arg.location, "_".into()),
-        };
+        }
 
         // Finally we can add the argument that was removed as the first step
         // of the newly defined pipeline.
@@ -7522,7 +8266,7 @@ impl<'a> ConvertToPipe<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Convert to pipe")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -7537,6 +8281,7 @@ impl<'ast> ast::visit::Visit<'ast> for ConvertToPipe<'ast> {
         _type_: &'ast Arc<Type>,
         fun: &'ast TypedExpr,
         arguments: &'ast [TypedCallArg],
+        _open_parenthesis: &'ast Option<u32>,
     ) {
         if arguments.iter().any(|arg| arg.is_capture_hole()) {
             return;
@@ -7742,7 +8487,7 @@ impl<'a> InterpolateString<'a> {
             }
 
             StringInterpolation::SplitString { .. } => return vec![],
-        };
+        }
 
         if self.string_literal_position == StringLiteralPosition::FirstPipelineStep {
             self.edits.insert(string_location.end, " }".into());
@@ -7750,7 +8495,7 @@ impl<'a> InterpolateString<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Interpolate string")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -7916,7 +8661,7 @@ impl<'a> FillUnusedFields<'a> {
         // Do not suggest this code action if there's no ignored fields at all.
         if positional.is_empty() && labelled.is_empty() {
             return vec![];
-        };
+        }
 
         // We add all the missing positional arguments before the first
         // labelled one (and so after all the already existing positional ones).
@@ -7967,15 +8712,15 @@ impl<'a> FillUnusedFields<'a> {
             // This way we also get rid of any comma separating the last argument
             // and the spread to be removed.
             self.edits
-                .delete(SrcSpan::new(delete_start, spread_location.end))
+                .delete(SrcSpan::new(delete_start, spread_location.end));
         } else {
             // Otherwise we just delete the spread.
-            self.edits.delete(spread_location)
+            self.edits.delete(spread_location);
         }
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Fill unused fields")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -8021,7 +8766,7 @@ impl<'ast> ast::visit::Visit<'ast> for FillUnusedFields<'ast> {
                 last_argument_end,
                 spread_location: *spread_location,
             });
-        };
+        }
 
         ast::visit::visit_typed_pattern(self, pattern);
     }
@@ -8065,7 +8810,7 @@ impl<'a> RemoveEchos<'a> {
         // the module
         if !self.is_hovering_echo {
             return vec![];
-        };
+        }
 
         for span in self.echo_spans_to_delete {
             self.edits.delete(span);
@@ -8073,7 +8818,7 @@ impl<'a> RemoveEchos<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Remove all `echo`s from this module")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -8334,7 +9079,7 @@ impl<'a> WrapInBlock<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Wrap in block")
-            .kind(CodeActionKind::REFACTOR_EXTRACT)
+            .kind(CodeActionKind::RefactorExtract)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -8380,7 +9125,7 @@ impl<'ast> ast::visit::Visit<'ast> for WrapInBlock<'ast> {
             | TypedExpr::Invalid { .. } => {
                 self.selected_expression = Some(assignment.value.location());
             }
-        };
+        }
         ast::visit::visit_typed_assignment(self, assignment);
     }
 
@@ -8397,7 +9142,7 @@ impl<'ast> ast::visit::Visit<'ast> for WrapInBlock<'ast> {
         // To avoid wrapping the same expression in multiple, nested blocks.
         if !matches!(clause.then, TypedExpr::Block { .. }) {
             self.selected_expression = Some(clause.then.location());
-        };
+        }
 
         ast::visit::visit_typed_clause(self, clause);
     }
@@ -8443,21 +9188,81 @@ impl<'a> FixBinaryOperation<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new(&format!("Use `{}`", replacement.name()))
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(true)
             .push_to(&mut action);
         action
     }
+
+    fn try_fix(
+        &mut self,
+        left: Arc<Type>,
+        right: Arc<Type>,
+        operator: ast::BinOp,
+        operator_start: u32,
+    ) {
+        let operator_location = SrcSpan::new(operator_start, operator_start + operator.size());
+        if operator.is_int_operator() && left.is_float() && right.is_float() {
+            self.fix = operator
+                .float_equivalent()
+                .map(|fix| (operator_location, fix));
+        } else if operator.is_float_operator() && left.is_int() && right.is_int() {
+            self.fix = operator
+                .int_equivalent()
+                .map(|fix| (operator_location, fix));
+        } else if operator == ast::BinOp::AddInt && left.is_string() && right.is_string() {
+            self.fix = Some((operator_location, ast::BinOp::Concatenate));
+        }
+    }
 }
 
 impl<'ast> ast::visit::Visit<'ast> for FixBinaryOperation<'ast> {
+    fn visit_typed_expr_case(
+        &mut self,
+        location: &'ast SrcSpan,
+        type_: &'ast Arc<Type>,
+        subjects: &'ast [TypedExpr],
+        clauses: &'ast [ast::TypedClause],
+        compiled_case: &'ast CompiledCase,
+    ) {
+        ast::visit::visit_typed_expr_case(self, location, type_, subjects, clauses, compiled_case);
+    }
+    fn visit_typed_clause_guard(&mut self, guard: &'ast TypedClauseGuard) {
+        ast::visit::visit_typed_clause_guard(self, guard);
+    }
+
+    fn visit_typed_clause_guard_bin_op(
+        &mut self,
+        left: &'ast TypedClauseGuard,
+        right: &'ast TypedClauseGuard,
+        operator: &'ast ast::BinOp,
+        operator_start: &'ast u32,
+        location: &'ast SrcSpan,
+    ) {
+        let binop_range = self.edits.src_span_to_lsp_range(*location);
+        if !within(self.params.range, binop_range) {
+            return;
+        }
+
+        self.try_fix(left.type_(), right.type_(), *operator, *operator_start);
+
+        ast::visit::visit_typed_clause_guard_bin_op(
+            self,
+            left,
+            right,
+            operator,
+            operator_start,
+            location,
+        );
+    }
+
     fn visit_typed_expr_bin_op(
         &mut self,
         location: &'ast SrcSpan,
         type_: &'ast Arc<Type>,
-        name: &'ast ast::BinOp,
-        name_location: &'ast SrcSpan,
+        operator: &'ast ast::BinOp,
+        operator_start: &'ast u32,
         left: &'ast TypedExpr,
         right: &'ast TypedExpr,
     ) {
@@ -8466,23 +9271,14 @@ impl<'ast> ast::visit::Visit<'ast> for FixBinaryOperation<'ast> {
             return;
         }
 
-        if name.is_int_operator() && left.type_().is_float() && right.type_().is_float() {
-            self.fix = name.float_equivalent().map(|fix| (*name_location, fix));
-        } else if name.is_float_operator() && left.type_().is_int() && right.type_().is_int() {
-            self.fix = name.int_equivalent().map(|fix| (*name_location, fix))
-        } else if *name == ast::BinOp::AddInt
-            && left.type_().is_string()
-            && right.type_().is_string()
-        {
-            self.fix = Some((*name_location, ast::BinOp::Concatenate))
-        }
+        self.try_fix(left.type_(), right.type_(), *operator, *operator_start);
 
         ast::visit::visit_typed_expr_bin_op(
             self,
             location,
             type_,
-            name,
-            name_location,
+            operator,
+            operator_start,
             left,
             right,
         );
@@ -8526,7 +9322,7 @@ impl<'a> FixTruncatedBitArraySegment<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new(&format!("Replace with `{replacement}`"))
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(true)
             .push_to(&mut action);
@@ -8657,7 +9453,6 @@ impl<'a> RemoveUnusedImports<'a> {
                 | type_::Warning::CaseMatchOnLiteralCollection { .. }
                 | type_::Warning::CaseMatchOnLiteralValue { .. }
                 | type_::Warning::OpaqueExternalType { .. }
-                | type_::Warning::InternalTypeLeak { .. }
                 | type_::Warning::RedundantAssertAssignment { .. }
                 | type_::Warning::AssertAssignmentOnImpossiblePattern { .. }
                 | type_::Warning::TodoOrPanicUsedAsFunction { .. }
@@ -8670,7 +9465,10 @@ impl<'a> RemoveUnusedImports<'a> {
                 | type_::Warning::ModuleImportedTwice { .. }
                 | type_::Warning::TopLevelDefinitionShadowsImport { .. }
                 | type_::Warning::RedundantComparison { .. }
-                | type_::Warning::UnusedRecursiveArgument { .. } => None,
+                | type_::Warning::UnusedRecursiveArgument { .. }
+                | type_::Warning::JavaScriptBitArrayUnsafeInt { .. }
+                | type_::Warning::PipeIntoCallWhichReturnsFunction { .. }
+                | type_::Warning::EmptyStringBitArraySegment { .. } => None,
             })
             .sorted_by_key(|import| import.location())
             .collect_vec();
@@ -8698,9 +9496,9 @@ impl<'a> RemoveUnusedImports<'a> {
                         self.edits.delete(SrcSpan {
                             start: location.start,
                             end: location.end + 1,
-                        })
+                        });
                     } else {
-                        self.edits.delete(*location)
+                        self.edits.delete(*location);
                     }
                 }
 
@@ -8756,7 +9554,7 @@ impl<'a> RemoveUnusedImports<'a> {
                             self.edits.delete(SrcSpan {
                                 start: previous_value.end,
                                 end: location.end,
-                            })
+                            });
                         }
 
                         // In all other cases it means that this is the only
@@ -8776,7 +9574,7 @@ impl<'a> RemoveUnusedImports<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Remove unused imports")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(true)
             .push_to(&mut action);
@@ -8827,7 +9625,7 @@ impl<'a> RemoveBlock<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Remove block")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(true)
             .push_to(&mut action);
@@ -8840,8 +9638,8 @@ impl<'ast> ast::visit::Visit<'ast> for RemoveBlock<'ast> {
         &mut self,
         _location: &'ast SrcSpan,
         _type_: &'ast Arc<Type>,
-        _name: &'ast ast::BinOp,
-        _name_location: &'ast SrcSpan,
+        _operator: &'ast ast::BinOp,
+        _operator_start: &'ast u32,
         left: &'ast TypedExpr,
         right: &'ast TypedExpr,
     ) {
@@ -8869,7 +9667,7 @@ impl<'ast> ast::visit::Visit<'ast> for RemoveBlock<'ast> {
                 ast::Statement::Use(_)
                 | ast::Statement::Assert(_)
                 | ast::Statement::Assignment(_) => {
-                    ast::visit::visit_typed_expr_block(self, location, statements)
+                    ast::visit::visit_typed_expr_block(self, location, statements);
                 }
 
                 ast::Statement::Expression(expr) => match expr {
@@ -8944,7 +9742,7 @@ impl<'a> RemovePrivateOpaque<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Remove opaque from private type")
-            .kind(CodeActionKind::QUICKFIX)
+            .kind(CodeActionKind::QuickFix)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(true)
             .push_to(&mut action);
@@ -8963,7 +9761,7 @@ impl<'ast> ast::visit::Visit<'ast> for RemovePrivateOpaque<'ast> {
             self.opaque_span = Some(SrcSpan {
                 start: custom_type.location.start,
                 end: custom_type.location.start + 7,
-            })
+            });
         }
     }
 }
@@ -9031,7 +9829,7 @@ struct Collapsed<'a> {
     ///
     outer_clause_span: SrcSpan,
 
-    /// The (optional) guard of the outer branch. In this exmaple it's this one:
+    /// The (optional) guard of the outer branch. In this example it's this one:
     ///
     /// ```gleam
     /// case something {
@@ -9181,8 +9979,8 @@ impl<'a> CollapseNestedCase<'a> {
                             // When it's a list literal, we remove the surrounding brackets.
                             let len = trimmed_contents.len();
                             if let Some(slice) = new_content.trim().get(1..(len - 1)) {
-                                new_content = slice.to_string()
-                            };
+                                new_content = slice.to_string();
+                            }
 
                             *tail_location
                         }
@@ -9240,7 +10038,7 @@ impl<'a> CollapseNestedCase<'a> {
                     let mut pattern_code = code_at(self.module, pattern_location).to_string();
                     if !references_to_matched_variable.is_empty() {
                         pattern_code = format!("{pattern_code} as {}", matched_variable.name());
-                    };
+                    }
                     pattern_with_variable(pattern_code)
                 })
                 .join(" | ");
@@ -9251,10 +10049,10 @@ impl<'a> CollapseNestedCase<'a> {
                     let mut outer_code = code_at(self.module, outer.location()).to_string();
                     let mut inner_code = code_at(self.module, inner.location()).to_string();
                     if ast::BinOp::And.precedence() > outer.precedence() {
-                        outer_code = format!("{{ {outer_code} }}")
+                        outer_code = format!("{{ {outer_code} }}");
                     }
                     if ast::BinOp::And.precedence() > inner.precedence() {
-                        inner_code = format!("{{ {inner_code} }}")
+                        inner_code = format!("{{ {inner_code} }}");
                     }
                     format!(" if {outer_code} && {inner_code}")
                 }
@@ -9281,7 +10079,7 @@ impl<'a> CollapseNestedCase<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Collapse nested case")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -9379,7 +10177,7 @@ impl<'ast> ast::visit::Visit<'ast> for CollapseNestedCase<'ast> {
             // We're done, there's no need to keep exploring as we know the
             // cursor is over this pattern and it can't be over any other one!
             return;
-        };
+        }
 
         ast::visit::visit_typed_clause(self, clause);
     }
@@ -9485,7 +10283,7 @@ impl<'a> RemoveUnreachableCaseClauses<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Remove unreachable clauses")
-            .kind(CodeActionKind::QUICKFIX)
+            .kind(CodeActionKind::QuickFix)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(true)
             .push_to(&mut action);
@@ -9509,22 +10307,174 @@ impl<'ast> ast::visit::Visit<'ast> for RemoveUnreachableCaseClauses<'ast> {
             let pattern_range = self.edits.src_span_to_lsp_range(clause.pattern_location());
             within(self.params.range, pattern_range)
         });
-        if is_hovering_clause {
-            self.clauses_to_delete = clauses
-                .iter()
-                .filter(|clause| {
-                    self.unreachable_clauses
-                        .contains(&clause.pattern_location())
-                })
-                .map(|clause| clause.location())
-                .collect_vec();
-            return;
-        }
 
         // If we're not hovering any of the clauses then we want to
         // keep visiting the case expression as the unreachable branch might be
         // in one of the nested cases.
-        ast::visit::visit_typed_expr_case(self, location, type_, subjects, clauses, compiled_case);
+        if !is_hovering_clause {
+            ast::visit::visit_typed_expr_case(
+                self,
+                location,
+                type_,
+                subjects,
+                clauses,
+                compiled_case,
+            );
+            return;
+        }
+
+        for clause in clauses {
+            let mut all_patterns_are_unreachable = true;
+            let mut unreachable_patterns = vec![];
+            let mut previous_pattern_end = None;
+            let mut all_previous_patterns_were_deleted = true;
+
+            for pattern in clause.patterns() {
+                let pattern_location = multi_pattern_location(pattern);
+                if self.unreachable_clauses.contains(&pattern_location) {
+                    // If an alternative is unreachable we want to delete
+                    // everything from the end of the previous alternative to
+                    // the start of this one.
+                    //
+                    // ```gleam
+                    // Error(_) | Error(_) | Ok(_)
+                    // //      ^^^^^^^^^^^ We want to delete all of this
+                    // ```
+                    unreachable_patterns.push(
+                        previous_pattern_end.map_or(pattern_location, |previous_end| {
+                            SrcSpan::new(previous_end, pattern_location.end)
+                        }),
+                    );
+                } else {
+                    // If all the previous alternatives have been deleted and
+                    // this one is reachable there's some final cleanup we need
+                    // to take care of:
+                    //
+                    // ```gleam
+                    // Ok(_) | Ok(_) | Error(_) -> todo
+                    // //^^^^^^^^^^^ All of this has been deleted, but there's
+                    // //            that last vertical bar that needs to be
+                    // //            taken care of!
+                    // ```
+                    //
+
+                    if all_previous_patterns_were_deleted && let Some(end) = previous_pattern_end {
+                        self.clauses_to_delete
+                            .push(SrcSpan::new(end, pattern_location.start));
+                    }
+
+                    all_previous_patterns_were_deleted = false;
+                    all_patterns_are_unreachable = false;
+                }
+
+                previous_pattern_end = pattern.last().map(|pattern| pattern.location().end);
+            }
+
+            if all_patterns_are_unreachable {
+                // If all the patterns of the clause are unreachable then we
+                // want to delete the entire branch:
+                //
+                // ```gleam
+                // case a, b {
+                //   _, _ -> todo
+                //   Ok(_), Ok(_) | Error(_), Error(_) -> todo
+                // // ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                // // we want the entire branch to be deleted!
+                // }
+                // ```
+                self.clauses_to_delete.push(clause.location());
+            } else {
+                // If only some of the variants are unreachable but not all
+                // we want to delete just those.
+                // case a, b {
+                //   1, 2 | 1, 2 -> todo
+                // //       ^^^^ just this one should be deleted
+                // }
+                self.clauses_to_delete.extend(&unreachable_patterns);
+            }
+        }
+    }
+}
+
+/// Given a pattern with possibly many subjects, this returns the location
+/// spanning the whole thing.
+fn multi_pattern_location(alternative: &[Pattern<Arc<Type>>]) -> SrcSpan {
+    let start = alternative
+        .first()
+        .map(|pattern| pattern.location().start)
+        .unwrap_or_default();
+    let end = alternative
+        .last()
+        .map(|pattern| pattern.location().end)
+        .unwrap_or_default();
+
+    SrcSpan::new(start, end)
+}
+
+/// Code action to remove a record update when all of its fields have been
+/// provided already:
+///
+/// ```gleam
+/// pub type Wibble { Wibble(one: Int, two: Int) }
+///
+/// wibble(..wibble, one:, two:)
+/// //     ^^^^^^^^ This is not needed and raises a warning!
+/// ```
+///
+pub struct RemoveRedundantRecordUpdate<'a> {
+    module: &'a Module,
+    params: &'a CodeActionParams,
+    edits: TextEdits<'a>,
+}
+
+impl<'a> RemoveRedundantRecordUpdate<'a> {
+    pub fn new(
+        module: &'a Module,
+        line_numbers: &'a LineNumbers,
+        params: &'a CodeActionParams,
+    ) -> Self {
+        Self {
+            module,
+            params,
+            edits: TextEdits::new(line_numbers),
+        }
+    }
+
+    pub fn code_actions(mut self) -> Vec<CodeAction> {
+        let spread_to_remove = self
+            .module
+            .ast
+            .type_info
+            .warnings
+            .iter()
+            .find_map(|warning| {
+                if let type_::Warning::AllFieldsRecordUpdate {
+                    location,
+                    record_location,
+                } = warning
+                    && within(
+                        self.params.range,
+                        self.edits.src_span_to_lsp_range(*location),
+                    )
+                {
+                    Some(*record_location)
+                } else {
+                    None
+                }
+            });
+
+        let Some(spread_to_remove) = spread_to_remove else {
+            return vec![];
+        };
+        self.edits.delete(spread_to_remove);
+
+        let mut action = Vec::with_capacity(1);
+        CodeActionBuilder::new("Remove redundant record update")
+            .kind(CodeActionKind::QuickFix)
+            .changes(self.params.text_document.uri.clone(), self.edits.edits)
+            .preferred(true)
+            .push_to(&mut action);
+        action
     }
 }
 
@@ -9580,13 +10530,13 @@ impl<'a> AddOmittedLabels<'a> {
                 self.edits.insert(call_argument.location.end, ":".into());
             } else {
                 self.edits
-                    .insert(call_argument.location.start, format!("{label}: "))
+                    .insert(call_argument.location.start, format!("{label}: "));
             }
         }
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Add omitted labels")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -9601,15 +10551,30 @@ impl<'ast> ast::visit::Visit<'ast> for AddOmittedLabels<'ast> {
         type_: &'ast Arc<Type>,
         fun: &'ast TypedExpr,
         arguments: &'ast [TypedCallArg],
+        open_parenthesis: &'ast Option<u32>,
     ) {
         let called_function_range = self.edits.src_span_to_lsp_range(fun.location());
         if !within(self.params.range, called_function_range) {
-            ast::visit::visit_typed_expr_call(self, location, type_, fun, arguments);
+            ast::visit::visit_typed_expr_call(
+                self,
+                location,
+                type_,
+                fun,
+                arguments,
+                open_parenthesis,
+            );
             return;
         }
 
         let Some(field_map) = fun.field_map() else {
-            ast::visit::visit_typed_expr_call(self, location, type_, fun, arguments);
+            ast::visit::visit_typed_expr_call(
+                self,
+                location,
+                type_,
+                fun,
+                arguments,
+                open_parenthesis,
+            );
             return;
         };
         let argument_index_to_label = field_map.indices_to_labels();
@@ -9648,7 +10613,7 @@ impl<'ast> ast::visit::Visit<'ast> for AddOmittedLabels<'ast> {
                 location: argument.location,
                 omitted_label: label,
                 can_use_shorthand_syntax,
-            })
+            });
         }
         self.arguments_and_omitted_labels = Some(omitted_labels);
     }
@@ -9696,9 +10661,13 @@ pub struct ExtractFunction<'a> {
     /// a statement is the last in a block or function, we need to track that
     /// manually.
     last_statement_location: Option<SrcSpan>,
+    /// When visiting a pipeline step, this will hold the type of the value
+    /// returned by the previous step (if any!)
+    previous_pipeline_assignment_type: Option<Arc<Type>>,
 }
 
 /// Information about a section of code we are extracting as a function.
+#[derive(Debug)]
 struct ExtractedFunction<'a> {
     /// A list of parameters which need to be passed to the extracted function.
     /// These are any variables used in the extracted code, which are defined
@@ -9725,7 +10694,32 @@ impl<'a> ExtractedFunction<'a> {
     fn location(&self) -> SrcSpan {
         match &self.value {
             ExtractedValue::Expression(expression) => expression.location(),
-            ExtractedValue::Statements { location, .. } => *location,
+            ExtractedValue::Statements { location, .. }
+            | ExtractedValue::Use { location, .. }
+            | ExtractedValue::PipelineSteps { location, .. } => *location,
+        }
+    }
+
+    /// If the extracted function is a series of pipeline steps, this adds to it
+    /// the given pipeline step, otherwise leaving it unchanged.
+    /// If the extracted function was indeed a pipeline, this will return `true`,
+    /// otherwise it returns `false`.
+    ///
+    fn try_add_pipeline_step(&mut self, step_type: Arc<Type>, step_location: SrcSpan) {
+        if let ExtractedFunction {
+            value:
+                ExtractedValue::PipelineSteps {
+                    location,
+                    before_first: _,
+                    return_type,
+                },
+            ..
+        } = self
+        {
+            // If we're extracting this pipeline and the final step is included
+            // in the selection we want to add it to the extracted steps
+            *return_type = step_type;
+            *location = location.merge(&step_location);
         }
     }
 }
@@ -9736,53 +10730,52 @@ enum ExtractedValue<'a> {
     Statements {
         location: SrcSpan,
         position: StatementPosition,
+        /// The type of the final statement.
+        type_: Arc<Type>,
+    },
+    /// We're extracting a single use statement. We need this special case to
+    /// properly handle the statements inside of them.
+    Use {
+        /// This is the location of the entire use block, including the
+        /// statements in it.
+        location: SrcSpan,
+        /// This is the location of the expression on the right hand side of the use
+        /// arrow.
+        ///
+        /// ```gleam
+        /// use a <- result.try(result)
+        ///          ^^^^^^^^^^^^^^^^^^
+        /// ```
+        ///
+        use_line_location: SrcSpan,
+        type_: Arc<Type>,
+    },
+    PipelineSteps {
+        location: SrcSpan,
+        /// The type of the value produced by the pipeline steps that will be
+        /// piped into the extracted function. Could be none if the steps we're
+        /// extracting include the first step, in that case there would be
+        /// nothing that is fed into it.
+        before_first: Option<Arc<Type>>,
+        /// The type returned by the extracted steps.
+        return_type: Arc<Type>,
     },
 }
 
-/// When we are extracting multiple statements, there are two possible cases:
-/// The first is if we are extracting statements in the middle of a function.
-/// In this case, we will need to return some number of arguments, or `Nil`.
-/// For example:
-///
-/// ```gleam
-/// pub fn main() {
-///   let message = "Hello!"
-///   let log_message = "[INFO] " <> message
-/// //^ Select from here
-///   io.println(log_message)
-///   //                    ^ Until here
-///
-///   do_some_more_things()
-/// }
-/// ```
-///
-/// Here, the extracted function doesn't bind any variables which we need
-/// afterwards, it purely performs side effects. In this case we can just return
-/// `Nil` from the new function.
-///
-/// However, consider the following:
-///
-/// ```gleam
-/// pub fn main() {
-///   let a = 1
-///   let b = 2
-/// //^ Select from here
-///   a + b
-///   //  ^ Until here
-/// }
-/// ```
-///
-/// Here, despite us not needing any variables from the extracted code, there
-/// is one key difference: the `a + b` expression is at the end of the function,
-/// and so its value is returned from the entire function. This is known as the
-/// "tail" position. In that case, we can't return `Nil` as that would make the
-/// `main` function return `Nil` instead of the result of the addition. If we
-/// extract the tail-position statement, we need to return that last value rather
-/// than `Nil`.
-///
+impl ExtractedValue<'_> {
+    fn location(&self) -> SrcSpan {
+        match self {
+            ExtractedValue::Expression(typed_expr) => typed_expr.location(),
+            ExtractedValue::Statements { location, .. }
+            | ExtractedValue::PipelineSteps { location, .. }
+            | ExtractedValue::Use { location, .. } => *location,
+        }
+    }
+}
+
 #[derive(Debug)]
 enum StatementPosition {
-    Tail { type_: Arc<Type> },
+    Tail,
     NotTail,
 }
 
@@ -9799,6 +10792,7 @@ impl<'a> ExtractFunction<'a> {
             function: None,
             function_end_position: None,
             last_statement_location: None,
+            previous_pipeline_assignment_type: None,
         }
     }
 
@@ -9821,10 +10815,10 @@ impl<'a> ExtractFunction<'a> {
         };
 
         match extracted.value {
-            // If we extract a block, it isn't very helpful to have the body of the
-            // extracted function just be a single block expression, so instead we
-            // extract the statements inside the block. For example, the following
-            // code:
+            // If we extract a block, it isn't very helpful to have the body of
+            // the extracted function just be a single block expression, so
+            // instead we extract the statements inside the block. For example,
+            // the following code:
             //
             // ```gleam
             // pub fn main() {
@@ -9870,13 +10864,13 @@ impl<'a> ExtractFunction<'a> {
                     .location()
                     .merge(&statements.last().location());
 
-                self.extract_code_in_tail_position(
+                self.extract_unbound_statements(
                     *full_location,
                     location,
-                    statements.last().type_(),
                     extracted.parameters,
+                    statements.last().type_(),
                     end,
-                )
+                );
             }
             ExtractedValue::Expression(TypedExpr::Fn {
                 type_,
@@ -9896,7 +10890,7 @@ impl<'a> ExtractFunction<'a> {
                         arguments,
                         return_type,
                         end,
-                    )
+                    );
                 } else if arguments.len() == 1 {
                     self.extract_anonymous_function_with_capture_hole(
                         *full_location,
@@ -9905,7 +10899,7 @@ impl<'a> ExtractFunction<'a> {
                         extracted.parameters,
                         return_type,
                         end,
-                    )
+                    );
                 } else {
                     self.extract_anonymous_function_body(
                         location,
@@ -9913,7 +10907,7 @@ impl<'a> ExtractFunction<'a> {
                         extracted.parameters,
                         return_type,
                         end,
-                    )
+                    );
                 }
             }
             ExtractedValue::Expression(expression) => {
@@ -9927,38 +10921,69 @@ impl<'a> ExtractFunction<'a> {
                 } else {
                     expression.type_()
                 };
-                self.extract_code_in_tail_position(
+                self.extract_unbound_statements(
                     expression.location(),
                     expression.location(),
-                    expression_type,
                     extracted.parameters,
+                    expression_type,
                     end,
-                )
+                );
             }
             ExtractedValue::Statements {
                 location,
                 position: StatementPosition::NotTail,
-            } => self.extract_statements(
+                type_,
+            } => {
+                if extracted.returned_variables.is_empty() {
+                    self.extract_unbound_statements(
+                        location,
+                        location,
+                        extracted.parameters,
+                        type_,
+                        end,
+                    );
+                } else {
+                    self.extract_bound_statements(
+                        location,
+                        extracted.parameters,
+                        extracted.returned_variables,
+                        end,
+                    );
+                }
+            }
+
+            ExtractedValue::Use {
+                location,
+                use_line_location: _,
+                type_,
+            }
+            | ExtractedValue::Statements {
+                location,
+                position: StatementPosition::Tail,
+                type_,
+            } => self.extract_unbound_statements(
+                location,
                 location,
                 extracted.parameters,
-                extracted.returned_variables,
+                type_,
                 end,
             ),
-            ExtractedValue::Statements {
+            ExtractedValue::PipelineSteps {
                 location,
-                position: StatementPosition::Tail { type_ },
-            } => self.extract_code_in_tail_position(
+                before_first,
+                return_type,
+            } => self.extract_pipeline_steps(
                 location,
-                location,
-                type_,
-                extracted.parameters,
                 end,
+                extracted.parameters,
+                before_first,
+                return_type,
             ),
         }
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Extract function")
-            .kind(CodeActionKind::REFACTOR_EXTRACT)
+            .kind(CodeActionKind::RefactorExtract)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -10171,14 +11196,28 @@ impl<'a> ExtractFunction<'a> {
         self.edits.insert(function_end, function);
     }
 
-    /// Extracts code from the end of a function or block. This could either be
-    /// a single expression, or multiple statements followed by a final expression.
-    fn extract_code_in_tail_position(
+    /// Extracts a function whose return value does not get bound to a variable
+    /// in the calling function.
+    ///
+    /// There are two cases:
+    /// 1. The function is in tail position, and its return value is used as the
+    ///    return value of the calling function.
+    /// 2. The function's return value is unused in the calling function, and so
+    ///    does not get bound to a variable.
+    ///
+    /// # Parameters
+    ///
+    /// In most cases, `location` and `code_location` are the same. They differ
+    /// only when the code being extracted is a single block expression. In
+    /// that case, the code being replaced in the calling function (`location`)
+    /// includes the braces around the block, while the code being put into the
+    /// body of the extracted function (`code_location`) does not.
+    fn extract_unbound_statements(
         &mut self,
         location: SrcSpan,
         code_location: SrcSpan,
-        type_: Arc<Type>,
         parameters: Vec<(EcoString, Arc<Type>)>,
+        return_type: Arc<Type>,
         function_end: u32,
     ) {
         let expression_code = code_at(self.module, code_location);
@@ -10199,7 +11238,7 @@ impl<'a> ExtractFunction<'a> {
             .iter()
             .map(|(name, type_)| eco_format!("{name}: {}", printer.print_type(type_)))
             .join(", ");
-        let return_type = printer.print_type(&type_);
+        let return_type = printer.print_type(&return_type);
 
         let function = format!(
             "\n\nfn {name}({parameters}) -> {return_type} {{
@@ -10210,7 +11249,47 @@ impl<'a> ExtractFunction<'a> {
         self.edits.insert(function_end, function);
     }
 
-    fn extract_statements(
+    /// Extracts a function that does get bound to one or more variables in the
+    /// calling function.
+    ///
+    /// For example, in the code
+    ///
+    /// ```gleam
+    /// pub fn main() {
+    ///   let a = 10
+    /// //^ Select from here
+    ///   let b = 20
+    ///   let c = a + b
+    ///   //          ^ Until here
+    ///
+    ///   echo a
+    ///   echo b
+    ///   echo c
+    /// }
+    /// ```
+    ///
+    /// multiple values defined in the extracted block are used in the calling
+    /// function. So, the extracted function must return multiple values that
+    /// are bound to variables: `let #(a, b, c) = function()`.
+    ///
+    /// There is a special case when there is only one value being bound, as it
+    /// is unnecessary to create a single-element tuple. For example:
+    ///
+    /// ```gleam
+    /// pub fn main() {
+    ///   let a = 10
+    /// //^ Select from here
+    ///   let b = 20
+    ///   let c = a + b
+    ///   //          ^ Until here
+    ///
+    ///   echo c
+    /// }
+    /// ```
+    ///
+    /// Here, the return value of the extracted function will be bound to a
+    /// single variable in the calling function: `let c = function()`.
+    fn extract_bound_statements(
         &mut self,
         location: SrcSpan,
         parameters: Vec<(EcoString, Arc<Type>)>,
@@ -10219,92 +11298,29 @@ impl<'a> ExtractFunction<'a> {
     ) {
         let code = code_at(self.module, location);
 
-        let returns_anything = !returned_variables.is_empty();
-
-        // Here, we decide what value to return from the function. There are
-        // three cases:
-        // The first is when the extracted code is purely for side-effects, and
-        // does not produce any values which are needed outside of the extracted
-        // code. For example:
-        //
-        // ```gleam
-        // pub fn main() {
-        //   let message = "Something important"
-        // //^ Select from here
-        //   io.println("Something important")
-        //   io.println("Something else which is repeated")
-        //   //                                           ^ Until here
-        //
-        //   do_final_thing()
-        // }
-        // ```
-        //
-        // It doesn't make sense to return any values from this function, since
-        // no values from the extract code are used afterwards, so we simply
-        // return `Nil`.
-        //
-        // The next is when we need just a single value defined in the extracted
-        // function, such as in this piece of code:
-        //
-        // ```gleam
-        // pub fn main() {
-        //   let a = 10
-        // //^ Select from here
-        //   let b = 20
-        //   let c = a + b
-        //   //          ^ Until here
-        //
-        //   echo c
-        // }
-        // ```
-        //
-        // Here, we can just return the single value, `c`.
-        //
-        // The last situation is when we need multiple defined values, such as
-        // in the following code:
-        //
-        // ```gleam
-        // pub fn main() {
-        //   let a = 10
-        // //^ Select from here
-        //   let b = 20
-        //   let c = a + b
-        //   //          ^ Until here
-        //
-        //   echo a
-        //   echo b
-        //   echo c
-        // }
-        // ```
-        //
-        // In this case, we must return a tuple containing `a`, `b` and `c` in
-        // order for the calling function to have access to the correct values.
         let (return_type, return_value) = match returned_variables.as_slice() {
-            [] => (type_::nil(), "Nil".into()),
-            [(name, type_)] => (type_.clone(), name.clone()),
+            [(returned_name, type_)] => (type_.clone(), returned_name.clone()),
             _ => {
-                let values = returned_variables.iter().map(|(name, _)| name).join(", ");
-                let type_ = type_::tuple(
-                    returned_variables
-                        .into_iter()
-                        .map(|(_, type_)| type_)
-                        .collect(),
-                );
+                let returned_names = returned_variables
+                    .iter()
+                    .map(|(name, _type)| name)
+                    .join(", ");
+                let return_value = eco_format!("#({returned_names})");
 
-                (type_, eco_format!("#({values})"))
+                let returned_types = returned_variables
+                    .into_iter()
+                    .map(|(_name, type_)| type_)
+                    .collect();
+                let type_ = type_::tuple(returned_types);
+
+                (type_, return_value)
             }
         };
 
         let name = self.function_name();
         let arguments = parameters.iter().map(|(name, _)| name).join(", ");
+        let call = format!("let {return_value} = {name}({arguments})");
 
-        // If any values are returned from the extracted function, we need to
-        // bind them so that they are accessible in the current scope.
-        let call = if returns_anything {
-            format!("let {return_value} = {name}({arguments})")
-        } else {
-            format!("{name}({arguments})")
-        };
         self.edits.replace(location, call);
 
         let mut printer = Printer::new(&self.module.ast.names);
@@ -10313,13 +11329,97 @@ impl<'a> ExtractFunction<'a> {
             .iter()
             .map(|(name, type_)| eco_format!("{name}: {}", printer.print_type(type_)))
             .join(", ");
-
         let return_type = printer.print_type(&return_type);
 
         let function = format!(
             "\n\nfn {name}({parameters}) -> {return_type} {{
   {code}
   {return_value}
+}}"
+        );
+
+        self.edits.insert(function_end, function);
+    }
+
+    fn extract_pipeline_steps(
+        &mut self,
+        location: SrcSpan,
+        function_end: u32,
+        parameters: Vec<(EcoString, Arc<Type>)>,
+        before_first: Option<Arc<Type>>,
+        return_type: Arc<Type>,
+    ) {
+        let name = self.function_name();
+        let code = code_at(self.module, location);
+        let arguments = parameters.iter().map(|(name, _)| name.clone()).join(", ");
+        let replacement = match before_first {
+            Some(_) if parameters.is_empty() => format!("{name}"),
+            Some(_) | None => format!("{name}({arguments})"),
+        };
+        self.edits.replace(location, replacement);
+
+        // When extracting something out of the middle of a pipeline the
+        // function we produce will produce a single value as output but could
+        // take multiple values as input:
+        //
+        // ```gleam
+        // wibble
+        // |> wobble(a)   // extracting this
+        // |> woo(b)      //
+        // |> something
+        // ```
+        //
+        // It will take the type returned by `wibble`, `a`, and `b` as input,
+        // and produce the value returned by `woo` as output:
+        //
+        // ```gleam
+        // wibble
+        // |> function(a, b)
+        // |> something
+        // ```
+        //
+        // If the steps extracted are at the beginning of the pipeline, then it
+        // won't take that additional argument!
+        //
+        // ```gleam
+        // wibble         // extracting these
+        // |> wobble(a)   //
+        // |> woo(b)      //
+        // |> something
+        // ```
+        //
+        // Becomes:
+        //
+        // ```gleam
+        // function(a, b)
+        // |> something
+        // ```
+
+        let mut type_printer = Printer::new(&self.module.ast.names);
+        let return_type = type_printer.print_type(&return_type);
+        let first_argument = before_first.map(|type_of_first_argument| {
+            let mut generator = NameGenerator::new();
+            for (name, _) in parameters.iter() {
+                generator.add_used_name(name.clone());
+            }
+            let first_argument_name = generator.generate_name_from_type(&type_of_first_argument);
+            (first_argument_name, type_of_first_argument.clone())
+        });
+        let parameters = first_argument
+            .clone()
+            .into_iter()
+            .chain(parameters)
+            .map(|(name, type_)| eco_format!("{name}: {}", type_printer.print_type(&type_)))
+            .join(", ");
+
+        let code = if let Some((first_argument_name, _)) = first_argument {
+            format!("{first_argument_name}\n  |> {code}")
+        } else {
+            code.trim_start_matches("|>").to_string()
+        };
+        let function = format!(
+            "\n\nfn {name}({parameters}) -> {return_type} {{
+  {code}
 }}"
         );
 
@@ -10376,8 +11476,8 @@ impl<'a> ExtractFunction<'a> {
         variables.push((name.clone(), type_.clone()));
     }
 
-    fn can_extract(&self, location: SrcSpan) -> bool {
-        let expression_range = self.edits.src_span_to_lsp_range(location);
+    fn can_extract_expression(&self, expression: &TypedExpr) -> bool {
+        let expression_range = self.edits.src_span_to_lsp_range(expression.location());
         let selected_range = self.params.range;
 
         // If the selected range doesn't touch the expression at all, then there
@@ -10386,37 +11486,101 @@ impl<'a> ExtractFunction<'a> {
             return false;
         }
 
-        // Determine whether the selected range falls completely within the
-        // expression. For example:
-        // ```gleam
-        // pub fn main() {
-        //   let something = {
-        //     let a = 1
-        //     let b = 2
-        //     let c = a + b
-        //   //^ The user has selected from here
-        //     let d = a * b
-        //     c / d
-        //     //  ^ Until here
-        //   }
-        // }
-        // ```
-        //
-        // Here, the selected range does overlap with the `let something`
-        // statement; but we don't want to extract that whole statement! The
-        // user only wanted to extract the statements inside the block. So if
-        // the selected range falls completely within the expression, we ignore
-        // it and traverse the tree further until we find exactly what the user
-        // selected.
-        //
-        let selected_within_expression = selected_range.start > expression_range.start
-            && selected_range.start < expression_range.end
-            && selected_range.end > expression_range.start
-            && selected_range.end < expression_range.end;
+        match expression {
+            TypedExpr::Pipeline {
+                first_value,
+                finally,
+                ..
+            } => {
+                // We can extract a pipeline as a whole only if the selection
+                // spans all of its steps!
+                let first_step = self.edits.src_span_to_lsp_range(first_value.location);
+                let last_step = self.edits.src_span_to_lsp_range(finally.location());
+                position_within(selected_range.start, first_step)
+                    && position_within(selected_range.end, last_step)
+            }
 
-        // If the selected range is completely within the expression, we don't
-        // want to extract it.
-        !selected_within_expression
+            TypedExpr::Int { .. }
+            | TypedExpr::Float { .. }
+            | TypedExpr::String { .. }
+            | TypedExpr::Block { .. }
+            | TypedExpr::Var { .. }
+            | TypedExpr::Fn { .. }
+            | TypedExpr::List { .. }
+            | TypedExpr::Call { .. }
+            | TypedExpr::BinOp { .. }
+            | TypedExpr::Case { .. }
+            | TypedExpr::RecordAccess { .. }
+            | TypedExpr::PositionalAccess { .. }
+            | TypedExpr::ModuleSelect { .. }
+            | TypedExpr::Tuple { .. }
+            | TypedExpr::TupleIndex { .. }
+            | TypedExpr::Todo { .. }
+            | TypedExpr::Panic { .. }
+            | TypedExpr::Echo { .. }
+            | TypedExpr::BitArray { .. }
+            | TypedExpr::RecordUpdate { .. }
+            | TypedExpr::NegateBool { .. }
+            | TypedExpr::NegateInt { .. }
+            | TypedExpr::Invalid { .. } => !completely_within(selected_range, expression_range),
+        }
+    }
+
+    fn can_extract_statement(&self, statement: &TypedStatement) -> bool {
+        let statement_range = self.edits.src_span_to_lsp_range(statement.location());
+        let selected_range = self.params.range;
+
+        // If the selected range doesn't touch the statement at all, then there
+        // is no reason to extract it.
+        if !overlaps(statement_range, selected_range) {
+            return false;
+        }
+
+        match statement {
+            ast::Statement::Expression(expression) => self.can_extract_expression(expression),
+
+            // Determine whether the selected range falls completely within the
+            // expression. For example:
+            // ```gleam
+            // pub fn main() {
+            //   let something = {
+            //     let a = 1
+            //     let b = 2
+            //     let c = a + b
+            //   //^ The user has selected from here
+            //     let d = a * b
+            //     c / d
+            //     //  ^ Until here
+            //   }
+            // }
+            // ```
+            //
+            // Here, the selected range does overlap with the `let something`
+            // statement; but we don't want to extract that whole statement! The
+            // user only wanted to extract the statements inside the block. So if
+            // the selected range falls completely within the expression, we ignore
+            // it and traverse the tree further until we find exactly what the user
+            // selected.
+            //
+            // If the selected range is completely within the expression, we don't
+            // want to extract it.
+            ast::Statement::Use(_) | ast::Statement::Assert(_) => {
+                !completely_within(selected_range, statement_range)
+            }
+
+            // We can only extract a whole let statement if the assignment
+            // part itself is selected. If the only part being selected is the
+            // expression then the right call is not extracting the whole
+            // statement but just the expression.
+            ast::Statement::Assignment(assignment) => {
+                let value_range = self
+                    .edits
+                    .src_span_to_lsp_range(assignment.value.location());
+
+                !within(selected_range, value_range)
+                    && !completely_within(selected_range, statement_range)
+            }
+        }
     }
 }
 
@@ -10445,6 +11609,24 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractFunction<'ast> {
         self.last_statement_location = last_statement_location;
     }
 
+    fn visit_typed_use(&mut self, use_: &'ast TypedUse) {
+        let last_statement_location = self.last_statement_location;
+        // The body must be visited first, before the desugared function
+        if let TypedExpr::Call { arguments, .. } = &*use_.call
+            && let Some(CallArg {
+                value: TypedExpr::Fn { body, .. },
+                ..
+            }) = arguments.last()
+        {
+            self.last_statement_location = Some(body.last().location());
+            for statement in body {
+                self.visit_typed_statement(statement);
+            }
+        }
+        ast::visit::visit_typed_use(self, use_);
+        self.last_statement_location = last_statement_location;
+    }
+
     fn visit_typed_expr(&mut self, expression: &'ast TypedExpr) {
         // If we have already determined what code we want to extract, we don't
         // want to extract this instead. This expression would be inside the
@@ -10453,19 +11635,29 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractFunction<'ast> {
         // not desired.
         if self.function.is_none() {
             // If this expression is fully selected, we mark it as being extracted.
-            if self.can_extract(expression.location()) {
+            if self.can_extract_expression(expression) {
                 self.function = Some(ExtractedFunction::new(ExtractedValue::Expression(
                     expression,
                 )));
             }
         }
+
+        // If the expression is a function, then the last statement location
+        // needs to be updated accordingly
+        let last_statement_location = self.last_statement_location;
+        if let TypedExpr::Fn { body, .. } = expression {
+            self.last_statement_location = Some(body.last().location());
+        }
+
         ast::visit::visit_typed_expr(self, expression);
+
+        self.last_statement_location = last_statement_location;
     }
 
     fn visit_typed_statement(&mut self, statement: &'ast TypedStatement) {
         let statement_location = statement.location();
 
-        if self.can_extract(statement_location) {
+        if self.can_extract_statement(statement) {
             let is_in_tail_position =
                 self.last_statement_location
                     .is_some_and(|last_statement_location| {
@@ -10476,20 +11668,80 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractFunction<'ast> {
             // it will be in tail position there and the extracted function should
             // return its returned value.
             let position = if statement.is_use() || is_in_tail_position {
-                StatementPosition::Tail {
-                    type_: statement.type_(),
-                }
+                StatementPosition::Tail
             } else {
                 StatementPosition::NotTail
             };
 
             match &mut self.function {
                 None => {
-                    self.function = Some(ExtractedFunction::new(ExtractedValue::Statements {
-                        location: statement_location,
-                        position,
-                    }));
+                    self.function = match statement {
+                        TypedStatement::Expression(TypedExpr::Pipeline { .. }) => None,
+                        TypedStatement::Assert(_)
+                        | TypedStatement::Assignment(_)
+                        | TypedStatement::Expression(_) => {
+                            Some(ExtractedFunction::new(ExtractedValue::Statements {
+                                location: statement_location,
+                                position,
+                                type_: statement.type_(),
+                            }))
+                        }
+                        TypedStatement::Use(use_) => {
+                            Some(ExtractedFunction::new(ExtractedValue::Use {
+                                location: use_.call.location(),
+                                use_line_location: use_.location,
+                                type_: statement.type_(),
+                            }))
+                        }
+                    };
                 }
+
+                // If we're extracting something that is within a use expression
+                // we need to check whether to extract the whole use or just
+                // statements inside of it
+                Some(ExtractedFunction {
+                    value:
+                        ExtractedValue::Use {
+                            location,
+                            use_line_location,
+                            ..
+                        },
+                    parameters,
+                    returned_variables,
+                }) if location.contains_span(statement_location) => {
+                    let use_line_range = self.edits.src_span_to_lsp_range(*use_line_location);
+
+                    // If the current statement is not a part of the use line,
+                    // and the current selection does not overlap the use line,
+                    // then the outer use is not the correct target.
+                    if !use_line_location.contains_span(statement_location)
+                        && !overlaps(use_line_range, self.params.range)
+                    {
+                        self.function = Some(ExtractedFunction {
+                            value: ExtractedValue::Statements {
+                                location: statement_location,
+                                position,
+                                type_: statement.type_(),
+                            },
+                            parameters: parameters.to_vec(),
+                            returned_variables: returned_variables.to_vec(),
+                        });
+                    }
+                }
+                // Otherwise it means we're extracting multiple statements
+                // _including_ some use expression, we fallback to extracting
+                // multiple statements
+                Some(ExtractedFunction {
+                    value: value @ ExtractedValue::Use { .. },
+                    ..
+                }) => {
+                    *value = ExtractedValue::Statements {
+                        location: value.location().merge(&statement_location),
+                        position,
+                        type_: statement.type_(),
+                    };
+                }
+
                 // If we have already chosen an expression to extract, that means
                 // that this statement is within the already extracted expression,
                 // so we don't want to extract this instead.
@@ -10498,22 +11750,90 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractFunction<'ast> {
                     ..
                 }) => {}
                 // If we are selecting multiple statements, this statement should
-                // be included within list, so we merge the spans to ensure it
-                // is included.
+                // be included within that list, so we merge the spans to ensure
+                // it is included.
                 Some(ExtractedFunction {
                     value:
                         ExtractedValue::Statements {
                             location,
                             position: extracted_position,
+                            type_: extracted_type,
                         },
                     ..
                 }) => {
                     *location = location.merge(&statement_location);
                     *extracted_position = position;
+                    *extracted_type = statement.type_();
+                }
+                Some(ExtractedFunction {
+                    value: value @ ExtractedValue::PipelineSteps { .. },
+                    ..
+                }) => {
+                    // If we were extracting a pipeline, but end up selecting
+                    // some statement that is not part of it, then we go back to
+                    // selecting a batch of statements.
+                    *value = ExtractedValue::Statements {
+                        location: value.location(),
+                        position,
+                        type_: statement.type_(),
+                    }
                 }
             }
         }
         ast::visit::visit_typed_statement(self, statement);
+    }
+
+    fn visit_typed_expr_pipeline(
+        &mut self,
+        _location: &'ast SrcSpan,
+        first_value: &'ast TypedPipelineAssignment,
+        assignments: &'ast [(TypedPipelineAssignment, PipelineAssignmentKind)],
+        finally: &'ast TypedExpr,
+        _finally_kind: &'ast PipelineAssignmentKind,
+    ) {
+        self.previous_pipeline_assignment_type = None;
+        self.visit_typed_pipeline_assignment(first_value);
+
+        self.previous_pipeline_assignment_type = Some(first_value.type_());
+        for (assignment, _kind) in assignments {
+            self.visit_typed_pipeline_assignment(assignment);
+            self.previous_pipeline_assignment_type = Some(assignment.type_());
+        }
+
+        // If we're selecting a pipeline and the selection ends on its final step
+        // we want to include that as well into the extracted bit.
+        let final_step_range = self.edits.src_span_to_lsp_range(finally.location());
+        if let Some(extracted_function) = &mut self.function
+            && position_within(self.params.range.end, final_step_range)
+        {
+            extracted_function.try_add_pipeline_step(finally.type_(), finally.location());
+        }
+
+        self.visit_typed_expr(finally);
+        self.previous_pipeline_assignment_type = None;
+    }
+
+    fn visit_typed_pipeline_assignment(&mut self, assignment: &'ast TypedPipelineAssignment) {
+        // In order to be extracted, a pipeline step must be overlapping with
+        // the cursor selection!
+        let assignment_range = self.edits.src_span_to_lsp_range(assignment.location);
+        if !overlaps(self.params.range, assignment_range) {
+            return;
+        }
+
+        match &mut self.function {
+            None => {
+                self.function = Some(ExtractedFunction::new(ExtractedValue::PipelineSteps {
+                    location: assignment.location,
+                    before_first: self.previous_pipeline_assignment_type.clone(),
+                    return_type: assignment.type_(),
+                }));
+            }
+            Some(extracted_function) => {
+                extracted_function.try_add_pipeline_step(assignment.type_(), assignment.location);
+            }
+        }
+        ast::visit::visit_typed_pipeline_assignment(self, assignment);
     }
 
     fn visit_typed_expr_var(
@@ -10542,8 +11862,61 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractFunction<'ast> {
         name: &'ast EcoString,
         type_: &'ast Arc<Type>,
         definition_location: &'ast SrcSpan,
+        _origin: &'ast VariableOrigin,
     ) {
         self.register_referenced_variable(name, type_, *location, *definition_location);
+    }
+
+    fn visit_typed_expr_case(
+        &mut self,
+        location: &'ast SrcSpan,
+        type_: &'ast Arc<Type>,
+        subjects: &'ast [TypedExpr],
+        clauses: &'ast [ast::TypedClause],
+        compiled_case: &'ast CompiledCase,
+    ) {
+        let was_extracting_already = self.function.is_some();
+
+        // We first visit as usual...
+        ast::visit::visit_typed_expr_case(self, location, type_, subjects, clauses, compiled_case);
+
+        // But then we need to check we're in a situation where it actually makes
+        // sense to extract: if the cursor is entirely within the case (so it's
+        // not part of a bigger extracted chunk) and it spans over one of the
+        // branches' pattern or guard, then we don't want to allow extracting
+        // anything. Popping up the action would be confusing.
+        // For example:
+        //
+        // ```gleam
+        // case wibble {
+        //   Ok(_) -> todo
+        // //^^^^^^^^^^^^^ If I'm selecting this whole branch it makes no sense
+        //                 to propose extracting it as a function
+        //   _ if wibble -> todo
+        // //        ^^^^^^^^^^^ If I'm selecting this it makes no sense to
+        // //                    propose extracting it as a function
+        // }
+        // ```
+
+        // We were already extracting something, we don't want to render that
+        // choice null, this is just a part of a bigger piece being extracted.
+        if was_extracting_already {
+            return;
+        }
+
+        for clause in clauses {
+            let left_hand_side_location = SrcSpan {
+                start: clause.pattern_location().start,
+                end: clause.then.location().start - 1,
+            };
+            let left_hand_side_range = self.edits.src_span_to_lsp_range(left_hand_side_location);
+            // If there's any overlapping with one of the patterns, then we
+            // don't want to extract anything.
+            if overlaps(self.params.range, left_hand_side_range) {
+                self.function = None;
+                break;
+            }
+        }
     }
 
     fn visit_typed_bit_array_size_variable(
@@ -10679,7 +12052,7 @@ impl<'a> MergeCaseBranches<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Merge case branches")
-            .kind(CodeActionKind::REFACTOR_REWRITE)
+            .kind(CodeActionKind::RefactorRewrite)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(false)
             .push_to(&mut action);
@@ -10822,7 +12195,7 @@ impl<'ast> ast::visit::Visit<'ast> for MergeCaseBranches<'ast> {
         }
 
         if let result @ Some(_) = self.select_mergeable_branches(clauses) {
-            self.patterns_to_merge = result
+            self.patterns_to_merge = result;
         }
 
         // We still need to visit the case expression in case we want to apply
@@ -10915,7 +12288,7 @@ impl<'a> AddMissingTypeParameter<'a> {
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Add missing type parameter")
-            .kind(CodeActionKind::QUICKFIX)
+            .kind(CodeActionKind::QuickFix)
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .preferred(true)
             .push_to(&mut action);
@@ -10925,13 +12298,12 @@ impl<'a> AddMissingTypeParameter<'a> {
 
 impl<'ast> ast::visit::Visit<'ast> for AddMissingTypeParameter<'ast> {
     fn visit_typed_custom_type(&mut self, custom_type: &'ast ast::TypedCustomType) {
-        let full_type_definition_range = self.edits.src_span_to_lsp_range(SrcSpan::new(
-            custom_type.location.start,
-            custom_type.end_position,
-        ));
+        let custom_type_range = self
+            .edits
+            .src_span_to_lsp_range(custom_type.full_location());
 
         // Only continue, if the action was selected anywhere within the custom type definition.
-        if !overlaps(self.params.range, full_type_definition_range) {
+        if !within(self.params.range, custom_type_range) {
             return;
         }
 
@@ -10942,17 +12314,1099 @@ impl<'ast> ast::visit::Visit<'ast> for AddMissingTypeParameter<'ast> {
 
         self.has_existing_parameters = !custom_type.typed_parameters.is_empty();
 
+        let existing_names: HashSet<_> = custom_type
+            .parameters
+            .iter()
+            .map(|(_, name)| name)
+            .collect();
+
         // Collect the remaining type parameters from the variant constructors.
         for record in &custom_type.constructors {
             for argument in &record.arguments {
-                if let Type::Var { .. } = argument.type_.as_ref()
-                    && !custom_type.typed_parameters.contains(&argument.type_)
+                if let ast::TypeAst::Var(ast::TypeAstVar { name, .. }) = &argument.ast
+                    && !existing_names.contains(name)
                 {
-                    let mut name = EcoString::new();
-                    argument.ast.print(&mut name);
-                    let _ = self.missing_parameters.insert(name);
+                    let _ = self.missing_parameters.insert(name.clone());
                 }
             }
         }
+    }
+}
+
+/// Code action to replace a `_` with its actual type in an annotation.
+///
+/// Before:
+/// ```gleam
+/// fn wibble() -> Ok(_) { Ok(1) }
+/// //                ^ Trigger it here
+/// ```
+///
+/// After:
+/// ```gleam
+/// fn wibble() -> Ok(Int) { Ok(1) }
+/// ```
+///
+pub struct ReplaceUnderscoreWithType<'a> {
+    module: &'a Module,
+    params: &'a CodeActionParams,
+    edits: TextEdits<'a>,
+    hovered_hole: Option<HoveredHole>,
+}
+
+struct HoveredHole {
+    type_: Arc<Type>,
+    location: SrcSpan,
+}
+
+impl<'a> ReplaceUnderscoreWithType<'a> {
+    pub fn new(
+        module: &'a Module,
+        line_numbers: &'a LineNumbers,
+        params: &'a CodeActionParams,
+    ) -> Self {
+        Self {
+            module,
+            params,
+            edits: TextEdits::new(line_numbers),
+            hovered_hole: None,
+        }
+    }
+
+    pub fn code_actions(mut self) -> Vec<CodeAction> {
+        self.visit_typed_module(&self.module.ast);
+
+        let mut action = Vec::with_capacity(1);
+
+        let Some(HoveredHole { type_, location }) = self.hovered_hole else {
+            return vec![];
+        };
+        let mut printer = Printer::new(&self.module.ast.names);
+        self.edits
+            .replace(location, format!("{}", printer.print_type(&type_)));
+
+        CodeActionBuilder::new("Replace `_` with type")
+            .kind(CodeActionKind::QuickFix)
+            .changes(self.params.text_document.uri.clone(), self.edits.edits)
+            .preferred(true)
+            .push_to(&mut action);
+        action
+    }
+}
+
+impl<'ast> ast::visit::Visit<'ast> for ReplaceUnderscoreWithType<'ast> {
+    fn visit_type_ast(&mut self, node: &'ast ast::TypeAst, inferred_type: Option<Arc<Type>>) {
+        // We never traverse a type annotation we're not hovering
+        let node_location = self.edits.src_span_to_lsp_range(node.location());
+        if !within(self.params.range, node_location) {
+            return;
+        }
+        ast::visit::visit_type_ast(self, node, inferred_type);
+    }
+
+    fn visit_type_ast_hole(
+        &mut self,
+        location: &'ast SrcSpan,
+        _name: &'ast EcoString,
+        type_: Option<Arc<Type>>,
+    ) {
+        if let Some(type_) = type_ {
+            self.hovered_hole = Some(HoveredHole {
+                type_,
+                location: *location,
+            });
+        }
+    }
+}
+
+/// Code action to turn a function used as a reference into a one-statement anonymous function.
+///
+/// For example, if the code action was used on `op` here:
+///
+/// ```gleam
+/// list.map([1, 2, 3], op)
+/// ```
+///
+/// it would become:
+///
+/// ```gleam
+/// list.map([1, 2, 3], fn(int) {
+///   op(int)
+/// })
+/// ```
+pub struct WrapInAnonymousFunction<'a> {
+    module: &'a Module,
+    params: &'a CodeActionParams,
+    functions: Vec<FunctionToWrap>,
+    edits: TextEdits<'a>,
+}
+
+/// Helper struct, a target for [WrapInAnonymousFunction].
+struct FunctionToWrap {
+    location: SrcSpan,
+    arguments: Vec<Arc<Type>>,
+    variables_names: VariablesNames,
+}
+
+impl<'a> WrapInAnonymousFunction<'a> {
+    pub fn new(
+        module: &'a Module,
+        line_numbers: &'a LineNumbers,
+        params: &'a CodeActionParams,
+    ) -> Self {
+        Self {
+            module,
+            params,
+            edits: TextEdits::new(line_numbers),
+            functions: vec![],
+        }
+    }
+
+    pub fn code_actions(mut self) -> Vec<CodeAction> {
+        self.visit_typed_module(&self.module.ast);
+
+        let mut actions = Vec::with_capacity(self.functions.len());
+        for target in self.functions {
+            let mut name_generator = NameGenerator::new();
+            name_generator.reserve_variable_names(target.variables_names);
+            let arguments = target
+                .arguments
+                .iter()
+                .map(|type_| name_generator.generate_name_from_type(type_))
+                .join(", ");
+
+            self.edits
+                .insert(target.location.start, format!("fn({arguments}) {{ "));
+            self.edits
+                .insert(target.location.end, format!("({arguments}) }}"));
+
+            CodeActionBuilder::new("Wrap in anonymous function")
+                .kind(CodeActionKind::RefactorRewrite)
+                .changes(
+                    self.params.text_document.uri.clone(),
+                    std::mem::take(&mut self.edits.edits),
+                )
+                .push_to(&mut actions);
+        }
+        actions
+    }
+}
+
+impl<'ast> ast::visit::Visit<'ast> for WrapInAnonymousFunction<'ast> {
+    fn visit_typed_expr(&mut self, expression: &'ast TypedExpr) {
+        let expression_range = self.edits.src_span_to_lsp_range(expression.location());
+        if !within(self.params.range, expression_range) {
+            return;
+        }
+
+        // Exclude if the expression is already a function literal
+        let is_excluded = matches!(expression, TypedExpr::Fn { .. });
+
+        if let Type::Fn { arguments, .. } = &*expression.type_()
+            && !is_excluded
+        {
+            self.functions.push(FunctionToWrap {
+                location: expression.location(),
+                arguments: arguments.clone(),
+                variables_names: VariablesNames::from_expression(expression),
+            });
+        }
+
+        ast::visit::visit_typed_expr(self, expression);
+    }
+
+    /// We don't want to apply to functions that are being explicitly called
+    /// already, so we need to intercept visits to function calls and bounce
+    /// them out again so they don't end up in our impl for visit_typed_expr.
+    /// Otherwise this is the same as [].
+    fn visit_typed_expr_call(
+        &mut self,
+        _location: &'ast SrcSpan,
+        _type: &'ast Arc<Type>,
+        fun: &'ast TypedExpr,
+        arguments: &'ast [TypedCallArg],
+        _argument_parentheses: &'ast Option<u32>,
+    ) {
+        // We only need to do this interception for explicit calls, so if any
+        // of our arguments are explicit we re-enter the visitor as usual.
+        if arguments.iter().any(|argument| argument.is_implicit()) {
+            self.visit_typed_expr(fun);
+        } else {
+            // We still want to visit other nodes nested in the function being
+            // called so we bounce the call back out.
+            ast::visit::visit_typed_expr(self, fun);
+        }
+
+        for argument in arguments {
+            self.visit_typed_call_arg(argument);
+        }
+    }
+
+    /// We don't want to apply this to record constructors used in a record
+    /// update.
+    fn visit_typed_expr_record_update(
+        &mut self,
+        location: &'ast SrcSpan,
+        spread_start: &'ast u32,
+        type_: &'ast Arc<Type>,
+        updated_record: &'ast TypedExpr,
+        updated_record_assigned_name: &'ast Option<EcoString>,
+        constructor: &'ast TypedExpr,
+        arguments: &'ast [TypedCallArg],
+    ) {
+        // If we're hovering the record constructor of an update and that is a
+        // simple record constructor, we don't want to offer the wrap in
+        // anonymous function code action:
+        //
+        // ```gleam
+        // Wibble(..wibble, a: 1)
+        // // ^^^ Wrap in anonymous function makes no sense on this!
+        // ```
+        let constructor_range = self.edits.src_span_to_lsp_range(constructor.location());
+        if within(self.params.range, constructor_range)
+            && constructor.is_record_constructor_function()
+        {
+            return;
+        }
+
+        ast::visit::visit_typed_expr_record_update(
+            self,
+            location,
+            spread_start,
+            type_,
+            updated_record,
+            updated_record_assigned_name,
+            constructor,
+            arguments,
+        );
+    }
+}
+
+/// Code action to unwrap trivial one-statement anonymous functions into just a
+/// reference to the function called
+///
+/// For example, if the code action was used on the anonymous function here:
+///
+/// ```gleam
+/// list.map([1, 2, 3], fn(int) {
+///   op(int)
+/// })
+/// ```
+///
+/// it would become:
+///
+/// ```gleam
+/// list.map([1, 2, 3], op)
+/// ```
+pub struct UnwrapAnonymousFunction<'a> {
+    module: &'a Module,
+    line_numbers: &'a LineNumbers,
+    params: &'a CodeActionParams,
+    functions: Vec<FunctionToUnwrap>,
+}
+
+/// Helper struct, a target for [UnwrapAnonymousFunction]
+struct FunctionToUnwrap {
+    /// Location of the anonymous function to apply the action to.
+    outer_function: SrcSpan,
+    /// Location of the opening brace of the anonymous function.
+    outer_function_body_start: u32,
+    /// Location of the function being called inside the anonymous function.
+    /// This will be all that's left after the action, plus any comments.
+    inner_function: SrcSpan,
+    // Location of the opening parenthesis of the inner function's argument list.
+    inner_function_arguments_start: u32,
+}
+
+impl<'a> UnwrapAnonymousFunction<'a> {
+    pub fn new(
+        module: &'a Module,
+        line_numbers: &'a LineNumbers,
+        params: &'a CodeActionParams,
+    ) -> Self {
+        Self {
+            module,
+            line_numbers,
+            params,
+            functions: vec![],
+        }
+    }
+
+    pub fn code_actions(mut self) -> Vec<CodeAction> {
+        self.visit_typed_module(&self.module.ast);
+
+        let mut actions = Vec::with_capacity(self.functions.len());
+        for function in &self.functions {
+            let mut edits = TextEdits::new(self.line_numbers);
+
+            // We need to delete the anonymous function's head and the opening
+            // brace but preserve comments between it and the inner function call.
+            // We set our endpoint at the start of the function body, and move
+            // it on through any whitespace.
+            let head_deletion_end =
+                next_nonwhitespace(&self.module.code, function.outer_function_body_start + 1);
+            edits.delete(SrcSpan {
+                start: function.outer_function.start,
+                end: head_deletion_end,
+            });
+
+            // Delete the inner function call's arguments.
+            edits.delete(SrcSpan {
+                start: function.inner_function_arguments_start,
+                end: function.inner_function.end,
+            });
+
+            // To delete the tail we remove the function end (the '}') and any
+            // whitespace before it.
+            let tail_deletion_start =
+                previous_nonwhitespace(&self.module.code, function.outer_function.end - 1);
+            edits.delete(SrcSpan {
+                start: tail_deletion_start,
+                end: function.outer_function.end,
+            });
+
+            CodeActionBuilder::new("Remove anonymous function wrapper")
+                .kind(CodeActionKind::RefactorRewrite)
+                .changes(self.params.text_document.uri.clone(), edits.edits)
+                .push_to(&mut actions);
+        }
+        actions
+    }
+
+    /// If an anonymous function can be unwrapped, save it to our list
+    ///
+    /// We need to ensure our subjects:
+    /// - are anonymous function literals (not captures)
+    /// - only contain a single statement
+    /// - that statement is a function call
+    /// - that call's arguments exactly match the arguments of the enclosing
+    ///   function
+    fn register_function(
+        &mut self,
+        location: &'a SrcSpan,
+        kind: &'a FunctionLiteralKind,
+        arguments: &'a [TypedArg],
+        body: &'a Vec1<TypedStatement>,
+    ) {
+        let function_range = src_span_to_lsp_range(*location, self.line_numbers);
+        if !within(self.params.range, function_range) {
+            return;
+        }
+
+        let outer_body = match kind {
+            FunctionLiteralKind::Anonymous { head, .. } => SrcSpan::new(
+                next_nonwhitespace(&self.module.code, head.end),
+                location.end,
+            ),
+            _ => return,
+        };
+
+        // We can only apply to anonymous functions containing a single function call
+        let [
+            TypedStatement::Expression(TypedExpr::Call {
+                location: call_location,
+                arguments: call_arguments,
+                open_parenthesis: Some(arguments_start),
+                ..
+            }),
+        ] = body.as_slice()
+        else {
+            return;
+        };
+
+        // We need the existing argument list for the fn to be a 1:1 match for
+        // the args we pass to the called function, so we need to collect the
+        // names used in both lists and check they're equal.
+
+        let outer_argument_names = arguments.iter().map(|a| match &a.names {
+            ArgNames::Named { name, .. } => Some(name),
+            // We can bail out early if any arguments are discarded, since
+            // they couldn't match those actually used.
+            ArgNames::Discard { .. } => None,
+            // Anonymous functions can't have labelled arguments.
+            ArgNames::NamedLabelled { .. } => unreachable!(),
+            ArgNames::LabelledDiscard { .. } => unreachable!(),
+        });
+
+        let inner_argument_names = call_arguments.iter().map(|a| match &a.value {
+            TypedExpr::Var { name, .. } => Some(name),
+            // We can bail out early if any of these aren't variables, since
+            // they couldn't match the inputs.
+            _ => None,
+        });
+
+        if !inner_argument_names.eq(outer_argument_names) {
+            return;
+        }
+
+        self.functions.push(FunctionToUnwrap {
+            outer_function: *location,
+            outer_function_body_start: outer_body.start,
+            inner_function: *call_location,
+            inner_function_arguments_start: *arguments_start,
+        });
+    }
+}
+
+impl<'ast> ast::visit::Visit<'ast> for UnwrapAnonymousFunction<'ast> {
+    fn visit_typed_expr_fn(
+        &mut self,
+        location: &'ast SrcSpan,
+        type_: &'ast Arc<Type>,
+        kind: &'ast FunctionLiteralKind,
+        arguments: &'ast [TypedArg],
+        body: &'ast Vec1<TypedStatement>,
+        return_annotation: &'ast Option<ast::TypeAst>,
+    ) {
+        let function_range = src_span_to_lsp_range(*location, self.line_numbers);
+        if !within(self.params.range, function_range) {
+            return;
+        }
+
+        self.register_function(location, kind, arguments, body);
+
+        ast::visit::visit_typed_expr_fn(
+            self,
+            location,
+            type_,
+            kind,
+            arguments,
+            body,
+            return_annotation,
+        );
+    }
+}
+
+/// Code action to create unknown modules when an import is added for a
+/// module that doesn't exist.
+///
+/// For example, if `import wobble/woo` is added to `src/wiggle.gleam`,
+/// then a code action to create `src/wobble/woo.gleam` will be presented
+/// when triggered over `import wobble/woo`.
+pub struct CreateUnknownModule<'a, IO> {
+    module: &'a Module,
+    compiler: &'a LspProjectCompiler<FileSystemProxy<IO>>,
+    lines: &'a LineNumbers,
+    params: &'a CodeActionParams,
+    paths: &'a ProjectPaths,
+    error: &'a Option<Error>,
+}
+
+impl<'a, IO> CreateUnknownModule<'a, IO> {
+    pub fn new(
+        module: &'a Module,
+        compiler: &'a LspProjectCompiler<FileSystemProxy<IO>>,
+        lines: &'a LineNumbers,
+        params: &'a CodeActionParams,
+        paths: &'a ProjectPaths,
+        error: &'a Option<Error>,
+    ) -> Self {
+        Self {
+            module,
+            compiler,
+            lines,
+            params,
+            paths,
+            error,
+        }
+    }
+
+    pub fn code_actions(self) -> Vec<CodeAction> {
+        // This code action can be derived from `UnknownModule` type errors.
+        // If those errors don't exist for the current module, then we will not
+        // suggest this action.
+        let Some(Error::Type { failed_modules, .. }) = self.error else {
+            return vec![];
+        };
+        let Some(failed_module) = failed_modules.get(&self.module.name) else {
+            return vec![];
+        };
+
+        let mut unknown_module_name = None;
+        // We then need to find the `UnknownModule` error that is under the
+        // cursor (if any, otherwise there's no action to suggest)!
+        for error in &failed_module.errors {
+            let TypeError::UnknownModule { location, name, .. } = error else {
+                continue;
+            };
+            let error_range = src_span_to_lsp_range(*location, self.lines);
+            if !within(self.params.range, error_range) {
+                continue;
+            }
+            // We've found the unknown module error!!
+            unknown_module_name = Some(name);
+        }
+
+        let Some(unknown_module_name) = unknown_module_name else {
+            return vec![];
+        };
+
+        // Now we need to check the module actually doesn't exist among the
+        // importable ones! Imagine we've written `timestamp.to_string` and
+        // `timestamp` is unknown: if there's any importable module in the form
+        // `.../timestamp` then the most likely scenario is that the programmer
+        // wanted to import that and not create a new `src/timestamp.gleam`
+        // file!
+        // So we check if any of the importable modules ends with the unknown
+        // name and if that's the case we don't suggest this action.
+        let importable_modules = self.compiler.project_compiler.get_importable_modules();
+        let unknown_module_can_be_imported = importable_modules
+            .keys()
+            .find(|module_name| module_name.split('/').next_back() == Some(unknown_module_name))
+            .is_some();
+        if unknown_module_can_be_imported {
+            return vec![];
+        }
+
+        // We've made sure the module is not among the importable ones, so now
+        // we figure out if the generated module needs to go under `src`,
+        // `test`, or `dev` and we're good to actually generate it!
+        let origin_directory = match self.module.origin {
+            Origin::Src => self.paths.src_directory(),
+            Origin::Test => self.paths.test_directory(),
+            Origin::Dev => self.paths.dev_directory(),
+        };
+
+        let uri = url_from_path(&format!("{origin_directory}/{}.gleam", unknown_module_name))
+            .expect("origin directory is absolute");
+
+        let mut actions = vec![];
+        CodeActionBuilder::new(&format!(
+            "Create {}/{}.gleam",
+            self.module.origin.folder_name(),
+            unknown_module_name
+        ))
+        .kind(CodeActionKind::QuickFix)
+        .document_changes(vec![DocumentChange::CreateFile(CreateFile {
+            uri,
+            options: Some(CreateFileOptions {
+                overwrite: Some(false),
+                ignore_if_exists: Some(true),
+            }),
+            annotation_id: None,
+        })])
+        .push_to(&mut actions);
+
+        actions
+    }
+}
+
+/// Code action to discard unused variable.
+pub struct DiscardUnusedVariable<'a> {
+    module: &'a Module,
+    params: &'a CodeActionParams,
+    edits: TextEdits<'a>,
+}
+
+#[derive(Debug)]
+struct UnusedVariable<'a> {
+    location: &'a SrcSpan,
+    origin: &'a VariableOrigin,
+}
+
+impl<'a> DiscardUnusedVariable<'a> {
+    pub fn new(
+        module: &'a Module,
+        line_numbers: &'a LineNumbers,
+        params: &'a CodeActionParams,
+    ) -> Self {
+        Self {
+            module,
+            params,
+            edits: TextEdits::new(line_numbers),
+        }
+    }
+
+    pub fn code_actions(mut self) -> Vec<CodeAction> {
+        let unused_variable = self
+            .module
+            .ast
+            .type_info
+            .warnings
+            .iter()
+            .find_map(|warning| {
+                if let type_::Warning::UnusedVariable { location, origin } = warning
+                    && within(
+                        self.params.range,
+                        self.edits.src_span_to_lsp_range(*location),
+                    )
+                    // We do not want code action for generated variables.
+                    && !origin.is_generated()
+                {
+                    Some(UnusedVariable { location, origin })
+                } else {
+                    None
+                }
+            });
+
+        let Some(unused_variable) = unused_variable else {
+            return vec![];
+        };
+
+        // Discard hovered variable definition.
+        self.discard_variable(unused_variable.origin, unused_variable.location);
+
+        // In case there are alternative patterns like:
+        //
+        // ```gleam
+        // [0, y] | [1, y] | [2, y]
+        // ```
+        //
+        // with code action triggered at first `y`, to discard the second and
+        // third `y` we need to find references of variable. Since the variable
+        // is unused, only alternative patterns will be there.
+        let references = FindVariableReferences::new(
+            *unused_variable.location,
+            // Name can be `None` only if the variable is generated, and here
+            // we know that it is not.
+            unused_variable.origin.name().expect("variable name"),
+        )
+        .find_in_module(&self.module.ast);
+
+        for reference in references {
+            let located = self.module.ast.find_node(reference.location.start);
+            match located {
+                // For bindings like `x`, `[x, y]` we have origin and location
+                // directly, so we can simply discard them with regard to origin.
+                Some(Located::Pattern(Pattern::Variable {
+                    location, origin, ..
+                })) => self.discard_variable(origin, location),
+                // For pattern assignments like `[1, 2] as tail` we can remove
+                // the part from the end of the pattern to the end of the assign.
+                Some(Located::Pattern(Pattern::Assign {
+                    location, pattern, ..
+                })) => self.edits.delete(SrcSpan {
+                    start: pattern.location().end,
+                    end: location.end,
+                }),
+                // For prefix alias of string prefix pattern we can remove
+                // assignment.
+                Some(Located::StringPrefixPatternPrefixAlias { location, .. }) => {
+                    self.edits.delete(location)
+                }
+                // For suffix of string prefix pattern we can add `_` before the name
+                Some(Located::StringPrefixPatternSuffix { location, .. }) => {
+                    self.edits.insert(location.start, "_".to_string())
+                }
+                _ => (),
+            }
+        }
+
+        let mut action = Vec::with_capacity(1);
+        CodeActionBuilder::new("Discard unused variable")
+            .kind(CodeActionKind::QuickFix)
+            .changes(self.params.text_document.uri.clone(), self.edits.edits)
+            .preferred(true)
+            .push_to(&mut action);
+        action
+    }
+
+    fn discard_variable(&mut self, origin: &VariableOrigin, location: &SrcSpan) {
+        match origin.syntax {
+            type_::error::VariableSyntax::Variable(_) => {
+                self.edits.insert(location.start, ("_").to_string());
+            }
+            type_::error::VariableSyntax::LabelShorthand(_) => {
+                self.edits.insert(location.end, (" _").to_string());
+            }
+            type_::error::VariableSyntax::AssignmentPattern { name: _, location } => {
+                self.edits.delete(SrcSpan {
+                    start: location.start,
+                    end: location.end,
+                });
+            }
+            type_::error::VariableSyntax::Generated => (),
+        }
+    }
+}
+
+pub fn code_action_fix_deprecated_pipe(
+    module: &Module,
+    line_numbers: &LineNumbers,
+    params: &CodeActionParams,
+    actions: &mut Vec<CodeAction>,
+) {
+    let uri = &params.text_document.uri;
+    let mut deprecated_pipes: Vec<&SrcSpan> = module
+        .ast
+        .type_info
+        .warnings
+        .iter()
+        .filter_map(|warning| {
+            if let type_::Warning::PipeIntoCallWhichReturnsFunction { location } = warning {
+                Some(location)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if deprecated_pipes.is_empty() {
+        return;
+    }
+
+    // Sort spans by start position, with longer spans coming first
+    deprecated_pipes.sort_by_key(|span| (span.start, -(span.len() as i64)));
+
+    for location in deprecated_pipes {
+        let range = src_span_to_lsp_range(*location, line_numbers);
+
+        // Check if the cursor is within this span
+        if !within(params.range, range) {
+            continue;
+        }
+
+        let edit = TextEdit {
+            range: Range::new(range.end, range.end),
+            new_text: "()".into(),
+        };
+
+        CodeActionBuilder::new("Add extra parentheses")
+            .kind(CodeActionKind::QuickFix)
+            .changes(uri.clone(), vec![edit])
+            .preferred(true)
+            .push_to(actions);
+    }
+}
+
+/// Code action to switch between doc and regular comments.
+pub struct ConvertBetweenDocAndRegularComment<'a> {
+    module: &'a Module,
+    lines: &'a LineNumbers,
+    params: &'a CodeActionParams,
+}
+
+impl<'a> ConvertBetweenDocAndRegularComment<'a> {
+    pub fn new(module: &'a Module, lines: &'a LineNumbers, params: &'a CodeActionParams) -> Self {
+        Self {
+            module,
+            lines,
+            params,
+        }
+    }
+
+    pub fn code_actions(self) -> Vec<CodeAction> {
+        let line = self.params.range.start.line;
+        let Some(num_slashes) = self.count_leading_slashes(line) else {
+            return vec![];
+        };
+
+        if !(2..=4).contains(&num_slashes) {
+            return vec![];
+        }
+
+        let start_line = self
+            .find_comment_edge((0..line).rev(), num_slashes)
+            .unwrap_or(line);
+        let end_line = self
+            .find_comment_edge(line + 1.., num_slashes)
+            .unwrap_or(line);
+
+        if self.params.range.end.line > end_line {
+            return vec![];
+        }
+
+        let comment = match num_slashes {
+            2 if self.can_be_module_comment(start_line, end_line) => "////",
+            2 if self.can_have_doc_comment(end_line) => "///",
+            3 | 4 => "//",
+            _ => return vec![],
+        };
+
+        let mut edits = TextEdits::new(self.lines);
+        for line in start_line..=end_line {
+            let Some(line_start) = self.line_start(line) else {
+                return vec![];
+            };
+            let start = next_nonwhitespace(&self.module.code, line_start);
+            edits.replace(SrcSpan::new(start, start + num_slashes), comment.to_owned());
+        }
+
+        let action_name = if comment == "//" {
+            "Convert to regular comment"
+        } else {
+            "Convert to documentation comment"
+        };
+
+        let mut action = Vec::with_capacity(1);
+        CodeActionBuilder::new(action_name)
+            .kind(CodeActionKind::RefactorRewrite)
+            .changes(self.params.text_document.uri.clone(), edits.edits)
+            .push_to(&mut action);
+        action
+    }
+
+    fn count_leading_slashes(&self, line: u32) -> Option<u32> {
+        let mut count = 0;
+        for c in self.module.code[self.line_start(line)? as usize..].chars() {
+            if c == '/' {
+                count += 1;
+            } else if !c.is_whitespace() || c == '\n' || count > 0 {
+                break;
+            }
+        }
+        Some(count)
+    }
+
+    fn line_start(&self, line: u32) -> Option<u32> {
+        self.lines.line_starts.get(line as usize).copied()
+    }
+
+    /// Find the last line in the range that is part of the same comment.
+    fn find_comment_edge(&self, lines: impl Iterator<Item = u32>, num_slashes: u32) -> Option<u32> {
+        lines
+            .take_while(|&line| {
+                self.count_leading_slashes(line)
+                    .is_some_and(|n| n == num_slashes)
+            })
+            .last()
+    }
+
+    fn can_be_module_comment(&self, start_line: u32, end_line: u32) -> bool {
+        let Some(line_start) = self.line_start(start_line) else {
+            return false;
+        };
+        previous_nonwhitespace(&self.module.code, line_start) == 0
+            && self
+                .line_start(end_line + 1)
+                .is_none_or(|position| self.module.extra.empty_lines.contains(&position))
+    }
+
+    /// Check if the comment is before a node that can have a doc comment, e.g. a function.
+    fn can_have_doc_comment(&self, end_line: u32) -> bool {
+        let Some(position) = self.line_start(end_line + 1) else {
+            return false;
+        };
+
+        let next_node = next_nonwhitespace(&self.module.code, position);
+        let definitions = &self.module.ast.definitions;
+        definitions
+            .functions
+            .iter()
+            .any(|function| function.location.contains(next_node))
+            || definitions
+                .constants
+                .iter()
+                .any(|constant| constant.location.contains(next_node))
+            || definitions
+                .type_aliases
+                .iter()
+                .any(|type_alias| type_alias.location.contains(next_node))
+            || definitions.custom_types.iter().any(|custom_type| {
+                custom_type.location.contains(next_node)
+                    || custom_type.constructors.iter().any(|constructor| {
+                        constructor.location.contains(next_node)
+                            || constructor.arguments.iter().any(|argument| {
+                                argument
+                                    .label
+                                    .as_ref()
+                                    .is_some_and(|label| label.0.contains(next_node))
+                            })
+                    })
+            })
+    }
+}
+
+/// Code action to convert integers to a different base from the current one.
+///
+pub struct ConvertIntToDifferentBase<'a> {
+    module: &'a Module,
+    params: &'a CodeActionParams,
+    edits: TextEdits<'a>,
+    /// This is gonna hold the base the hovered integer is written in, and its
+    /// decimal value. And its position in the source code.
+    int: Option<(SrcSpan, Base, BigInt)>,
+}
+
+enum Base {
+    Binary,
+    Octal,
+    Decimal,
+    Hexadecimal,
+}
+
+impl<'a> ConvertIntToDifferentBase<'a> {
+    pub fn new(
+        module: &'a Module,
+        line_numbers: &'a LineNumbers,
+        params: &'a CodeActionParams,
+    ) -> Self {
+        Self {
+            module,
+            params,
+            edits: TextEdits::new(line_numbers),
+            int: None,
+        }
+    }
+
+    pub fn code_actions(mut self) -> Vec<CodeAction> {
+        self.visit_typed_module(&self.module.ast);
+
+        let Some((location, base, int)) = self.int else {
+            return vec![];
+        };
+
+        let missing_bases = match base {
+            Base::Binary => [Base::Decimal, Base::Octal, Base::Hexadecimal],
+            Base::Octal => [Base::Decimal, Base::Binary, Base::Hexadecimal],
+            Base::Decimal => [Base::Binary, Base::Octal, Base::Hexadecimal],
+            Base::Hexadecimal => [Base::Decimal, Base::Binary, Base::Octal],
+        };
+
+        let is_negative = int < BigInt::ZERO;
+        let int = if is_negative { int.neg() } else { int };
+
+        let mut action = Vec::with_capacity(3);
+        for base in missing_bases {
+            let minus = if is_negative { "-" } else { "" };
+            let converted_number = match base {
+                Base::Binary => format!("{minus}0b{:b}", int),
+                Base::Octal => format!("{minus}0o{:o}", int),
+                Base::Hexadecimal => format!("{minus}0x{:x}", int),
+                Base::Decimal => {
+                    format!("{minus}{}", format_int_with_thousands_separator(&int))
+                }
+            };
+            let title = format!("Convert to `{converted_number}`");
+            self.edits.replace(location, converted_number);
+
+            CodeActionBuilder::new(&title)
+                .kind(CodeActionKind::RefactorRewrite)
+                .changes(
+                    self.params.text_document.uri.clone(),
+                    std::mem::take(&mut self.edits.edits),
+                )
+                .preferred(false)
+                .push_to(&mut action);
+        }
+        action
+    }
+
+    fn insert_int(&mut self, string_value: &EcoString, int_value: &BigInt, location: &SrcSpan) {
+        let string_value = string_value.trim_start_matches('-');
+        let base = if string_value.starts_with("0b") {
+            Base::Binary
+        } else if string_value.starts_with("0o") {
+            Base::Octal
+        } else if string_value.starts_with("0x") {
+            Base::Hexadecimal
+        } else {
+            Base::Decimal
+        };
+
+        self.int = Some((*location, base, int_value.clone()))
+    }
+}
+
+fn format_int_with_thousands_separator(int: &BigInt) -> String {
+    if int <= &BigInt::from(9999) {
+        return int.to_string();
+    }
+
+    // We get chunks of three digits. If we start from 1234567
+    // we will have `765`, `432`, `1`
+    (int.to_string().chars().rev().chunks(3).into_iter())
+        // Each chunk is turned into a string and those are joined with a
+        // separator.
+        .map(|chunk| chunk.collect::<EcoString>())
+        .join("_")
+        // And finally reverse everything to bring it back to normal, the number
+        // is spelled in reverse right now!
+        .chars()
+        .rev()
+        .collect()
+}
+
+impl<'ast> ast::visit::Visit<'ast> for ConvertIntToDifferentBase<'ast> {
+    fn visit_typed_function(&mut self, fun: &'ast TypedFunction) {
+        // We skip all the functions the cursor is not inside of.
+        // This is gonna make it faster to find the int we're hovering, if any.
+        let fun_range = self.edits.src_span_to_lsp_range(fun.full_location());
+        if within(self.params.range, fun_range) {
+            ast::visit::visit_typed_function(self, fun);
+        }
+    }
+
+    fn visit_typed_expr(&mut self, expr: &'ast TypedExpr) {
+        // We skip all the expressions the cursor is not inside of.
+        // This is gonna make it faster to find the int we're hovering, if any.
+        let expression_range = self.edits.src_span_to_lsp_range(expr.location());
+        if within(self.params.range, expression_range) {
+            ast::visit::visit_typed_expr(self, expr);
+        }
+    }
+
+    fn visit_typed_pattern(&mut self, pattern: &'ast TypedPattern) {
+        // We skip all the patterns the cursor is not inside of.
+        // This is gonna make it faster to find the int we're hovering, if any.
+        let pattern_range = self.edits.src_span_to_lsp_range(pattern.location());
+        if within(self.params.range, pattern_range) {
+            ast::visit::visit_typed_pattern(self, pattern);
+        }
+    }
+
+    fn visit_typed_constant(&mut self, constant: &'ast ast::TypedConstant) {
+        // We skip all the constants the cursor is not inside of.
+        // This is gonna make it faster to find the int we're hovering, if any.
+        let constant_range = self.edits.src_span_to_lsp_range(constant.location());
+        if within(self.params.range, constant_range) {
+            ast::visit::visit_typed_constant(self, constant);
+        }
+    }
+
+    fn visit_typed_expr_int(
+        &mut self,
+        location: &'ast SrcSpan,
+        _type_: &'ast Arc<Type>,
+        string_value: &'ast EcoString,
+        int_value: &'ast BigInt,
+    ) {
+        let int_range = self.edits.src_span_to_lsp_range(*location);
+        if !within(self.params.range, int_range) {
+            return;
+        }
+
+        self.insert_int(string_value, int_value, location);
+    }
+
+    fn visit_typed_constant_int(
+        &mut self,
+        location: &'ast SrcSpan,
+        string_value: &'ast EcoString,
+        int_value: &'ast BigInt,
+    ) {
+        let int_range = self.edits.src_span_to_lsp_range(*location);
+        if !within(self.params.range, int_range) {
+            return;
+        }
+
+        self.insert_int(string_value, int_value, location);
+    }
+
+    fn visit_typed_pattern_int(
+        &mut self,
+        location: &'ast SrcSpan,
+        string_value: &'ast EcoString,
+        int_value: &'ast BigInt,
+    ) {
+        let int_range = self.edits.src_span_to_lsp_range(*location);
+        if !within(self.params.range, int_range) {
+            return;
+        }
+
+        self.insert_int(string_value, int_value, location);
+    }
+
+    fn visit_typed_bit_array_size_int(
+        &mut self,
+        location: &'ast SrcSpan,
+        string_value: &'ast EcoString,
+        int_value: &'ast BigInt,
+    ) {
+        let int_range = self.edits.src_span_to_lsp_range(*location);
+        if !within(self.params.range, int_range) {
+            return;
+        }
+
+        self.insert_int(string_value, int_value, location);
     }
 }

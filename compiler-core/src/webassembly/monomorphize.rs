@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Gleam contributors
+
 use ecow::EcoString;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     ast::{
-        AssignmentKind, ClauseGuard, Pattern, SrcSpan, Statement, TypedArg, TypedAssignment,
+        AssignmentKind, ClauseGuard, Pattern, Statement, TypedArg, TypedAssignment,
         TypedClauseGuard, TypedCustomType, TypedExpr, TypedFunction, TypedPattern,
         TypedRecordConstructor, TypedStatement,
         visit::{Visit, visit_typed_assignment, visit_typed_expr_call},
@@ -11,6 +14,7 @@ use crate::{
     type_::{self, Type, TypeVar, TypedCallArg},
     webassembly::LocalFunction,
 };
+use src_span::SrcSpan;
 
 pub(super) struct Monomorphizer {
     map: HashMap<u64, Arc<Type>>,
@@ -364,15 +368,13 @@ impl Monomorphizer {
             }
             TypedExpr::RecordUpdate {
                 type_,
-                record_assignment,
+                updated_record,
                 constructor,
                 arguments,
                 ..
             } => {
                 *type_ = self.type_(type_);
-                if let Some(record_assignment) = record_assignment {
-                    self.assignment(record_assignment);
-                }
+                self.expression(updated_record);
                 self.expression(constructor);
                 for argument in arguments {
                     self.expression(&mut argument.value);
@@ -490,6 +492,9 @@ impl Monomorphizer {
             ClauseGuard::ModuleSelect { type_, .. } => {
                 *type_ = self.type_(type_);
             }
+            ClauseGuard::Invalid { .. } => {
+                panic!("invalid guards should not reach code generation")
+            }
         }
     }
 }
@@ -557,13 +562,14 @@ fn propagate_call_type_vars(map: &mut HashMap<u64, Arc<Type>>, statements: &[Typ
             _type_: &'ast Arc<Type>,
             fun: &'ast TypedExpr,
             arguments: &'ast [TypedCallArg],
+            open_parenthesis: &'ast Option<u32>,
         ) {
             if let Some((params, _)) = fun.type_().fn_types() {
                 for (param, arg) in params.iter().zip(arguments) {
                     propagate_between_types(self.map, param, &arg.value.type_(), self.changed);
                 }
             }
-            visit_typed_expr_call(self, _location, _type_, fun, arguments);
+            visit_typed_expr_call(self, _location, _type_, fun, arguments, open_parenthesis);
         }
     }
 

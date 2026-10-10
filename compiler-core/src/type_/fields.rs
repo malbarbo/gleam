@@ -1,13 +1,14 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 use super::Error;
-use crate::{
-    ast::{CallArg, SrcSpan},
-    type_::error::IncorrectArityContext,
-};
+use crate::{ast::CallArg, type_::error::IncorrectArityContext};
 use ecow::EcoString;
 use itertools::Itertools;
+use src_span::SrcSpan;
 use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FieldMap {
     /// Number of accepted arguments, including unlabelled fields.
     pub arity: u32,
@@ -236,7 +237,7 @@ impl FieldMapBuilder {
                 label: label.clone(),
                 location,
             });
-        };
+        }
         self.any_labels = true;
         Ok(())
     }

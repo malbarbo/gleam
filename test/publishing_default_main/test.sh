@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Gleam contributors
+
 set -eu
 
 GLEAM_COMMAND=${GLEAM_COMMAND:-"cargo run --quiet --"}

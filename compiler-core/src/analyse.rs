@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2018 The Gleam contributors
+
 mod imports;
 pub mod name;
 
@@ -8,21 +11,18 @@ use crate::{
     GLEAM_CORE_PACKAGE_NAME, STDLIB_PACKAGE_NAME,
     ast::{
         self, Arg, BitArrayOption, CustomType, DefinitionLocation, Function, GroupedDefinitions,
-        Import, ModuleConstant, Publicity, RecordConstructor, RecordConstructorArg, SrcSpan,
-        Statement, TypeAlias, TypeAst, TypeAstConstructor, TypeAstFn, TypeAstHole, TypeAstTuple,
-        TypeAstVar, TypedCustomType, TypedDefinitions, TypedExpr, TypedFunction, TypedImport,
-        TypedModule, TypedModuleConstant, TypedTypeAlias, UntypedArg, UntypedCustomType,
-        UntypedFunction, UntypedImport, UntypedModule, UntypedModuleConstant, UntypedStatement,
-        UntypedTypeAlias,
+        Import, ModuleConstant, Publicity, RecordConstructor, RecordConstructorArg, Statement,
+        TypeAlias, TypeAst, TypeAstConstructor, TypeAstFn, TypeAstHole, TypeAstTuple, TypeAstVar,
+        TypedCustomType, TypedDefinitions, TypedExpr, TypedFunction, TypedImport, TypedModule,
+        TypedModuleConstant, TypedTypeAlias, UntypedArg, UntypedCustomType, UntypedFunction,
+        UntypedImport, UntypedModule, UntypedModuleConstant, UntypedStatement, UntypedTypeAlias,
     },
     build::{Origin, Outcome, Target},
     call_graph::{CallGraphNode, into_dependency_order},
     config::PackageConfig,
     dep_tree,
-    inline::{self, InlinableFunction},
-    line_numbers::LineNumbers,
     parse::SpannedString,
-    reference::{EntityKind, ReferenceKind},
+    reference::{EntityKind, LabelOwner, ReferenceKind},
     type_::{
         self, AccessorsMap, Deprecation, FieldMap, ModuleInterface, Opaque, PatternConstructor,
         RecordAccessor, References, Type, TypeAliasConstructor, TypeConstructor,
@@ -43,6 +43,8 @@ use ecow::{EcoString, eco_format};
 use hexpm::version::Version;
 use itertools::Itertools;
 use name::{check_argument_names, check_name_case};
+use regex::Regex;
+use src_span::{LineNumbers, SrcSpan};
 use std::{
     collections::{HashMap, HashSet},
     ops::Deref,
@@ -52,7 +54,10 @@ use vec1::Vec1;
 
 use self::imports::Importer;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+static EXTERNAL_MODULE_PATTERN: OnceLock<Regex> = OnceLock::new();
+static EXTERNAL_FUNCTION_PATTERN: OnceLock<Regex> = OnceLock::new();
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Inferred<T> {
     Known(T),
     #[default]
@@ -145,7 +150,7 @@ pub struct ModuleAnalyzerConstructor<'a, A> {
     pub target: Target,
     pub ids: &'a UniqueIdGenerator,
     pub origin: Origin,
-    pub importable_modules: &'a im::HashMap<EcoString, ModuleInterface>,
+    pub importable_modules: &'a imbl::HashMap<EcoString, ModuleInterface>,
     pub warnings: &'a TypeWarningEmitter,
     pub direct_dependencies: &'a HashMap<EcoString, A>,
     pub dev_dependencies: &'a HashSet<EcoString>,
@@ -179,7 +184,6 @@ impl<A> ModuleAnalyzerConstructor<'_, A> {
             value_names: HashMap::with_capacity(module.definitions.len()),
             hydrators: HashMap::with_capacity(module.definitions.len()),
             module_name: module.name.clone(),
-            inline_functions: HashMap::new(),
             minimum_required_version: Version::new(0, 1, 0),
         }
         .infer_module(module)
@@ -190,7 +194,7 @@ struct ModuleAnalyzer<'a, A> {
     target: Target,
     ids: &'a UniqueIdGenerator,
     origin: Origin,
-    importable_modules: &'a im::HashMap<EcoString, ModuleInterface>,
+    importable_modules: &'a imbl::HashMap<EcoString, ModuleInterface>,
     warnings: &'a TypeWarningEmitter,
     direct_dependencies: &'a HashMap<EcoString, A>,
     dev_dependencies: &'a HashSet<EcoString>,
@@ -202,8 +206,6 @@ struct ModuleAnalyzer<'a, A> {
     value_names: HashMap<EcoString, SrcSpan>,
     hydrators: HashMap<EcoString, Hydrator>,
     module_name: EcoString,
-
-    inline_functions: HashMap<EcoString, InlinableFunction>,
 
     /// The minimum Gleam version required to compile the analysed module.
     minimum_required_version: Version,
@@ -298,21 +300,17 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             for definition in group {
                 match definition {
                     CallGraphNode::Function(function) => {
-                        working_functions.push(self.infer_function(function, &mut env))
+                        working_functions.push(self.infer_function(function, &mut env));
                     }
                     CallGraphNode::ModuleConstant(constant) => {
-                        working_constants.push(self.infer_module_constant(constant, &mut env))
+                        working_constants.push(self.infer_module_constant(constant, &mut env));
                     }
-                };
+                }
             }
 
             // Now that the entire group has been inferred, generalise their types.
             for inferred_constant in working_constants.drain(..) {
-                typed_constants.push(generalise_module_constant(
-                    inferred_constant,
-                    &mut env,
-                    &self.module_name,
-                ))
+                typed_constants.push(generalise_module_constant(inferred_constant, &mut env));
             }
             for inferred_function in working_functions.drain(..) {
                 typed_functions.push(generalise_function(
@@ -343,8 +341,12 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
 
         // Ensure no exported values have private types in their type signature
         for value in env.module_values.values() {
-            self.check_for_type_leaks(value)
+            self.check_for_type_leaks(value);
         }
+
+        // Resolve deferred type variable aliases now that all unification is
+        // done and link chains are stable.
+        env.resolve_deferred_type_variable_aliases();
 
         let Environment {
             module_types: types,
@@ -353,7 +355,6 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             accessors,
             names: type_names,
             module_type_aliases: type_aliases,
-            echo_found,
             ..
         } = env;
 
@@ -393,7 +394,6 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
                 minimum_required_version: self.minimum_required_version,
                 type_aliases,
                 documentation,
-                contains_echo: echo_found,
                 references: References {
                     imported_modules: env
                         .imported_modules
@@ -402,8 +402,13 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
                         .collect(),
                     value_references: env.references.value_references,
                     type_references: env.references.type_references,
+                    module_references: env.references.module_references,
+                    label_references: env.references.label_references,
+                    label_definitions: env.references.label_definitions,
+                    echo_usages: env.references.echo_usages,
+                    todo_usages: env.references.todo_usages,
+                    panic_usages: env.references.panic_usages,
                 },
-                inline_functions: self.inline_functions,
             },
         };
 
@@ -747,7 +752,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
         if let Some((module, _, location)) = &external_javascript
             && module.contains('@')
         {
-            self.track_feature_usage(FeatureKind::AtInJavascriptModules, *location)
+            self.track_feature_usage(FeatureKind::AtInJavascriptModules, *location);
         }
 
         // Assert that the inferred type matches the type of any recursive call
@@ -812,7 +817,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             ReferenceKind::Definition,
         );
 
-        let function = Function {
+        Function {
             documentation: doc,
             location,
             name: Some((name_location, name.clone())),
@@ -831,17 +836,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             external_webassembly,
             implementations,
             purity,
-        };
-
-        if let Some(inline_function) = inline::function_to_inlinable(
-            &environment.current_package,
-            &environment.current_module,
-            &function,
-        ) {
-            _ = self.inline_functions.insert(name, inline_function);
         }
-
-        function
     }
 
     fn assert_valid_javascript_external(
@@ -852,14 +847,11 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
     ) {
         use regex::Regex;
 
-        static MODULE: OnceLock<Regex> = OnceLock::new();
-        static FUNCTION: OnceLock<Regex> = OnceLock::new();
-
         let (module, function) = match external_javascript {
             None => return,
             Some((module, function, _location)) => (module, function),
         };
-        if !MODULE
+        if !EXTERNAL_MODULE_PATTERN
             .get_or_init(|| Regex::new("^[@a-zA-Z0-9\\./:_-]+$").expect("regex"))
             .is_match(module)
         {
@@ -869,7 +861,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
                 name: function_name.clone(),
             });
         }
-        if !FUNCTION
+        if !EXTERNAL_FUNCTION_PATTERN
             .get_or_init(|| Regex::new("^[a-zA-Z_][a-zA-Z0-9_]*$").expect("regex"))
             .is_match(function)
         {
@@ -955,7 +947,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
                 location,
                 module: module_info.name.clone(),
                 package: module_info.package.clone(),
-            })
+            });
         }
 
         Some(Import {
@@ -1240,6 +1232,18 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
                     None => (*location, None),
                 };
 
+                if let Some(label) = label {
+                    environment.references.register_label_definition(
+                        LabelOwner::Record {
+                            module: environment.current_module.clone(),
+                            name: name.clone(),
+                        },
+                        label.clone(),
+                        label_location,
+                        Some(constructor.name.clone()),
+                    );
+                }
+
                 // Register the label for this parameter
                 if let Err(error) = field_map_builder.add(label, label_location) {
                     self.problems.error(error);
@@ -1301,6 +1305,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
                     .documentation
                     .as_ref()
                     .map(|(_, documentation)| documentation.clone()),
+                deprecation: constructor.deprecation.clone(),
             });
             environment.insert_variable(
                 constructor.name.clone(),
@@ -1332,7 +1337,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             shared_accessors,
             // TODO: improve the ownership here so that we can use the
             // `return_type_constructor` below rather than looking it up twice.
-            type_: type_.clone(),
+            type_,
             variant_specific_accessors,
             variant_positional_accessors: positional_accessors,
         };
@@ -1494,7 +1499,13 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
         let arity = parameters.len();
         let tryblock = || {
             hydrator.disallow_new_type_variables();
-            let type_ = hydrator.type_from_ast(resolved_type, environment, &mut self.problems)?;
+            let hydrator_result =
+                hydrator.type_from_ast(resolved_type, environment, &mut self.problems);
+
+            let type_ = match &hydrator_result {
+                Ok(type_) => type_.clone(),
+                Err(_) => environment.new_unbound_var(),
+            };
 
             environment
                 .names
@@ -1540,7 +1551,11 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
                 });
             }
 
-            Ok(())
+            if let Err(e) = hydrator_result {
+                Err(e)
+            } else {
+                Ok(())
+            }
         };
         let result = tryblock();
         self.record_if_error(result);
@@ -1619,8 +1634,25 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
         {
             check_argument_names(names, &mut self.problems);
 
-            if let Err(error) = builder.add(names.get_label(), *location) {
+            let label = names.get_label();
+
+            if let Err(error) = builder.add(label.map(|(label, _)| label), *location) {
                 self.problems.error(error);
+            }
+
+            // If this argument is labelled then register the label's definition so
+            // the language server can find it when looking up references to
+            // the label, or jumping to its definition
+            if let Some((label, label_location)) = label {
+                environment.references.register_label_definition(
+                    LabelOwner::Function {
+                        module: environment.current_module.clone(),
+                        name: name.clone(),
+                    },
+                    label.clone(),
+                    *label_location,
+                    None,
+                );
             }
         }
         let field_map = builder.finish();
@@ -1732,7 +1764,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
                         feature_kind,
                         minimum_required_version: minimum_required_version.clone(),
                         wrongfully_allowed_version: lowest_allowed_version,
-                    })
+                    });
             }
         }
 
@@ -1760,9 +1792,9 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
 fn validate_module_name(name: &EcoString) -> Result<(), Error> {
     if is_prelude_module(name) {
         return Err(Error::ReservedModuleName { name: name.clone() });
-    };
+    }
     for segment in name.split('/') {
-        if crate::parse::lexer::str_to_keyword(segment).is_some() {
+        if crate::parse::lexer::string_to_keyword(segment).is_some() {
             return Err(Error::KeywordInModuleName {
                 name: name.clone(),
                 keyword: segment.into(),
@@ -1869,12 +1901,11 @@ where
 }
 
 fn generalise_module_constant(
-    constant: ModuleConstant<Arc<Type>, EcoString>,
+    constant: ModuleConstant<Arc<Type>>,
     environment: &mut Environment<'_>,
-    module_name: &EcoString,
 ) -> TypedModuleConstant {
     let ModuleConstant {
-        documentation: doc,
+        documentation,
         location,
         name,
         name_location,
@@ -1885,19 +1916,16 @@ fn generalise_module_constant(
         deprecation,
         implementations,
     } = constant;
-    let type_ = type_.clone();
     let type_ = type_::generalise(type_);
-    let variant = ValueConstructorVariant::ModuleConstant {
-        documentation: doc.as_ref().map(|(_, doc)| doc.clone()),
-        location,
-        literal: *value.clone(),
-        module: module_name.clone(),
-        implementations,
-        name: name.clone(),
-    };
+
+    let constructor = environment
+        .get_variable(&name)
+        .expect("module constant not bound in the environment before being generalised")
+        .clone();
+
     environment.insert_variable(
         name.clone(),
-        variant.clone(),
+        constructor.variant.clone(),
         type_.clone(),
         publicity,
         deprecation.clone(),
@@ -1907,14 +1935,14 @@ fn generalise_module_constant(
         name.clone(),
         ValueConstructor {
             publicity,
-            variant,
+            variant: constructor.variant,
             deprecation: deprecation.clone(),
             type_: type_.clone(),
         },
     );
 
     ModuleConstant {
-        documentation: doc,
+        documentation,
         location,
         name,
         name_location,
@@ -2162,7 +2190,7 @@ fn get_compatible_record_fields(constructors: &[TypeValueConstructor]) -> Vec<Re
             label: first_label.clone(),
             type_: first_parameter.type_.clone(),
             documentation,
-        })
+        });
     }
 
     compatible
@@ -2176,31 +2204,35 @@ fn get_type_dependencies(type_: &TypeAst) -> Vec<EcoString> {
         TypeAst::Var(TypeAstVar { .. }) => (),
         TypeAst::Hole(TypeAstHole { .. }) => (),
         TypeAst::Constructor(TypeAstConstructor {
-            name,
-            arguments,
-            module,
-            ..
+            name, arguments, ..
         }) => {
-            deps.push(match module {
-                Some((module, _)) => format!("{name}.{module}").into(),
-                None => name.clone(),
+            deps.push(match name {
+                ast::TypeAstConstructorName::Unqualified { name, .. } => name.clone(),
+                ast::TypeAstConstructorName::Qualified {
+                    module,
+                    name: Some((name, _)),
+                    ..
+                } => format!("{module}.{name}").into(),
+                ast::TypeAstConstructorName::Qualified {
+                    module, name: None, ..
+                } => format!("{module}.").into(),
             });
 
             for arg in arguments {
-                deps.extend(get_type_dependencies(arg))
+                deps.extend(get_type_dependencies(arg));
             }
         }
         TypeAst::Fn(TypeAstFn {
             arguments, return_, ..
         }) => {
             for arg in arguments {
-                deps.extend(get_type_dependencies(arg))
+                deps.extend(get_type_dependencies(arg));
             }
-            deps.extend(get_type_dependencies(return_))
+            deps.extend(get_type_dependencies(return_));
         }
         TypeAst::Tuple(TypeAstTuple { elements, .. }) => {
             for element in elements {
-                deps.extend(get_type_dependencies(element))
+                deps.extend(get_type_dependencies(element));
             }
         }
     }
@@ -2212,7 +2244,7 @@ fn sorted_type_aliases(aliases: &Vec<UntypedTypeAlias>) -> Result<Vec<&UntypedTy
     let mut deps: Vec<(EcoString, Vec<EcoString>)> = Vec::with_capacity(aliases.len());
 
     for alias in aliases {
-        deps.push((alias.alias.clone(), get_type_dependencies(&alias.type_ast)))
+        deps.push((alias.alias.clone(), get_type_dependencies(&alias.type_ast)));
     }
 
     let sorted_deps = dep_tree::toposort_deps(deps).map_err(|err| {

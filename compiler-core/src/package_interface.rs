@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2024 The Gleam contributors
+
 use std::{collections::HashMap, ops::Deref};
 
 use ecow::EcoString;
@@ -94,6 +97,9 @@ pub struct TypeConstructorInterface {
     /// }
     /// ```
     parameters: Vec<ParameterInterface>,
+    /// If the constructor has a deprecation annotation `@deprecated("...")`
+    /// this field will hold the reason of the deprecation.
+    deprecation: Option<DeprecationInterface>,
 }
 
 #[derive(Serialize, Debug)]
@@ -366,7 +372,7 @@ pub struct ParameterInterface {
 impl PackageInterface {
     pub fn from_package(
         package: &Package,
-        cached_modules: &im::HashMap<EcoString, type_::ModuleInterface>,
+        cached_modules: &imbl::HashMap<EcoString, type_::ModuleInterface>,
     ) -> PackageInterface {
         PackageInterface {
             name: package.config.name.clone(),
@@ -435,6 +441,9 @@ impl ModuleInterface {
                             .map(|constructor| TypeConstructorInterface {
                                 documentation: constructor.documentation.clone(),
                                 name: constructor.name.clone(),
+                                deprecation: DeprecationInterface::from_deprecation(
+                                    &constructor.deprecation,
+                                ),
                                 parameters: constructor
                                     .parameters
                                     .iter()
@@ -442,7 +451,7 @@ impl ModuleInterface {
                                         label: arg.label.clone(),
                                         // We share the same id_map between each step so that the
                                         // incremental ids assigned are consisten with each other
-                                        type_: from_type_helper(arg.type_.as_ref(), &mut id_map),
+                                        type_: from_type_with_ids(arg.type_.as_ref(), &mut id_map),
                                     })
                                     .collect(),
                             })
@@ -458,13 +467,19 @@ impl ModuleInterface {
             .iter()
             .filter(|(_, v)| v.publicity.is_public())
         {
+            let mut id_map = IdMap::new();
+
+            for typed_parameter in alias.parameters.iter() {
+                id_map.add_type_variable_id(typed_parameter.as_ref());
+            }
+
             let _ = type_aliases.insert(
                 name.clone(),
                 TypeAliasInterface {
                     documentation: alias.documentation.clone(),
                     deprecation: DeprecationInterface::from_deprecation(&alias.deprecation),
                     parameters: alias.arity,
-                    alias: TypeInterface::from_type(&alias.type_),
+                    alias: from_type_with_ids(&alias.type_, &mut id_map),
                 },
             );
         }
@@ -509,10 +524,10 @@ impl ModuleInterface {
                                     label: reverse_field_map
                                         .get(&(index as u32))
                                         .map(|label| (*label).clone()),
-                                    type_: from_type_helper(type_, &mut id_map),
+                                    type_: from_type_with_ids(type_, &mut id_map),
                                 })
                                 .collect(),
-                            return_: from_type_helper(return_type, &mut id_map),
+                            return_: from_type_with_ids(return_type, &mut id_map),
                         },
                     );
                 }
@@ -554,7 +569,7 @@ impl ModuleInterface {
 
 impl TypeInterface {
     fn from_type(type_: &Type) -> TypeInterface {
-        from_type_helper(type_, &mut IdMap::new())
+        from_type_with_ids(type_, &mut IdMap::new())
     }
 }
 
@@ -562,20 +577,20 @@ impl TypeInterface {
 /// the type variables' ids that appear in the type are mapped to an incremental
 /// number and consistent with each other (that is, two types variables that
 /// have the same id will also have the same incremental number in the end).
-fn from_type_helper(type_: &Type, id_map: &mut IdMap) -> TypeInterface {
+fn from_type_with_ids(type_: &Type, id_map: &mut IdMap) -> TypeInterface {
     match type_ {
         Type::Fn { arguments, return_ } => TypeInterface::Fn {
             parameters: arguments
                 .iter()
-                .map(|argument| from_type_helper(argument.as_ref(), id_map))
+                .map(|argument| from_type_with_ids(argument.as_ref(), id_map))
                 .collect(),
-            return_: Box::new(from_type_helper(return_, id_map)),
+            return_: Box::new(from_type_with_ids(return_, id_map)),
         },
 
         Type::Tuple { elements } => TypeInterface::Tuple {
             elements: elements
                 .iter()
-                .map(|element| from_type_helper(element.as_ref(), id_map))
+                .map(|element| from_type_with_ids(element.as_ref(), id_map))
                 .collect(),
         },
 
@@ -585,7 +600,7 @@ fn from_type_helper(type_: &Type, id_map: &mut IdMap) -> TypeInterface {
             .expect("borrow type after inference")
             .deref()
         {
-            TypeVar::Link { type_ } => from_type_helper(type_, id_map),
+            TypeVar::Link { type_ } => from_type_with_ids(type_, id_map),
             // Since package serialisation happens after inference there
             // should be no unbound type variables.
             // TODO: This branch should be `unreachable!()` but because of
@@ -615,7 +630,7 @@ fn from_type_helper(type_: &Type, id_map: &mut IdMap) -> TypeInterface {
             module: module.clone(),
             parameters: arguments
                 .iter()
-                .map(|argument| from_type_helper(argument.as_ref(), id_map))
+                .map(|argument| from_type_with_ids(argument.as_ref(), id_map))
                 .collect(),
         },
     }

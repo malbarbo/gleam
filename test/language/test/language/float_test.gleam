@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Gleam contributors
+
 pub fn addition_1_test() {
   assert 0.0 +. 0.0 == 0.0
 }
@@ -228,4 +231,11 @@ pub fn divide_by_0_test() {
   let left = 2.0
   let right = 0.0
   assert left /. right == 0.0
+}
+
+pub fn negative_float_test() {
+  let one = -1.1
+  let other = 1.1
+  assert one != other
+  assert one *. -1.0 == other
 }

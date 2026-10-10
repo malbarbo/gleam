@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 use type_::{FieldMap, TypedCallArg};
 
 use super::*;
@@ -76,13 +79,16 @@ pub enum TypedExpr {
         type_: Arc<Type>,
         fun: Box<Self>,
         arguments: Vec<CallArg<Self>>,
+        /// Specifies the source position of the argument list, if present. Can
+        /// be None in cases where the function call is part of a pipeline.
+        open_parenthesis: Option<u32>,
     },
 
     BinOp {
         location: SrcSpan,
         type_: Arc<Type>,
-        name: BinOp,
-        name_location: SrcSpan,
+        operator: BinOp,
+        operator_start: u32,
         left: Box<Self>,
         right: Box<Self>,
     },
@@ -91,7 +97,7 @@ pub enum TypedExpr {
         location: SrcSpan,
         type_: Arc<Type>,
         subjects: Vec<Self>,
-        clauses: Vec<Clause<Self, Arc<Type>, EcoString>>,
+        clauses: Vec<Clause<Self, Arc<Type>>>,
         compiled_case: CompiledCase,
     },
 
@@ -174,10 +180,34 @@ pub enum TypedExpr {
     /// we do for pipelines.
     RecordUpdate {
         location: SrcSpan,
+        /// This is where the `..` starts:
+        /// ```gleam
+        /// Wibble(  ..wobble, a: 1)
+        /// //       ^ Here!
+        /// ```
+        spread_start: u32,
         type_: Arc<Type>,
-        /// If the record is an expression that is not a variable we will need to assign to a
-        /// variable so it can be referred multiple times.
-        record_assignment: Option<Box<TypedAssignment>>,
+        /// This is the record being updated as written in the code:
+        /// ```gleam
+        /// Wibble(..wibble, a: 1)
+        /// //       ^^^^^^ This!
+        ///
+        /// Wibble(..fun(1), a: 1)
+        /// //       ^^^^^ This!
+        /// ```
+        ///
+        updated_record: Box<Self>,
+        /// If the record is an expression that is not a variable we will need
+        /// to assign to a variable so it can be referred to multiple times.
+        /// If this is `Some` it will contain the name we've picked for the
+        /// variable the record should be assigned to.
+        updated_record_assigned_name: Option<EcoString>,
+        /// The constructor used to build a new record:
+        /// ```gleam
+        ///   Wibble(..wibble, a: 1)
+        /// //^^^^^^ This!
+        /// ```
+        ///
         constructor: Box<Self>,
         arguments: Vec<CallArg<Self>>,
     },
@@ -400,9 +430,34 @@ impl TypedExpr {
                 .or_else(|| self.self_if_contains_location(byte_index)),
 
             Self::RecordAccess {
-                record: expression, ..
-            }
-            | Self::TupleIndex {
+                record,
+                label,
+                location,
+                type_,
+                documentation,
+                ..
+            } => record
+                .find_node(byte_index)
+                .or_else(|| {
+                    // The label is the final part of the access, so its span
+                    // ends where the whole `record.label` expression does.
+                    let label_location =
+                        SrcSpan::new(location.end - label.len() as u32, location.end);
+                    if label_location.contains(byte_index) {
+                        Some(Located::RecordAccessLabel {
+                            location: label_location,
+                            field_type: type_.clone(),
+                            label: label.clone(),
+                            record_type: record.type_(),
+                            documentation: documentation.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| self.self_if_contains_location(byte_index)),
+
+            Self::TupleIndex {
                 tuple: expression, ..
             } => expression
                 .find_node(byte_index)
@@ -414,9 +469,10 @@ impl TypedExpr {
                 .or_else(|| self.self_if_contains_location(byte_index)),
 
             Self::RecordUpdate {
-                record_assignment,
                 constructor,
                 arguments,
+                updated_record,
+                spread_start,
                 ..
             } => arguments
                 .iter()
@@ -424,9 +480,47 @@ impl TypedExpr {
                 .find_map(|argument| argument.find_node(byte_index, constructor, arguments))
                 .or_else(|| constructor.find_node(byte_index))
                 .or_else(|| {
-                    record_assignment
-                        .as_ref()
-                        .and_then(|assignment| assignment.find_node(byte_index))
+                    // If the updated record contains the index, then we update
+                    // the found position to be `UpdatedRecord`
+                    updated_record.find_node(byte_index).map(|found| {
+                        if let Located::Expression {
+                            expression,
+                            position:
+                                ExpressionPosition::ArgumentOrLabel { .. }
+                                | ExpressionPosition::Expression,
+                        } = found
+                        {
+                            Located::Expression {
+                                expression,
+                                position: ExpressionPosition::UpdatedRecord {
+                                    unchanged_record_fields: self
+                                        .unchanged_record_fields()
+                                        .unwrap_or_default(),
+                                },
+                            }
+                        } else {
+                            found
+                        }
+                    })
+                })
+                .or_else(|| {
+                    // If we're hovering over the two `..` then we also want to
+                    // count that as hovering the entire expression and show the
+                    // fields that are not being updated.
+                    if !SrcSpan::new(*spread_start, updated_record.location().start)
+                        .contains(byte_index)
+                    {
+                        return None;
+                    }
+
+                    Some(Located::Expression {
+                        expression: self,
+                        position: ExpressionPosition::UpdatedRecord {
+                            unchanged_record_fields: self
+                                .unchanged_record_fields()
+                                .unwrap_or_default(),
+                        },
+                    })
                 })
                 .or_else(|| self.self_if_contains_location(byte_index)),
         }
@@ -579,18 +673,14 @@ impl TypedExpr {
                 .find_map(|arg| arg.value.find_statement(byte_index)),
 
             Self::RecordUpdate {
-                record_assignment,
+                updated_record,
                 arguments,
                 ..
             } => arguments
                 .iter()
                 .filter(|arg| arg.implicit.is_none())
                 .find_map(|arg| arg.find_statement(byte_index))
-                .or_else(|| {
-                    record_assignment
-                        .as_ref()
-                        .and_then(|r| r.value.find_statement(byte_index))
-                }),
+                .or_else(|| updated_record.find_statement(byte_index)),
         }
     }
 
@@ -841,8 +931,11 @@ impl TypedExpr {
     pub fn is_known_bool(&self) -> bool {
         match self {
             TypedExpr::BinOp {
-                left, right, name, ..
-            } if name.is_bool_operator() => left.is_known_bool() && right.is_known_bool(),
+                left,
+                right,
+                operator,
+                ..
+            } if operator.is_bool_operator() => left.is_known_bool() && right.is_known_bool(),
             TypedExpr::NegateBool { value, .. } => value.is_known_bool(),
             TypedExpr::Int { .. }
             | TypedExpr::Float { .. }
@@ -931,11 +1024,6 @@ impl TypedExpr {
         matches!(self, Self::Case { .. })
     }
 
-    #[must_use]
-    pub fn is_todo_with_no_message(&self) -> bool {
-        matches!(self, Self::Todo { message: None, .. })
-    }
-
     /// Returns `true` if the typed expr is [`Pipeline`].
     ///
     /// [`Pipeline`]: TypedExpr::Pipeline
@@ -944,6 +1032,8 @@ impl TypedExpr {
         matches!(self, Self::Pipeline { .. })
     }
 
+    /// Returns true if this function is guaranteed to not have any side
+    /// effects.
     pub fn is_pure_value_constructor(&self) -> bool {
         match self {
             TypedExpr::Int { .. }
@@ -969,10 +1059,8 @@ impl TypedExpr {
             // long as it's not called!
             TypedExpr::ModuleSelect { .. } => true,
 
-            // A pipeline is a pure value constructor if its last step is a record builder,
-            // or a call to a pure function. For example:
-            //  - `wibble() |> wobble() |> Ok`
-            //  - `"hello" |> fn(s) { s <> " world!" }`
+            // A pipeline is a pure value constructor if all of its steps are
+            // pure.
             TypedExpr::Pipeline {
                 first_value,
                 assignments,
@@ -986,6 +1074,9 @@ impl TypedExpr {
                     && finally.is_pure_value_constructor()
             }
 
+            // A function is a pure value constructor if it is a record builder,
+            // or the called function is understood to be pure. Also all of its
+            // arguments must be pure value constructors!
             TypedExpr::Call { fun, arguments, .. } => {
                 (fun.is_record_literal() || fun.called_function_purity().is_pure())
                     && arguments
@@ -1014,9 +1105,9 @@ impl TypedExpr {
                     && clauses.iter().all(|c| c.then.is_pure_value_constructor())
             }
 
-            // `panic`, `todo`, and placeholders are never considered pure value constructors,
-            // we don't want to raise a warning for an unused value if it's one
-            // of those.
+            // `panic`, `todo`, and placeholders are never considered pure value
+            // constructors, we don't want to raise a warning for an unused
+            // value if it's one of those.
             TypedExpr::Todo { .. }
             | TypedExpr::Panic { .. }
             | TypedExpr::Echo { .. }
@@ -1134,9 +1225,8 @@ impl TypedExpr {
                         ..
                     },
                 ..
-            } => *arity > 0,
-
-            TypedExpr::ModuleSelect {
+            }
+            | TypedExpr::ModuleSelect {
                 constructor: ModuleValueConstructor::Record { arity, .. },
                 ..
             } => *arity > 0,
@@ -1165,6 +1255,96 @@ impl TypedExpr {
             | TypedExpr::NegateBool { .. }
             | TypedExpr::NegateInt { .. }
             | TypedExpr::Invalid { .. } => false,
+        }
+    }
+
+    /// Returns the name of the module and the function, if this is a well-defined (named)
+    /// function.
+    ///
+    pub fn module_function_name(&self) -> Option<(&EcoString, &EcoString)> {
+        match self {
+            TypedExpr::Var {
+                constructor:
+                    ValueConstructor {
+                        variant: ValueConstructorVariant::ModuleFn { module, name, .. },
+                        ..
+                    },
+                ..
+            }
+            | TypedExpr::ModuleSelect {
+                constructor: ModuleValueConstructor::Fn { module, name, .. },
+                ..
+            } => Some((module, name)),
+
+            TypedExpr::Int { .. }
+            | TypedExpr::Float { .. }
+            | TypedExpr::String { .. }
+            | TypedExpr::Block { .. }
+            | TypedExpr::Pipeline { .. }
+            | TypedExpr::Var { .. }
+            | TypedExpr::Fn { .. }
+            | TypedExpr::List { .. }
+            | TypedExpr::Call { .. }
+            | TypedExpr::BinOp { .. }
+            | TypedExpr::Case { .. }
+            | TypedExpr::RecordAccess { .. }
+            | TypedExpr::PositionalAccess { .. }
+            | TypedExpr::ModuleSelect { .. }
+            | TypedExpr::Tuple { .. }
+            | TypedExpr::TupleIndex { .. }
+            | TypedExpr::Todo { .. }
+            | TypedExpr::Panic { .. }
+            | TypedExpr::Echo { .. }
+            | TypedExpr::BitArray { .. }
+            | TypedExpr::RecordUpdate { .. }
+            | TypedExpr::NegateBool { .. }
+            | TypedExpr::NegateInt { .. }
+            | TypedExpr::Invalid { .. } => None,
+        }
+    }
+
+    /// If this expression is a record constructor function with non-zero
+    /// arity, returns the name of the variant it constructs.
+    ///
+    pub fn record_constructor_variant_name(&self) -> Option<&EcoString> {
+        match self {
+            TypedExpr::Var {
+                constructor:
+                    ValueConstructor {
+                        variant: ValueConstructorVariant::Record { name, arity, .. },
+                        ..
+                    },
+                ..
+            }
+            | TypedExpr::ModuleSelect {
+                constructor: ModuleValueConstructor::Record { name, arity, .. },
+                ..
+            } if *arity > 0 => Some(name),
+
+            TypedExpr::Int { .. }
+            | TypedExpr::Float { .. }
+            | TypedExpr::String { .. }
+            | TypedExpr::Block { .. }
+            | TypedExpr::Pipeline { .. }
+            | TypedExpr::Var { .. }
+            | TypedExpr::Fn { .. }
+            | TypedExpr::List { .. }
+            | TypedExpr::Call { .. }
+            | TypedExpr::BinOp { .. }
+            | TypedExpr::Case { .. }
+            | TypedExpr::RecordAccess { .. }
+            | TypedExpr::PositionalAccess { .. }
+            | TypedExpr::ModuleSelect { .. }
+            | TypedExpr::Tuple { .. }
+            | TypedExpr::TupleIndex { .. }
+            | TypedExpr::Todo { .. }
+            | TypedExpr::Panic { .. }
+            | TypedExpr::Echo { .. }
+            | TypedExpr::BitArray { .. }
+            | TypedExpr::RecordUpdate { .. }
+            | TypedExpr::NegateBool { .. }
+            | TypedExpr::NegateInt { .. }
+            | TypedExpr::Invalid { .. } => None,
         }
     }
 
@@ -1475,16 +1655,19 @@ impl TypedExpr {
 
             (
                 TypedExpr::BinOp {
-                    name, left, right, ..
+                    operator,
+                    left,
+                    right,
+                    ..
                 },
                 TypedExpr::BinOp {
-                    name: other_name,
+                    operator: other_operator,
                     left: other_left,
                     right: other_right,
                     ..
                 },
             ) => {
-                name == other_name
+                operator == other_operator
                     && left.syntactically_eq(other_left)
                     && right.syntactically_eq(other_right)
             }
@@ -1656,6 +1839,66 @@ impl TypedExpr {
             (TypedExpr::Invalid { .. }, _) => false,
         }
     }
+
+    pub fn is_todo_with_no_message(&self) -> bool {
+        matches!(self, TypedExpr::Todo { message: None, .. })
+    }
+
+    /// If the expression is a record update, this returns a list with the names
+    /// of its labelled arguments that are not being changed by the record
+    /// update.
+    pub fn unchanged_record_fields(&self) -> Option<Vec<(EcoString, Arc<Type>)>> {
+        let TypedExpr::RecordUpdate { arguments, .. } = self else {
+            return None;
+        };
+
+        let mut unchanged_arguments = vec![];
+        for argument in arguments {
+            // All arguments that stay the same are generated as "implicit"
+            // arguments, we only care about them!
+            if !argument.is_implicit() {
+                continue;
+            }
+            // The label should always be present for these implicit arguments,
+            // technically this will never fail, but rather than panicking I
+            // just "continue".
+            let Some(label) = argument.label.as_ref() else {
+                continue;
+            };
+            unchanged_arguments.push((label.clone(), argument.value.type_()));
+        }
+        Some(unchanged_arguments)
+    }
+
+    pub fn is_module_select(&self) -> bool {
+        match self {
+            TypedExpr::ModuleSelect { .. } => true,
+
+            TypedExpr::Int { .. }
+            | TypedExpr::Float { .. }
+            | TypedExpr::String { .. }
+            | TypedExpr::Block { .. }
+            | TypedExpr::Pipeline { .. }
+            | TypedExpr::Var { .. }
+            | TypedExpr::Fn { .. }
+            | TypedExpr::List { .. }
+            | TypedExpr::Call { .. }
+            | TypedExpr::BinOp { .. }
+            | TypedExpr::Case { .. }
+            | TypedExpr::RecordAccess { .. }
+            | TypedExpr::PositionalAccess { .. }
+            | TypedExpr::Tuple { .. }
+            | TypedExpr::TupleIndex { .. }
+            | TypedExpr::Todo { .. }
+            | TypedExpr::Panic { .. }
+            | TypedExpr::Echo { .. }
+            | TypedExpr::BitArray { .. }
+            | TypedExpr::RecordUpdate { .. }
+            | TypedExpr::NegateBool { .. }
+            | TypedExpr::NegateInt { .. }
+            | TypedExpr::Invalid { .. } => false,
+        }
+    }
 }
 
 /// Checks that two slices have the same number of item and that the given
@@ -1696,7 +1939,7 @@ impl bit_array::GetLiteralValue for TypedExpr {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InvalidExpression {
     ModuleSelect {
         module_name: EcoString,

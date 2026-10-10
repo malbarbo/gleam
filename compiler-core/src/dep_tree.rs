@@ -1,9 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 use ecow::EcoString;
 use petgraph::{Direction, algo::Cycle, graph::NodeIndex};
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+use pretty_assertions::assert_eq;
+
 /// Take a sequence of values and their deps, and return the values in
-/// order so that deps come before the dependants.
+/// order so that deps come before the dependents.
 ///
 /// Any deps that are not nodes are ignored and presumed to be nodes
 /// that do not need processing.
@@ -87,8 +93,7 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, toposort_deps};
-    use pretty_assertions::assert_eq;
+    use super::{assert_eq, *};
 
     #[test]
     fn toposort_deps_test() {

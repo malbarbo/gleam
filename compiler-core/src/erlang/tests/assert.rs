@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2025 The Gleam contributors
+
 use crate::assert_erl;
 
 #[test]
@@ -52,6 +55,20 @@ fn assert_binary_operation3() {
         "
 pub fn assert_answer(x) {
   assert x == 42
+}
+"
+    );
+}
+
+#[test]
+fn assert_on_consts() {
+    assert_erl!(
+        "
+pub const wibble = [1, 2, 3]
+pub const wobble = [1, 2]
+
+pub fn assert_answer(x) {
+  assert wibble == wobble
 }
 "
     );

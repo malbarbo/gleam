@@ -1,18 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 use camino::Utf8PathBuf;
-use ecow::EcoString;
+use ecow::{EcoString, eco_format};
 use gleam_core::{
     Error, Result, Warning,
     analyse::name::correct_name_case,
     ast::{
         self, Constant, CustomType, DefinitionLocation, ModuleConstant, PatternUnusedArguments,
-        SrcSpan, TypedArg, TypedConstant, TypedExpr, TypedFunction, TypedModule, TypedPattern,
+        TypedArg, TypedClauseGuard, TypedConstant, TypedExpr, TypedFunction, TypedModule,
+        TypedPattern, TypedRecordConstructor,
     },
     build::{
         ExpressionPosition, Located, Module, UnqualifiedImport, type_constructor_from_modules,
     },
     config::PackageConfig,
-    io::{BeamCompiler, CommandExecutor, FileSystemReader, FileSystemWriter},
-    line_numbers::LineNumbers,
+    io::{BeamCompilerIO, CommandExecutor, FileSystemReader, FileSystemWriter},
     paths::ProjectPaths,
     type_::{
         self, Deprecation, ModuleInterface, Type, TypeConstructor, ValueConstructor,
@@ -25,39 +28,58 @@ use itertools::Itertools;
 use lsp::CodeAction;
 use lsp_server::ResponseError;
 use lsp_types::{
-    self as lsp, DocumentSymbol, Hover, HoverContents, MarkedString, Position,
-    PrepareRenameResponse, Range, SignatureHelp, SymbolKind, SymbolTag, TextEdit, Url,
-    WorkspaceEdit,
+    self as lsp, Contents, DocumentSymbol, FoldingRange, FoldingRangeKind, Hover, MarkedString,
+    MarkupContent, Position, PrepareRenameResult, Range, SignatureHelp, SymbolKind, SymbolTag,
+    TextEdit, Uri as Url, WorkspaceEdit,
 };
-use std::{collections::HashSet, sync::Arc};
+use src_span::{LineNumbers, SrcSpan};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
-use crate::rename::rename_module_alias;
+use crate::{
+    code_action::{
+        ConvertIntToDifferentBase, DiscardUnusedVariable, RemoveRedundantRecordUpdate,
+        ReplaceUnderscoreWithType, code_action_fix_deprecated_pipe, type_errors_for_module,
+    },
+    reference::{
+        find_echo_references, find_echo_references_in_module, find_module_references_in_module,
+        find_panic_references, find_panic_references_in_module, find_todo_references,
+        find_todo_references_in_module,
+    },
+    rename::{rename_module_alias, rename_module_occurrences, rename_type_variable},
+};
 
 use super::{
     DownloadDependencies, MakeLocker,
     code_action::{
         AddAnnotations, AddMissingTypeParameter, AddOmittedLabels, AnnotateTopLevelDefinitions,
-        CodeActionBuilder, CollapseNestedCase, ConvertFromUse, ConvertToFunctionCall,
-        ConvertToPipe, ConvertToUse, ExpandFunctionCapture, ExtractConstant, ExtractFunction,
-        ExtractVariable, FillInMissingLabelledArgs, FillUnusedFields, FixBinaryOperation,
+        CodeActionBuilder, CollapseNestedCase, ConvertBetweenDocAndRegularComment, ConvertFromUse,
+        ConvertToFunctionCall, ConvertToPipe, ConvertToUse, CreateUnknownModule,
+        ExpandFunctionCapture, ExtractConstant, ExtractFunction, ExtractVariable,
+        FillInMissingLabelledArgs, FillUnusedFields, FixBinaryOperation,
         FixTruncatedBitArraySegment, GenerateDynamicDecoder, GenerateFunction, GenerateJsonEncoder,
         GenerateVariant, InlineVariable, InterpolateString, LetAssertToCase, MergeCaseBranches,
         PatternMatchOnValue, RedundantTupleInCaseSubject, RemoveBlock, RemoveEchos,
         RemovePrivateOpaque, RemoveUnreachableCaseClauses, RemoveUnusedImports,
-        UseLabelShorthandSyntax, WrapInBlock, code_action_add_missing_patterns,
-        code_action_convert_qualified_constructor_to_unqualified,
-        code_action_convert_unqualified_constructor_to_qualified, code_action_import_module,
-        code_action_inexhaustive_let_to_case,
+        UnwrapAnonymousFunction, UseLabelShorthandSyntax, WrapInAnonymousFunction, WrapInBlock,
+        code_action_add_missing_patterns, code_action_convert_qualified_constructor_to_unqualified,
+        code_action_convert_unqualified_constructor_to_qualified, code_action_generate_type,
+        code_action_import_module, code_action_inexhaustive_let_to_case,
     },
     compiler::LspProjectCompiler,
     completer::Completer,
     files::FileSystemProxy,
     progress::ProgressReporter,
     reference::{
-        FindVariableReferences, Referenced, VariableReferenceKind, find_module_references,
-        reference_for_ast_node,
+        FindVariableReferences, Referenced, VariableReferenceKind, find_label_references,
+        find_label_references_in_module, find_module_references, reference_for_ast_node,
     },
-    rename::{RenameOutcome, RenameTarget, Renamed, rename_local_variable, rename_module_entity},
+    rename::{
+        RenameOutcome, RenameTarget, Renamed, rename_label, rename_local_variable,
+        rename_module_entity,
+    },
     signature_help, src_span_to_lsp_range,
 };
 
@@ -104,7 +126,7 @@ where
     // IO to be supplied from outside of gleam-core
     IO: FileSystemReader
         + FileSystemWriter
-        + BeamCompiler
+        + BeamCompilerIO
         + CommandExecutor
         + DownloadDependencies
         + MakeLocker
@@ -187,11 +209,9 @@ where
         self.compiler.take_warnings()
     }
 
-    // TODO: implement unqualified imported module functions
-    //
     pub fn goto_definition(
         &mut self,
-        params: lsp::GotoDefinitionParams,
+        params: lsp::DefinitionParams,
     ) -> Response<Option<lsp::Location>> {
         self.respond(|this| {
             let params = params.text_document_position_params;
@@ -212,7 +232,7 @@ where
 
     pub(crate) fn goto_type_definition(
         &mut self,
-        params: lsp_types::GotoDefinitionParams,
+        params: lsp_types::TypeDefinitionParams,
     ) -> Response<Vec<lsp::Location>> {
         self.respond(|this| {
             let params = params.text_document_position_params;
@@ -248,7 +268,7 @@ where
             None => (params.text_document.uri.clone(), line_numbers),
             Some(name) => {
                 let module = self.compiler.get_source(&name)?;
-                let url = Url::parse(&format!("file:///{}", &module.path))
+                let url = Url::parse(&format!("file:///{}", module.path))
                     .expect("goto definition URL parse");
                 (url, &module.line_numbers)
             }
@@ -265,7 +285,7 @@ where
     ) -> Response<Option<Vec<lsp::CompletionItem>>> {
         self.respond(|this| {
             let module = match this.module_for_uri(&params.text_document.uri) {
-                Some(m) => m,
+                Some(module) => module,
                 None => return Ok(None),
             };
 
@@ -291,7 +311,8 @@ where
             let completions = match found {
                 Located::PatternSpread { .. } => None,
                 Located::Pattern(_pattern) => None,
-                Located::StringPrefixPatternVariable { .. } => None,
+                Located::StringPrefixPatternPrefixAlias { .. }
+                | Located::StringPrefixPatternSuffix { .. } => None,
 
                 // Do not show completions when typing inside a string.
                 Located::Expression {
@@ -299,8 +320,15 @@ where
                     ..
                 }
                 | Located::Constant(Constant::String { .. }) => None,
+
                 Located::Expression {
-                    expression: TypedExpr::Call { fun, arguments, .. },
+                    expression:
+                        TypedExpr::Call { fun, arguments, .. }
+                        | TypedExpr::RecordUpdate {
+                            constructor: fun,
+                            arguments,
+                            ..
+                        },
                     ..
                 } => {
                     let mut completions = vec![];
@@ -308,6 +336,7 @@ where
                     completions.append(&mut completer.completion_labels(fun, arguments));
                     Some(completions)
                 }
+
                 Located::Expression {
                     expression: TypedExpr::RecordAccess { record, type_, .. },
                     ..
@@ -318,6 +347,7 @@ where
                     completions.append(&mut completer.completion_field_accessors(record.type_()));
                     Some(completions)
                 }
+
                 Located::Expression {
                     position:
                         ExpressionPosition::ArgumentOrLabel {
@@ -333,10 +363,33 @@ where
                     );
                     Some(completions)
                 }
+
+                // If we're typing inside an expression body (and not being any
+                // more specific than this, meaning we're not editing some
+                // specific value inside it) we don't want to set the expected
+                // type to the type of the entire anonymous function, otherwise
+                // the language server would start recommending the wrong
+                // values:
+                //
+                // ```
+                // fn(x: Int) -> String {
+                //   | // <- Typing here
+                //     //    We don't want the language server to suggest values
+                //     //    of type `fn(Int) -> String`!
+                //   todo
+                // }
+                // ```
+                //
+                Located::Expression {
+                    position: ExpressionPosition::Expression,
+                    expression: TypedExpr::Fn { .. },
+                } => Some(completer.completion_values()),
+
                 Located::Expression { expression, .. } => {
                     completer.expected_type = Some(expression.type_());
                     Some(completer.completion_values())
                 }
+
                 Located::ModuleFunction(_) => Some(completer.completion_types()),
 
                 Located::Statement(_) => Some(completer.completion_values()),
@@ -366,7 +419,23 @@ where
 
                 Located::Annotation { .. } => Some(completer.completion_types()),
 
-                Located::Label(_, _) => None,
+                Located::Label { .. }
+                | Located::RecordLabelDefinition { .. }
+                | Located::RecordLabelUsage { .. }
+                | Located::FunctionLabelDefinition { .. }
+                | Located::FunctionLabelUsage { .. } => None,
+
+                Located::RecordAccessLabel {
+                    field_type,
+                    record_type,
+                    ..
+                } => {
+                    completer.expected_type = Some(field_type);
+                    let mut completions = vec![];
+                    completions.append(&mut completer.completion_values());
+                    completions.append(&mut completer.completion_field_accessors(record_type));
+                    Some(completions)
+                }
 
                 Located::ModuleName {
                     layer: ast::Layer::Type,
@@ -376,6 +445,10 @@ where
                     layer: ast::Layer::Value,
                     ..
                 } => Some(completer.completion_values()),
+
+                Located::ClauseGuard(_) => Some(completer.completion_values()),
+
+                Located::TypeVariable { .. } => None,
             };
 
             Ok(completions)
@@ -394,8 +467,22 @@ where
 
             let lines = LineNumbers::new(&module.code);
 
-            code_action_unused_values(module, &lines, &params, &mut actions);
             actions.extend(RemoveUnusedImports::new(module, &lines, &params).code_actions());
+            code_action_fix_names(module, &lines, &params, &this.error, &mut actions);
+            code_action_import_module(module, &lines, &params, &this.error, &mut actions);
+            code_action_generate_type(module, &lines, &params, &this.error, &mut actions);
+            code_action_add_missing_patterns(module, &lines, &params, &this.error, &mut actions);
+            actions
+                .extend(RemoveUnreachableCaseClauses::new(module, &lines, &params).code_actions());
+            actions
+                .extend(RemoveRedundantRecordUpdate::new(module, &lines, &params).code_actions());
+            actions.extend(CollapseNestedCase::new(module, &lines, &params).code_actions());
+            actions.extend(FixBinaryOperation::new(module, &lines, &params).code_actions());
+            actions
+                .extend(FixTruncatedBitArraySegment::new(module, &lines, &params).code_actions());
+            actions.extend(RemovePrivateOpaque::new(module, &lines, &params).code_actions());
+            actions.extend(AddMissingTypeParameter::new(module, &lines, &params).code_actions());
+            code_action_unused_values(module, &lines, &params, &mut actions);
             code_action_convert_qualified_constructor_to_unqualified(
                 module,
                 &this.compiler,
@@ -409,12 +496,6 @@ where
                 &params,
                 &mut actions,
             );
-            code_action_fix_names(&lines, &params, &this.error, &mut actions);
-            code_action_import_module(module, &lines, &params, &this.error, &mut actions);
-            code_action_add_missing_patterns(module, &lines, &params, &this.error, &mut actions);
-            actions
-                .extend(RemoveUnreachableCaseClauses::new(module, &lines, &params).code_actions());
-            actions.extend(CollapseNestedCase::new(module, &lines, &params).code_actions());
             code_action_inexhaustive_let_to_case(
                 module,
                 &lines,
@@ -423,14 +504,11 @@ where
                 &mut actions,
             );
             actions.extend(MergeCaseBranches::new(module, &lines, &params).code_actions());
-            actions.extend(FixBinaryOperation::new(module, &lines, &params).code_actions());
-            actions
-                .extend(FixTruncatedBitArraySegment::new(module, &lines, &params).code_actions());
             actions.extend(LetAssertToCase::new(module, &lines, &params).code_actions());
             actions
                 .extend(RedundantTupleInCaseSubject::new(module, &lines, &params).code_actions());
-            actions.extend(UseLabelShorthandSyntax::new(module, &lines, &params).code_actions());
             actions.extend(FillInMissingLabelledArgs::new(module, &lines, &params).code_actions());
+            actions.extend(UseLabelShorthandSyntax::new(module, &lines, &params).code_actions());
             actions.extend(ConvertFromUse::new(module, &lines, &params).code_actions());
             actions.extend(RemoveEchos::new(module, &lines, &params).code_actions());
             actions.extend(ConvertToUse::new(module, &lines, &params).code_actions());
@@ -455,10 +533,11 @@ where
             actions.extend(InlineVariable::new(module, &lines, &params).code_actions());
             actions.extend(WrapInBlock::new(module, &lines, &params).code_actions());
             actions.extend(RemoveBlock::new(module, &lines, &params).code_actions());
-            actions.extend(RemovePrivateOpaque::new(module, &lines, &params).code_actions());
             actions.extend(ExtractFunction::new(module, &lines, &params).code_actions());
             GenerateDynamicDecoder::new(module, &lines, &params, &mut actions, &this.compiler)
                 .code_actions();
+            actions.extend(WrapInAnonymousFunction::new(module, &lines, &params).code_actions());
+            actions.extend(UnwrapAnonymousFunction::new(module, &lines, &params).code_actions());
             GenerateJsonEncoder::new(
                 module,
                 &lines,
@@ -470,7 +549,45 @@ where
             AddAnnotations::new(module, &lines, &params).code_action(&mut actions);
             actions
                 .extend(AnnotateTopLevelDefinitions::new(module, &lines, &params).code_actions());
-            actions.extend(AddMissingTypeParameter::new(module, &lines, &params).code_actions());
+            actions.extend(ReplaceUnderscoreWithType::new(module, &lines, &params).code_actions());
+            actions.extend(
+                CreateUnknownModule::new(
+                    module,
+                    &this.compiler,
+                    &lines,
+                    &params,
+                    &this.paths,
+                    &this.error,
+                )
+                .code_actions(),
+            );
+            actions.extend(DiscardUnusedVariable::new(module, &lines, &params).code_actions());
+            code_action_fix_deprecated_pipe(module, &lines, &params, &mut actions);
+            actions.extend(
+                ConvertBetweenDocAndRegularComment::new(module, &lines, &params).code_actions(),
+            );
+            actions.extend(ConvertIntToDifferentBase::new(module, &lines, &params).code_actions());
+
+            actions.sort_by_key(|one| {
+                let preferred_key = if one.is_preferred == Some(true) { 0 } else { 1 };
+                let kind_key = match &one.kind {
+                    Some(lsp_types::CodeActionKind::QuickFix) => 1,
+                    Some(lsp_types::CodeActionKind::Refactor) => 2,
+                    Some(lsp_types::CodeActionKind::RefactorExtract) => 2,
+                    Some(lsp_types::CodeActionKind::RefactorInline) => 2,
+                    Some(lsp_types::CodeActionKind::RefactorMove) => 2,
+                    Some(lsp_types::CodeActionKind::RefactorRewrite) => 2,
+                    Some(lsp_types::CodeActionKind::Source) => 3,
+                    Some(lsp_types::CodeActionKind::SourceOrganizeImports) => 3,
+                    Some(lsp_types::CodeActionKind::SourceFixAll) => 3,
+                    Some(lsp_types::CodeActionKind::Custom(_)) => 4,
+                    Some(lsp_types::CodeActionKind::Notebook) => 5,
+                    Some(lsp_types::CodeActionKind::Empty) => 6,
+                    None => 7,
+                };
+                (preferred_key, kind_key)
+            });
+
             Ok(if actions.is_empty() {
                 None
             } else {
@@ -518,7 +635,7 @@ where
                 // to be able to construct the 'DocumentSymbol' type, so
                 // we suppress the warning. We specify 'None' as specifying 'Some'
                 // is what is actually deprecated.
-                #[allow(deprecated)]
+                #[expect(deprecated)]
                 symbols.push(DocumentSymbol {
                     name: name.to_string(),
                     detail: Some(
@@ -526,7 +643,7 @@ where
                             .print_type(&get_function_type(function))
                             .to_string(),
                     ),
-                    kind: SymbolKind::FUNCTION,
+                    kind: SymbolKind::Function,
                     tags: make_deprecated_symbol_tag(&function.deprecation),
                     deprecated: None,
                     range: src_span_to_lsp_range(full_function_span, &line_numbers),
@@ -547,7 +664,7 @@ where
                 // to be able to construct the 'DocumentSymbol' type, so
                 // we suppress the warning. We specify 'None' as specifying 'Some'
                 // is what is actually deprecated.
-                #[allow(deprecated)]
+                #[expect(deprecated)]
                 symbols.push(DocumentSymbol {
                     name: alias.alias.to_string(),
                     detail: Some(
@@ -558,7 +675,7 @@ where
                             .print_type_without_aliases(&alias.type_)
                             .to_string(),
                     ),
-                    kind: SymbolKind::CLASS,
+                    kind: SymbolKind::Class,
                     tags: make_deprecated_symbol_tag(&alias.deprecation),
                     deprecated: None,
                     range: src_span_to_lsp_range(full_alias_span, &line_numbers),
@@ -590,7 +707,7 @@ where
                 // to be able to construct the 'DocumentSymbol' type, so
                 // we suppress the warning. We specify 'None' as specifying 'Some'
                 // is what is actually deprecated.
-                #[allow(deprecated)]
+                #[expect(deprecated)]
                 symbols.push(DocumentSymbol {
                     name: constant.name.to_string(),
                     detail: Some(
@@ -598,7 +715,7 @@ where
                             .print_type(&constant.type_)
                             .to_string(),
                     ),
-                    kind: SymbolKind::CONSTANT,
+                    kind: SymbolKind::Constant,
                     tags: make_deprecated_symbol_tag(&constant.deprecation),
                     deprecated: None,
                     range: src_span_to_lsp_range(full_constant_span, &line_numbers),
@@ -608,6 +725,114 @@ where
             }
 
             Ok(symbols)
+        })
+    }
+
+    pub fn folding_range(
+        &mut self,
+        params: lsp::FoldingRangeParams,
+    ) -> Response<Vec<FoldingRange>> {
+        self.respond(|this| {
+            let mut ranges: Vec<FoldingRange> = vec![];
+            let Some(module) = this.module_for_uri(&params.text_document.uri) else {
+                return Ok(vec![]);
+            };
+
+            let line_numbers = LineNumbers::new(&module.code);
+
+            for import in
+                import_folding_spans(&module.ast.definitions.imports, &module.code, &line_numbers)
+            {
+                let Some(range) =
+                    folding_range_for_span(import, &line_numbers, Some(FoldingRangeKind::Imports))
+                else {
+                    continue;
+                };
+
+                ranges.push(range);
+            }
+
+            for type_ in &module.ast.definitions.custom_types {
+                let span = type_.full_location();
+                let Some(range) = folding_range_for_span(span, &line_numbers, None) else {
+                    continue;
+                };
+                ranges.push(range);
+            }
+
+            for constant in &module.ast.definitions.constants {
+                let span = SrcSpan::new(constant.location.start, constant.value.location().end);
+                let Some(range) = folding_range_for_span(span, &line_numbers, None) else {
+                    continue;
+                };
+                ranges.push(range);
+            }
+
+            for alias in &module.ast.definitions.type_aliases {
+                let span = alias.location;
+                let Some(range) = folding_range_for_span(span, &line_numbers, None) else {
+                    continue;
+                };
+                ranges.push(range);
+            }
+
+            for function in &module.ast.definitions.functions {
+                let Some(body_start) = function.body_start else {
+                    continue;
+                };
+
+                let span = SrcSpan::new(body_start, function.end_position);
+                let Some(range) = folding_range_for_span(span, &line_numbers, None) else {
+                    continue;
+                };
+                ranges.push(range);
+            }
+
+            for doc_comment in comment_folding_spans(
+                &module.extra.doc_comments,
+                &module.code,
+                &line_numbers,
+                "///",
+            ) {
+                let Some(range) = folding_range_for_span(
+                    doc_comment,
+                    &line_numbers,
+                    Some(FoldingRangeKind::Comment),
+                ) else {
+                    continue;
+                };
+                ranges.push(range);
+            }
+
+            for module_comment in comment_folding_spans(
+                &module.extra.module_comments,
+                &module.code,
+                &line_numbers,
+                "////",
+            ) {
+                let Some(range) = folding_range_for_span(
+                    module_comment,
+                    &line_numbers,
+                    Some(FoldingRangeKind::Comment),
+                ) else {
+                    continue;
+                };
+                ranges.push(range);
+            }
+
+            for comment in
+                comment_folding_spans(&module.extra.comments, &module.code, &line_numbers, "//")
+            {
+                let Some(range) =
+                    folding_range_for_span(comment, &line_numbers, Some(FoldingRangeKind::Comment))
+                else {
+                    continue;
+                };
+                ranges.push(range);
+            }
+
+            ranges.sort_by_key(|range| range.start_line);
+            Ok(ranges)
         })
     }
 
@@ -627,25 +852,28 @@ where
 
     pub fn prepare_rename(
         &mut self,
-        params: lsp::TextDocumentPositionParams,
-    ) -> Response<Option<PrepareRenameResponse>> {
+        params: lsp::PrepareRenameParams,
+    ) -> Response<Option<PrepareRenameResult>> {
         self.respond(|this| {
-            let (lines, found) = match this.node_at_position(&params) {
+            let (lines, found) = match this.node_at_position(&params.text_document_position_params)
+            {
                 Some(value) => value,
                 None => return Ok(None),
             };
 
-            let Some(current_module) = this.module_for_uri(&params.text_document.uri) else {
+            let Some(current_module) =
+                this.module_for_uri(&params.text_document_position_params.text_document.uri)
+            else {
                 return Ok(None);
             };
 
             let success_response = |location| {
-                Some(PrepareRenameResponse::Range(src_span_to_lsp_range(
+                Some(PrepareRenameResult::Range(src_span_to_lsp_range(
                     location, &lines,
                 )))
             };
 
-            let byte_index = lines.byte_index(params.position);
+            let byte_index = lines.byte_index(params.text_document_position_params.position);
 
             let referenced = reference_for_ast_node(found, &current_module.name);
 
@@ -664,18 +892,22 @@ where
                             .map(|len: u32| location.start + len)
                             .unwrap_or(location.end),
                     }),
-                    Some(VariableSyntax::AssignmentPattern) | None => success_response(location),
+                    Some(VariableSyntax::AssignmentPattern { .. }) | None => {
+                        success_response(location)
+                    }
                 },
                 Some(
                     Referenced::ModuleValue {
                         module,
                         location,
+                        name_start,
                         target_kind,
                         ..
                     }
                     | Referenced::ModuleType {
                         module,
                         location,
+                        name_start,
                         target_kind,
                         ..
                     },
@@ -686,12 +918,54 @@ where
                         RenameTarget::Unqualified | RenameTarget::Definition => true,
                     };
                     if rename_allowed {
+                        // The location field is sometimes larger than the
+                        // location of the actual name. In most cases they are
+                        // the same, but in import statements that are for types
+                        // and/or are aliased, the location is larger than the
+                        // name.
+                        //
+                        // For example, in `import m.{type Wibble as Wobble}`,
+                        // location will cover `type Wibble as Wobble` but
+                        // the name is just `Wobble`. In every case (including
+                        // non-imports), the name is at the very end of the
+                        // location span.
+                        let location = SrcSpan {
+                            start: name_start,
+                            end: location.end,
+                        };
                         success_response(location)
                     } else {
                         None
                     }
                 }
-                Some(Referenced::ModuleName { location, .. }) => success_response(location),
+                Some(Referenced::ModuleName {
+                    location,
+                    module_alias,
+                    ..
+                }) => success_response(SrcSpan::new(
+                    // Since the location contains the full module name (e.g. `wibble/wobble/woo`),
+                    // we just want to include the last segment so we get a rename of the string
+                    // `woo`, as that's the being referenced in module access expressions.
+                    location.end - module_alias.len() as u32,
+                    location.end,
+                )),
+
+                Some(Referenced::TypeVariable { location, name: _ }) => success_response(location),
+
+                // For a label written using the shorthand syntax the location
+                // spans the whole `label:`, so we trim it down to just the
+                // label.
+                Some(Referenced::Label {
+                    location,
+                    label,
+                    owner,
+                    ..
+                }) if this.is_same_package(current_module, owner.module()) => {
+                    success_response(SrcSpan {
+                        start: location.start,
+                        end: location.start + label.len() as u32,
+                    })
+                }
 
                 _ => None,
             })
@@ -703,7 +977,7 @@ where
         params: lsp::RenameParams,
     ) -> Response<Result<Option<WorkspaceEdit>, ResponseError>> {
         self.respond(|this| {
-            let position = &params.text_document_position;
+            let position = &params.text_document_position_params;
 
             let (lines, found) = match this.node_at_position(position) {
                 Some(value) => value,
@@ -731,7 +1005,8 @@ where
                             VariableReferenceKind::LabelShorthand
                         }
                         Some(
-                            VariableSyntax::AssignmentPattern | VariableSyntax::Variable { .. },
+                            VariableSyntax::AssignmentPattern { .. }
+                            | VariableSyntax::Variable { .. },
                         )
                         | None => VariableReferenceKind::Variable,
                     };
@@ -786,16 +1061,208 @@ where
                 )
                 .into_result(),
 
-                Some(Referenced::ModuleName {
-                    module_name,
-                    module_alias,
-                    ..
-                }) => rename_module_alias(module, &lines, &params, &module_name, &module_alias)
-                    .into_result(),
+                Some(Referenced::ModuleName { module_name, .. }) => {
+                    rename_module_alias(module, &lines, &params, &module_name).into_result()
+                }
 
-                None => RenameOutcome::NoRenames.into_result(),
+                Some(Referenced::TypeVariable { location, name }) => {
+                    rename_type_variable(module, &lines, &params, location, name).into_result()
+                }
+
+                Some(Referenced::Label { owner, label, .. }) => rename_label(
+                    &params,
+                    owner,
+                    &label,
+                    this.compiler.project_compiler.get_importable_modules(),
+                    &this.compiler.sources,
+                )
+                .into_result(),
+
+                Some(
+                    Referenced::Echo { .. } | Referenced::Todo { .. } | Referenced::Panic { .. },
+                )
+                | None => RenameOutcome::NoRenames.into_result(),
             })
         })
+    }
+
+    /// Shared core of find references and document highlight.
+    fn find_references_in_scope(
+        &mut self,
+        position: &lsp_types::TextDocumentPositionParams,
+        search_scope: FindReferencesSearchScope,
+    ) -> Option<Vec<lsp::Location>> {
+        let (lines, found) = self.node_at_position(position)?;
+
+        let uri = position.text_document.uri.clone();
+
+        let source_module = self.module_for_uri(&uri)?;
+
+        let byte_index = lines.byte_index(position.position);
+
+        let referenced = reference_for_ast_node(found, &source_module.name);
+
+        match referenced {
+            Some(Referenced::LocalVariable {
+                origin,
+                definition_location,
+                location,
+                name,
+            }) if location.contains(byte_index) => match origin.map(|origin| origin.syntax) {
+                Some(VariableSyntax::Generated) => None,
+                Some(
+                    VariableSyntax::LabelShorthand(_)
+                    | VariableSyntax::AssignmentPattern { .. }
+                    | VariableSyntax::Variable { .. },
+                )
+                | None => {
+                    let variable_references =
+                        FindVariableReferences::new(definition_location, name)
+                            .find_in_module(&source_module.ast);
+
+                    let mut reference_locations = Vec::with_capacity(variable_references.len() + 1);
+                    reference_locations.push(lsp::Location {
+                        uri: uri.clone(),
+                        range: src_span_to_lsp_range(definition_location, &lines),
+                    });
+
+                    for reference in variable_references {
+                        reference_locations.push(lsp::Location {
+                            uri: uri.clone(),
+                            range: src_span_to_lsp_range(reference.location, &lines),
+                        });
+                    }
+
+                    Some(reference_locations)
+                }
+            },
+            Some(Referenced::ModuleValue {
+                module,
+                name,
+                location,
+                ..
+            }) if location.contains(byte_index) => match search_scope {
+                FindReferencesSearchScope::AllModules => Some(find_module_references(
+                    module,
+                    name,
+                    self.compiler.project_compiler.get_importable_modules(),
+                    &self.compiler.sources,
+                    ast::Layer::Value,
+                )),
+                FindReferencesSearchScope::CurrentModule => {
+                    let source_information = self.compiler.get_source(&source_module.name)?;
+                    let source_module = self.compiler.get_module_interface(&source_module.name)?;
+                    Some(find_module_references_in_module(
+                        module,
+                        name,
+                        source_module,
+                        source_information,
+                        ast::Layer::Value,
+                    ))
+                }
+            },
+            Some(Referenced::ModuleType { module, name, .. }) => match search_scope {
+                FindReferencesSearchScope::AllModules => Some(find_module_references(
+                    module,
+                    name,
+                    self.compiler.project_compiler.get_importable_modules(),
+                    &self.compiler.sources,
+                    ast::Layer::Type,
+                )),
+                FindReferencesSearchScope::CurrentModule => {
+                    let source_information = self.compiler.get_source(&source_module.name)?;
+                    let source_module = self.compiler.get_module_interface(&source_module.name)?;
+                    Some(find_module_references_in_module(
+                        module,
+                        name,
+                        source_module,
+                        source_information,
+                        ast::Layer::Type,
+                    ))
+                }
+            },
+            Some(Referenced::Label { owner, label, .. }) => match search_scope {
+                FindReferencesSearchScope::AllModules => Some(find_label_references(
+                    owner,
+                    label,
+                    self.compiler.project_compiler.get_importable_modules(),
+                    &self.compiler.sources,
+                )),
+                FindReferencesSearchScope::CurrentModule => {
+                    let source_information = self.compiler.get_source(&source_module.name)?;
+                    let source_module = self.compiler.get_module_interface(&source_module.name)?;
+                    Some(find_label_references_in_module(
+                        owner,
+                        label,
+                        source_module,
+                        source_information,
+                    ))
+                }
+            },
+            Some(Referenced::Echo { location }) if location.contains(byte_index) => {
+                let source_module = self.compiler.get_module_interface(&source_module.name)?;
+                match search_scope {
+                    FindReferencesSearchScope::AllModules => Some(find_echo_references(
+                        source_module.package.clone(),
+                        self.compiler.project_compiler.get_importable_modules(),
+                        &self.compiler.sources,
+                    )),
+                    FindReferencesSearchScope::CurrentModule => {
+                        let source_information = self.compiler.get_source(&source_module.name)?;
+                        Some(find_echo_references_in_module(
+                            source_module,
+                            source_information,
+                        ))
+                    }
+                }
+            }
+            Some(Referenced::Todo { location }) if location.contains(byte_index) => {
+                let source_module = self.compiler.get_module_interface(&source_module.name)?;
+                match search_scope {
+                    FindReferencesSearchScope::AllModules => Some(find_todo_references(
+                        source_module.package.clone(),
+                        self.compiler.project_compiler.get_importable_modules(),
+                        &self.compiler.sources,
+                    )),
+                    FindReferencesSearchScope::CurrentModule => {
+                        let source_information = self.compiler.get_source(&source_module.name)?;
+                        Some(find_todo_references_in_module(
+                            source_module,
+                            source_information,
+                        ))
+                    }
+                }
+            }
+
+            Some(Referenced::Panic { location }) if location.contains(byte_index) => {
+                let source_module = self.compiler.get_module_interface(&source_module.name)?;
+                match search_scope {
+                    FindReferencesSearchScope::AllModules => Some(find_panic_references(
+                        source_module.package.clone(),
+                        self.compiler.project_compiler.get_importable_modules(),
+                        &self.compiler.sources,
+                    )),
+                    FindReferencesSearchScope::CurrentModule => {
+                        let source_information = self.compiler.get_source(&source_module.name)?;
+                        Some(find_panic_references_in_module(
+                            source_module,
+                            source_information,
+                        ))
+                    }
+                }
+            }
+
+            Some(
+                Referenced::LocalVariable { .. }
+                | Referenced::ModuleName { .. }
+                | Referenced::ModuleValue { .. }
+                | Referenced::TypeVariable { .. }
+                | Referenced::Echo { .. }
+                | Referenced::Todo { .. }
+                | Referenced::Panic { .. },
+            )
+            | None => None,
+        }
     }
 
     pub fn find_references(
@@ -803,84 +1270,58 @@ where
         params: lsp::ReferenceParams,
     ) -> Response<Option<Vec<lsp::Location>>> {
         self.respond(|this| {
-            let position = &params.text_document_position;
+            let position = &params.text_document_position_params;
+            Ok(this.find_references_in_scope(position, FindReferencesSearchScope::AllModules))
+        })
+    }
 
-            let (lines, found) = match this.node_at_position(position) {
-                Some(value) => value,
-                None => return Ok(None),
-            };
+    pub fn document_highlight(
+        &mut self,
+        params: lsp::DocumentHighlightParams,
+    ) -> Response<Option<Vec<lsp::DocumentHighlight>>> {
+        self.respond(|this| {
+            let position = &params.text_document_position_params;
+            Ok(this
+                .find_references_in_scope(position, FindReferencesSearchScope::CurrentModule)
+                .map(|references| {
+                    references
+                        .into_iter()
+                        .map(|loc| lsp::DocumentHighlight {
+                            range: loc.range,
+                            kind: None,
+                        })
+                        .collect()
+                }))
+        })
+    }
 
-            let uri = position.text_document.uri.clone();
+    /// Triggers after the renaming of one or more `.gleam` files, updating any
+    /// imports to those modules.
+    pub fn rename_files(&mut self, renames: Vec<(Url, Url)>) -> Response<Option<WorkspaceEdit>> {
+        self.respond(|this| {
+            let mut changes = HashMap::new();
 
-            let Some(module) = this.module_for_uri(&uri) else {
-                return Ok(None);
-            };
-
-            let byte_index = lines.byte_index(position.position);
-
-            let referenced = reference_for_ast_node(found, &module.name);
-
-            Ok(match referenced {
-                Some(Referenced::LocalVariable {
-                    origin,
-                    definition_location,
-                    location,
-                    name,
-                }) if location.contains(byte_index) => match origin.map(|origin| origin.syntax) {
-                    Some(VariableSyntax::Generated) => None,
-                    Some(
-                        VariableSyntax::LabelShorthand(_)
-                        | VariableSyntax::AssignmentPattern
-                        | VariableSyntax::Variable { .. },
-                    )
-                    | None => {
-                        let variable_references =
-                            FindVariableReferences::new(definition_location, name)
-                                .find_in_module(&module.ast);
-
-                        let mut reference_locations =
-                            Vec::with_capacity(variable_references.len() + 1);
-                        reference_locations.push(lsp::Location {
-                            uri: uri.clone(),
-                            range: src_span_to_lsp_range(definition_location, &lines),
-                        });
-
-                        for reference in variable_references {
-                            reference_locations.push(lsp::Location {
-                                uri: uri.clone(),
-                                range: src_span_to_lsp_range(reference.location, &lines),
-                            })
-                        }
-
-                        Some(reference_locations)
-                    }
-                },
-                Some(Referenced::ModuleValue {
-                    module,
-                    name,
-                    location,
-                    ..
-                }) if location.contains(byte_index) => Some(find_module_references(
-                    module,
-                    name,
+            for (old_uri, new_uri) in renames {
+                let Some(old_name) = this.module_name_for_uri(&old_uri) else {
+                    continue;
+                };
+                let Some(new_name) = this.module_name_for_uri(&new_uri) else {
+                    continue;
+                };
+                rename_module_occurrences(
+                    old_name,
+                    new_name,
                     this.compiler.project_compiler.get_importable_modules(),
                     &this.compiler.sources,
-                    ast::Layer::Value,
-                )),
-                Some(Referenced::ModuleType {
-                    module,
-                    name,
-                    location,
-                    ..
-                }) if location.contains(byte_index) => Some(find_module_references(
-                    module,
-                    name,
-                    this.compiler.project_compiler.get_importable_modules(),
-                    &this.compiler.sources,
-                    ast::Layer::Type,
-                )),
-                _ => None,
-            })
+                    &mut changes,
+                );
+            }
+
+            Ok(Some(WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            }))
         })
     }
 
@@ -935,24 +1376,31 @@ where
                         &this.hex_deps,
                     ))
                 }
-                Located::ModuleCustomType(_) => None,
+                Located::ModuleCustomType(custom_type) => {
+                    Some(hover_for_custom_type(custom_type, lines))
+                }
                 Located::ModuleTypeAlias(_) => None,
-                Located::VariantConstructorDefinition(_) => None,
-                Located::UnqualifiedImport(UnqualifiedImport {
-                    name,
-                    module: module_name,
-                    is_type,
-                    location,
-                }) => this
+                Located::VariantConstructorDefinition(constructor) => {
+                    Some(hover_for_constructor(constructor, lines, module))
+                }
+                Located::UnqualifiedImport(
+                    import @ UnqualifiedImport {
+                        name,
+                        module: module_name,
+                        location,
+                        name_position: _,
+                        as_name: _,
+                    },
+                ) => this
                     .compiler
                     .get_module_interface(module_name.as_str())
                     .and_then(|module_interface| {
-                        if is_type {
-                            module_interface.types.get(name).map(|t| {
+                        if import.is_type() {
+                            module_interface.types.get(name).map(|constructor| {
                                 hover_for_annotation(
                                     *location,
-                                    t.type_.as_ref(),
-                                    Some(t),
+                                    constructor.type_.as_ref(),
+                                    Some(constructor),
                                     lines,
                                     module,
                                 )
@@ -1006,15 +1454,34 @@ Unused labelled fields:
                     };
 
                     Some(Hover {
-                        contents: HoverContents::Scalar(MarkedString::from_markdown(content)),
+                        contents: Contents::MarkupContent(MarkupContent {
+                            value: content,
+                            kind: lsp_types::MarkupKind::Markdown,
+                        }),
                         range,
                     })
                 }
-                Located::StringPrefixPatternVariable { location, .. } => Some(
+                Located::StringPrefixPatternPrefixAlias {
+                    name_start_position,
+                    location,
+                    ..
+                } => {
+                    let name_location = SrcSpan::new(name_start_position, location.end);
+                    Some(hover_for_string_prefix_pattern_variable(
+                        name_location,
+                        &lines,
+                        module,
+                    ))
+                }
+                Located::StringPrefixPatternSuffix { location, .. } => Some(
                     hover_for_string_prefix_pattern_variable(location, &lines, module),
                 ),
-                Located::Expression { expression, .. } => Some(hover_for_expression(
+                Located::Expression {
                     expression,
+                    position,
+                } => Some(hover_for_expression(
+                    expression,
+                    position,
                     lines,
                     module,
                     &this.hex_deps,
@@ -1034,9 +1501,42 @@ Unused labelled fields:
                         module,
                     ))
                 }
-                Located::Label(location, type_) => {
-                    Some(hover_for_label(location, type_, lines, module))
+                Located::Label {
+                    location,
+                    field_type,
                 }
+                | Located::RecordLabelDefinition {
+                    location,
+                    field_type,
+                    ..
+                }
+                | Located::RecordLabelUsage {
+                    location,
+                    field_type,
+                    ..
+                }
+                | Located::FunctionLabelDefinition {
+                    location,
+                    field_type,
+                    ..
+                }
+                | Located::FunctionLabelUsage {
+                    location,
+                    field_type,
+                    ..
+                } => Some(hover_for_label(location, field_type, None, lines, module)),
+                Located::RecordAccessLabel {
+                    location,
+                    field_type,
+                    documentation,
+                    ..
+                } => Some(hover_for_label(
+                    location,
+                    field_type,
+                    documentation.as_ref(),
+                    lines,
+                    module,
+                )),
                 Located::ModuleName {
                     location,
                     module_name,
@@ -1047,6 +1547,10 @@ Unused labelled fields:
                     };
                     Some(hover_for_module(module, location, &lines, &this.hex_deps))
                 }
+
+                Located::ClauseGuard(guard) => Some(hover_for_clause_guard(guard, lines, module)),
+
+                Located::TypeVariable { .. } => None,
             })
         })
     }
@@ -1055,15 +1559,21 @@ Unused labelled fields:
         &mut self,
         params: lsp_types::SignatureHelpParams,
     ) -> Response<Option<SignatureHelp>> {
-        self.respond(
-            |this| match this.node_at_position(&params.text_document_position_params) {
+        self.respond(|this| {
+            let Some(module) =
+                this.module_for_uri(&params.text_document_position_params.text_document.uri)
+            else {
+                return Ok(None);
+            };
+
+            match this.node_at_position(&params.text_document_position_params) {
                 Some((_lines, Located::Expression { expression, .. })) => {
-                    Ok(signature_help::for_expression(expression))
+                    Ok(signature_help::for_expression(expression, module))
                 }
                 Some((_lines, _located)) => Ok(None),
                 None => Ok(None),
-            },
-        )
+            }
+        })
     }
 
     fn module_node_at_position(
@@ -1086,7 +1596,7 @@ Unused labelled fields:
         self.module_node_at_position(params, module)
     }
 
-    fn module_for_uri(&self, uri: &Url) -> Option<&Module> {
+    fn module_name_for_uri(&self, uri: &Url) -> Option<EcoString> {
         // The to_file_path method is available on these platforms
         #[cfg(any(unix, windows, target_os = "redox", target_os = "wasi"))]
         let path = uri.to_file_path().expect("URL file");
@@ -1100,13 +1610,170 @@ Unused labelled fields:
             .components()
             .skip(1)
             .map(|c| c.as_os_str().to_string_lossy());
-        let module_name: EcoString = Itertools::intersperse(components, "/".into())
+        let name = Itertools::intersperse(components, "/".into())
             .collect::<String>()
             .strip_suffix(".gleam")?
             .into();
+        Some(name)
+    }
 
+    fn module_for_uri(&self, uri: &Url) -> Option<&Module> {
+        let module_name = self.module_name_for_uri(uri)?;
         self.compiler.modules.get(&module_name)
     }
+
+    #[cfg(test)]
+    pub fn path_for_module_name(&self, module_name: &str) -> Utf8PathBuf {
+        let src_directory = self.paths.src_directory();
+        src_directory.join(module_name).with_extension("gleam")
+    }
+}
+
+fn import_folding_spans(
+    imports: &[ast::Import<EcoString>],
+    code: &str,
+    line_numbers: &LineNumbers,
+) -> Vec<SrcSpan> {
+    let mut spans = vec![];
+    let mut imports = imports.iter();
+
+    let Some(first_import) = imports.next() else {
+        return spans;
+    };
+
+    let mut previous_line = src_span_to_lsp_range(
+        SrcSpan::new(first_import.location.start, first_import.location.start),
+        line_numbers,
+    )
+    .start
+    .line;
+    let mut current_start = first_import.location.start;
+    let mut current_end = first_import.location.end;
+    let mut current_len = 1;
+
+    for import in imports {
+        let next_line = src_span_to_lsp_range(
+            SrcSpan::new(import.location.start, import.location.start),
+            line_numbers,
+        )
+        .start
+        .line;
+        let separated_by_blank_line = next_line > previous_line + 1;
+        let between = &code[current_end as usize..import.location.start as usize];
+        let has_non_whitespace_between = between.chars().any(|char| !char.is_whitespace());
+
+        if separated_by_blank_line || has_non_whitespace_between {
+            if current_len > 1 {
+                spans.push(SrcSpan::new(current_start, current_end));
+            }
+            current_start = import.location.start;
+            current_end = import.location.end;
+            current_len = 1;
+        } else {
+            current_end = import.location.end;
+            current_len += 1;
+        }
+
+        previous_line = next_line;
+    }
+
+    if current_len > 1 {
+        spans.push(SrcSpan::new(current_start, current_end));
+    }
+
+    spans
+}
+
+fn comment_folding_spans(
+    comments: &[SrcSpan],
+    code: &str,
+    line_numbers: &LineNumbers,
+    comment_prefix: &str,
+) -> Vec<SrcSpan> {
+    let mut spans = vec![];
+    let comments = comments.iter();
+
+    let mut comments = comments.map(|span| {
+        let line = src_span_to_lsp_range(*span, line_numbers).start.line;
+        let start = line_numbers
+            .line_starts
+            .get(line as usize)
+            .copied()
+            .unwrap_or_default();
+        let end = line_numbers
+            .line_starts
+            .get(line as usize + 1)
+            .copied()
+            .map(|next_line_start| next_line_start.saturating_sub(1))
+            .unwrap_or(line_numbers.length);
+
+        // Find prefix (`//`, `///` or `////`), so we use start of the prefix
+        // as start of comment. This allows us to not fold comments before and
+        // after some code, like here:
+        // ```gleam
+        // // wibble
+        // // wobble
+        // wibble // wubble
+        // ```
+        let between = &code[start as usize..end as usize];
+        let start = start + between.find(comment_prefix).unwrap_or_default() as u32;
+        (start, line, end)
+    });
+
+    let Some((start, line, end)) = comments.next() else {
+        return spans;
+    };
+
+    let mut current_start = start;
+    let mut current_line = line;
+    let mut current_end = end;
+    let mut current_len = 1;
+
+    for (start, line, end) in comments {
+        let separated_by_blank_line = line > current_line + 1;
+        let between = &code[current_end as usize..start as usize];
+        let has_non_comments_between_between = between.chars().any(|char| !char.is_whitespace());
+
+        if separated_by_blank_line || has_non_comments_between_between {
+            if current_len > 1 {
+                spans.push(SrcSpan::new(current_start, current_end));
+            }
+            current_start = start;
+            current_end = end;
+            current_len = 1;
+        } else {
+            current_end = end;
+            current_len += 1;
+        }
+        current_line = line;
+    }
+
+    if current_len > 1 {
+        spans.push(SrcSpan::new(current_start, current_end));
+    }
+
+    spans
+}
+
+fn folding_range_for_span(
+    span: SrcSpan,
+    line_numbers: &LineNumbers,
+    kind: Option<FoldingRangeKind>,
+) -> Option<FoldingRange> {
+    let range = src_span_to_lsp_range(span, line_numbers);
+
+    if range.start.line >= range.end.line {
+        return None;
+    }
+
+    Some(FoldingRange {
+        start_line: range.start.line,
+        start_character: None,
+        end_line: range.end.line,
+        end_character: None,
+        kind,
+        collapsed_text: None,
+    })
 }
 
 fn custom_type_symbol(
@@ -1137,7 +1804,7 @@ fn custom_type_symbol(
                 // to be able to construct the 'DocumentSymbol' type, so
                 // we suppress the warning. We specify 'None' as specifying 'Some'
                 // is what is actually deprecated.
-                #[allow(deprecated)]
+                #[expect(deprecated)]
                 arguments.push(DocumentSymbol {
                     name: label.to_string(),
                     detail: Some(
@@ -1145,7 +1812,7 @@ fn custom_type_symbol(
                             .print_type(&argument.type_)
                             .to_string(),
                     ),
-                    kind: SymbolKind::FIELD,
+                    kind: SymbolKind::Field,
                     tags: None,
                     deprecated: None,
                     range: src_span_to_lsp_range(full_arg_span, line_numbers),
@@ -1170,14 +1837,14 @@ fn custom_type_symbol(
             // to be able to construct the 'DocumentSymbol' type, so
             // we suppress the warning. We specify 'None' as specifying 'Some'
             // is what is actually deprecated.
-            #[allow(deprecated)]
+            #[expect(deprecated)]
             DocumentSymbol {
                 name: constructor.name.to_string(),
                 detail: None,
                 kind: if constructor.arguments.is_empty() {
-                    SymbolKind::ENUM_MEMBER
+                    SymbolKind::EnumMember
                 } else {
-                    SymbolKind::CONSTRUCTOR
+                    SymbolKind::Constructor
                 },
                 tags: make_deprecated_symbol_tag(&constructor.deprecation),
                 deprecated: None,
@@ -1209,11 +1876,11 @@ fn custom_type_symbol(
     // to be able to construct the 'DocumentSymbol' type, so
     // we suppress the warning. We specify 'None' as specifying 'Some'
     // is what is actually deprecated.
-    #[allow(deprecated)]
+    #[expect(deprecated)]
     DocumentSymbol {
         name: type_.name.to_string(),
         detail: None,
-        kind: SymbolKind::CLASS,
+        kind: SymbolKind::Class,
         tags: make_deprecated_symbol_tag(&type_.deprecation),
         deprecated: None,
         range: src_span_to_lsp_range(full_type_span, line_numbers),
@@ -1238,7 +1905,7 @@ fn hover_for_pattern(pattern: &TypedPattern, line_numbers: LineNumbers, module: 
 {documentation}"
     );
     Hover {
-        contents: HoverContents::Scalar(MarkedString::String(contents)),
+        contents: Contents::MarkedString(MarkedString::String(contents)),
         range: Some(src_span_to_lsp_range(pattern.location(), &line_numbers)),
     }
 }
@@ -1274,7 +1941,7 @@ fn hover_for_function_head(
 {documentation}"
     );
     Hover {
-        contents: HoverContents::Scalar(MarkedString::String(contents)),
+        contents: Contents::MarkedString(MarkedString::String(contents)),
         range: Some(src_span_to_lsp_range(fun.location, &line_numbers)),
     }
 }
@@ -1287,7 +1954,7 @@ fn hover_for_function_argument(
     let type_ = Printer::new(&module.ast.names).print_type(&argument.type_);
     let contents = format!("```gleam\n{type_}\n```");
     Hover {
-        contents: HoverContents::Scalar(MarkedString::String(contents)),
+        contents: Contents::MarkedString(MarkedString::String(contents)),
         range: Some(src_span_to_lsp_range(argument.location, &line_numbers)),
     }
 }
@@ -1301,7 +1968,7 @@ fn hover_for_annotation(
 ) -> Hover {
     let empty_str = EcoString::from("");
     let documentation = type_constructor
-        .and_then(|t| t.documentation.as_ref())
+        .and_then(|constructor| constructor.documentation.as_ref())
         .unwrap_or(&empty_str);
     // If a user is hovering an annotation, it's not very useful to show the
     // local representation of that type, since that's probably what they see
@@ -1315,7 +1982,7 @@ fn hover_for_annotation(
 {documentation}"
     );
     Hover {
-        contents: HoverContents::Scalar(MarkedString::String(contents)),
+        contents: Contents::MarkedString(MarkedString::String(contents)),
         range: Some(src_span_to_lsp_range(location, &line_numbers)),
     }
 }
@@ -1323,19 +1990,23 @@ fn hover_for_annotation(
 fn hover_for_label(
     location: SrcSpan,
     type_: Arc<Type>,
+    documentation: Option<&EcoString>,
     line_numbers: LineNumbers,
     module: &Module,
 ) -> Hover {
     let type_ = Printer::new(&module.ast.names).print_type(&type_);
-    let contents = format!("```gleam\n{type_}\n```");
+    let contents = match documentation {
+        Some(documentation) => format!("```gleam\n{type_}\n```\n{documentation}"),
+        None => format!("```gleam\n{type_}\n```"),
+    };
     Hover {
-        contents: HoverContents::Scalar(MarkedString::String(contents)),
+        contents: Contents::MarkedString(MarkedString::String(contents)),
         range: Some(src_span_to_lsp_range(location, &line_numbers)),
     }
 }
 
 fn hover_for_module_constant(
-    constant: &ModuleConstant<Arc<Type>, EcoString>,
+    constant: &ModuleConstant<Arc<Type>>,
     line_numbers: LineNumbers,
     module: &Module,
 ) -> Hover {
@@ -1348,7 +2019,7 @@ fn hover_for_module_constant(
         .unwrap_or(&empty_str);
     let contents = format!("```gleam\n{type_}\n```\n{documentation}");
     Hover {
-        contents: HoverContents::Scalar(MarkedString::String(contents)),
+        contents: Contents::MarkedString(MarkedString::String(contents)),
         range: Some(src_span_to_lsp_range(constant.location, &line_numbers)),
     }
 }
@@ -1361,8 +2032,21 @@ fn hover_for_constant(
     let type_ = Printer::new(&module.ast.names).print_type(&constant.type_());
     let contents = format!("```gleam\n{type_}\n```");
     Hover {
-        contents: HoverContents::Scalar(MarkedString::String(contents)),
+        contents: Contents::MarkedString(MarkedString::String(contents)),
         range: Some(src_span_to_lsp_range(constant.location(), &line_numbers)),
+    }
+}
+
+fn hover_for_clause_guard(
+    guard: &TypedClauseGuard,
+    line_numbers: LineNumbers,
+    module: &Module,
+) -> Hover {
+    let type_ = Printer::new(&module.ast.names).print_type(&guard.type_());
+    let contents = format!("```gleam\n{type_}\n```");
+    Hover {
+        contents: Contents::MarkedString(MarkedString::String(contents)),
+        range: Some(src_span_to_lsp_range(guard.location(), &line_numbers)),
     }
 }
 
@@ -1374,13 +2058,14 @@ fn hover_for_string_prefix_pattern_variable(
     let type_ = Printer::new(&module.ast.names).print_type(&type_::string());
     let contents = format!("```gleam\n{type_}\n```");
     Hover {
-        contents: HoverContents::Scalar(MarkedString::String(contents)),
+        contents: Contents::MarkedString(MarkedString::String(contents)),
         range: Some(src_span_to_lsp_range(location, lines)),
     }
 }
 
-fn hover_for_expression(
-    expression: &TypedExpr,
+fn hover_for_expression<'a>(
+    expression: &'a TypedExpr,
+    position: ExpressionPosition<'a>,
     line_numbers: LineNumbers,
     module: &Module,
     hex_deps: &HashSet<EcoString>,
@@ -1394,15 +2079,40 @@ fn hover_for_expression(
         .unwrap_or("".to_string());
 
     // Show the type of the hovered node to the user
-    let type_ = Printer::new(&module.ast.names).print_type(expression.type_().as_ref());
+    let mut printer = Printer::new(&module.ast.names);
+    let type_ = printer.print_type(expression.type_().as_ref());
+
+    // If the expression is a record update and there's record fields that are
+    // begin implicitly updated, then we want to list them in the hover.
+    let unchanged_record_update_fields = match position {
+        ExpressionPosition::Expression | ExpressionPosition::ArgumentOrLabel { .. } => "",
+
+        ExpressionPosition::UpdatedRecord {
+            unchanged_record_fields,
+        } if !unchanged_record_fields.is_empty() => &format!(
+            "Unchanged record fields:\n{}",
+            unchanged_record_fields
+                .iter()
+                .map(|(label, type_)| format!("- `{}: {}`", label, printer.print_type(type_)))
+                .join("\n")
+        ),
+        ExpressionPosition::UpdatedRecord { .. } => "",
+    };
+
+    let description = [documentation, unchanged_record_update_fields, &link_section]
+        .iter()
+        .filter(|string| !string.is_empty())
+        .join("\n\n");
+
     let contents = format!(
         "```gleam
 {type_}
 ```
-{documentation}{link_section}"
+{description}"
     );
+
     Hover {
-        contents: HoverContents::Scalar(MarkedString::String(contents)),
+        contents: Contents::MarkedString(MarkedString::String(contents)),
         range: Some(src_span_to_lsp_range(expression.location(), &line_numbers)),
     }
 }
@@ -1430,7 +2140,7 @@ fn hover_for_imported_value(
 {documentation}{link_section}"
     );
     Hover {
-        contents: HoverContents::Scalar(MarkedString::String(contents)),
+        contents: Contents::MarkedString(MarkedString::String(contents)),
         range: Some(src_span_to_lsp_range(*location, &line_numbers)),
     }
 }
@@ -1458,12 +2168,62 @@ fn hover_for_module(
 {link_section}",
     );
     Hover {
-        contents: HoverContents::Scalar(MarkedString::String(contents)),
+        contents: Contents::MarkedString(MarkedString::String(contents)),
         range: Some(src_span_to_lsp_range(location, line_numbers)),
     }
 }
 
-// Returns true if any part of either range overlaps with the other.
+fn hover_for_custom_type(type_: &CustomType<Arc<Type>>, line_numbers: LineNumbers) -> Hover {
+    let name = &type_.name;
+    let documentation = type_
+        .documentation
+        .as_ref()
+        .map(|(_, documentation)| documentation.clone())
+        .unwrap_or_default();
+
+    let contents = format!("```gleam\n{name}\n```\n{documentation}");
+    Hover {
+        contents: Contents::MarkedString(MarkedString::String(contents)),
+        range: Some(src_span_to_lsp_range(type_.full_location(), &line_numbers)),
+    }
+}
+
+fn hover_for_constructor(
+    constructor: &TypedRecordConstructor,
+    line_numbers: LineNumbers,
+    module: &Module,
+) -> Hover {
+    let mut printer = Printer::new(&module.ast.names);
+
+    let arguments = constructor
+        .arguments
+        .iter()
+        .map(|argument| match &argument.label {
+            Some((_, label)) => eco_format!("{label}: {}", printer.print_type(&argument.type_)),
+            None => printer.print_type(&argument.type_),
+        })
+        .join(", ");
+
+    let documentation = constructor
+        .documentation
+        .as_ref()
+        .map(|(_, documentation)| documentation.clone())
+        .unwrap_or_default();
+
+    let constructor_doc = if arguments.is_empty() {
+        constructor.name.clone()
+    } else {
+        eco_format!("{}({arguments})", constructor.name)
+    };
+
+    let contents = format!("```gleam\n{constructor_doc}\n```\n{documentation}");
+    Hover {
+        contents: Contents::MarkedString(MarkedString::String(contents)),
+        range: Some(src_span_to_lsp_range(constructor.location, &line_numbers)),
+    }
+}
+
+/// Returns true if any part of either range overlaps with the other.
 pub fn overlaps(a: Range, b: Range) -> bool {
     position_within(a.start, b)
         || position_within(a.end, b)
@@ -1471,13 +2231,65 @@ pub fn overlaps(a: Range, b: Range) -> bool {
         || position_within(b.end, a)
 }
 
-// Returns true if a range is contained within another.
+/// Returns true if the first range is within the second range.
+/// The ranges might touch on their extremes and still be considered one within
+/// the other!
+///
+/// `within(a, b)` is true in all of these cases:
+///
+/// - ```txt
+///   |------| b
+///     |---| a
+///   ```
+/// - ```txt
+///   |------| b
+///   |---| a
+///   ```
+/// - ```txt
+///   |------| b
+///      |---| a
+///   ```
+/// - ```txt
+///   |------| b
+///   |------| a
+///   ```
+///
 pub fn within(a: Range, b: Range) -> bool {
     position_within(a.start, b) && position_within(a.end, b)
 }
 
+/// Returns true if the first range is completely within the second range.
+/// The range cannot have any extreme in common to be considered completely
+/// within another.
+///
+/// `completely_within(a, b)` is true this case:
+///
+/// - ```txt
+///   |------| b
+///     |---| a
+///   ```
+///
+/// And `completely_within(a, b)` is false in all these cases:
+///
+/// - ```txt
+///   |------| b
+///   |---| a
+///   ```
+/// - ```txt
+///   |------| b
+///      |---| a
+///   ```
+/// - ```txt
+///   |------| b
+///   |------| a
+///   ```
+///
+pub fn completely_within(a: Range, b: Range) -> bool {
+    a.start > b.start && a.start < b.end && a.end > b.start && a.end < b.end
+}
+
 // Returns true if a position is within a range.
-fn position_within(position: Position, range: Range) -> bool {
+pub fn position_within(position: Position, range: Range) -> bool {
     position >= range.start && position <= range.end
 }
 
@@ -1536,7 +2348,7 @@ fn code_action_unused_values(
         };
 
         CodeActionBuilder::new("Assign unused Result value to `_`")
-            .kind(lsp_types::CodeActionKind::QUICKFIX)
+            .kind(lsp_types::CodeActionKind::QuickFix)
             .changes(uri.clone(), vec![edit])
             .preferred(true)
             .push_to(actions);
@@ -1551,13 +2363,14 @@ struct NameCorrection {
 }
 
 fn code_action_fix_names(
+    module: &Module,
     line_numbers: &LineNumbers,
     params: &lsp::CodeActionParams,
     error: &Option<Error>,
     actions: &mut Vec<CodeAction>,
 ) {
     let uri = &params.text_document.uri;
-    let Some(Error::Type { errors, .. }) = error else {
+    let Some(errors) = type_errors_for_module(error, module) else {
         return;
     };
     let name_corrections = errors
@@ -1598,7 +2411,7 @@ fn code_action_fix_names(
             };
 
             CodeActionBuilder::new(&format!("Rename to {correction}"))
-                .kind(lsp_types::CodeActionKind::QUICKFIX)
+                .kind(lsp_types::CodeActionKind::QuickFix)
                 .changes(uri.clone(), vec![edit])
                 .preferred(true)
                 .push_to(actions);
@@ -1660,9 +2473,10 @@ fn format_hexdocs_link_section(
     module_name: &str,
     name: Option<&str>,
 ) -> String {
+    let package_name = package_name.replace('_', "-");
     let link = match name {
-        Some(name) => format!("https://hexdocs.pm/{package_name}/{module_name}.html#{name}"),
-        None => format!("https://hexdocs.pm/{package_name}/{module_name}.html"),
+        Some(name) => format!("https://{package_name}.hexdocs.pm/{module_name}.html#{name}"),
+        None => format!("https://{package_name}.hexdocs.pm/{module_name}.html"),
     };
     format!("\nView on [HexDocs]({link})")
 }
@@ -1697,5 +2511,10 @@ fn get_doc_marker_position(content_pos: u32) -> u32 {
 fn make_deprecated_symbol_tag(deprecation: &Deprecation) -> Option<Vec<SymbolTag>> {
     deprecation
         .is_deprecated()
-        .then(|| vec![SymbolTag::DEPRECATED])
+        .then(|| vec![SymbolTag::Deprecated])
+}
+
+enum FindReferencesSearchScope {
+    AllModules,
+    CurrentModule,
 }

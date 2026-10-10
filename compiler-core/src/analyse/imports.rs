@@ -1,12 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
 use ecow::EcoString;
+use src_span::SrcSpan;
 
 use crate::{
-    ast::{Publicity, SrcSpan, UnqualifiedImport, UntypedImport},
+    ast::{Publicity, UnqualifiedImport, UntypedImport},
     build::Origin,
     reference::{EntityKind, ReferenceKind},
     type_::{
         Environment, Error, ModuleInterface, Problems, ValueConstructorVariant, Warning,
-        error::InvalidImportKind,
+        environment, error::InvalidImportKind,
     },
 };
 
@@ -40,7 +44,7 @@ impl<'context, 'problems> Importer<'context, 'problems> {
     ) -> Environment<'context> {
         let mut importer = Self::new(origin, env, problems);
         for import in imports {
-            importer.register_import(import)
+            importer.register_import(import);
         }
         importer.environment
     }
@@ -85,18 +89,34 @@ impl<'context, 'problems> Importer<'context, 'problems> {
         module: &ModuleInterface,
     ) {
         let imported_name = import.as_name.as_ref().unwrap_or(&import.name);
+        let import_location = import.location;
 
         // Register the unqualified import if it is a type constructor
-        let Some(type_info) = module.get_public_type(&import.name) else {
-            // TODO: refine to a type specific error
-            self.problems.error(Error::UnknownModuleType {
-                location: import.location,
-                name: import.name.clone(),
-                module_name: module.name.clone(),
-                type_constructors: module.public_type_names(),
-                value_with_same_name: module.get_public_value(&import.name).is_some(),
-            });
-            return;
+        let type_info = match module.types.get(&import.name) {
+            Some(type_info) if type_info.publicity.is_importable() => type_info,
+            // If the type belongs to current package, but isn't importable,
+            // then we produce error message about usage of private type.
+            Some(_) if self.environment.current_package == module.package => {
+                self.problems.error(Error::PrivateTypeUse {
+                    location: import.location,
+                    name: import.name.clone(),
+                    module_name: module.name.clone(),
+                });
+                return;
+            }
+            // Otherwise, the type either doesn't exist or is from another
+            // module, where we do not want to expose information, we produce
+            // error message about usage of unknown type.
+            Some(_) | None => {
+                self.problems.error(Error::UnknownModuleType {
+                    location: import.location,
+                    name: import.name.clone(),
+                    module_name: module.name.clone(),
+                    type_constructors: module.public_type_names(),
+                    value_with_same_name: module.get_importable_value(&import.name).is_some(),
+                });
+                return;
+            }
         };
 
         let type_info = type_info.clone().with_location(import.location);
@@ -116,12 +136,27 @@ impl<'context, 'problems> Importer<'context, 'problems> {
             Publicity::Private,
         );
 
+        let alias_location = SrcSpan {
+            start: import.name_location().end,
+            end: import.location.end,
+        };
+
         self.environment.references.register_type_reference(
             type_info.module.clone(),
             import.name.clone(),
             imported_name,
-            import.imported_name_location,
-            ReferenceKind::Import,
+            import.name_location(),
+            ReferenceKind::Import(alias_location),
+        );
+
+        // Register the type so we know whether it was imported with an import
+        // alias
+        let _ = self.environment.unqualified_imported_types.insert(
+            imported_name.clone(),
+            environment::UnqualifiedImport {
+                location: import_location,
+                has_alias: import.as_name.is_some(),
+            },
         );
 
         if let Err(e) = self
@@ -143,8 +178,9 @@ impl<'context, 'problems> Importer<'context, 'problems> {
         let used_name = import.as_name.as_ref().unwrap_or(&import.name);
 
         // Register the unqualified import if it is a value
-        let variant = match module.get_public_value(import_name) {
-            Some(value) => {
+
+        let variant = match module.values.get(import_name) {
+            Some(value) if value.publicity.is_importable() => {
                 let implementations = value.variant.implementations();
                 // Check the target support of the imported value
                 if self.environment.target_support.is_enforced()
@@ -153,7 +189,7 @@ impl<'context, 'problems> Importer<'context, 'problems> {
                     self.problems.error(Error::UnsupportedExpressionTarget {
                         target: self.environment.target,
                         location,
-                    })
+                    });
                 }
 
                 self.environment.insert_variable(
@@ -165,13 +201,26 @@ impl<'context, 'problems> Importer<'context, 'problems> {
                 );
                 &value.variant
             }
-            None => {
+            // If the value belongs to current package, but isn't importable,
+            // then we produce error message about usage of private value.
+            Some(_) if self.environment.current_package == module.package => {
+                self.problems.error(Error::PrivateValueUse {
+                    location,
+                    name: import_name.clone(),
+                    module_name: module.name.clone(),
+                });
+                return;
+            }
+            // Otherwise, the value either doesn't exist or is from another
+            // module, where we do not want to expose information, we produce
+            // error message about usage of unknown value.
+            Some(_) | None => {
                 self.problems.error(Error::UnknownModuleValue {
                     location,
                     name: import_name.clone(),
                     module_name: module.name.clone(),
                     value_constructors: module.public_value_names(),
-                    type_with_same_name: module.get_public_type(import_name).is_some(),
+                    type_with_same_name: module.get_importable_type(import_name).is_some(),
                     context: crate::type_::error::ModuleValueUsageContext::UnqualifiedImport,
                 });
                 return;
@@ -194,12 +243,17 @@ impl<'context, 'problems> Importer<'context, 'problems> {
                     Publicity::Private,
                 );
 
+                let alias_location = SrcSpan {
+                    start: import.name_location().end,
+                    end: import.location.end,
+                };
+
                 self.environment.references.register_value_reference(
                     module.clone(),
                     import_name.clone(),
                     used_name,
-                    import.imported_name_location,
-                    ReferenceKind::Import,
+                    import.name_location(),
+                    ReferenceKind::Import(alias_location),
                 );
             }
             ValueConstructorVariant::ModuleConstant { module, .. }
@@ -212,19 +266,28 @@ impl<'context, 'problems> Importer<'context, 'problems> {
                     location,
                     Publicity::Private,
                 );
+
+                let alias_location = SrcSpan {
+                    start: import.name_location().end,
+                    end: import.location.end,
+                };
+
                 self.environment.references.register_value_reference(
                     module.clone(),
                     import_name.clone(),
                     used_name,
-                    import.imported_name_location,
-                    ReferenceKind::Import,
+                    import.name_location(),
+                    ReferenceKind::Import(alias_location),
                 );
             }
             ValueConstructorVariant::LocalVariable { .. } => {}
-        };
+        }
 
         // Check if value already was imported
-        if let Some(previous) = self.environment.unqualified_imported_names.get(used_name) {
+        if let Some(environment::UnqualifiedImport {
+            location: previous, ..
+        }) = self.environment.unqualified_imported_names.get(used_name)
+        {
             self.problems.error(Error::DuplicateImport {
                 location,
                 previous_location: *previous,
@@ -234,11 +297,15 @@ impl<'context, 'problems> Importer<'context, 'problems> {
         }
 
         // Register the name as imported so it can't be imported a
-        // second time in future
-        let _ = self
-            .environment
-            .unqualified_imported_names
-            .insert(used_name.clone(), location);
+        // second time in future and so we know whether it was imported with an
+        // import alias
+        let _ = self.environment.unqualified_imported_names.insert(
+            used_name.clone(),
+            environment::UnqualifiedImport {
+                location,
+                has_alias: import.as_name.is_some(),
+            },
+        );
     }
 
     /// Check for invalid imports, such as `src` importing `test` or `dev`.
@@ -295,12 +362,15 @@ impl<'context, 'problems> Importer<'context, 'problems> {
                 import.module.clone(),
                 alias_location,
                 import.location,
+                import.module_location,
             );
         } else {
             self.environment.references.register_module(
                 used_name.clone(),
                 import.module.clone(),
                 import.location,
+                import.module_location,
+                None,
             );
         }
 

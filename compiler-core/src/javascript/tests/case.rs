@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use crate::assert_js;
 
 #[test]
@@ -921,4 +924,412 @@ pub fn wibble() {
   }
 }"#
     )
+}
+
+#[test]
+fn directly_matching_case_subject() {
+    assert_js!(
+        r#"
+pub fn go() {
+  let x = "ABC"
+  case True {
+    True -> {
+      let x = 79
+      0
+    }
+    False -> {
+      let x = True
+      0
+    }
+  }
+  x
+}"#
+    )
+}
+
+// https://github.com/gleam-lang/gleam/issues/5400
+#[test]
+fn case_matching_single_character_prefixes() {
+    assert_js!(
+        r#"
+pub fn parse_digit(s: String) -> Int {
+  case s {
+    "0" <> s -> 0
+    "1" <> s -> 1
+    "2" <> s -> 2
+    "3" <> s -> 3
+    "4" <> s -> 4
+    "5" <> s -> 5
+    "6" <> s -> 6
+    "7" <> s -> 7
+    "8" <> s -> 8
+    "9" <> s -> 9
+    "" -> todo
+    _ -> panic
+  }
+}
+"#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/5467
+#[test]
+fn no_duplicate_let_after_directly_matching_case() {
+    assert_js!(
+        r#"
+pub fn go() {
+  let x =
+    case #(1, 2) {
+      #(1, b) -> b
+      #(_, b) -> b
+    }
+
+  let #(a, _b) = #(x, 3)
+
+  a
+}"#
+    )
+}
+
+// https://github.com/gleam-lang/gleam/issues/5743
+#[test]
+fn no_duplicate_pipe_variable_with_case_in_pipeline() {
+    assert_js!(
+        r#"
+pub fn main() {
+  0
+  |> case True {
+    True -> add_one |> identity
+    False -> add_one
+  }
+  |> add_one
+}
+
+fn identity(x) {
+  x
+}
+
+fn add_one(x) {
+  x + 1
+}"#
+    )
+}
+
+#[test]
+fn list_with_tail_used_in_guard() {
+    assert_js!(
+        r#"
+pub fn go(x: List(Int), y: List(Int)) {
+  case x {
+    [1, ..x] if [1, 2, ..x] == y -> True
+    _ -> False
+  }
+}"#
+    )
+}
+
+// https://github.com/gleam-lang/gleam/issues/5612
+#[test]
+fn no_duplicate_let_after_case_with_same_named_variable_with_declaration_before_and_after() {
+    assert_js!(
+        r#"
+pub fn go() {
+  let x = 0
+  let x = x
+  let x = case #(1, 2) {
+    #(_, x) -> x
+  }
+
+  let x = x
+  x
+}"#
+    )
+}
+
+// https://github.com/gleam-lang/gleam/issues/5612
+#[test]
+fn no_duplicate_let_after_case_with_same_named_variable() {
+    assert_js!(
+        r#"
+pub fn go() {
+  let x = case #(1, 2) {
+    #(_, x) -> x
+  }
+
+  x
+}"#
+    )
+}
+
+// https://github.com/gleam-lang/gleam/issues/5748
+#[test]
+fn no_duplicate_let_when_rebinding_variable_after_directly_matching_case() {
+    assert_js!(
+        r#"
+pub fn go() {
+  let n = 1
+  case True {
+    True -> {
+      let n = 99
+      n
+    }
+    False -> 0
+  }
+  let n = n + 5
+  n
+}"#
+    )
+}
+
+#[test]
+fn semicolon_exists_with_directly_matching_case() {
+    assert_js!(
+        r#"
+pub fn go() {
+  case #(1, 2) {
+    #(a, _) -> a
+  }
+  {2 + 4} * 2
+}"#
+    )
+}
+
+#[test]
+fn semicolon_exists_with_case() {
+    assert_js!(
+        r#"
+pub fn go() {
+  case #(1, 2) {
+    #(2, b) -> b
+    #(1, 3) -> 2
+    #(a, _) -> a
+  }
+  {2 + 4} * 2
+}"#
+    )
+}
+
+// https://github.com/gleam-lang/gleam/issues/6029
+#[test]
+fn bit_array_slice_float_with_number_constructor() {
+    assert_js!(
+        "
+pub type Number {
+  Number(Int)
+}
+
+pub fn go(bit_array) {
+  case bit_array {
+    <<f:float>> -> f
+    _ -> 0.0
+  }
+}
+"
+    );
+}
+
+#[test]
+fn single_choice_switch_does_not_bind_subject() {
+    assert_js!(
+        "
+pub type Wibble {
+  Wibble(Int, Int)
+  Wobble
+}
+
+pub fn go(x) {
+  case x {
+    Wibble(1, 2) -> 1
+    _ -> 2
+  }
+}
+"
+    );
+}
+
+#[test]
+fn single_choice_switch_binds_subject_referenced_more_than_once() {
+    assert_js!(
+        "
+pub fn go(sequences) {
+  case sequences {
+    [] -> 0
+    [_] -> 1
+    [a, b, ..rest] -> a + b + go(rest)
+  }
+}
+"
+    );
+}
+
+#[test]
+fn single_choice_switch_binds_subject_referenced_by_guard() {
+    assert_js!(
+        "
+pub fn go(x) {
+  case x {
+    [a, b, ..rest] if b > 0 -> [a, b, ..rest]
+    _ -> []
+  }
+}
+"
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6213
+#[test]
+fn shadowing_in_directly_matching_case_does_not_leak_out() {
+    assert_js!(
+        r#"
+pub fn go() {
+  let m = 1
+  let _ = case 0 + 0 {
+    _ -> {
+      let m = 99
+      m
+    }
+  }
+  m
+}"#
+    )
+}
+
+// https://github.com/gleam-lang/gleam/issues/6212
+#[test]
+fn pattern_shadowing_module_function_in_directly_matching_case() {
+    assert_js!(
+        r#"
+fn wibble(_: Int) -> Float {
+  0.0
+}
+
+pub fn go() {
+  case 0 + 0 {
+    wibble -> {
+      echo wibble
+    }
+  }
+  |> wibble
+}"#
+    )
+}
+
+#[test]
+fn guard_binding_in_directly_matching_case_is_not_redeclared() {
+    assert_js!(
+        r#"
+pub fn go(x) {
+  case x {
+    #(_, b) if b == 2 -> b
+    #(_, b) -> b
+  }
+  let b = 5
+  b
+}"#
+    )
+}
+
+// https://github.com/gleam-lang/gleam/issues/6182
+#[test]
+fn match_on_empty_bit_array_string() {
+    assert_js!(
+        "
+pub fn main(x) {
+  case x {
+    <<\"\":utf8>> -> \"a\"
+    _ -> \"b\"
+  }
+}
+"
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6182
+#[test]
+fn match_on_empty_bit_array_string_in_middle() {
+    assert_js!(
+        "
+pub fn main(x) {
+  case x {
+    <<\"x\":utf8, \"\":utf8, \"z\":utf8, >> -> \"a\"
+    _ -> \"b\"
+  }
+}
+"
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6182
+#[test]
+fn utf16_match_on_empty_bit_array_string() {
+    assert_js!(
+        "
+pub fn main(x) {
+  case x {
+    <<\"\":utf16>> -> \"a\"
+    _ -> \"b\"
+  }
+}
+"
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6182
+#[test]
+fn utf16_match_on_empty_bit_array_string_in_middle() {
+    assert_js!(
+        r#"
+pub fn main(x) {
+  case x {
+    <<"x":utf16, "":utf16, "z":utf16, >> -> "a"
+    _ -> "b"
+  }
+}
+"#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6182
+#[test]
+fn utf32_match_on_empty_bit_array_string() {
+    assert_js!(
+        r#"
+pub fn main(x) {
+  case x {
+    <<"":utf32>> -> "a"
+    _ -> "b"
+  }
+}
+"#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6182
+#[test]
+fn utf32_match_on_empty_bit_array_string_in_middle() {
+    assert_js!(
+        r#"
+pub fn main(x) {
+  case x {
+    <<"x":utf32, "":utf32, "z":utf32, >> -> "a"
+    _ -> "b"
+  }
+}
+"#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/6182
+#[test]
+fn empty_string_with_alias() {
+    assert_js!(
+        r#"
+pub fn main(x) {
+  case x {
+    <<"" as a:utf8>> -> a
+    _ -> "b"
+  }
+}
+"#
+    );
 }

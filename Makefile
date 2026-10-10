@@ -24,16 +24,9 @@ test: ## Run the compiler unit tests
 	cd test/project_javascript && cargo run clean && cargo run check && cargo run test
 	cd test/project_deno && cargo run clean && cargo run check && cargo run test
 	cd test/hextarball && make test
+	cd test/typescript_declarations && make test
 	cd test/running_modules && make test
 	cd test/subdir_ffi && make
-
-.PHONY: insta-check-unused
-insta-check-unused: ## Check for unused cargo insta snapshots
-	cargo insta test --unreferenced=warn
-
-.PHONY: insta-fix-unused
-insta-fix-unused: ## Remove unused cargo insta snapshots
-	cargo insta test --unreferenced=delete
 
 .PHONY: language-test
 language-test: ## Run the language integration tests for all targets
@@ -53,11 +46,15 @@ javascript-prelude-test-watch: ## Run the JavaScript prelude core tests when fil
 
 .PHONY: test-watch
 test-watch: ## Run compiler tests when files change
-	watchexec -e rs,toml,gleam,html,capnp "cargo test --quiet"
+	watchexec -e rs,toml,gleam,html "cargo test --quiet"
 
 .PHONY: export-hex-tarball-test
 export-hex-tarball-test: ## Run `gleam export hex-tarball` and verify it is created
 	cd test/hextarball && make test
+
+.PHONY: typescript-declarations-test
+typescript-declarations-test: ## Check that generated TypeScript declaration compile
+	cd test/typescript_declarations && make test
 
 .PHONY: benchmark
 benchmark: ## Run the benchmarks

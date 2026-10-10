@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Gleam contributors
+
 import importable
 
 // Constructor functions are used rather than literals to stop the Erlang
@@ -559,4 +562,46 @@ pub fn case_with_guard_does_not_pollute_outer_scope_test() {
     n -> 2
   }
   assert a == b
+}
+
+// https://github.com/gleam-lang/gleam/issues/5641
+pub fn tail_of_list_in_clause_guard_is_not_ignored_test() {
+  assert go([2, 3, 4], [1, 2, 3, 4])
+  assert !go([2, 3], [1, 2])
+}
+
+pub fn go(x: List(Int), y: List(Int)) {
+  case x {
+    [_, ..x] if [1, 2, ..x] == y -> True
+    _ -> False
+  }
+}
+
+pub fn or_guard_does_not_escape_its_pattern_test() {
+  let flag = false()
+  let other = true()
+
+  let value = [1, 2]
+  assert 0
+    == case value {
+      [a] if flag || other -> a
+      _ -> 0
+    }
+
+  let value = 7
+  assert 7
+    == case value {
+      a if flag || other -> a
+      _ -> 0
+    }
+}
+
+pub fn guard_binding_in_directly_matching_case_is_not_redeclared_test() {
+  let value = make_pair(1, 2)
+  case value {
+    #(_, b) if b == 2 -> b
+    #(_, b) -> b
+  }
+  let b = 5
+  assert b == 5
 }

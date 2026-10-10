@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use crate::assert_erl;
 
 #[test]
@@ -24,8 +27,8 @@ fn alternative_patterns1() {
     // Alternative patterns with a clause containing vars
     assert_erl!(
         r#"
-pub fn main() {
-  case Ok(1) {
+pub fn main(x) {
+  case x {
     Ok(duplicate_name) | Error(duplicate_name) -> duplicate_name
   }
 }"#
@@ -120,5 +123,18 @@ fn string_prefix_as_pattern_with_assertion() {
   let assert \"a\" as a <> rest = \"wibble\"
   a
 }"
+    );
+}
+
+#[test]
+fn aliased_discard_pattern_in_bit_array_later_used() {
+    assert_erl!(
+        r#"
+pub fn main(x) {
+  case x {
+    <<_ as b>> -> b + 2
+    _ -> 0
+  }
+}"#
     );
 }

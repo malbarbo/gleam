@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2020 The Gleam contributors
+
 use vec1::Vec1;
 
 use crate::parse::LiteralFloatValue;
@@ -56,17 +59,18 @@ pub enum UntypedExpr {
         location: SrcSpan,
         fun: Box<Self>,
         arguments: Vec<CallArg<Self>>,
+        open_parenthesis: u32,
     },
 
     BinOp {
         location: SrcSpan,
-        name: BinOp,
-        name_location: SrcSpan,
+        operator: BinOp,
+        operator_start: u32,
         left: Box<Self>,
         right: Box<Self>,
     },
 
-    PipeLine {
+    Pipeline {
         expressions: Vec1<Self>,
     },
 
@@ -74,7 +78,7 @@ pub enum UntypedExpr {
         location: SrcSpan,
         subjects: Vec<Self>,
         // None if the case expression is missing a body.
-        clauses: Option<Vec<Clause<Self, (), ()>>>,
+        clauses: Option<Vec<Clause<Self, ()>>>,
     },
 
     FieldAccess {
@@ -131,6 +135,12 @@ pub enum UntypedExpr {
 
     RecordUpdate {
         location: SrcSpan,
+        /// This is where the `..` starts:
+        /// ```gleam
+        /// Wibble(  ..wobble, a: 1)
+        /// //       ^ Here!
+        /// ```
+        spread_start: u32,
         constructor: Box<Self>,
         record: RecordBeingUpdated<UntypedExpr>,
         arguments: Vec<UntypedRecordUpdateArg>,
@@ -150,7 +160,7 @@ pub enum UntypedExpr {
 impl UntypedExpr {
     pub fn location(&self) -> SrcSpan {
         match self {
-            Self::PipeLine { expressions, .. } => expressions
+            Self::Pipeline { expressions, .. } => expressions
                 .first()
                 .location()
                 .merge(&expressions.last().location()),
@@ -181,7 +191,7 @@ impl UntypedExpr {
     pub fn start_byte_index(&self) -> u32 {
         match self {
             Self::Block { location, .. } => location.start,
-            Self::PipeLine { expressions, .. } => expressions.first().start_byte_index(),
+            Self::Pipeline { expressions, .. } => expressions.first().start_byte_index(),
             Self::Int { .. }
             | Self::Float { .. }
             | Self::String { .. }
@@ -206,8 +216,8 @@ impl UntypedExpr {
 
     pub fn bin_op_precedence(&self) -> u8 {
         match self {
-            Self::BinOp { name, .. } => name.precedence(),
-            Self::PipeLine { .. } => 5,
+            Self::BinOp { operator, .. } => operator.precedence(),
+            Self::Pipeline { .. } => 5,
             Self::Int { .. }
             | Self::Float { .. }
             | Self::String { .. }
@@ -231,8 +241,8 @@ impl UntypedExpr {
     }
 
     pub fn bin_op_name(&self) -> Option<&BinOp> {
-        if let UntypedExpr::BinOp { name, .. } = self {
-            Some(name)
+        if let UntypedExpr::BinOp { operator, .. } = self {
+            Some(operator)
         } else {
             None
         }
@@ -256,7 +266,7 @@ impl UntypedExpr {
             | UntypedExpr::List { .. }
             | UntypedExpr::Call { .. }
             | UntypedExpr::BinOp { .. }
-            | UntypedExpr::PipeLine { .. }
+            | UntypedExpr::Pipeline { .. }
             | UntypedExpr::Case { .. }
             | UntypedExpr::Tuple { .. }
             | UntypedExpr::TupleIndex { .. }
@@ -287,7 +297,7 @@ impl UntypedExpr {
 
     #[must_use]
     pub fn is_pipeline(&self) -> bool {
-        matches!(self, Self::PipeLine { .. })
+        matches!(self, Self::Pipeline { .. })
     }
 
     #[must_use]
@@ -315,6 +325,13 @@ pub enum FunctionLiteralKind {
 }
 
 impl FunctionLiteralKind {
+    pub fn is_anonymous(&self) -> bool {
+        match self {
+            FunctionLiteralKind::Anonymous { .. } => true,
+            FunctionLiteralKind::Capture { .. } | FunctionLiteralKind::Use { .. } => false,
+        }
+    }
+
     pub fn is_capture(&self) -> bool {
         match self {
             FunctionLiteralKind::Capture { .. } => true,

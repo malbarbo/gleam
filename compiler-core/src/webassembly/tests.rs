@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Gleam contributors
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -6,13 +9,13 @@ use crate::{
     ast::TypedModule,
     build::{Origin, Target},
     config::PackageConfig,
-    line_numbers::LineNumbers,
     type_::PRELUDE_MODULE_NAME,
     uid::UniqueIdGenerator,
     warning::{TypeWarningEmitter, WarningEmitter},
 };
 use camino::Utf8PathBuf;
 use ecow::EcoString;
+use src_span::LineNumbers;
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -20,7 +23,7 @@ pub fn compile(
     src: &str,
     deps: Vec<(&str, &str, &str)>,
 ) -> (TypedModule, HashMap<EcoString, TypedModule>) {
-    let mut modules = im::HashMap::new();
+    let mut modules = imbl::HashMap::new();
     let ids = UniqueIdGenerator::new();
     let _ = modules.insert(
         PRELUDE_MODULE_NAME.into(),

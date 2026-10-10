@@ -1,8 +1,6 @@
 ---
 source: compiler-core/src/javascript/tests/custom_types.rs
-assertion_line: 209
 expression: "\npub type TypeWithALongNameAndSeveralArguments{\n  TypeWithALongNameAndSeveralArguments(String, String, String, a: String, b: String)\n}\n\npub const local = TypeWithALongNameAndSeveralArguments(\"one\", \"two\", \"three\", \"four\", \"five\")\n"
-snapshot_kind: text
 ---
 ----- SOURCE CODE
 
@@ -44,8 +42,8 @@ export function TypeWithALongNameAndSeveralArguments$TypeWithALongNameAndSeveral
   b: string,
 ): TypeWithALongNameAndSeveralArguments$;
 export function TypeWithALongNameAndSeveralArguments$isTypeWithALongNameAndSeveralArguments(
-  value: TypeWithALongNameAndSeveralArguments$,
-): boolean;
+  value: any,
+): value is TypeWithALongNameAndSeveralArguments$;
 export function TypeWithALongNameAndSeveralArguments$TypeWithALongNameAndSeveralArguments$0(value: TypeWithALongNameAndSeveralArguments$): string;
 export function TypeWithALongNameAndSeveralArguments$TypeWithALongNameAndSeveralArguments$1(
   value: TypeWithALongNameAndSeveralArguments$,

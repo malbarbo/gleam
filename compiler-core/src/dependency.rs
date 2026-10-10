@@ -1,4 +1,14 @@
-use std::{cell::RefCell, cmp::Reverse, collections::HashMap, rc::Rc};
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2023 The Gleam contributors
+
+use std::{
+    cell::RefCell,
+    cmp::{Ordering, Reverse},
+    collections::HashMap,
+    fmt,
+    ops::Bound,
+    rc::Rc,
+};
 
 use crate::{Error, Result, manifest};
 
@@ -7,12 +17,82 @@ use hexpm::{
     Dependency, Release,
     version::{Range, Version},
 };
-use pubgrub::{Dependencies, Map};
+use pubgrub::{Dependencies, DerivationTree, Map};
 use thiserror::Error;
 
 pub type PackageVersions = HashMap<String, Version>;
 
-type PubgrubRange = pubgrub::Range<Version>;
+type PubgrubRange = pubgrub::Range<Presence>;
+
+/// A resolved package version, or `Absent` when the package is not part of the
+/// dependency tree at all.
+///
+/// Hex's optional requirements do not pull a package in, they only constrain
+/// one that something else has already pulled in. pubgrub has no way to say
+/// "this package, if it is here at all", so absence is modelled as a version
+/// that only optional requirements admit. A package resolves to `Absent`
+/// exactly when every requirement on it was optional.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Presence {
+    Absent,
+    Present(Version),
+}
+
+/// `Absent` sorts below every version.
+///
+/// That ordering is what lets a requirement rule absence in or out.
+/// `to_presence_range` gives a mandatory requirement the lower bound
+/// `Bound::Excluded(Absent)`, which admits every version and nothing else.
+impl Ord for Presence {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Presence::Absent, Presence::Absent) => Ordering::Equal,
+            (Presence::Absent, Presence::Present(_)) => Ordering::Less,
+            (Presence::Present(_), Presence::Absent) => Ordering::Greater,
+            (Presence::Present(left), Presence::Present(right)) => left.cmp(right),
+        }
+    }
+}
+
+impl PartialOrd for Presence {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl fmt::Display for Presence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Presence::Absent => write!(f, "absent"),
+            Presence::Present(version) => version.fmt(f),
+        }
+    }
+}
+
+/// Lift a requirement over Hex versions into one over `Presence`.
+///
+/// An unbounded lower end excludes `Absent`, so a mandatory requirement does
+/// not admit absence.
+fn to_presence_range(range: &pubgrub::Range<Version>) -> PubgrubRange {
+    range
+        .iter()
+        .map(|(lower, upper)| {
+            let lower = to_presence_bound(lower, Bound::Excluded(Presence::Absent));
+            let upper = to_presence_bound(upper, Bound::Unbounded);
+            PubgrubRange::from_range_bounds((lower, upper))
+        })
+        .fold(PubgrubRange::empty(), |range, segment| {
+            range.union(&segment)
+        })
+}
+
+fn to_presence_bound(bound: &Bound<Version>, unbounded: Bound<Presence>) -> Bound<Presence> {
+    match bound {
+        Bound::Unbounded => unbounded,
+        Bound::Included(version) => Bound::Included(Presence::Present(version.clone())),
+        Bound::Excluded(version) => Bound::Excluded(Presence::Present(version.clone())),
+    }
+}
 
 pub fn resolve_versions<Requirements>(
     package_fetcher: &impl PackageFetcher,
@@ -28,21 +108,26 @@ where
     let root_version = Version::new(0, 0, 0);
     let requirements = root_dependencies(dependencies, locked)?;
 
-    // Creating a map of all the required packages that have exact versions specified
+    // Creating a map of all the required packages that have exact versions
+    // specified
     let exact_deps = &requirements
         .iter()
-        .filter_map(|(name, dep)| parse_exact_version(dep.requirement.as_str()).map(|v| (name, v)))
+        .filter_map(|(name, dependency)| {
+            parse_exact_version(dependency.requirement.as_str()).map(|version| (name, version))
+        })
         .map(|(name, version)| (name.clone(), version))
         .collect();
 
     let root = hexpm::Package {
         name: root_name.as_str().into(),
         repository: "local".into(),
+        advisories: vec![],
         releases: vec![Release {
             version: root_version.clone(),
             outer_checksum: vec![],
             retirement_status: None,
             requirements,
+            security_advisories: vec![],
             meta: (),
         }],
     };
@@ -50,11 +135,17 @@ where
     let packages = pubgrub::resolve(
         &DependencyProvider::new(package_fetcher, provided_packages, root, locked, exact_deps),
         root_name.as_str().into(),
-        root_version,
+        Presence::Present(root_version),
     )
     .map_err(|error| Error::dependency_resolution_failed(error, root_name.clone()))?
     .into_iter()
-    .filter(|(name, _)| name.as_str() != root_name.as_str())
+    .filter_map(|(name, version)| match version {
+        // Packages that only ever had optional requirements on them are not
+        // part of the dependency tree.
+        Presence::Absent => None,
+        Presence::Present(_) if name.as_str() == root_name.as_str() => None,
+        Presence::Present(version) => Some((name, version)),
+    })
     .collect();
 
     Ok(packages)
@@ -105,8 +196,8 @@ fn resolve_versions_diffs(
         .collect()
 }
 
-/// Check for major version updates for direct dependencies that are being blocked by some version
-/// constraints.
+/// Check for major version updates for direct dependencies that are being
+/// blocked by some version constraints.
 pub fn check_for_major_version_updates(
     manifest: &manifest::Manifest,
     package_fetcher: &impl PackageFetcher,
@@ -115,19 +206,28 @@ pub fn check_for_major_version_updates(
         .packages
         .iter()
         .filter(|manifest_package| {
-            manifest
-                .requirements
-                .iter()
-                .any(|(required_pkg, _)| manifest_package.name == *required_pkg)
+            // It makes sense to check for major version upgrades only for
+            // packages that are actually published.
+            // git and path dependencies are skipped.
+            manifest_package.is_hex()
+                && manifest
+                    .requirements
+                    .iter()
+                    .any(|(required_package, _)| manifest_package.name == *required_package)
         })
-        .map(|manifest_pkg| (manifest_pkg.name.to_string(), manifest_pkg.version.clone()))
+        .map(|manifest_package| {
+            (
+                manifest_package.name.to_string(),
+                manifest_package.version.clone(),
+            )
+        })
         .collect();
 
     resolve_versions_diffs(package_fetcher, versions, true)
 }
 
-/// Check for version updates for direct and transitive dependencies that are being blocked by some version
-/// constraints.
+/// Check for version updates for direct and transitive dependencies that are
+/// being blocked by some version constraints.
 pub fn check_for_version_updates(
     manifest: &manifest::Manifest,
     package_fetcher: &impl PackageFetcher,
@@ -135,13 +235,13 @@ pub fn check_for_version_updates(
     let versions = manifest
         .packages
         .iter()
-        .filter(|manifest_package| {
-            matches!(
-                manifest_package.source,
-                manifest::ManifestPackageSource::Hex { .. }
+        .filter(|manifest_package| manifest_package.is_hex())
+        .map(|manifest_package| {
+            (
+                manifest_package.name.to_string(),
+                manifest_package.version.clone(),
             )
         })
-        .map(|manifest_pkg| (manifest_pkg.name.to_string(), manifest_pkg.version.clone()))
         .collect();
 
     resolve_versions_diffs(package_fetcher, versions, false)
@@ -214,7 +314,7 @@ but it is locked to {locked_version}, which is incompatible.",
                     });
                 }
             }
-        };
+        }
     }
 
     Ok(requirements)
@@ -226,7 +326,7 @@ pub trait PackageFetcher {
 
 #[derive(Debug, Error)]
 pub enum PackageFetchError {
-    #[error("The package {0} was not found in the package repository")]
+    #[error("the package {0} was not found in the package repository")]
     NotFoundError(String),
     #[error("{0}")]
     ApiError(hexpm::ApiError),
@@ -241,7 +341,13 @@ impl PackageFetchError {
     pub fn from_api_error(api_error: hexpm::ApiError, package: &str) -> Self {
         match &api_error {
             hexpm::ApiError::NotFound => Self::NotFoundError(package.to_string()),
+
             hexpm::ApiError::Json(_)
+            | hexpm::ApiError::IncorrectOneTimePassword
+            | hexpm::ApiError::OAuthRefreshTokenRejected
+            | hexpm::ApiError::OAuthAccessDenied
+            | hexpm::ApiError::OAuthTimeout
+            | hexpm::ApiError::ExpiredToken
             | hexpm::ApiError::Io(_)
             | hexpm::ApiError::InvalidProtobuf(_)
             | hexpm::ApiError::UnexpectedResponse(_, _)
@@ -252,9 +358,9 @@ impl PackageFetchError {
             | hexpm::ApiError::InvalidVersionFormat(_)
             | hexpm::ApiError::InvalidVersionRequirementFormat(_)
             | hexpm::ApiError::IncorrectChecksum
-            | hexpm::ApiError::InvalidApiKey
             | hexpm::ApiError::Forbidden
             | hexpm::ApiError::NotReplacing
+            | hexpm::ApiError::LateDeletion
             | hexpm::ApiError::LateModification => Self::ApiError(api_error),
         }
     }
@@ -266,10 +372,11 @@ pub struct DependencyProvider<'a, T: PackageFetcher> {
     remote: &'a T,
     locked: &'a HashMap<EcoString, Version>,
     // Map of packages where an exact version was requested
-    // We need this because by default pubgrub checks exact version by checking if a version is between the exact
-    // and the version 1 bump ahead. That default breaks on prerelease builds since a bump includes the whole patch
+    // We need this because by default pubgrub checks exact version by checking
+    // if a version is between the exact and the version 1 bump ahead.
+    // That default breaks on prerelease builds since a bump includes the whole
+    // patch.
     exact_only: &'a HashMap<String, Version>,
-    optional_dependencies: RefCell<HashMap<EcoString, pubgrub::Range<Version>>>,
 }
 
 impl<'a, T> DependencyProvider<'a, T>
@@ -289,7 +396,6 @@ where
             locked,
             remote,
             exact_only,
-            optional_dependencies: RefCell::new(Default::default()),
         }
     }
 
@@ -317,7 +423,7 @@ where
             let (pre, mut norm): (_, Vec<_>) = package
                 .releases
                 .into_iter()
-                .partition(|r| r.version.is_pre());
+                .partition(|release| release.version.is_pre());
             norm.extend(pre);
             package.releases = norm;
             let _ = packages.insert(name.into(), package);
@@ -329,6 +435,11 @@ where
 type PackageName = String;
 pub type ResolutionError<'a, T> = pubgrub::PubGrubError<DependencyProvider<'a, T>>;
 
+/// Why resolution could not find a set of versions that satisfies everything.
+///
+#[derive(Debug, Clone)]
+pub struct ResolutionFailure(pub(crate) DerivationTree<PackageName, PubgrubRange, String>);
+
 impl<T> pubgrub::DependencyProvider for DependencyProvider<'_, T>
 where
     T: PackageFetcher,
@@ -338,13 +449,17 @@ where
         package: &Self::P,
         version: &Self::V,
     ) -> Result<Dependencies<Self::P, Self::VS, Self::M>, Self::Err> {
+        let Presence::Present(version) = version else {
+            return Ok(Dependencies::Available(Map::default()));
+        };
+
         self.ensure_package_fetched(package)?;
         let packages = self.packages.borrow();
         let release = match packages
             .get(package.as_str())
             .into_iter()
-            .flat_map(|p| p.releases.iter())
-            .find(|r| &r.version == version)
+            .flat_map(|package| package.releases.iter())
+            .find(|release| &release.version == version)
         {
             Some(release) => release,
             None => {
@@ -361,25 +476,19 @@ where
             )));
         }
 
-        let mut deps: Map<PackageName, PubgrubRange> = Default::default();
-        for (name, d) in &release.requirements {
-            let mut range = d.requirement.to_pubgrub().clone();
-            let mut opt_deps = self.optional_dependencies.borrow_mut();
-            // if it's optional and it was not provided yet, store and skip
-            if d.optional && !packages.contains_key(name.as_str()) {
-                let _ = opt_deps
-                    .entry(name.into())
-                    .and_modify(|stored_range| {
-                        *stored_range = range.intersection(stored_range);
-                    })
-                    .or_insert(range);
-                continue;
-            }
-
-            // if a now required dep was optional before, add back the constraints
-            if let Some(other_range) = opt_deps.remove(name.as_str()) {
-                range = range.intersection(&other_range);
-            }
+        let absent = PubgrubRange::singleton(Presence::Absent);
+        let mut deps: Map<PackageName, PubgrubRange> = Map::default();
+        for (name, dependency) in &release.requirements {
+            let requirement = to_presence_range(dependency.requirement.to_pubgrub());
+            // Admitting absence is the whole of what makes a requirement
+            // optional. pubgrub then intersects it with every other requirement
+            // on the package in the same pass, so the outcome does not depend
+            // on the order packages happen to be visited in.
+            let range = if dependency.optional {
+                requirement.union(&absent)
+            } else {
+                requirement
+            };
 
             let _ = deps.insert(name.clone(), range);
         }
@@ -398,10 +507,10 @@ where
                 .get(package.as_str())
                 .cloned()
                 .into_iter()
-                .flat_map(|p| {
-                    p.releases
-                        .into_iter()
-                        .filter(|r| range.contains(&r.version))
+                .flat_map(|package| {
+                    package.releases.into_iter().filter(|release| {
+                        range.contains(&Presence::Present(release.version.clone()))
+                    })
                 })
                 .count(),
         )
@@ -412,6 +521,12 @@ where
         package: &Self::P,
         range: &Self::VS,
     ) -> std::result::Result<Option<Self::V>, Self::Err> {
+        // Nothing mandatory requires this package, so it stays out of the
+        // dependency tree and never needs fetching.
+        if range.contains(&Presence::Absent) {
+            return Ok(Some(Presence::Absent));
+        }
+
         self.ensure_package_fetched(package)?;
 
         let exact_package = self.exact_only.get(package);
@@ -421,25 +536,31 @@ where
             .get(package.as_str())
             .cloned()
             .into_iter()
-            .flat_map(move |p| {
-                p.releases
+            .flat_map(move |package| {
+                package
+                    .releases
                     .into_iter()
-                    // if an exact version of a package is specified then we only want to allow that version as available
+                    // if an exact version of a package is specified then we
+                    // only want to allow that version as available.
                     .filter_map(move |release| match exact_package {
-                        Some(ver) => (ver == &release.version).then_some(release.version),
+                        Some(version) => (version == &release.version).then_some(release.version),
                         _ => Some(release.version),
                     })
             })
-            .filter(|v| range.contains(v));
-        match potential_versions.clone().filter(|v| !v.is_pre()).max() {
+            .filter(|version| range.contains(&Presence::Present(version.clone())));
+        match potential_versions
+            .clone()
+            .filter(|version| !version.is_pre())
+            .max()
+        {
             // Don't resolve to a pre-releaase package unless we *have* to
-            Some(v) => Ok(Some(v)),
-            None => Ok(potential_versions.max()),
+            Some(version) => Ok(Some(Presence::Present(version))),
+            None => Ok(potential_versions.max().map(Presence::Present)),
         }
     }
 
     type P = PackageName;
-    type V = Version;
+    type V = Presence;
     type VS = PubgrubRange;
     type Priority = Reverse<usize>;
     type M = String;
@@ -449,9 +570,9 @@ where
 #[cfg(test)]
 mod tests {
     use hexpm::RetirementStatus;
+    use itertools::Itertools;
 
     use crate::{
-        derivation_tree::DerivationTreePrinter,
         manifest::{Base16Checksum, ManifestPackage, ManifestPackageSource},
         requirement,
     };
@@ -510,6 +631,28 @@ mod tests {
                     vec![],
                     vec![("gleam_stdlib", ">= 0.1.0 and < 0.3.0")],
                 )],
+            ),
+            (
+                "package_with_optional_chain",
+                vec![release_with_optional(
+                    "0.1.0",
+                    vec![],
+                    vec![
+                        ("pkg_that_gains_a_dep", ">= 0.1.0 and < 0.2.0"),
+                        ("indirect_optional_target", ">= 0.1.0 and < 0.2.0"),
+                    ],
+                )],
+            ),
+            (
+                "pkg_that_gains_a_dep",
+                vec![
+                    release("0.1.0", vec![("indirect_optional_target", ">= 0.1.0")]),
+                    release("0.2.0", vec![]),
+                ],
+            ),
+            (
+                "indirect_optional_target",
+                vec![release("0.1.0", vec![]), release("0.2.0", vec![])],
             ),
             (
                 "direct_pkg_with_major_version",
@@ -647,16 +790,19 @@ mod tests {
             HashMap::new(),
             "app".into(),
             vec![
+                ("gleam_stdlib".into(), Range::new("~> 0.1".into()).unwrap()),
                 (
                     "package_with_optional".into(),
                     Range::new("~> 0.1".into()).unwrap(),
                 ),
-                ("gleam_stdlib".into(), Range::new("~> 0.1".into()).unwrap()),
             ]
             .into_iter(),
             &vec![].into_iter().collect(),
         )
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .sorted_by(|left, right| left.0.cmp(&right.0))
+        .collect_vec();
         assert_eq!(
             result,
             vec![
@@ -666,8 +812,80 @@ mod tests {
                     Version::try_from("0.1.0").unwrap()
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn resolution_with_optional_deps_not_pulled_in_by_provided_package() {
+        let gleam_stdlib = (*make_remote().get_dependencies("gleam_stdlib").unwrap()).clone();
+        let provided = vec![(EcoString::from("gleam_stdlib"), gleam_stdlib)]
+            .into_iter()
+            .collect();
+
+        let result = resolve_versions(
+            &make_remote(),
+            provided,
+            "app".into(),
+            vec![(
+                "package_with_optional".into(),
+                Range::new("~> 0.1".into()).unwrap(),
+            )]
+            .into_iter(),
+            &vec![].into_iter().collect(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            vec![(
+                "package_with_optional".into(),
+                Version::try_from("0.1.0").unwrap()
+            )]
             .into_iter()
             .collect()
+        );
+    }
+
+    #[test]
+    fn resolution_with_optional_dep_on_package_pulled_in_by_another_optional_dep() {
+        let result = resolve_versions(
+            &make_remote(),
+            HashMap::new(),
+            "app".into(),
+            vec![
+                (
+                    "package_with_optional_chain".into(),
+                    Range::new("~> 0.1".into()).unwrap(),
+                ),
+                (
+                    "pkg_that_gains_a_dep".into(),
+                    Range::new("~> 0.1".into()).unwrap(),
+                ),
+            ]
+            .into_iter(),
+            &vec![].into_iter().collect(),
+        )
+        .unwrap()
+        .into_iter()
+        .sorted_by(|left, right| left.0.cmp(&right.0))
+        .collect_vec();
+
+        assert_eq!(
+            result,
+            vec![
+                (
+                    "indirect_optional_target".into(),
+                    Version::try_from("0.1.0").unwrap()
+                ),
+                (
+                    "package_with_optional_chain".into(),
+                    Version::try_from("0.1.0").unwrap()
+                ),
+                (
+                    "pkg_that_gains_a_dep".into(),
+                    Version::try_from("0.1.0").unwrap()
+                ),
+            ]
         );
     }
 
@@ -706,24 +924,22 @@ mod tests {
             .into_iter(),
             &vec![].into_iter().collect(),
         )
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .sorted_by(|left, right| left.0.cmp(&right.0))
+        .collect_vec();
         assert_eq!(
             result,
             vec![
-                ("gleam_stdlib".into(), Version::try_from("0.2.2").unwrap()),
                 ("gleam_otp".into(), Version::try_from("0.2.0").unwrap()),
+                ("gleam_stdlib".into(), Version::try_from("0.2.2").unwrap()),
                 (
                     "package_with_optional".into(),
                     Version::try_from("0.1.0").unwrap()
                 ),
             ]
-            .into_iter()
-            .collect()
         );
     }
-
-    #[test]
-    fn resolution_with_optional_deps_keep_constraints() {}
 
     #[test]
     fn resolution_locked_to_older_version() {
@@ -859,7 +1075,8 @@ mod tests {
         match err {
             Error::DependencyResolutionError(error) => assert_eq!(
                 error,
-                "An error occurred while choosing the version of unknown: The package unknown was not found in the package repository"
+                "An error occurred while choosing the version of unknown: \
+the package unknown was not found in the package repository"
             ),
             _ => panic!("wrong error: {err}"),
         }
@@ -897,7 +1114,8 @@ mod tests {
         match err {
             Error::IncompatibleLockedVersion { error } => assert_eq!(
                 error,
-                "gleam_stdlib is specified with the requirement `~> 0.1.0`, but it is locked to 0.2.0, which is incompatible."
+                "gleam_stdlib is specified with the requirement `~> 0.1.0`, \
+but it is locked to 0.2.0, which is incompatible."
             ),
             _ => panic!("wrong error: {err}"),
         }
@@ -1025,6 +1243,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn git_deps_are_not_checked_on_hex_for_major_version_updates() {
+        let manifest = manifest::Manifest {
+            requirements: vec![(
+                EcoString::from("wibble"),
+                requirement::Requirement::Git {
+                    git: "git".into(),
+                    ref_: "ref".into(),
+                    path: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            packages: vec![ManifestPackage {
+                name: "wibble".into(),
+                version: Version::parse("0.1.0").unwrap(),
+                build_tools: ["gleam".into()].into(),
+                otp_app: None,
+                requirements: vec![],
+                source: ManifestPackageSource::Git {
+                    repo: "repo".into(),
+                    commit: "commit".into(),
+                    path: None,
+                },
+            }],
+        };
+
+        // There's a package on hex with the same name of the git dependency
+        // and a new major version. Those are not the same package though!!
+        let remote = remote(vec![("wibble", vec![release("2.0.0", vec![])])]);
+        let result = check_for_major_version_updates(&manifest, &remote);
+        assert_eq!(result, HashMap::new());
+    }
+
+    #[test]
+    fn local_deps_are_not_checked_on_hex_for_major_version_updates() {
+        let manifest = manifest::Manifest {
+            requirements: vec![(
+                EcoString::from("wibble"),
+                requirement::Requirement::Path {
+                    path: "path".into(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            packages: vec![ManifestPackage {
+                name: "wibble".into(),
+                version: Version::parse("0.1.0").unwrap(),
+                build_tools: ["gleam".into()].into(),
+                otp_app: None,
+                requirements: vec![],
+                source: ManifestPackageSource::Local {
+                    path: "path".into(),
+                },
+            }],
+        };
+
+        // There's a package on hex with the same name of the local dependency
+        // and a new major version. Those are not the same package though!!
+        let remote = remote(vec![("wibble", vec![release("2.0.0", vec![])])]);
+        let result = check_for_major_version_updates(&manifest, &remote);
+        assert_eq!(result, HashMap::new());
+    }
+
     fn retired_release(
         version: &str,
         requirements: Vec<(&str, &str)>,
@@ -1077,6 +1359,7 @@ mod tests {
             requirements: all_requirements,
             retirement_status: None,
             outer_checksum: vec![1, 2, 3],
+            security_advisories: vec![],
             meta: (),
         }
     }
@@ -1089,6 +1372,7 @@ mod tests {
                 Rc::new(hexpm::Package {
                     name: package.into(),
                     repository: "hexpm".into(),
+                    advisories: vec![],
                     releases,
                 }),
             );
@@ -1145,14 +1429,139 @@ mod tests {
             &vec![].into_iter().collect(),
         );
 
-        if let Err(Error::DependencyResolutionNoSolution {
-            root_package_name,
-            derivation_tree,
-        }) = result
-        {
-            let message = crate::error::wrap(
-                &DerivationTreePrinter::new(root_package_name, derivation_tree.0).print(),
-            );
+        if let Err(error @ Error::DependencyResolutionNoSolution { .. }) = result {
+            let message = error.pretty_string();
+            insta::assert_snapshot!(message)
+        } else {
+            panic!("expected a resolution error message")
+        }
+    }
+
+    #[test]
+    fn resolution_error_message_for_requirement_with_no_lower_bound() {
+        let remote = remote(vec![(
+            "wibble",
+            vec![release("1.2.0", vec![]), release("1.3.0", vec![])],
+        )]);
+
+        let result = resolve_versions(
+            &remote,
+            HashMap::new(),
+            "app".into(),
+            vec![("wibble".into(), Range::new("< 1.0.0".into()).unwrap())].into_iter(),
+            &vec![].into_iter().collect(),
+        );
+
+        if let Err(error @ Error::DependencyResolutionNoSolution { .. }) = result {
+            let message = error.pretty_string();
+            insta::assert_snapshot!(message)
+        } else {
+            panic!("expected a resolution error message")
+        }
+    }
+
+    #[test]
+    fn resolution_error_message_for_optional_requirement() {
+        let result = resolve_versions(
+            &make_remote(),
+            HashMap::new(),
+            "app".into(),
+            vec![
+                (
+                    "package_with_optional".into(),
+                    Range::new("~> 0.1".into()).unwrap(),
+                ),
+                ("gleam_stdlib".into(), Range::new("~> 0.3".into()).unwrap()),
+            ]
+            .into_iter(),
+            &vec![].into_iter().collect(),
+        );
+
+        if let Err(error @ Error::DependencyResolutionNoSolution { .. }) = result {
+            let message = error.pretty_string();
+            insta::assert_snapshot!(message)
+        } else {
+            panic!("expected a resolution error message")
+        }
+    }
+
+    #[test]
+    fn resolution_error_message_for_optional_requirement_with_no_lower_bound() {
+        let remote = remote(vec![
+            (
+                "wibble",
+                vec![release_with_optional(
+                    "1.0.0",
+                    vec![],
+                    vec![("wobble", "< 3.0.0")],
+                )],
+            ),
+            (
+                "wobble",
+                vec![release("2.0.0", vec![]), release("3.0.0", vec![])],
+            ),
+        ]);
+
+        let result = resolve_versions(
+            &remote,
+            HashMap::new(),
+            "app".into(),
+            vec![
+                ("wibble".into(), Range::new("~> 1.0".into()).unwrap()),
+                ("wobble".into(), Range::new(">= 3.0.0".into()).unwrap()),
+            ]
+            .into_iter(),
+            &vec![].into_iter().collect(),
+        );
+
+        if let Err(error @ Error::DependencyResolutionNoSolution { .. }) = result {
+            let message = error.pretty_string();
+            insta::assert_snapshot!(message)
+        } else {
+            panic!("expected a resolution error message")
+        }
+    }
+
+    #[test]
+    fn adding_package_version_that_does_not_exist() {
+        let remote = remote(vec![(
+            "wibble",
+            vec![release("1.2.0", vec![]), release("1.3.0", vec![])],
+        )]);
+
+        let result = resolve_versions(
+            &remote,
+            HashMap::new(),
+            "app".into(),
+            vec![("wibble".into(), Range::new("1.0.0".into()).unwrap())].into_iter(),
+            &vec![].into_iter().collect(),
+        );
+
+        if let Err(error @ Error::DependencyResolutionNoSolution { .. }) = result {
+            let message = error.pretty_string();
+            insta::assert_snapshot!(message)
+        } else {
+            panic!("expected a resolution error message")
+        }
+    }
+
+    #[test]
+    fn adding_package_version_that_does_not_exist_2() {
+        let remote = remote(vec![(
+            "wibble",
+            vec![release("1.2.0", vec![]), release("1.3.0", vec![])],
+        )]);
+
+        let result = resolve_versions(
+            &remote,
+            HashMap::new(),
+            "app".into(),
+            vec![("wibble".into(), Range::new("> 2.0.0".into()).unwrap())].into_iter(),
+            &vec![].into_iter().collect(),
+        );
+
+        if let Err(error @ Error::DependencyResolutionNoSolution { .. }) = result {
+            let message = error.pretty_string();
             insta::assert_snapshot!(message)
         } else {
             panic!("expected a resolution error message")

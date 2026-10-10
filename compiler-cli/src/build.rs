@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2021 The Gleam contributors
+
 use std::{rc::Rc, time::Instant};
 
 use gleam_core::{
@@ -44,13 +47,15 @@ pub(crate) fn main_with_warnings(
     } else {
         &cli::Reporter
     };
+    let target = options.target.unwrap_or(root_config.target);
     let io = fs::ProjectIO::new();
+    // Initialise the BEAM compiler instance eagerly, so we don't have to wait
+    // for it to boot when we come to use it for the first time.
+    if target.is_erlang() {
+        io.initialise_beam_compiler()?;
+    }
     let start = Instant::now();
-    let lock = BuildLock::new_target(
-        paths,
-        options.mode,
-        options.target.unwrap_or(root_config.target),
-    )?;
+    let lock = BuildLock::new_target(paths, options.mode, target)?;
 
     tracing::info!("Compiling packages");
     let result = {
@@ -70,7 +75,7 @@ pub(crate) fn main_with_warnings(
     match perform_codegen {
         Codegen::All | Codegen::DepsOnly => telemetry.compiled_package(start.elapsed()),
         Codegen::None => telemetry.checked_package(start.elapsed()),
-    };
+    }
 
     Ok(result)
 }
