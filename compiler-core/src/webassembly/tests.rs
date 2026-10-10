@@ -422,6 +422,7 @@ mod lists;
 mod local_closures;
 mod memory;
 mod numbers;
+mod rust;
 mod specialization;
 mod stdlib;
 mod strings;

@@ -107,9 +107,10 @@ pub(super) fn rust_signature(
 
 impl<'a> Generator<'a> {
     fn rust_function(&self, name: &str) -> FunctionId {
-        self.find_global(name)
+        *self
+            .rust_functions
+            .get(name)
             .unwrap_or_else(|| panic!("rust builtin \"{name}\" to be available"))
-            .func_id()
     }
 
     /// The glue of the Rust function `name` with the Gleam type `fn_type`,

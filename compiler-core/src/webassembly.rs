@@ -647,6 +647,8 @@ struct Generator<'a> {
     next_specialization: u32,
     builtins: HashMap<BuiltinFunction, FunctionId>,
     builtins_external: HashMap<BuiltinFunctionExternal, FunctionId>,
+    /// The functions of builtins-wasm, by name.
+    rust_functions: HashMap<EcoString, FunctionId>,
     main: Option<FunctionId>,
     /// Interned string literals and the global each one owns. Insertion
     /// ordered: `code_start` walks this map to lay out the data segments, so
@@ -700,6 +702,7 @@ impl<'a> Generator<'a> {
             next_specialization: 0,
             builtins: HashMap::new(),
             builtins_external: HashMap::new(),
+            rust_functions: HashMap::new(),
             main: None,
             strings: IndexMap::new(),
             consts: vec![],
@@ -1079,7 +1082,12 @@ impl<'a> Generator<'a> {
             })
             .collect();
         for (name, id, params, results) in func_info {
-            let _ = self.add_function_to_globals(name.clone(), id);
+            // Gleam names can't start with `_`, so these don't shadow Gleam
+            // functions; the others are only reached through glue.
+            if name.starts_with('_') {
+                let _ = self.add_function_to_globals(name.clone(), id);
+            }
+            let _ = self.rust_functions.insert(name.clone(), id);
             let _ = available.insert(name, (params, results));
         }
 
