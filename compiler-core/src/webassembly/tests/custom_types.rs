@@ -446,3 +446,467 @@ pub fn main() {
     // should share a single "Option" supertype.
     assert_eq!(names.iter().filter(|n| n.as_str() == "Option").count(), 1,);
 }
+
+#[test]
+fn recursive_struct_through_function() {
+    run_ok(
+        r#"
+type S {
+    S(f: fn(S) -> Int)
+}
+
+pub fn main() {
+    let s = S(fn(_) { 1 })
+    assert s.f(s) == 1
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn recursive_struct_through_tuple() {
+    run_ok(
+        r#"
+type S {
+    S(#(Int, Result(S, Nil)))
+}
+
+pub fn main() {
+    let s = S(#(1, Ok(S(#(2, Error(Nil))))))
+    let assert S(#(_, Ok(S(#(x, _))))) = s
+    assert x == 2
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn recursive_union_shared_field() {
+    run_ok(
+        r#"
+type U {
+    U1(x: fn(U) -> Int, a: Int)
+    U2(x: fn(U) -> Int, b: Int)
+}
+
+pub fn main() {
+    let u = U1(fn(u) { u.x(U2(fn(_) { 2 }, 0)) }, 1)
+    assert u.x(u) == 2
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn mutually_recursive_types() {
+    run_ok(
+        r#"
+type A {
+    A(b: fn() -> B)
+}
+
+type B {
+    B(a: fn() -> A, n: Int)
+}
+
+fn a() -> A {
+    A(fn() { B(a, 1) })
+}
+
+pub fn main() {
+    let b = a().b()
+    assert b.n == 1
+    assert { b.a().b() }.n == 1
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn recursive_cycle_of_three_types() {
+    run_ok(
+        r#"
+type A { A(b: fn() -> B) }
+type B { B(c: fn() -> C) }
+type C { C(a: fn() -> A, n: Int) }
+fn a() -> A { A(fn() { B(fn() { C(a, 3) }) }) }
+pub fn main() {
+    assert a().b().c().n == 3
+    assert a().b().c().a().b().c().n == 3
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn mutually_recursive_unions_shared_field() {
+    run_ok(
+        r#"
+type A { A1(b: fn() -> B, x: Int) A2(b: fn() -> B, y: Int) }
+type B { B1(a: fn() -> A) B2(a: fn() -> A) }
+fn a() -> A { A1(fn() { B2(fn() { A2(fn() { B1(a) }, 7) }) }, 1) }
+pub fn main() {
+    let assert A2(_, y) = a().b().a()
+    assert y == 7
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn mutually_recursive_generic_types() {
+    run_ok(
+        r#"
+type A(t) { A(b: fn(t) -> B(t), v: t) }
+type B(t) { B(a: fn(t) -> A(t)) }
+fn a(v: t) -> A(t) { A(b, v) }
+fn b(_: t) -> B(t) { B(a) }
+pub fn main() {
+    let x = a(1)
+    assert { x.b(1).a(2) }.v == 2
+    let y = a("s")
+    assert { y.b("t").a("u") }.v == "u"
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn recursive_types_nested_cycles() {
+    run_ok(
+        r#"
+type A { A(a: fn(A) -> Int, b: fn(B) -> Int) }
+type B { B(b: fn(B) -> Int, a: fn(A) -> Int) }
+pub fn main() {
+    let a = A(fn(_) { 1 }, fn(_) { 2 })
+    let b = B(fn(_) { 3 }, fn(_) { 4 })
+    assert a.a(a) + a.b(b) + b.b(b) + b.a(a) == 10
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn recursive_types_inner_cycle_closed_first() {
+    run_ok(
+        r#"
+type A { A(b: fn(B) -> Int) }
+type B { B(b: fn(B) -> Int, a: fn(A) -> Int) }
+pub fn main() {
+    let a = A(fn(_) { 1 })
+    let b = B(fn(_) { 2 }, fn(_) { 3 })
+    assert a.b(b) + b.b(b) + b.a(a) == 6
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn recursive_unions_inner_cycle_closed_first() {
+    run_ok(
+        r#"
+type A { A1(b: fn(B) -> Int) A2(b: fn(B) -> Int) }
+type B { B1(b: fn(B) -> Int, a: fn(A) -> Int) B2(b: fn(B) -> Int, a: fn(A) -> Int) }
+pub fn main() {
+    let a = A1(fn(_) { 1 })
+    let b = B2(fn(_) { 2 }, fn(_) { 3 })
+    assert a.b(b) + b.b(b) + b.a(a) == 6
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn mutually_recursive_types_through_list_and_tuple() {
+    run_ok(
+        r#"
+type A { A(List(#(Int, B))) }
+type B { B(fn(A) -> Int) }
+pub fn main() {
+    let a = A([#(1, B(fn(_) { 5 }))])
+    let assert A([#(_, B(f))]) = a
+    assert f(a) == 5
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn mutual_operations() {
+    run_ok(
+        r#"
+type Expr {
+    Num(Int)
+    Op(BinOp)
+}
+
+type BinOp {
+    Add(Expr, Expr)
+    Mul(Expr, Expr)
+}
+
+fn eval(e: Expr) -> Int {
+    case e {
+        Num(n) -> n
+        Op(op) -> eval_op(op)
+    }
+}
+
+fn eval_op(op: BinOp) -> Int {
+    case op {
+        Add(a, b) -> eval(a) + eval(b)
+        Mul(a, b) -> eval(a) * eval(b)
+    }
+}
+
+fn depth(e: Expr) -> Int {
+    case e {
+        Num(_) -> 0
+        Op(op) -> 1 + depth_op(op)
+    }
+}
+
+fn depth_op(op: BinOp) -> Int {
+    case op {
+        Add(a, b) -> max(depth(a), depth(b))
+        Mul(a, b) -> max(depth(a), depth(b))
+    }
+}
+
+fn max(a: Int, b: Int) -> Int {
+    case a > b {
+        True -> a
+        False -> b
+    }
+}
+
+pub fn main() {
+    let e = Op(Mul(Op(Add(Num(1), Num(2))), Num(3)))
+    assert eval(e) == 9
+    assert depth(e) == 2
+
+    let e = Op(Add(Num(4), Op(Mul(Num(5), Num(6)))))
+    assert eval(e) == 34
+    assert depth(e) == 2
+
+    assert eval(Num(7)) == 7
+    assert depth(Num(7)) == 0
+}
+"#,
+    );
+}
+
+#[test]
+fn self_shared_recursive_field() {
+    run_ok(
+        r#"
+pub type X {
+    X1(child: X, n: Int)
+    X2(child: X, s: String)
+}
+
+pub fn first(x: X) -> Int {
+    case x {
+        X1(_, n) -> n
+        X2(_, _) -> 0
+    }
+}
+
+pub fn main() {
+    let _ = first
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn mutual_unions_shared_cross_refs() {
+    run_ok(
+        r#"
+pub type A {
+    A1(b: B, n: Int)
+    A2(b: B, s: String)
+}
+
+pub type B {
+    B1(a: A, n: Int)
+    B2(a: A, s: String)
+}
+
+pub fn show_a(a: A) -> Int {
+    case a {
+        A1(_, n) -> n
+        A2(_, _) -> 0
+    }
+}
+
+pub fn show_b(b: B) -> Int {
+    case b {
+        B1(_, n) -> n
+        B2(_, _) -> 0
+    }
+}
+
+pub fn main() {
+    let _ = show_a
+    let _ = show_b
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn function_field_recursive() {
+    run_ok(
+        r#"
+pub type Handler {
+    Handler(act: fn(Handler) -> Int)
+}
+
+pub fn run(h: Handler) -> Int {
+    case h {
+        Handler(f) -> f(h)
+    }
+}
+
+pub fn main() {
+    let h = Handler(fn(_) { 42 })
+    assert run(h) == 42
+}
+"#,
+    );
+}
+
+#[test]
+fn mutual_structs_cycle() {
+    run_ok(
+        r#"
+pub type Wrap {
+    Wrap(inner: Choice)
+}
+
+pub type Choice {
+    C1(w: Wrap, n: Int)
+}
+
+pub fn first(c: Choice) -> Wrap {
+    case c {
+        C1(w, _) -> w
+    }
+}
+
+pub fn main() {
+    let _ = first
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn private_cyclic_mutual_structs() {
+    run_ok(
+        r#"
+type Wrap {
+    Wrap(inner: Choice)
+}
+
+type Choice {
+    C1(w: Wrap, n: Int)
+}
+
+fn first(c: Choice) -> Wrap {
+    case c {
+        C1(w, _) -> w
+    }
+}
+
+pub fn main() {
+    let _ = first
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn private_cyclic_via_body_only() {
+    run_ok(
+        r#"
+type Wrap {
+    Wrap(inner: Choice)
+}
+
+type Choice {
+    C1(w: Wrap, n: Int)
+}
+
+pub fn main() -> Int {
+    let unpack = fn(c: Choice) -> Int {
+        case c {
+            C1(_, n) -> n
+        }
+    }
+    let _ = unpack
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn recursive_type_instantiations_with_same_type_name() {
+    let result = super::run_wasm(
+        r#"
+import thepackage/a/y as ay
+import thepackage/b/y as by
+
+type Box(t) { Box(f: fn(Box(t)) -> Int, v: t) }
+
+pub fn main() {
+    let a = Box(fn(_) { 1 }, ay.new())
+    let b = Box(fn(_) { 2 }, by.new())
+    assert a.f(a) + b.f(b) == 3
+    assert ay.value(a.v) == 3
+    assert by.value(b.v) == 4.5
+    0
+}
+"#,
+        vec![
+            ("thepackage", "thepackage/a/x", "pub type T { T(Int) }"),
+            (
+                "thepackage",
+                "thepackage/a/y",
+                "import thepackage/a/x
+pub fn new() { x.T(3) }
+pub fn value(t: x.T) { let x.T(v) = t v }",
+            ),
+            ("thepackage", "thepackage/b/x", "pub type T { T(Float) }"),
+            (
+                "thepackage",
+                "thepackage/b/y",
+                "import thepackage/b/x
+pub fn new() { x.T(4.5) }
+pub fn value(t: x.T) { let x.T(v) = t v }",
+            ),
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}

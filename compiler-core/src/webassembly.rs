@@ -317,6 +317,37 @@ impl WasmType {
             kind: WasmTypeKind::Union(fields, supertype),
         }
     }
+
+    fn remap(self, remap: &impl Fn(TypeId) -> TypeId) -> WasmType {
+        let val_types = |val_types: Vec<ValType>| {
+            val_types
+                .iter()
+                .map(|val_type| remap_val_type(val_type, remap))
+                .collect()
+        };
+        let fields = |fields: Vec<(EcoString, ValType)>| {
+            fields
+                .into_iter()
+                .map(|(name, val_type)| (name, remap_val_type(&val_type, remap)))
+                .collect()
+        };
+        let kind = match self.kind {
+            WasmTypeKind::Array(storage_type) => {
+                WasmTypeKind::Array(remap_storage_type(storage_type, remap))
+            }
+            WasmTypeKind::Function(params, results) => {
+                WasmTypeKind::Function(val_types(params), val_types(results))
+            }
+            WasmTypeKind::Struct(fields_) => WasmTypeKind::Struct(fields(fields_)),
+            WasmTypeKind::Union(fields_, supertype) => {
+                WasmTypeKind::Union(fields(fields_), supertype.map(remap))
+            }
+        };
+        WasmType {
+            name: self.name,
+            kind,
+        }
+    }
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -325,6 +356,26 @@ enum WasmTypeKind {
     Function(Vec<ValType>, Vec<ValType>),
     Struct(Vec<(EcoString, ValType)>),
     Union(Vec<(EcoString, ValType)>, Option<TypeId>),
+}
+
+enum CustomTypeId {
+    /// Its definition is in progress, at this position of
+    /// `custom_type_definitions`.
+    Defining(usize),
+    Defined(TypeId),
+}
+
+/// A custom type definition in progress. Definitions that reference each
+/// other form a cycle, and the types of a cycle are added to a rec group
+/// when the outermost definition of the cycle is finished.
+struct CustomTypeDefinition {
+    /// The id reserved for the type when its definition references it.
+    reserved: Option<TypeId>,
+    /// The position of the outermost definition in progress that this
+    /// definition, or the definitions inside it, references.
+    outermost: usize,
+    /// The first id reserved by this definition or the definitions inside it.
+    first_reserved: Option<TypeId>,
 }
 
 #[derive(Clone)]
@@ -490,6 +541,9 @@ struct Generator<'a> {
     /// Names of builtin data segments, indexed by segment index.
     builtin_data_names: Vec<String>,
     wasm_types: IndexMap<WasmType, TypeId>,
+    /// The type ids of the custom types instantiations.
+    custom_type_ids: HashMap<EcoString, CustomTypeId>,
+    custom_type_definitions: Vec<CustomTypeDefinition>,
     types: HashMap<(EcoString, EcoString), CustomType>,
     variants: HashMap<(EcoString, EcoString), Variant>,
     local_functions: HashMap<SrcSpan, LocalFunction>,
@@ -538,6 +592,8 @@ impl<'a> Generator<'a> {
             memory,
             builtin_data_names: Vec::new(),
             wasm_types,
+            custom_type_ids: HashMap::new(),
+            custom_type_definitions: Vec::new(),
             types: HashMap::new(),
             variants: HashMap::new(),
             local_functions: HashMap::new(),
@@ -1418,8 +1474,19 @@ impl<'a> Generator<'a> {
     }
 
     fn struct_type_index(&mut self, name: EcoString, fields: Vec<(EcoString, ValType)>) -> TypeId {
+        self.struct_type_index_reserved(name, fields, None)
+    }
+
+    fn struct_type_index_reserved(
+        &mut self,
+        name: EcoString,
+        fields: Vec<(EcoString, ValType)>,
+        reserved: Option<TypeId>,
+    ) -> TypeId {
         let key = WasmType::struct_(name.clone(), fields.clone());
-        if let Some(id) = self.wasm_types.get(&key) {
+        if reserved.is_none()
+            && let Some(id) = self.wasm_types.get(&key)
+        {
             return *id;
         }
         let walrus_fields: Vec<FieldType> = fields
@@ -1429,7 +1496,10 @@ impl<'a> Generator<'a> {
                 mutable: false,
             })
             .collect();
-        let id = self.wasm_module.types.add_struct(walrus_fields);
+        let comp = walrus::CompositeType::Struct(walrus::StructType {
+            fields: walrus_fields.into_boxed_slice(),
+        });
+        let id = self.composite_type_add(comp, true, None, reserved);
         self.wasm_module.types.get_mut(id).name = Some(name.to_string());
         let _ = self.wasm_types.insert(key, id);
         id
@@ -1463,9 +1533,185 @@ impl<'a> Generator<'a> {
         args: &[Arc<Type>],
     ) -> (TypeId, Vec<Arc<Type>>) {
         let types = Monomorphizer::variant_constructor(custom_type, constructor, args);
+        let key = custom_type_key(type_);
+        if let Some(id) = self.custom_type_begin(&key) {
+            return (id, types);
+        }
         let fields = self.fields(constructor, &types);
         let name = self.type_pretty_name(type_);
-        (self.struct_type_index(name, fields), types)
+        let id = self.custom_type_end(key, |this, reserved| {
+            this.struct_type_index_reserved(name, fields, reserved)
+        });
+        (id, types)
+    }
+
+    /// Returns the id of the custom type `key` if it is defined or its
+    /// definition is in progress, reserving the id in this case. Otherwise
+    /// starts its definition, which is finished by `custom_type_end`.
+    fn custom_type_begin(&mut self, key: &EcoString) -> Option<TypeId> {
+        let position = match self.custom_type_ids.get(key) {
+            Some(CustomTypeId::Defined(id)) => return Some(*id),
+            Some(CustomTypeId::Defining(position)) => *position,
+            None => {
+                let position = self.custom_type_definitions.len();
+                let _ = self
+                    .custom_type_ids
+                    .insert(key.clone(), CustomTypeId::Defining(position));
+                self.custom_type_definitions.push(CustomTypeDefinition {
+                    reserved: None,
+                    outermost: position,
+                    first_reserved: None,
+                });
+                return None;
+            }
+        };
+        let current = self
+            .custom_type_definitions
+            .last_mut()
+            .expect("definition in progress");
+        current.outermost = current.outermost.min(position);
+        let definition = self
+            .custom_type_definitions
+            .get_mut(position)
+            .expect("definition in progress");
+        if let Some(id) = definition.reserved {
+            return Some(id);
+        }
+        // A placeholder that references itself, so no other type is
+        // deduplicated to it.
+        let placeholder = |id: &TypeId| {
+            let field = FieldType {
+                element_type: StorageType::Val(ValType::Ref(RefType {
+                    heap_type: HeapType::Concrete(*id),
+                    nullable: true,
+                })),
+                mutable: false,
+            };
+            let comp = walrus::CompositeType::Struct(walrus::StructType {
+                fields: vec![field].into_boxed_slice(),
+            });
+            (comp, true, None)
+        };
+        let id = *self
+            .wasm_module
+            .types
+            .add_rec_group(1, |ids| ids.iter().map(placeholder).collect())
+            .first()
+            .expect("reserved type");
+        definition.reserved = Some(id);
+        let _ = definition.first_reserved.get_or_insert(id);
+        Some(id)
+    }
+
+    /// Finishes the definition of the custom type `key`, adding its type with
+    /// `add`, which receives the reserved id.
+    fn custom_type_end(
+        &mut self,
+        key: EcoString,
+        add: impl FnOnce(&mut Self, Option<TypeId>) -> TypeId,
+    ) -> TypeId {
+        let reserved = self
+            .custom_type_definitions
+            .last()
+            .expect("definition in progress")
+            .reserved;
+        let id = add(self, reserved);
+        let definition = self
+            .custom_type_definitions
+            .pop()
+            .expect("definition in progress");
+        let _ = self.custom_type_ids.insert(key, CustomTypeId::Defined(id));
+        let position = self.custom_type_definitions.len();
+        if let Some(enclosing) = self.custom_type_definitions.last_mut()
+            && definition.outermost < position
+        {
+            enclosing.outermost = enclosing.outermost.min(definition.outermost);
+            enclosing.first_reserved = enclosing
+                .first_reserved
+                .into_iter()
+                .chain(definition.first_reserved)
+                .min_by_key(|id| id.index());
+            return id;
+        }
+        match definition.first_reserved {
+            Some(first) => self.rec_group_from(first, id),
+            None => id,
+        }
+    }
+
+    fn composite_type_add(
+        &mut self,
+        comp: walrus::CompositeType,
+        is_final: bool,
+        supertype: Option<TypeId>,
+        reserved: Option<TypeId>,
+    ) -> TypeId {
+        let Some(id) = reserved else {
+            return self
+                .wasm_module
+                .types
+                .add_composite(comp, is_final, supertype);
+        };
+        let type_ = self.wasm_module.types.get_mut(id);
+        *type_.kind_mut() = comp;
+        type_.is_final = is_final;
+        type_.supertype = supertype;
+        id
+    }
+
+    /// Moves the types created since `first` to a new rec group, so they can
+    /// reference each other. No rec group may contain both these types and
+    /// types created before `first`. Returns the new id of `id`.
+    fn rec_group_from(&mut self, first: TypeId, id: TypeId) -> TypeId {
+        let types = &mut self.wasm_module.types;
+        let old: Vec<TypeId> = types
+            .iter()
+            .map(|type_| type_.id())
+            .skip_while(|id| id.index() < first.index())
+            .collect();
+        let definitions: Vec<_> = old
+            .iter()
+            .map(|id| {
+                let type_ = types.get(*id);
+                (
+                    type_.kind().clone(),
+                    type_.is_final,
+                    type_.supertype,
+                    type_.name.clone(),
+                )
+            })
+            .collect();
+        let new = types.add_rec_group(old.len(), |new| {
+            let remap: HashMap<TypeId, TypeId> =
+                old.iter().copied().zip(new.iter().copied()).collect();
+            let remap = |id: TypeId| remap.get(&id).copied().unwrap_or(id);
+            definitions
+                .iter()
+                .map(|(kind, is_final, supertype, _)| {
+                    (
+                        remap_composite_type(kind, &remap),
+                        *is_final,
+                        supertype.map(remap),
+                    )
+                })
+                .collect()
+        });
+        for ((old, new), (.., name)) in old.iter().zip(&new).zip(definitions) {
+            types.delete(*old);
+            types.get_mut(*new).name = name;
+        }
+        let remap: HashMap<TypeId, TypeId> = old.into_iter().zip(new).collect();
+        let remap = |id: TypeId| remap.get(&id).copied().unwrap_or(id);
+        self.wasm_types = std::mem::take(&mut self.wasm_types)
+            .into_iter()
+            .map(|(key, id)| (key.remap(&remap), remap(id)))
+            .collect();
+        for custom_type_id in self.custom_type_ids.values_mut() {
+            if let CustomTypeId::Defined(id) = custom_type_id {
+                *id = remap(*id);
+            }
+        }
+        remap(id)
     }
 
     fn union_layout(&self, type_: &Arc<Type>) -> UnionFieldLayout {
@@ -1495,6 +1741,10 @@ impl<'a> Generator<'a> {
             .map(|(_, _, a)| a)
             .unwrap_or_default();
         let types = Monomorphizer::variant_constructor(custom_type, first, &args);
+        let custom_type_key = custom_type_key(type_);
+        if let Some(id) = self.custom_type_begin(&custom_type_key) {
+            return id;
+        }
 
         // Build shared fields (those with wasm index <= shared_count, i.e. in supertype)
         let field_indices = layout.fields(0);
@@ -1512,13 +1762,17 @@ impl<'a> Generator<'a> {
         }
 
         let name = custom_type.name.clone();
-        let key = WasmType::union(name.clone(), shared_fields.clone(), None);
-        if let Some(id) = self.wasm_types.get(&key) {
-            return *id;
-        }
-        let id = self.union_type_add(&name, &shared_fields, None);
-        let _ = self.wasm_types.insert(key, id);
-        id
+        self.custom_type_end(custom_type_key, |this, reserved| {
+            let key = WasmType::union(name.clone(), shared_fields.clone(), None);
+            if reserved.is_none()
+                && let Some(id) = this.wasm_types.get(&key)
+            {
+                return *id;
+            }
+            let id = this.union_type_add(&name, &shared_fields, None, reserved);
+            let _ = this.wasm_types.insert(key, id);
+            id
+        })
     }
 
     fn mono_union_subtype_index(
@@ -1568,7 +1822,7 @@ impl<'a> Generator<'a> {
         let type_index = if let Some(id) = self.wasm_types.get(&key) {
             *id
         } else {
-            let id = self.union_type_add(&name, &fields, Some(supertype_index));
+            let id = self.union_type_add(&name, &fields, Some(supertype_index), None);
             let _ = self.wasm_types.insert(key, id);
             id
         };
@@ -1580,6 +1834,7 @@ impl<'a> Generator<'a> {
         name: &EcoString,
         fields: &[(EcoString, ValType)],
         supertype: Option<TypeId>,
+        reserved: Option<TypeId>,
     ) -> TypeId {
         let tag_field: (EcoString, ValType) = ("tag".into(), ValType::I32);
         let walrus_fields: Vec<FieldType> = iter::once(&tag_field)
@@ -1594,10 +1849,7 @@ impl<'a> Generator<'a> {
         let comp = walrus::CompositeType::Struct(walrus::StructType {
             fields: walrus_fields.into_boxed_slice(),
         });
-        let id = self
-            .wasm_module
-            .types
-            .add_composite(comp, is_final, supertype);
+        let id = self.composite_type_add(comp, is_final, supertype, reserved);
         self.wasm_module.types.get_mut(id).name = Some(name.to_string());
         id
     }
@@ -3780,6 +4032,101 @@ fn is_main_funtion(function: &TypedFunction) -> bool {
 
 fn type_pretty_name(names: &Names, type_: &Arc<Type>) -> EcoString {
     Printer::new(names).print_type(type_)
+}
+
+/// A key that identifies the instantiation of the custom type `type_`.
+fn custom_type_key(type_: &Arc<Type>) -> EcoString {
+    fn write(key: &mut EcoString, type_: &Arc<Type>) {
+        match &**type_ {
+            Type::Named {
+                module,
+                name,
+                arguments,
+                ..
+            } => {
+                key.push_str(module);
+                key.push('.');
+                key.push_str(name);
+                write_all(key, arguments);
+            }
+            Type::Fn { arguments, return_ } => {
+                key.push_str("fn");
+                write_all(key, arguments);
+                write(key, return_);
+            }
+            Type::Tuple { elements } => {
+                key.push('#');
+                write_all(key, elements);
+            }
+            Type::Var { type_ } => match type_.borrow().deref() {
+                TypeVar::Link { type_ } => write(key, type_),
+                TypeVar::Unbound { .. } | TypeVar::Generic { .. } => key.push('_'),
+            },
+        }
+    }
+    fn write_all(key: &mut EcoString, types: &[Arc<Type>]) {
+        key.push('(');
+        for type_ in types {
+            write(key, type_);
+            key.push(',');
+        }
+        key.push(')');
+    }
+    let mut key = EcoString::new();
+    write(&mut key, type_);
+    key
+}
+
+fn remap_val_type(val_type: &ValType, remap: &impl Fn(TypeId) -> TypeId) -> ValType {
+    match *val_type {
+        ValType::Ref(RefType {
+            nullable,
+            heap_type,
+        }) => ValType::Ref(RefType {
+            nullable,
+            heap_type: match heap_type {
+                HeapType::Concrete(id) => HeapType::Concrete(remap(id)),
+                HeapType::Exact(id) => HeapType::Exact(remap(id)),
+                HeapType::Abstract(_) => heap_type,
+                _ => panic!("unexpected heap type {heap_type:?}"),
+            },
+        }),
+        ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64 | ValType::V128 => *val_type,
+    }
+}
+
+fn remap_storage_type(storage_type: StorageType, remap: &impl Fn(TypeId) -> TypeId) -> StorageType {
+    match storage_type {
+        StorageType::Val(val_type) => StorageType::Val(remap_val_type(&val_type, remap)),
+        StorageType::I8 | StorageType::I16 => storage_type,
+    }
+}
+
+fn remap_composite_type(
+    type_: &walrus::CompositeType,
+    remap: &impl Fn(TypeId) -> TypeId,
+) -> walrus::CompositeType {
+    let val_type = |val_type: &ValType| remap_val_type(val_type, remap);
+    let field = |field: &FieldType| FieldType {
+        element_type: remap_storage_type(field.element_type, remap),
+        mutable: field.mutable,
+    };
+    match type_ {
+        walrus::CompositeType::Function(function) => {
+            walrus::CompositeType::Function(walrus::FunctionType::new(
+                function.params().iter().map(val_type).collect(),
+                function.results().iter().map(val_type).collect(),
+            ))
+        }
+        walrus::CompositeType::Struct(struct_) => {
+            walrus::CompositeType::Struct(walrus::StructType {
+                fields: struct_.fields.iter().map(field).collect(),
+            })
+        }
+        walrus::CompositeType::Array(array) => walrus::CompositeType::Array(walrus::ArrayType {
+            field: field(&array.field),
+        }),
+    }
 }
 
 fn custom_type_inferred_constructor<'a>(
