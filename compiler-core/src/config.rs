@@ -802,37 +802,28 @@ pub struct WebAssemblyConfig {
     pub opt_level: WasmOptLevel,
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy, Default)]
 pub enum WasmInt {
     #[serde(rename = "I32")]
+    #[default]
     I32,
     #[serde(rename = "I64")]
     I64,
 }
 
-impl Default for WasmInt {
-    fn default() -> Self {
-        Self::I32
-    }
-}
-
-#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy, Default)]
 pub enum WasmFloat {
     #[serde(rename = "F32")]
     F32,
     #[serde(rename = "F64")]
+    #[default]
     F64,
 }
 
-impl Default for WasmFloat {
-    fn default() -> Self {
-        Self::F64
-    }
-}
-
-#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy, Default)]
 pub enum WasmOptLevel {
     #[serde(rename = "0")]
+    #[default]
     O0,
     #[serde(rename = "1")]
     O1,
@@ -860,12 +851,6 @@ impl WasmOptLevel {
             Self::Os => "-Os",
             Self::Oz => "-Oz",
         }
-    }
-}
-
-impl Default for WasmOptLevel {
-    fn default() -> Self {
-        Self::O0
     }
 }
 

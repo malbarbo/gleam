@@ -2080,7 +2080,24 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 BinOp::GtFloat => ComparisonOutcome::AlwaysFails,
                 BinOp::GtEqFloat if n >= m => ComparisonOutcome::AlwaysSucceeds,
                 BinOp::GtEqFloat => ComparisonOutcome::AlwaysFails,
-                _ => return,
+                BinOp::And
+                | BinOp::Or
+                | BinOp::Eq
+                | BinOp::NotEq
+                | BinOp::LtInt
+                | BinOp::LtEqInt
+                | BinOp::GtEqInt
+                | BinOp::GtInt
+                | BinOp::AddInt
+                | BinOp::AddFloat
+                | BinOp::SubInt
+                | BinOp::SubFloat
+                | BinOp::MultInt
+                | BinOp::MultFloat
+                | BinOp::DivInt
+                | BinOp::DivFloat
+                | BinOp::RemainderInt
+                | BinOp::Concatenate => return,
             },
 
             _ => return,

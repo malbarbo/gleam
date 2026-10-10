@@ -421,7 +421,7 @@ impl<'a> Generator<'a> {
     ) -> (TypeId, FunctionId) {
         let (_, type_index, types) =
             self.mono_union_subtype_index(type_, custom_type, constructor, args);
-        let layout = self.union_layout(type_).clone();
+        let layout = self.union_layout(type_);
         let variant_index = custom_type
             .constructors
             .iter()
@@ -802,7 +802,7 @@ impl<'a> Generator<'a> {
             None
         };
         let field_mapping = if let CustomType::Union { custom_type, .. } = &variant.custom_type {
-            let layout = self.union_layout(&return_).clone();
+            let layout = self.union_layout(&return_);
             let variant_index = custom_type
                 .constructors
                 .iter()
@@ -1118,7 +1118,7 @@ impl<'a> Generator<'a> {
             name + "." + constructor_name.clone(),
             Some(constructor_name.clone()),
         );
-        let layout = self.union_layout(type_).clone();
+        let layout = self.union_layout(type_);
         let variant_index = custom_type
             .constructors
             .iter()
@@ -1809,7 +1809,7 @@ impl<'a> Generator<'a> {
         // later we swap its body with the real one.
         let (params, results) = self.builtin_type(&builtin);
         let placeholder_id = self.allocate_placeholder_function(&builtin.name(), &params, &results);
-        let _ = self.builtins.insert(builtin.clone(), placeholder_id);
+        let _ = self.builtins.insert(builtin, placeholder_id);
         let real_id = code_fn(self);
         replace_function_body(&mut self.wasm_module, placeholder_id, real_id);
         placeholder_id

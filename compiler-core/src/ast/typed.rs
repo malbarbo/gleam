@@ -980,9 +980,10 @@ impl TypedExpr {
     }
 
     pub fn var_name(&self) -> Option<&EcoString> {
-        match self {
-            Self::Var { name, .. } => Some(name),
-            _ => None,
+        if let Self::Var { name, .. } = self {
+            Some(name)
+        } else {
+            None
         }
     }
 

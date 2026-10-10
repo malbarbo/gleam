@@ -46,7 +46,8 @@ use crate::{
         TypedRecordConstructorArg, TypedStatement, visit::Visit,
     },
     type_::{
-        self, ModuleValueConstructor, PRELUDE_MODULE_NAME, Type, TypeVar, ValueConstructorVariant,
+        self, Deprecation, ModuleValueConstructor, PRELUDE_MODULE_NAME, Type, TypeVar,
+        ValueConstructorVariant,
         printer::{Names, Printer},
     },
 };
@@ -941,7 +942,7 @@ impl<'a> Generator<'a> {
                                 results.iter().map(|r| format!("{r:?}")).join(", "),
                             )
                             .into(),
-                            got: self.type_pretty_name(&function_type(function)).clone(),
+                            got: self.type_pretty_name(&function_type(function)),
                         });
                     }
                 } else if let Some(builtin) = BuiltinFunctionExternal::by_name(name) {
@@ -958,7 +959,7 @@ impl<'a> Generator<'a> {
                             location: function.location,
                             name: name.clone(),
                             expected: "fn(a) -> String".into(),
-                            got: self.type_pretty_name(&function_type(function)).clone(),
+                            got: self.type_pretty_name(&function_type(function)),
                         });
                     }
                 } else {
@@ -1095,11 +1096,11 @@ impl<'a> Generator<'a> {
     fn prelude_custom_types() -> Vec<TypedCustomType> {
         fn record_constructor_arg(ast: TypeAst, type_: Arc<Type>) -> TypedRecordConstructorArg {
             TypedRecordConstructorArg {
-                label: Default::default(),
+                label: Option::default(),
                 ast,
-                location: Default::default(),
+                location: SrcSpan::default(),
                 type_,
-                doc: Default::default(),
+                doc: Option::default(),
             }
         }
 
@@ -1108,18 +1109,18 @@ impl<'a> Generator<'a> {
             arguments: Vec<TypedRecordConstructorArg>,
         ) -> TypedRecordConstructor {
             TypedRecordConstructor {
-                location: Default::default(),
-                name_location: Default::default(),
+                location: SrcSpan::default(),
+                name_location: SrcSpan::default(),
                 name: name.into(),
                 arguments,
-                documentation: Default::default(),
-                deprecation: Default::default(),
+                documentation: Option::default(),
+                deprecation: Deprecation::default(),
             }
         }
 
         fn ast_var(name: &str) -> TypeAst {
             TypeAst::Var(TypeAstVar {
-                location: Default::default(),
+                location: SrcSpan::default(),
                 name: name.into(),
             })
         }
@@ -1131,20 +1132,20 @@ impl<'a> Generator<'a> {
             typed_parameters: Vec<Arc<Type>>,
         ) -> TypedCustomType {
             TypedCustomType {
-                location: Default::default(),
+                location: SrcSpan::default(),
                 end_position: Default::default(),
                 name: name.into(),
-                name_location: Default::default(),
+                name_location: SrcSpan::default(),
                 publicity: Publicity::Public,
                 constructors,
-                documentation: Default::default(),
-                deprecation: Default::default(),
+                documentation: Option::default(),
+                deprecation: Deprecation::default(),
                 opaque: Default::default(),
                 parameters,
                 typed_parameters,
-                external_erlang: Default::default(),
-                external_javascript: Default::default(),
-                external_webassembly: Default::default(),
+                external_erlang: Option::default(),
+                external_javascript: Option::default(),
+                external_webassembly: Option::default(),
             }
         }
 
@@ -1180,8 +1181,8 @@ impl<'a> Generator<'a> {
                 ),
             ],
             vec![
-                (Default::default(), "ok".into()),
-                (Default::default(), "err".into()),
+                (SrcSpan::default(), "ok".into()),
+                (SrcSpan::default(), "err".into()),
             ],
             vec![type_ok, type_err],
         );
@@ -1199,7 +1200,7 @@ impl<'a> Generator<'a> {
                     ],
                 ),
             ],
-            vec![(Default::default(), "a".into())],
+            vec![(SrcSpan::default(), "a".into())],
             vec![type_item],
         );
 
@@ -1208,7 +1209,7 @@ impl<'a> Generator<'a> {
 
     fn custom_type(&self, type_: &Arc<Type>) -> Option<(CustomType, Vec<Arc<Type>>)> {
         if let Some((module, name, args)) = type_.named_type_information()
-            && let Some(custom_type) = self.types.get(&(module, name.clone()))
+            && let Some(custom_type) = self.types.get(&(module, name))
         {
             Some((custom_type.clone(), args))
         } else {
@@ -1897,10 +1898,9 @@ impl<'a> Generator<'a> {
             } => {
                 let (custom_type, cons, item_type, _) = self.list_type_cons(type_);
                 let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
-                let cons_variant =
-                    self.variant_expect(PRELUDE_MODULE_NAME.into(), cons.name.clone());
+                let cons_variant = self.variant_expect(PRELUDE_MODULE_NAME.into(), cons.name);
                 let cons_fn = self.variant_constructor(
-                    vec![type_::list(item_type.clone()), item_type.clone()],
+                    vec![type_::list(item_type.clone()), item_type],
                     type_.clone(),
                     cons_variant,
                 );
@@ -2341,7 +2341,7 @@ impl<'a> Generator<'a> {
                 let cons_variant =
                     self.variant_expect(PRELUDE_MODULE_NAME.into(), cons.name.clone());
                 let cons_fn = self.variant_constructor(
-                    vec![type_::list(item_type.clone()), item_type.clone()],
+                    vec![type_::list(item_type.clone()), item_type],
                     type_.clone(),
                     cons_variant,
                 );
@@ -2385,7 +2385,7 @@ impl<'a> Generator<'a> {
                             .struct_get(type_index, *index as u32);
                     }
                     CustomType::Union { custom_type, .. } => {
-                        let layout = self.union_layout(&record.type_()).clone();
+                        let layout = self.union_layout(&record.type_());
                         if let Some(variant) = record.type_().custom_type_inferred_variant() {
                             let constructor = custom_type
                                 .constructors
@@ -2483,7 +2483,7 @@ impl<'a> Generator<'a> {
                 arguments,
                 ..
             } => {
-                let args_types = arguments.iter().map(|arg| arg.value.type_().clone());
+                let args_types = arguments.iter().map(|arg| arg.value.type_());
                 let args = arguments.iter().map(|arg| &arg.value);
                 if fun.is_var() {
                     // the function can be evaluated after the parameters
@@ -2547,7 +2547,7 @@ impl<'a> Generator<'a> {
                             .struct_get(type_index, *index as u32);
                     }
                     CustomType::Union { custom_type, .. } => {
-                        let layout = self.union_layout(&record.type_()).clone();
+                        let layout = self.union_layout(&record.type_());
                         if let Some(variant) = record.type_().custom_type_inferred_variant() {
                             let constructor = custom_type
                                 .constructors
@@ -3182,8 +3182,8 @@ impl<'a> Generator<'a> {
                         custom_type,
                         constructor,
                     } => {
-                        let custom_type = custom_type.clone();
-                        let constructor = constructor.clone();
+                        let custom_type = custom_type;
+                        let constructor = constructor;
                         let (type_index, _) =
                             self.mono_struct_type_index(type_, &custom_type, &constructor, &args);
                         assert_eq!(constructor.arguments.len(), arguments.len());
@@ -3199,7 +3199,7 @@ impl<'a> Generator<'a> {
                         );
                     }
                     CustomType::Union { custom_type, .. } => {
-                        let custom_type = custom_type.clone();
+                        let custom_type = custom_type;
                         let null_tag = Self::null_variant_tag(&custom_type);
                         let (tag, constructor) = custom_type
                             .constructors
@@ -3238,7 +3238,7 @@ impl<'a> Generator<'a> {
                                     .i32_ne()
                                     .br_if(fail_target);
                             }
-                            let layout = self.union_layout(type_).clone();
+                            let layout = self.union_layout(type_);
                             let field_mapping = layout.fields(tag);
                             let _ = instructions.local_get(right).patterns(
                                 self,
@@ -3552,7 +3552,7 @@ impl<'a> Generator<'a> {
                             .struct_get(type_index, index);
                     }
                     CustomType::Union { custom_type, .. } => {
-                        let layout = self.union_layout(&type_).clone();
+                        let layout = self.union_layout(&type_);
                         let constructor = custom_type_inferred_constructor(&custom_type, &type_)
                             .expect("inferred constructor");
                         let variant = custom_type

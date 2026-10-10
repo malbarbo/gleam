@@ -135,7 +135,10 @@ impl Type {
     }
 
     pub fn is_named(&self) -> bool {
-        matches!(self, Self::Named { .. })
+        match self {
+            Self::Named { .. } => true,
+            Self::Var { .. } | Self::Fn { .. } | Self::Tuple { .. } => false,
+        }
     }
 
     pub fn result_ok_type(&self) -> Option<Arc<Type>> {
@@ -238,7 +241,7 @@ impl Type {
                 }
             }
             Type::Var { type_ } => type_.borrow().list_type(),
-            _ => None,
+            Type::Named { .. } | Type::Fn { .. } | Type::Tuple { .. } => None,
         }
     }
 
@@ -288,7 +291,7 @@ impl Type {
                 true
             }
             Self::Var { type_ } => type_.borrow().is_utf_codepoint(),
-            _ => false,
+            Self::Named { .. } | Self::Fn { .. } | Self::Tuple { .. } => false,
         }
     }
 
@@ -340,7 +343,7 @@ impl Type {
         match self {
             Self::Tuple { .. } => true,
             Self::Var { type_ } => type_.borrow().is_tuple(),
-            _ => false,
+            Self::Named { .. } | Self::Fn { .. } => false,
         }
     }
 

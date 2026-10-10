@@ -562,16 +562,16 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
     }
 
     fn visit_typed_expr(&mut self, expr: &'ast TypedExpr) {
-        match expr {
-            TypedExpr::Echo { .. } => self.locals.insert_echo(self.generator, expr),
-            TypedExpr::RecordUpdate {
-                updated_record,
-                updated_record_assigned_name: Some(_),
-                ..
-            } => self
-                .locals
-                .insert_record_update(self.generator, updated_record),
-            _ => {}
+        if let TypedExpr::Echo { .. } = expr {
+            self.locals.insert_echo(self.generator, expr);
+        } else if let TypedExpr::RecordUpdate {
+            updated_record,
+            updated_record_assigned_name: Some(_),
+            ..
+        } = expr
+        {
+            self.locals
+                .insert_record_update(self.generator, updated_record);
         }
         visit_typed_expr(self, expr);
     }
