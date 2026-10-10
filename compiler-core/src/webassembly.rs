@@ -491,8 +491,11 @@ struct Generator<'a> {
     builtins: HashMap<BuiltinFunction, FunctionId>,
     builtins_external: HashMap<BuiltinFunctionExternal, FunctionId>,
     main: Option<FunctionId>,
-    // String literals and its index in the global section
-    strings: HashMap<EcoString, GlobalId>,
+    /// Interned string literals and the global each one owns. Insertion
+    /// ordered: `code_start` walks this map to lay out the data segments, so
+    /// a `HashMap` here would make the emitted module differ between runs of
+    /// the compiler over the same source.
+    strings: IndexMap<EcoString, GlobalId>,
     consts: Vec<WasmConst>,
     globals: Rc<RefCell<Vec<Id>>>,
     int: IntType,
@@ -532,7 +535,7 @@ impl<'a> Generator<'a> {
             builtins: HashMap::new(),
             builtins_external: HashMap::new(),
             main: None,
-            strings: HashMap::new(),
+            strings: IndexMap::new(),
             consts: vec![],
             globals: Rc::default(),
             int: IntType::I32,
@@ -3670,6 +3673,20 @@ fn function_name(function: &TypedFunction) -> &EcoString {
 
 fn set_function_name(function: &mut TypedFunction, name: EcoString) {
     function.name.as_mut().expect("function to have a name").1 = name;
+}
+
+/// A few characters of a string literal, safe to put in a wasm name. The
+/// name section is read by hand and by `wasm-tools print`, so this only has
+/// to be legible, not injective -- the index in `string@{i}<{tag}>` is what
+/// tells two literals apart.
+fn string_tag(s: &str) -> String {
+    s.chars()
+        .take(16)
+        .map(|c| match c.is_ascii_alphanumeric() {
+            true => c,
+            false => '_',
+        })
+        .collect()
 }
 
 pub fn unescape(s: &str) -> String {

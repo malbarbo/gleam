@@ -26,9 +26,6 @@ dependencies = [
 [[package]]
 name = "fast-float2"
 version = "0.2.3"
-dependencies = [
- "no-panic",
-]
 
 [[package]]
 name = "itoa"

@@ -270,6 +270,14 @@ impl<'a> Generator<'a> {
             .wasm_module
             .globals
             .add_local(val_type, true, false, init);
+        // Named after the text it holds. A module carries one of these per
+        // distinct literal and they are otherwise identical, so a disassembly
+        // reading `global.set 7` says nothing about which literal that is.
+        self.wasm_module.globals.get_mut(id).name = Some(format!(
+            "string@{}<{}>",
+            self.strings.len(),
+            string_tag(&string)
+        ));
         let _ = self.strings.insert(string.into(), id);
         id
     }
