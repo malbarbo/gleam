@@ -230,7 +230,10 @@ Generated wasm, no linear memory. `Int` and `Float` follow the configured width.
 | `_float_round` | `fn(Float) -> Int` | half away from zero: `t = trunc(|x|); r = t + (|x| - t >= 0.5)`, sign restored, then `trunc_sat_s` |
 | `_float_square_root` | `fn(Float) -> Float` | native |
 
-**String** (bytes; `O(1)`/`O(k)` once strings are views)
+**String** (bytes; `String` is a view `{ bytes, off, len }`, so slices are `O(1)`)
+
+A slice of up to 64 bytes, or smaller than a quarter of the byte array it
+comes from, is copied; a bigger one shares the array.
 
 | Name | Gleam type | Semantics |
 |---|---|---|
@@ -247,3 +250,43 @@ Generated wasm, no linear memory. `Int` and `Float` follow the configured width.
 | `_unsafe_int_to_utf_codepoint` | `fn(Int) -> UtfCodepoint` | identity |
 | `_int_to_utf_codepoint` | `fn(Int) -> Result(UtfCodepoint, Nil)` | existing |
 | `_inspect` | `fn(a) -> String` | existing |
+| `_hash` | `fn(a) -> Int` | structural hash generated for each type, consistent with `==`: string views hash like copies, `-0.0` like `0.0`, functions all hash the same |
+
+### Planned builtins (used by the standard library, not implemented yet)
+
+The `wasm` branch of gleam_stdlib already refers to these names.
+
+**BitArray** (needs BitArray support in the compiler; a `BitArray` is a view
+`{ bytes, off, bit_len }` like `String`)
+
+| Name | Gleam type | Semantics |
+|---|---|---|
+| `_bit_array_from_string` | `fn(String) -> BitArray` | shares the bytes |
+| `_bit_array_bit_size` / `_bit_array_byte_size` | `fn(BitArray) -> Int` | |
+| `_bit_array_pad_to_bytes` | `fn(BitArray) -> BitArray` | |
+| `_bit_array_slice` | `fn(BitArray, Int, Int) -> Result(BitArray, Nil)` | `(position, length)` in bytes, as in Erlang |
+| `_bit_array_concat` | `fn(List(BitArray)) -> BitArray` | |
+| `_bit_array_starts_with` | `fn(BitArray, BitArray) -> Bool` | |
+| `_bit_array_compare` | `fn(BitArray, BitArray) -> order.Order` | as `bit_array.compare` (the Rust `bit_array_compare` returns -1/0/1) |
+
+**Dynamic** (`Dynamic` is the Gleam type of `gleam/internal/wasm/dynamic`: a
+closed sum of the primitive types, lists, tuples and dicts, plus
+`DOther(payload, vtable)` with a vtable of functions generated for each type)
+
+| Name | Gleam type | Semantics |
+|---|---|---|
+| `_dynamic_cast` | `fn(a) -> Dynamic` | primitive values, lists and tuples go to their variant (shallow); other values to `DOther` with the vtable of their type |
+| `_dynamic_classify` | `fn(Dynamic) -> String` | the names used on Erlang (`"Int"`, `"Array"`, `"Dict"`, `"Nil"`, ...) |
+| `_dynamic_is_null` | `fn(Dynamic) -> Bool` | |
+| `_dynamic_int` / `_dynamic_float` / `_dynamic_string` / `_dynamic_bit_array` | `fn(Dynamic) -> Result(T, T)` | the value, or `Error` with the zero value |
+| `_dynamic_list_items` | `fn(Dynamic) -> Result(List(Dynamic), Nil)` | lists and tuples |
+| `_dynamic_dict` | `fn(Dynamic) -> Result(Dict(Dynamic, Dynamic), Nil)` | |
+| `_dynamic_index` | `fn(Dynamic, a) -> Result(Option(Dynamic), String)` | Erlang `index` semantics |
+| `_dynamic_same_vtable` | `fn(VTable, VTable) -> Bool` | `ref.eq` |
+
+Also planned: the external type `"builtins", "AnyRef"` for the payload of
+`DOther`; externals pointing at Gleam modules (`@external(webassembly,
+"gleam/internal/wasm/champ", "insert")`, for functions and types); and type
+hooks, so that `==`, `_hash` and `_inspect` of `Dict` call the `equal`,
+`hash_dict` and `inspect` functions of its module.
+
