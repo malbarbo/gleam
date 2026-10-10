@@ -344,6 +344,7 @@ macro_rules! assert_wasm_validate_error {
 
 mod bools;
 mod case_;
+mod closures;
 mod consts;
 mod custom_types;
 mod echo;

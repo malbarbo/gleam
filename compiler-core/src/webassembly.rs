@@ -338,6 +338,9 @@ impl WasmType {
             WasmTypeKind::Function(params, results) => {
                 WasmTypeKind::Function(val_types(params), val_types(results))
             }
+            WasmTypeKind::Closure(params, results) => {
+                WasmTypeKind::Closure(val_types(params), val_types(results))
+            }
             WasmTypeKind::Struct(fields_) => WasmTypeKind::Struct(fields(fields_)),
             WasmTypeKind::Union(fields_, supertype) => {
                 WasmTypeKind::Union(fields(fields_), supertype.map(remap))
@@ -354,8 +357,19 @@ impl WasmType {
 enum WasmTypeKind {
     Array(StorageType),
     Function(Vec<ValType>, Vec<ValType>),
+    #[allow(dead_code, reason = "closures are not used yet")]
+    /// The closure struct of functions with these params (without the
+    /// closure itself) and results.
+    Closure(Vec<ValType>, Vec<ValType>),
     Struct(Vec<(EcoString, ValType)>),
     Union(Vec<(EcoString, ValType)>, Option<TypeId>),
+}
+
+#[allow(dead_code, reason = "closures are not used yet")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClosureType {
+    clo: TypeId,
+    code: TypeId,
 }
 
 enum CustomTypeId {
@@ -1443,6 +1457,115 @@ impl<'a> Generator<'a> {
 
     fn function_val_type(&self, type_index: TypeId) -> ValType {
         self.val_type_ref(type_index)
+    }
+
+    #[allow(dead_code, reason = "closures are not used yet")]
+    /// The closure types of functions with these arguments and return. They
+    /// are created once for each signature, in their own rec group:
+    ///
+    /// ```wat
+    /// (rec
+    ///   (type $clo (sub (struct (field (ref $code)))))
+    ///   (type $code (func (param (ref $clo) A...) (result R))))
+    /// ```
+    ///
+    /// `$code` is final and has no supertype, so the type that
+    /// `FunctionBuilder::new` adds for a code function is `$code`.
+    fn closure_type(
+        &mut self,
+        arguments: impl IntoIterator<Item = Arc<Type>>,
+        return_: Arc<Type>,
+    ) -> ClosureType {
+        let arguments = arguments.into_iter().collect_vec();
+        // Computing the val types may define recursive types that move the
+        // closure types, so the cache is checked after it.
+        let params = self.val_types(arguments.iter().cloned());
+        let results = self.val_types([return_.clone()]);
+        let key = WasmType {
+            name: None,
+            kind: WasmTypeKind::Closure(params.clone(), results.clone()),
+        };
+        if let Some(clo) = self.wasm_types.get(&key) {
+            return self.closure_type_of(*clo);
+        }
+        let ref_ = |id| {
+            ValType::Ref(RefType {
+                heap_type: HeapType::Concrete(id),
+                nullable: false,
+            })
+        };
+        let ids = self.wasm_module.types.add_rec_group(2, |ids| {
+            let &[clo, code] = ids else {
+                panic!("two closure types");
+            };
+            let clo_def = walrus::CompositeType::Struct(walrus::StructType {
+                fields: Box::new([FieldType {
+                    element_type: StorageType::Val(ref_(code)),
+                    mutable: false,
+                }]),
+            });
+            let code_params = iter::once(ref_(clo)).chain(params).collect_vec();
+            let code_def = walrus::CompositeType::Function(walrus::FunctionType::new(
+                code_params.into_boxed_slice(),
+                results.into_boxed_slice(),
+            ));
+            vec![(clo_def, false, None), (code_def, true, None)]
+        });
+        let [clo, code] = ids[..] else {
+            panic!("two closure types");
+        };
+        let name = qualified_type_name(&type_::fn_(arguments, return_)).replace(" ", "");
+        let types = &mut self.wasm_module.types;
+        types.get_mut(code).name = Some(format!("{name}::code"));
+        types.get_mut(clo).name = Some(name.into());
+        let _ = self.wasm_types.insert(key, clo);
+        ClosureType { clo, code }
+    }
+
+    #[allow(dead_code, reason = "closures are not used yet")]
+    fn closure_type_of(&self, clo: TypeId) -> ClosureType {
+        let walrus::CompositeType::Struct(struct_) = self.wasm_module.types.get(clo).kind() else {
+            panic!("closure type should be a struct");
+        };
+        let [
+            FieldType {
+                element_type:
+                    StorageType::Val(ValType::Ref(RefType {
+                        heap_type: HeapType::Concrete(code),
+                        ..
+                    })),
+                ..
+            },
+        ] = *struct_.fields
+        else {
+            panic!("closure type field should be a code reference");
+        };
+        ClosureType { clo, code }
+    }
+
+    #[allow(dead_code, reason = "closures are not used yet")]
+    /// The env type of the closures of `closure` that capture values of
+    /// `captures`. Closures with the same signature and captures share it.
+    fn closure_env_type(&mut self, closure: &ClosureType, captures: Vec<ValType>) -> TypeId {
+        let fields = iter::once(self.val_type_ref(closure.code))
+            .chain(captures)
+            .map(|val_type| FieldType {
+                element_type: StorageType::Val(val_type),
+                mutable: false,
+            })
+            .collect_vec();
+        let comp = walrus::CompositeType::Struct(walrus::StructType {
+            fields: fields.into_boxed_slice(),
+        });
+        let types = &mut self.wasm_module.types;
+        let id = types.add_composite(comp, true, Some(closure.clo));
+        let name = types
+            .get(closure.clo)
+            .name
+            .clone()
+            .expect("closure type name");
+        types.get_mut(id).name = Some(name + "::env");
+        id
     }
 
     fn tuple_type_index(&mut self, types: impl IntoIterator<Item = Arc<Type>>) -> TypeId {
