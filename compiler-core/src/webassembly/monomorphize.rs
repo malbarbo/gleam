@@ -15,6 +15,7 @@ use crate::{
 };
 use src_span::SrcSpan;
 
+#[derive(Clone)]
 pub(super) struct Monomorphizer {
     map: HashMap<u64, Arc<Type>>,
 }
@@ -95,17 +96,22 @@ impl Monomorphizer {
         self
     }
 
+    pub(super) fn for_local_function(from: &LocalFunction, to: &Arc<Type>) -> Monomorphizer {
+        let mut mono = from.enclosing.clone();
+        let _ = mono.bound(&from.type_, to);
+        mono
+    }
+
     pub(super) fn function_local(
+        &self,
         from: &LocalFunction,
-        to: &Arc<Type>,
     ) -> (Vec<TypedArg>, Vec<TypedStatement>) {
-        let mono = Monomorphizer::with_bound(&from.type_, to);
         let mut args = from.arguments.clone();
         for arg in &mut args {
-            arg.type_ = mono.type_(&arg.type_);
+            arg.type_ = self.type_(&arg.type_);
         }
         let mut body = from.body.clone();
-        mono.statements(&mut body);
+        self.statements(&mut body);
         (args, body)
     }
 
@@ -447,14 +453,17 @@ impl Monomorphizer {
 
 /// Collects the functions bound to a variable by `let`, keyed by the location
 /// of the variable definition. Generic type vars are preserved for later
-/// monomorphization.
+/// monomorphization. The bodies of the collected functions are not visited,
+/// the functions defined there are collected when they are specialized.
 pub(super) fn collect_local_functions(
     body: &[TypedStatement],
-    parent_id: u32,
+    specialization: u32,
+    enclosing: &Monomorphizer,
 ) -> HashMap<SrcSpan, LocalFunction> {
     struct LocalFunctionCollector<'a> {
-        map: &'a mut HashMap<SrcSpan, LocalFunction>,
-        parent_id: u32,
+        map: HashMap<SrcSpan, LocalFunction>,
+        specialization: u32,
+        enclosing: &'a Monomorphizer,
     }
 
     impl<'ast> Visit<'ast> for LocalFunctionCollector<'_> {
@@ -475,26 +484,28 @@ pub(super) fn collect_local_functions(
                     *definition,
                     LocalFunction {
                         location: *location,
-                        parent_id: self.parent_id,
+                        specialization: self.specialization,
+                        enclosing: self.enclosing.clone(),
                         type_: type_.clone(),
                         arguments: arguments.clone(),
                         body: body.to_vec(),
                     },
                 );
+            } else {
+                visit_typed_assignment(self, assignment);
             }
-            visit_typed_assignment(self, assignment);
         }
     }
 
-    let mut map = HashMap::new();
     let mut collector = LocalFunctionCollector {
-        map: &mut map,
-        parent_id,
+        map: HashMap::new(),
+        specialization,
+        enclosing,
     };
     for statement in body {
         collector.visit_typed_statement(statement);
     }
-    map
+    collector.map
 }
 
 fn get_unbound_or_generic_id(type_: &Arc<Type>) -> Option<u64> {

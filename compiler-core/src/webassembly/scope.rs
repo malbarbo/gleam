@@ -7,9 +7,9 @@ use walrus::{FunctionId, GlobalId, LocalId, ValType};
 
 use crate::{
     ast::{
-        AssignName, AssignmentKind, BinOp, ClauseGuard, StringPrefixLeftSideAssignment, TypedArg,
-        TypedAssignment, TypedClause, TypedClauseGuard, TypedExpr, TypedPattern,
-        TypedPipelineAssignment, TypedStatement,
+        AssignName, AssignmentKind, BinOp, ClauseGuard, FunctionLiteralKind,
+        StringPrefixLeftSideAssignment, TypeAst, TypedArg, TypedAssignment, TypedClause,
+        TypedClauseGuard, TypedExpr, TypedPattern, TypedPipelineAssignment, TypedStatement,
         visit::{
             Visit, visit_typed_assignment, visit_typed_clause_guard, visit_typed_expr,
             visit_typed_expr_bin_op, visit_typed_expr_call, visit_typed_expr_case,
@@ -19,6 +19,7 @@ use crate::{
     type_::{self, ModuleValueConstructor, Type, TypedCallArg},
 };
 use src_span::SrcSpan;
+use vec1::Vec1;
 
 use super::{Generator, monomorphize::set_ubound_or_generic};
 
@@ -484,8 +485,27 @@ struct LocalsVisit<'a, 'b, 'c> {
 
 impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
     fn visit_typed_assignment(&mut self, assignment: &'ast TypedAssignment) {
-        self.locals.insert_assignment(self.generator, assignment);
-        visit_typed_assignment(self, assignment);
+        if self
+            .generator
+            .local_function_definition(assignment)
+            .is_none()
+        {
+            self.locals.insert_assignment(self.generator, assignment);
+            visit_typed_assignment(self, assignment);
+        }
+    }
+
+    fn visit_typed_expr_fn(
+        &mut self,
+        _location: &'ast SrcSpan,
+        _type_: &'ast Arc<Type>,
+        _kind: &'ast FunctionLiteralKind,
+        _arguments: &'ast [TypedArg],
+        _body: &'ast Vec1<TypedStatement>,
+        _return_annotation: &'ast Option<TypeAst>,
+    ) {
+        // Anonymous functions are generated as separate functions, with
+        // their own locals.
     }
 
     fn visit_typed_expr_bin_op(

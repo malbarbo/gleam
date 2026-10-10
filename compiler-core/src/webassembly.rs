@@ -394,7 +394,8 @@ struct Variant {
 #[derive(Clone)]
 struct LocalFunction {
     location: SrcSpan,
-    parent_id: u32,
+    specialization: u32,
+    enclosing: Monomorphizer,
     type_: Arc<Type>,
     arguments: Vec<TypedArg>,
     body: Vec<TypedStatement>,
@@ -492,6 +493,10 @@ struct Generator<'a> {
     types: HashMap<(EcoString, EcoString), CustomType>,
     variants: HashMap<(EcoString, EcoString), Variant>,
     local_functions: HashMap<SrcSpan, LocalFunction>,
+    /// Anonymous functions are named after the specialization that contains
+    /// them, as their code depends on its substitution.
+    specialization: u32,
+    next_specialization: u32,
     builtins: HashMap<BuiltinFunction, FunctionId>,
     builtins_external: HashMap<BuiltinFunctionExternal, FunctionId>,
     main: Option<FunctionId>,
@@ -536,6 +541,8 @@ impl<'a> Generator<'a> {
             types: HashMap::new(),
             variants: HashMap::new(),
             local_functions: HashMap::new(),
+            specialization: 0,
+            next_specialization: 0,
             builtins: HashMap::new(),
             builtins_external: HashMap::new(),
             main: None,
@@ -2032,10 +2039,9 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// Returns a u32 unique to each function emitted by the compiler. Used
-    /// to disambiguate anonymous inner functions sharing a source location.
-    fn allocate_parent_id(&self) -> u32 {
-        self.wasm_module.funcs.iter().count() as u32
+    fn allocate_specialization(&mut self) -> u32 {
+        self.next_specialization += 1;
+        self.next_specialization
     }
 
     fn allocate_placeholder_function(
@@ -2055,14 +2061,15 @@ impl<'a> Generator<'a> {
         function: TypedFunction,
         name: EcoString,
         export: bool,
-        original_local_functions: HashMap<SrcSpan, LocalFunction>,
+        specialization: u32,
+        local_functions: HashMap<SrcSpan, LocalFunction>,
     ) -> Id {
         let params = self.val_types(function_params_types(&function));
         let results = self.val_types(iter::once(function.return_type.clone()));
         let index = self.allocate_placeholder_function(&name, &params, &results);
         let id = self.add_function_to_globals(name.clone(), index);
-        let saved_local_functions =
-            std::mem::replace(&mut self.local_functions, original_local_functions);
+        let saved_local_functions = std::mem::replace(&mut self.local_functions, local_functions);
+        let saved_specialization = std::mem::replace(&mut self.specialization, specialization);
         let locals = Locals::new(self, &function.arguments, &function.body);
         let param_ids = locals.param_ids();
         let mut code = Function::new(self, &name, &param_ids, &results);
@@ -2074,6 +2081,7 @@ impl<'a> Generator<'a> {
             &function.body,
         );
         self.local_functions = saved_local_functions;
+        self.specialization = saved_specialization;
         let _ = instructions.end();
 
         for (local_id, lname) in locals.names() {
@@ -2091,11 +2099,12 @@ impl<'a> Generator<'a> {
         if let Some(id) = self.find_global(&base_name) {
             return id;
         }
-        let original_local_functions =
-            collect_local_functions(&function.body, self.allocate_parent_id());
+        let specialization = self.allocate_specialization();
+        let mono = Monomorphizer::new();
+        let local_functions = collect_local_functions(&function.body, specialization, &mono);
         // Resolve Generic type vars (from inner lambdas) to Nil for valid WASM types.
-        let function = Monomorphizer::new().function(function);
-        self._function(function, base_name, export, original_local_functions)
+        let function = mono.function(function);
+        self._function(function, base_name, export, specialization, local_functions)
     }
 
     fn function_generic(
@@ -2109,12 +2118,12 @@ impl<'a> Generator<'a> {
         if let Some(id) = self.find_global(&name) {
             return id;
         }
-        let original_local_functions =
-            collect_local_functions(&function.body, self.allocate_parent_id());
-        let type_ = function_type(function);
-        let mut function = Monomorphizer::with_bound(&type_, required_type).function(function);
+        let specialization = self.allocate_specialization();
+        let mono = Monomorphizer::with_bound(&function_type(function), required_type);
+        let local_functions = collect_local_functions(&function.body, specialization, &mono);
+        let mut function = mono.function(function);
         set_function_name(&mut function, name.clone());
-        self._function(function, name, export, original_local_functions)
+        self._function(function, name, export, specialization, local_functions)
     }
 
     fn _function_local(
@@ -2133,14 +2142,12 @@ impl<'a> Generator<'a> {
         let param_ids = locals.param_ids();
         let mut code = Function::new(self, &name, &param_ids, &results);
         let mut instructions = code.extend_instructions(self);
-        let saved_local_functions = self.local_functions.clone();
         self.statements(
             &mut instructions,
             Scope::with_params(self.globals.clone(), arguments, &param_ids),
             &locals,
             body,
         );
-        self.local_functions = saved_local_functions;
         let _ = instructions.end();
 
         for (local_id, lname) in locals.names() {
@@ -2168,7 +2175,7 @@ impl<'a> Generator<'a> {
         let type_name = self.type_pretty_name(required_type).replace(" ", "");
         let name: EcoString = format!(
             "anonymous@{}-{}#{}:{type_name}",
-            info.location.start, info.location.end, info.parent_id
+            info.location.start, info.location.end, info.specialization
         )
         .into();
 
@@ -2176,8 +2183,19 @@ impl<'a> Generator<'a> {
             return id;
         }
 
-        let (args, body) = Monomorphizer::function_local(info, required_type);
-        self._function_local(name, required_type, &args, &body)
+        let specialization = self.allocate_specialization();
+        let mono = Monomorphizer::for_local_function(info, required_type);
+        let nested = collect_local_functions(&info.body, specialization, &mono);
+        let (args, body) = mono.function_local(info);
+        let nested_locations: Vec<_> = nested.keys().copied().collect();
+        let saved_specialization = std::mem::replace(&mut self.specialization, specialization);
+        self.local_functions.extend(nested);
+        let id = self._function_local(name, required_type, &args, &body);
+        for location in nested_locations {
+            let _ = self.local_functions.remove(&location);
+        }
+        self.specialization = saved_specialization;
+        id
     }
 
     fn function_imported(
@@ -2224,6 +2242,18 @@ impl<'a> Generator<'a> {
         let mut remaining = statements;
         while let Some((statement, rest)) = remaining.split_first() {
             match statement {
+                Statement::Assignment(assignment)
+                    if let Some(info) = self.local_function_definition(assignment) =>
+                {
+                    // The code of a local function is generated where it is
+                    // used, the definition only produces a value when it is
+                    // the result of the block.
+                    if rest.is_empty() {
+                        let info = info.clone();
+                        let id = self.function_local_generic(&info, &assignment.value.type_());
+                        let _ = instructions.ref_func(id.func_id());
+                    }
+                }
                 Statement::Assignment(assignment)
                     if matches!(assignment.kind, AssignmentKind::Assert { .. }) =>
                 {
@@ -2514,8 +2544,11 @@ impl<'a> Generator<'a> {
                 ..
             } => {
                 let type_name = self.type_pretty_name(type_).replace(" ", "");
-                let name: EcoString =
-                    format!("anonymous@{}-{}:{type_name}", location.start, location.end).into();
+                let name: EcoString = format!(
+                    "anonymous@{}-{}#{}:{type_name}",
+                    location.start, location.end, self.specialization
+                )
+                .into();
                 let id = self.function_local(name, type_, arguments, body);
                 let _ = instructions.ref_func(id.func_id());
             }
@@ -2857,6 +2890,14 @@ impl<'a> Generator<'a> {
             } else {
                 false
             }
+        }
+    }
+
+    fn local_function_definition(&self, assignment: &TypedAssignment) -> Option<&LocalFunction> {
+        if let Pattern::Variable { location, .. } = &assignment.pattern {
+            self.local_functions.get(location)
+        } else {
+            None
         }
     }
 

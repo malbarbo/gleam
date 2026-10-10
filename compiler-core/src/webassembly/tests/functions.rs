@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-use super::{compile_wasm, count_call_ref, run_ok, run_wasm};
+use super::{compile_wasm, count_call_ref, run_ok, run_wasm, wasm_function_names, wasm_type_names};
 
 #[test]
 fn const_function_assignment() {
@@ -1444,4 +1444,141 @@ pub fn main() {
 "#;
     assert_eq!(count_call_ref(&compile_wasm(src, vec![])), 1);
     run_ok(src);
+}
+
+fn sorted_with_prefix(names: Vec<String>, prefix: &str) -> Vec<String> {
+    let mut names: Vec<_> = names
+        .into_iter()
+        .filter(|name| name.starts_with(prefix))
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn local_function_uses_enclosing_specialization() {
+    // The type `a` of the enclosing function must not be resolved to Nil.
+    let src = r#"
+fn g(x: a) -> Int {
+    let f = fn(y: c) -> Int { let z: List(a) = []  echo z  1 }
+    f(1)
+}
+pub fn main() {
+    assert g(1) + g("s") == 2
+    0
+}
+"#;
+    let wasm = compile_wasm(src, vec![]);
+    assert_eq!(
+        sorted_with_prefix(wasm_type_names(&wasm), "List("),
+        ["List(Int).Cons", "List(String).Cons"]
+    );
+    assert_eq!(
+        sorted_with_prefix(wasm_function_names(&wasm), "anonymous@").len(),
+        2
+    );
+    run_ok(src);
+}
+
+#[test]
+fn nested_local_function_uses_enclosing_specialization() {
+    let src = r#"
+pub fn main() {
+    let outer = fn(x: a) -> Int {
+        let inner = fn(y: b) -> Int { let z: List(a) = []  echo z  1 }
+        inner(1)
+    }
+    assert outer(1) + outer("s") == 2
+    0
+}
+"#;
+    let wasm = compile_wasm(src, vec![]);
+    assert_eq!(
+        sorted_with_prefix(wasm_type_names(&wasm), "List("),
+        ["List(Int).Cons", "List(String).Cons"]
+    );
+    // One `outer` and one `inner` for each type of `x`.
+    assert_eq!(
+        sorted_with_prefix(wasm_function_names(&wasm), "anonymous@").len(),
+        4
+    );
+    run_ok(src);
+}
+
+#[test]
+fn anonymous_function_per_enclosing_specialization() {
+    let src = r#"
+fn wrap(x: a) -> fn() -> Int { fn() { let z: List(a) = []  echo z  1 } }
+pub fn main() {
+    assert wrap(1)() + wrap("s")() == 2
+    0
+}
+"#;
+    let wasm = compile_wasm(src, vec![]);
+    assert_eq!(
+        sorted_with_prefix(wasm_type_names(&wasm), "List("),
+        ["List(Int).Cons", "List(String).Cons"]
+    );
+    assert_eq!(
+        sorted_with_prefix(wasm_function_names(&wasm), "anonymous@").len(),
+        2
+    );
+    run_ok(src);
+}
+
+#[test]
+fn local_function_definition_generates_no_code() {
+    let src = r#"
+pub fn main() {
+    let f = fn(x: Int) -> Int { x }
+    assert f(1) == 1
+    0
+}
+"#;
+    let wasm = compile_wasm(src, vec![]);
+    assert_eq!(
+        sorted_with_prefix(wasm_function_names(&wasm), "anonymous@").len(),
+        1
+    );
+    run_ok(src);
+}
+
+#[test]
+fn local_function_definition_as_block_result() {
+    run_ok(
+        r#"
+fn make() -> fn(Int) -> Int {
+    let f = fn(x: Int) -> Int { x + 1 }
+}
+pub fn main() {
+    let g = {
+        let id = fn(x: a) -> a { x }
+    }
+    assert make()(1) == 2
+    assert g(3) == 3
+    0
+}
+"#,
+    );
+}
+
+#[test]
+fn local_function_used_in_anonymous_and_nested_functions() {
+    run_ok(
+        r#"
+fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }
+pub fn main() {
+    let id = fn(x: a) -> a { x }
+    let assert inc = fn(x: Int) -> Int { x + 1 }
+    let twice = fn(x: b) -> #(b, b) {
+        let pair = fn(y: c) -> #(c, c) { #(id(y), id(y)) }
+        pair(x)
+    }
+    assert apply(fn(x) { inc(id(x)) }, 1) == 2
+    assert twice(1) == #(1, 1)
+    assert twice("a") == #("a", "a")
+    0
+}
+"#,
+    );
 }
