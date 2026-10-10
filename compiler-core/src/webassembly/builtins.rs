@@ -13,6 +13,9 @@ pub(super) enum BuiltinFunction {
     VariantConstructor(Vec<ValType>, ValType, EcoString),
     Inspect(ValType, EcoString),
     StringStartsWith,
+    Hash(ValType, EcoString),
+    HashExternal(ValType, EcoString),
+    HashMix,
 }
 
 impl BuiltinFunction {
@@ -32,6 +35,9 @@ impl BuiltinFunction {
             BuiltinFunction::VariantConstructor(_, _, name) => format!("_create({name})").into(),
             BuiltinFunction::Inspect(_, name) => format!("_inspect({name})").into(),
             BuiltinFunction::StringStartsWith => "_string_starts_with".into(),
+            BuiltinFunction::Hash(_, name) => format!("_hash({name})").into(),
+            BuiltinFunction::HashExternal(_, name) => format!("_hash_int({name})").into(),
+            BuiltinFunction::HashMix => "_hash_mix".into(),
         }
     }
 }
@@ -88,7 +94,7 @@ pub fn builtin_function_names() -> Vec<EcoString> {
     BuiltinFunctionExternal::all()
         .iter()
         .map(|b| b.name().into())
-        .chain(iter::once(INSPECT.into()))
+        .chain([INSPECT.into(), HASH.into()])
         .collect()
 }
 
@@ -1967,7 +1973,7 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    fn get_function_builtin(
+    pub(super) fn get_function_builtin(
         &mut self,
         builtin: BuiltinFunction,
         code_fn: impl FnOnce(&mut Self) -> FunctionId,

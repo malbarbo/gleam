@@ -618,6 +618,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
     binop!(i32_or, I32Or);
     binop!(i32_shl, I32Shl);
     binop!(i32_shr_u, I32ShrU);
+    binop!(i32_xor, I32Xor);
     binop!(i32_div_s, I32DivS);
     binop!(i64_ne, I64Ne);
     binop!(i64_div_s, I64DivS);
@@ -831,6 +832,39 @@ impl<'a, 'b> Instructions<'a, 'b> {
             (FloatType::F64, IntType::I64) => UnaryOp::I64TruncSSatF64,
         };
         let _ = self.seq.as_mut().unop(op);
+        self
+    }
+
+    /// `[Int] -> [i32]`: the two halves of a 64 bit `Int` xored.
+    pub(super) fn int_fold_to_i32(&mut self) -> &mut Self {
+        if let IntType::I64 = self.int {
+            let _ = self.seq.as_mut().unop(UnaryOp::I64Extend32S);
+            return self.fold_i64();
+        }
+        self
+    }
+
+    /// `[Float] -> [i32]`: the bits of a `Float`, folded to 32 bits.
+    pub(super) fn float_fold_to_i32(&mut self) -> &mut Self {
+        match self.float {
+            FloatType::F32 => {
+                let _ = self.seq.as_mut().unop(UnaryOp::I32ReinterpretF32);
+                self
+            }
+            FloatType::F64 => {
+                let _ = self.seq.as_mut().unop(UnaryOp::I64ReinterpretF64);
+                self.fold_i64()
+            }
+        }
+    }
+
+    /// `[i64] -> [i32]`: `low ^ high`.
+    fn fold_i64(&mut self) -> &mut Self {
+        let seq = self.seq.as_mut();
+        let _ = seq
+            .i64_const(32)
+            .binop(BinaryOp::I64Rotl)
+            .unop(UnaryOp::I32WrapI64);
         self
     }
 

@@ -298,3 +298,44 @@ pub fn main() {{
         output.stderr
     );
 }
+
+#[test]
+fn hash() {
+    run_ok(&format!(
+        r#"{STRING}
+@external(webassembly, "builtins", "_hash")
+fn hash(a: a) -> Int
+
+type Shape {{
+    Circle(Float)
+    Rect(width: Int, height: Int)
+    Empty
+}}
+
+pub fn main() {{
+    let s = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz"
+    let view = byte_slice(s, 10, 80)
+    let copy = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqr"
+    let assert True = hash(view) == hash(copy)
+    let assert False = hash("a") == hash("b")
+    let assert True = hash(1) == hash(1)
+    let assert False = hash(1) == hash(2)
+    let assert True = hash(0.0) == hash(-0.0)
+    let assert False = hash(1.0) == hash(2.0)
+    let assert True = hash([1, 2, 3]) == hash([1, 2, 3])
+    let assert False = hash([1, 2, 3]) == hash([1, 3, 2])
+    let assert False = hash([]) == hash([0])
+    let assert True = hash(#(1, "a", [view])) == hash(#(1, "a", [copy]))
+    let assert False = hash(#(1, 2)) == hash(#(2, 1))
+    let assert True = hash(Rect(1, 2)) == hash(Rect(width: 1, height: 2))
+    let assert False = hash(Rect(1, 2)) == hash(Rect(2, 1))
+    let assert False = hash(Empty) == hash(Circle(0.0))
+    let assert True = hash(Ok(Empty)) == hash(Ok(Empty))
+    let assert False = hash(Ok(1)) == hash(Error(1))
+    let assert True = hash(True) == hash(True)
+    let assert False = hash(True) == hash(False)
+    let assert True = hash(fn(x) {{ x + 1 }}) == hash(fn(x) {{ x }})
+}}
+"#
+    ));
+}

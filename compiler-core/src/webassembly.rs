@@ -5,6 +5,7 @@
 mod builtins;
 mod captures;
 mod glue;
+mod hash;
 mod instructions;
 mod monomorphize;
 mod scope;
@@ -17,6 +18,7 @@ pub use builtins::builtin_function_names;
 use builtins::*;
 use captures::{Capture, Variables};
 use glue::*;
+use hash::*;
 use instructions::*;
 use monomorphize::*;
 use scope::*;
@@ -967,6 +969,11 @@ impl<'a> Generator<'a> {
                 let s = self.string.val_type();
                 (vec![s, s], vec![BOOL_VALTYPE])
             }
+            BuiltinFunction::Hash(val_type, _) => (vec![*val_type], vec![ValType::I32]),
+            BuiltinFunction::HashExternal(val_type, _) => {
+                (vec![*val_type], vec![self.int.val_type()])
+            }
+            BuiltinFunction::HashMix => (vec![ValType::I32], vec![ValType::I32]),
         }
     }
 
@@ -1130,6 +1137,21 @@ impl<'a> Generator<'a> {
                     }
                 } else if let Some(builtin) = BuiltinFunctionExternal::by_name(name) {
                     builtins.push((builtin, name.clone(), function_type(function)));
+                } else if name == HASH {
+                    if !(function.arguments.len() == 1
+                        && function
+                            .arguments
+                            .first()
+                            .is_some_and(|arg| is_generic_type(&arg.type_))
+                        && function.return_type.is_int())
+                    {
+                        return Err(Error::WrongBuiltinFunctionSignature {
+                            location: function.location,
+                            name: name.clone(),
+                            expected: "fn(a) -> Int".into(),
+                            got: self.type_pretty_name(&function_type(function)),
+                        });
+                    }
                 } else if name == INSPECT {
                     if !(function.arguments.len() == 1
                         && function
@@ -2792,6 +2814,9 @@ impl<'a> Generator<'a> {
                     if fname == INSPECT {
                         return self.function_inspect(required_type);
                     }
+                    if fname == HASH {
+                        return self.function_hash_external(required_type);
+                    }
                     return self.find_global_expect(fname);
                 }
                 let export = function.publicity.is_public();
@@ -3290,6 +3315,9 @@ impl<'a> Generator<'a> {
             }
             if fname == INSPECT {
                 return self.function_inspect(required_type);
+            }
+            if fname == HASH {
+                return self.function_hash_external(required_type);
             }
             return self.find_global_expect(fname);
         }
