@@ -7,7 +7,8 @@ use std::process::Command;
 const BUILTINS: &str = "builtins-wasm";
 
 fn main() {
-    println!("cargo:rerun-if-changed=../{BUILTINS}/src/lib.rs");
+    println!("cargo:rerun-if-changed=../{BUILTINS}/src");
+    println!("cargo:rerun-if-changed=../{BUILTINS}/Cargo.toml");
 
     assert!(
         Command::new("cargo")

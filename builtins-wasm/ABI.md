@@ -30,11 +30,15 @@ Rust owns a bump arena in linear memory, which is also its global allocator.
 | `cabi_realloc` | `(old_ptr: i32, old_size: i32, align: i32, new_size: i32) -> i32` | allocate in the arena (grows memory as needed, traps when it cannot) |
 | `_arena_mark` | `() -> i32` | current top of the arena |
 | `_arena_release` | `(mark: i32)` | reset the top to `mark` |
+| `_heap_base` | `() -> i32` | top of the arena rounded up to 16; scratch memory the code generator may write to without allocating |
 
 Every glue call does: `mark = _arena_mark()`, lower the arguments (allocating
 with `cabi_realloc`), allocate the return area, call, lift the result, then
 `_arena_release(mark)`. Calls may nest (a repr calls Gleam code that calls Rust),
 so the arena is never reset to zero.
+
+`_heap_base` scratch memory is not allocated: anything that allocates in the
+arena (any glue call) while the scratch is in use may overwrite it.
 
 ### Layout of values in memory
 
@@ -55,6 +59,10 @@ All sizes are multiples of 8 and every value is 8-aligned. Little endian.
 
 A pointer returned by Rust may point anywhere in the arena, including into the
 argument bytes (for example `string_trim` may return a sub-slice of its input).
+The pointer of an empty `String`, `BitArray` or `List` may be any value.
+A `BitArray` returned by Rust always has `bit_len == 8 * byte_len`. In a
+`BitArray` argument a partial last byte holds its bits in the most significant
+positions; the unused low bits may be anything and are ignored.
 
 ### Parameters and results
 
@@ -79,7 +87,10 @@ Rust fills with the layout above.
 
 ### Panics
 
-A Rust panic writes `panic: <message>` to stderr and traps (`unreachable`).
+A Rust panic writes `panic: <message>\n` to stderr and traps (`unreachable`).
+Only literal messages are printed (`panic!("invalid code point")`); for a
+message with arguments the source location is printed instead, because
+formatting would bring `core::fmt` into the module.
 
 ### Functions
 
@@ -90,17 +101,17 @@ configured width (`_config`).
 
 | Export | Gleam type | Notes |
 |---|---|---|
-| `int_parse` | `fn(String) -> Result(Int, Nil)` | `core` `from_str` grammar: optional `+`/`-`, digits, nothing else; overflow is `Error` |
-| `int_base_parse` | `fn(String, Int) -> Result(Int, Nil)` | base 2..36 (checked by the caller), `from_str_radix` grammar, both letter cases |
+| `int_parse` | `fn(String) -> Result(Int, Nil)` | `i64::from_str` grammar: optional `+`/`-`, ASCII digits, nothing else (no `_`, no spaces, no lone sign); overflow is `Error` |
+| `int_base_parse` | `fn(String, Int) -> Result(Int, Nil)` | base 2..36 (checked by the caller; another base gives `Error`), `from_str_radix` grammar, both letter cases |
 | `int_to_string` | `fn(Int) -> String` | |
-| `int_to_base_string` | `fn(Int, Int) -> String` | base 2..36, upper case digits, `-` prefix |
+| `int_to_base_string` | `fn(Int, Int) -> String` | base 2..36 (another base panics), upper case digits, `-` prefix |
 
 **float**
 
 | Export | Gleam type | Notes |
 |---|---|---|
 | `float_parse` | `fn(String) -> Result(Float, Nil)` | grammar `[+-]?[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?`; overflow to infinity is `Error` |
-| `float_to_string` | `fn(Float) -> String` | shortest round-trip digits (ryu); same text as `float_to_string` in `gleam_stdlib.mjs` (ECMAScript `Number#toString`, then `.0` added before the exponent or at the end when there is no `.`); `-0.0` gives `"-0.0"` |
+| `float_to_string` | `fn(Float) -> String` | shortest round-trip digits (ryu; of the `f32` value when `Float` is 32 bits); same text as `float_to_string` in `gleam_stdlib.mjs`: ECMAScript `Number#toString` layout (exponent form when the decimal exponent is `>= 21` or `< -6`), `+` of the exponent removed, `.0` added before the `e` or at the end when there is no `.` (`1.0e21`, `1.0e-7`, `100.0`); the one difference is `-0.0`, which gives `"-0.0"` (JavaScript gives `"0.0"`); NaN and infinities, which Gleam cannot build, give `NaN.0`, `Infinity.0`, `-Infinity.0` as the JavaScript code does |
 | `float_power` | `fn(Float, Float) -> Float` | `libm::pow` |
 | `float_logarithm` | `fn(Float) -> Float` | `libm::log` |
 | `float_exponential` | `fn(Float) -> Float` | `libm::exp` |
@@ -113,12 +124,12 @@ configured width (`_config`).
 | `string_length` | `fn(String) -> Int` | extended grapheme clusters |
 | `string_lowercase` | `fn(String) -> String` | `str::to_lowercase` (final sigma) |
 | `string_uppercase` | `fn(String) -> String` | `str::to_uppercase` |
-| `string_trim` | `fn(String) -> String` | Pattern_White_Space on both ends |
+| `string_trim` | `fn(String) -> String` | Pattern_White_Space on both ends: U+0009..U+000D, U+0020, U+0085, U+200E, U+200F, U+2028, U+2029 (not U+00A0 nor U+3000) |
 | `string_trim_start` | `fn(String) -> String` | |
 | `string_trim_end` | `fn(String) -> String` | |
-| `string_contains` | `fn(String, String) -> Bool` | byte search (`memchr::memmem`) |
+| `string_contains` | `fn(String, String) -> Bool` | byte search (`memchr` for the first byte, then compare) |
 | `string_crop` | `fn(String, String) -> String` | from the first match of the second string; unchanged if absent |
-| `string_split` | `fn(String, String) -> List(String)` | empty separator gives the graphemes (`[]` for `""`); otherwise byte search |
+| `string_split` | `fn(String, String) -> List(String)` | empty separator gives the graphemes (`[]` for `""`); otherwise byte search, non overlapping, `[""]` for `""` |
 | `string_split_once` | `fn(String, String) -> Result(#(String, String), Nil)` | |
 | `string_replace` | `fn(String, String, String) -> String` | empty pattern returns the input |
 | `string_reverse` | `fn(String) -> String` | grapheme order |
@@ -131,7 +142,7 @@ configured width (`_config`).
 | `string_pop_grapheme` | `fn(String) -> Result(#(String, String), Nil)` | copying version; the compiler builtin `_string_pop_grapheme` is preferred |
 | `string_to_utf_codepoints` | `fn(String) -> List(UtfCodepoint)` | |
 | `string_from_utf_codepoints` | `fn(List(UtfCodepoint)) -> String` | invalid code point panics |
-| `string_inspect` | `fn(String) -> String` | Gleam source repr with quotes and escapes, as `string.inspect` on Erlang/JS |
+| `string_inspect` | `fn(String) -> String` | Gleam source repr with quotes and escapes, as `string.inspect` on Erlang/JS (both agree): `\\`, `\"`, `\n`, `\r`, `\t`, `\f`, and the other code points below U+0020 or in U+007F..U+009F as `\u{XXXX}` (4 upper case hex digits) |
 
 **bit_array**
 
@@ -146,16 +157,16 @@ configured width (`_config`).
 | `bit_array_base16_encode` | `fn(BitArray) -> String` | upper case |
 | `bit_array_base16_decode` | `fn(String) -> Result(BitArray, Nil)` | both cases |
 | `bit_array_inspect` | `fn(BitArray) -> String` | `<<1, 2, 3:size(2)>>` |
-| `bit_array_compare` | `fn(BitArray, BitArray) -> Int` | -1, 0, 1 (`order.Order` built by the caller) |
-| `bit_array_to_int_and_size` | `fn(BitArray) -> #(Int, Int)` | unsigned big endian value and bit size |
+| `bit_array_compare` | `fn(BitArray, BitArray) -> Int` | -1, 0, 1 (`order.Order` built by the caller), same result as `bit_array.compare`: bytes while both sides have 8 bits left, then an empty side is smaller, then the remaining bits as unsigned integers, then the bit size |
+| `bit_array_to_int_and_size` | `fn(BitArray) -> #(Int, Int)` | unsigned big endian value (wrapping to 64 bits, Erlang gives a big integer) and bit size |
 
 **uri**
 
 | Export | Gleam type | Notes |
 |---|---|---|
 | `uri_percent_encode` | `fn(String) -> String` | keeps unreserved and `!$'()*+`, upper case hex |
-| `uri_percent_decode` | `fn(String) -> Result(String, Nil)` | `%ZZ` is `Error`; incomplete `%4` at the end is literal; UTF-8 validated |
-| `uri_parse_query` | `fn(String) -> Result(List(#(String, String)), Nil)` | `+` is space; `&` separates; `x=1=2` gives `"1=2"`; key without `=` gets `""`; decoding errors are `Error` |
+| `uri_percent_decode` | `fn(String) -> Result(String, Nil)` | `%ZZ` is `Error`; a `%` followed by fewer than two bytes at the end is literal (`%4`, `%`); `+` is kept; UTF-8 validated |
+| `uri_parse_query` | `fn(String) -> Result(List(#(String, String)), Nil)` | like `uri_string:dissect_query` on Erlang: `""` gives `[]`; `&` separates and empty segments are kept (`a&&b` gives `[#("a", ""), #("", ""), #("b", "")]`; the JavaScript target skips segments with an empty key instead); `;` does not separate; the first `=` splits (`x=1=2` gives `"1=2"`); key without `=` gets `""`; `+` is space; each key and value is decoded like `uri_percent_decode` (so a trailing `%4` of a component is literal); decoding errors and invalid UTF-8 are `Error` |
 
 **io**
 
@@ -172,12 +183,29 @@ Not callable from Gleam; the compiler calls them from generated code.
 
 | Export | Signature | Meaning |
 |---|---|---|
-| `_grapheme_prefix_len` | `(ptr: i32, len: i32, complete: i32) -> i32` | byte length of the first grapheme of the window; `-1` when `complete == 0` and the grapheme may continue past the window; `0` for an empty string |
+| `_grapheme_prefix_len` | `(ptr: i32, len: i32, complete: i32) -> i32` | byte length of the first grapheme of the window; `-1` when `complete == 0` and the grapheme reaches the end of the window (it may continue past it), the window cuts a UTF-8 sequence before the first grapheme ends, or the window is empty; with `complete != 0` the window is the whole string and `""` gives `0` |
 | `_float_repr` | `(f: f64, ptr: i32) -> i32` | writes `float_to_string(f)` at `ptr`, returns the length (used by `_inspect`) |
 
 The older exports (`_print`, `_exit`, `_i32_to_str`, `_i64_to_str`, `_f32_to_str`,
 `_f64_to_str`, `_i32_parse`, `_i64_parse`, `_f32_parse`, `_f64_parse`,
 `_i32_is_codepoint`, `_i64_is_codepoint`, `_heap_base`) keep their signatures.
+`_f32_to_str`/`_f64_to_str` now write the `float_to_string` text (for `f32` and
+`f64` respectively) and `_i32_parse`/`_i64_parse` use the `from_str` grammar.
+
+The code generator cannot handle indirect calls in this module yet (its dead
+code elimination deletes the element segments, and walrus panics when a
+surviving function uses the table), so no function reachable from an export may
+make one: no `core::fmt` formatting (`write!`, `format!`, `{:?}`) and no
+`memchr::memmem` (its searchers are function pointers). Functions with
+`call_indirect` that are only reachable from the table (e.g. `Debug` impls
+referenced by panic sites) are harmless, since they are collected.
+
+The code generator finds the exports by function name (the name section), so
+every export must stay a distinct function (LTO may otherwise merge identical
+bodies under one name).
+
+The module imports `fd_write`, `proc_exit` and `random_get` from
+`wasi_snapshot_preview1`.
 
 ## Compiler builtins (`"builtins"` module)
 
