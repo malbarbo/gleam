@@ -235,3 +235,66 @@ pub fn main() {{
 "#
     ));
 }
+
+#[test]
+fn string_views() {
+    // Slices bigger than 64 bytes and a quarter of the original share its
+    // bytes; every operation must respect their offset.
+    run_ok(&format!(
+        r#"{STRING}
+pub fn main() {{
+    let s = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz"
+    let view = byte_slice(s, 10, 80)
+    let assert 80 = byte_size(view)
+    let assert True = view == "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqr"
+    let assert True = starts_with(view, "abc")
+    let assert True = ends_with(view, "pqr")
+    let assert #(97, rest) = pop_codeunit(view)
+    let assert 79 = byte_size(rest)
+    let assert True = starts_with(rest, "bcd")
+    let assert "bcd" = byte_slice(rest, 0, 3)
+    let assert "abc!" = byte_slice(view, 0, 3) <> "!"
+    let assert "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqr" = view
+    let assert "abc" <> tail = view
+    let assert True = starts_with(tail, "defg")
+    let assert True = less_than(view, rest)
+    let assert "x-abc-qr" = join(["x", byte_slice(view, 0, 3), byte_slice(view, 78, 2)], "-")
+    let assert "bcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqr" = remove_prefix(view, "a")
+    let assert "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopq" = remove_suffix(view, "r")
+}}
+"#
+    ));
+}
+
+#[test]
+fn string_views_echo() {
+    let output = super::run_wasm(
+        &format!(
+            r#"{STRING}
+@external(webassembly, "builtins", "_inspect")
+fn inspect(a: a) -> String
+
+pub fn main() {{
+    let s = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz"
+    let view = byte_slice(s, 10, 80)
+    echo view
+    echo #(byte_slice(view, 70, 10), inspect(view) == "\"" <> view <> "\"")
+}}
+"#
+        ),
+        vec![],
+    );
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(
+        output.stderr.contains(
+            "\"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqr\""
+        ),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains("#(\"ijklmnopqr\", True)"),
+        "{}",
+        output.stderr
+    );
+}

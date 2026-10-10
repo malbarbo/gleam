@@ -4,6 +4,7 @@
 #![allow(clippy::todo)]
 mod builtins;
 mod captures;
+mod glue;
 mod instructions;
 mod monomorphize;
 mod scope;
@@ -15,6 +16,7 @@ mod tests;
 pub use builtins::builtin_function_names;
 use builtins::*;
 use captures::{Capture, Variables};
+use glue::*;
 use instructions::*;
 use monomorphize::*;
 use scope::*;
@@ -674,11 +676,9 @@ impl<'a> Generator<'a> {
         let mut wasm_module =
             walrus::Module::from_buffer(BUILTINS_WASM).expect("builtins wasm to be a valid module");
         let memory = wasm_module.memories.iter().next().map(|m| m.id());
-        // String is a mutable i8 array. Add it once and reuse for all string literals.
-        let string_type_index = wasm_module.types.add_array(StringType::field_type());
-        wasm_module.types.get_mut(string_type_index).name = Some("String".to_string());
+        let string = StringType::new(&mut wasm_module);
         let mut wasm_types = IndexMap::new();
-        let _ = wasm_types.insert(StringType::wasm_type(), string_type_index);
+        let _ = wasm_types.insert(StringType::wasm_type(), string.bytes_index);
         Generator {
             wasm_module,
             memory,
@@ -704,9 +704,7 @@ impl<'a> Generator<'a> {
             globals: Rc::default(),
             int: IntType::I32,
             float: FloatType::F64,
-            string: StringType {
-                type_index: string_type_index,
-            },
+            string,
             module,
             line_numbers,
             all_modules,
@@ -1097,6 +1095,10 @@ impl<'a> Generator<'a> {
         let functions: Vec<_> = self.module.definitions.functions.iter().collect();
         for function in functions {
             if let Some((module, name, _)) = &function.external_webassembly {
+                if module == RUST_MODULE {
+                    self.validate_rust_external(function, name, available)?;
+                    continue;
+                }
                 if module != BUILTINS_MODULE {
                     return Err(Error::UnknownExternalModule {
                         location: function.location,
@@ -1152,6 +1154,51 @@ impl<'a> Generator<'a> {
             }
         }
         Ok(builtins)
+    }
+
+    fn validate_rust_external(
+        &self,
+        function: &TypedFunction,
+        name: &EcoString,
+        available: &HashMap<EcoString, (Vec<ValType>, Vec<ValType>)>,
+    ) -> Result<(), Error> {
+        let params = function
+            .arguments
+            .iter()
+            .map(|arg| arg.type_.clone())
+            .collect_vec();
+        let Some(expected) = rust_signature(&params, &function.return_type) else {
+            return Err(Error::UnsupportedFeature {
+                location: function.location,
+                feature: format!(
+                    "the type {} in a rust external",
+                    self.type_pretty_name(&function_type(function))
+                )
+                .into(),
+            });
+        };
+        let Some(got) = available.get(name) else {
+            return Err(Error::UnknownBuiltinFunction {
+                location: function.location,
+                name: name.clone(),
+            });
+        };
+        if &expected != got {
+            let show = |(params, results): &(Vec<ValType>, Vec<ValType>)| {
+                format!(
+                    "fn({}) -> {}",
+                    params.iter().map(|p| format!("{p:?}")).join(", "),
+                    results.iter().map(|r| format!("{r:?}")).join(", "),
+                )
+            };
+            return Err(Error::WrongBuiltinFunctionSignature {
+                location: function.location,
+                name: name.clone(),
+                expected: show(got).into(),
+                got: show(&expected).into(),
+            });
+        }
+        Ok(())
     }
 
     fn types(&mut self) {
@@ -2738,7 +2785,10 @@ impl<'a> Generator<'a> {
 
         for function in &self.module.definitions.functions {
             if function_name(function) == name {
-                if let Some((_, fname, _)) = &function.external_webassembly {
+                if let Some((module, fname, _)) = &function.external_webassembly {
+                    if module == RUST_MODULE {
+                        return self.function_rust(fname, &function_type(function));
+                    }
                     if fname == INSPECT {
                         return self.function_inspect(required_type);
                     }
@@ -3234,7 +3284,10 @@ impl<'a> Generator<'a> {
         required_type: &Arc<Type>,
     ) -> Id {
         let function = self.module_function_definition(module_name, fn_name);
-        if let Some((_, fname, _)) = &function.external_webassembly {
+        if let Some((module, fname, _)) = &function.external_webassembly {
+            if module == RUST_MODULE {
+                return self.function_rust(fname, &function_type(function));
+            }
             if fname == INSPECT {
                 return self.function_inspect(required_type);
             }
@@ -4522,20 +4575,13 @@ impl<'a> Generator<'a> {
                     // rest = subject[prefix_len..]
                     let _ = instructions
                         .local_get(subject)
-                        .string_len()
-                        .i32_const(prefix_len)
-                        .i32_sub()
-                        .string_new()
-                        .local_set(rest_local)
-                        .local_get(rest_local)
-                        .i32_const(0)
-                        .local_get(subject)
                         .i32_const(prefix_len)
                         .local_get(subject)
                         .string_len()
                         .i32_const(prefix_len)
                         .i32_sub()
-                        .string_copy();
+                        .string_slice()
+                        .local_set(rest_local);
                 }
             }
             Pattern::BitArray { .. } | Pattern::BitArraySize(_) => {

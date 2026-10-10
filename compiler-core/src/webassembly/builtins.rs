@@ -278,6 +278,21 @@ impl<'a> Generator<'a> {
     fn code_start(&mut self) -> FunctionId {
         let mut function = Function::new(self, "$start", &[], &[]);
         let mut instructions = function.extend_instructions(self);
+        // the configuration of the rust builtins
+        if let Some(config) = self.find_global(CONFIG) {
+            let int_bits = match self.int {
+                IntType::I32 => 32,
+                IntType::I64 => 64,
+            };
+            let float_bits = match self.float {
+                FloatType::F32 => 32,
+                FloatType::F64 => 64,
+            };
+            let _ = instructions
+                .i32_const(int_bits)
+                .i32_const(float_bits)
+                .call(config.func_id());
+        }
         // string data
         for (string, index) in self.strings.clone() {
             let bytes = string.as_bytes().to_vec();
@@ -285,8 +300,8 @@ impl<'a> Generator<'a> {
             let _ = instructions
                 .i32_const(0)
                 .i32_const(string.len() as i32)
-                .array_new_data(self.string.type_index, data)
-                .ref_as_non_null()
+                .array_new_data(self.string.bytes_index, data)
+                .string_from_bytes()
                 .global_set(index);
         }
         // constants
@@ -350,7 +365,7 @@ impl<'a> Generator<'a> {
         })
     }
 
-    fn ok_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> FunctionId {
+    pub(super) fn ok_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> FunctionId {
         self.variant_constructor(
             vec![ok.clone()],
             type_::result(ok, error),
@@ -358,7 +373,11 @@ impl<'a> Generator<'a> {
         )
     }
 
-    fn error_variant_constructor(&mut self, ok: Arc<Type>, error: Arc<Type>) -> FunctionId {
+    pub(super) fn error_variant_constructor(
+        &mut self,
+        ok: Arc<Type>,
+        error: Arc<Type>,
+    ) -> FunctionId {
         self.variant_constructor(
             vec![error.clone()],
             type_::result(ok, error),
@@ -400,8 +419,8 @@ impl<'a> Generator<'a> {
         // locals
         let len_a = self.wasm_local(ValType::I32); // I32
         let len_b = self.wasm_local(ValType::I32); // I32
-        // return
-        let r = self.wasm_local(string_vt); // String
+        // result bytes
+        let r = self.wasm_local(self.string.bytes_val_type());
         let mut function = Function::new(self, "_string_concat", &[a, b], &[string_vt]);
         let mut instructions = function.extend_instructions(self);
         #[rustfmt::skip]
@@ -418,24 +437,24 @@ impl<'a> Generator<'a> {
             .local_get(len_a)
             .local_get(len_b)
             .i32_add()
-            .string_new()
+            .bytes_new()
             .local_set(r)
-            // array.copy r[0..] from a[0..len_a]
+            // r[0..] = a
             .local_get(r)
             .i32_const(0)
             .local_get(a)
             .i32_const(0)
             .local_get(len_a)
-            .string_copy()
-            // array.copy r[len_a..] from b[0..len_b]
+            .bytes_copy_from_string()
+            // r[len_a..] = b
             .local_get(r)
             .local_get(len_a)
             .local_get(b)
             .i32_const(0)
             .local_get(len_b)
-            .string_copy()
-            // return r
+            .bytes_copy_from_string()
             .local_get(r)
+            .string_from_bytes()
             .end();
         function.finish(self)
     }
@@ -1798,7 +1817,7 @@ impl<'a> Generator<'a> {
         #[rustfmt::skip]
         let _ = instructions
             .local_get(s)
-            .array_len()
+            .string_len()
             .local_set(len)
             .local_get(dest)
             .local_get(len)
@@ -1839,15 +1858,14 @@ impl<'a> Generator<'a> {
         let len = self.wasm_local(ValType::I32); // I32
         // locals
         let i = self.wasm_local(ValType::I32); // I32
-        // return String
-        let s = self.wasm_local(string_vt);
-        let string_type_index = self.string.type_index;
+        // result bytes
+        let s = self.wasm_local(self.string.bytes_val_type());
         let mut function = Function::new(self, "_memory_to_string", &[src, len], &[string_vt]);
         let mut instructions = function.extend_instructions(self);
         #[rustfmt::skip]
         let _ = instructions
             .local_get(len)
-            .string_new()
+            .bytes_new()
             .local_set(s)
             .i32_const(0)
             .local_set(i)
@@ -1863,13 +1881,14 @@ impl<'a> Generator<'a> {
                             .local_get(i)
                             .local_get(src)
                             .i32_load8_u(MemArg { offset: 0, align: 0 })
-                            .array_set(string_type_index)
+                            .bytes_set()
                             .i32_inc(src)
                             .i32_inc(i)
                             .br(loop_id);
                     });
             })
             .local_get(s)
+            .string_from_bytes()
             .end();
         function.finish(self)
     }

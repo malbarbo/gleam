@@ -253,7 +253,7 @@ impl<'a> Generator<'a> {
     }
 
     /// `_string_byte_slice(s, start, length)`: the caller guarantees the
-    /// bounds.
+    /// bounds. A view over `s` unless the slice is small.
     pub(super) fn code_string_byte_slice(&mut self) -> FunctionId {
         let string_vt = self.string.val_type();
         let int_vt = self.int.val_type();
@@ -261,25 +261,16 @@ impl<'a> Generator<'a> {
         let s = self.wasm_local(string_vt); // String
         let start = self.wasm_local(int_vt); // Int
         let len = self.wasm_local(int_vt); // Int
-        // locals
-        let r = self.wasm_local(string_vt); // String
         let mut function =
             Function::new(self, "_string_byte_slice", &[s, start, len], &[string_vt]);
-        #[rustfmt::skip]
         let _ = function
             .extend_instructions(self)
-            .local_get(len)
-            .int_to_i32()
-            .string_new()
-            .local_tee(r)
-            .i32_const(0)
             .local_get(s)
             .local_get(start)
             .int_to_i32()
             .local_get(len)
             .int_to_i32()
-            .string_copy()
-            .local_get(r)
+            .string_slice()
             .end();
         function.finish(self)
     }
@@ -508,7 +499,7 @@ impl<'a> Generator<'a> {
         let total = self.wasm_local(ValType::I32); // I32
         let pos = self.wasm_local(ValType::I32); // I32
         let seen = self.wasm_local(ValType::I32); // Bool
-        let r = self.wasm_local(string_vt); // String
+        let r = self.wasm_local(self.string.bytes_val_type());
         let (name, params) = if with_separator {
             ("_string_join", vec![strings, separator])
         } else {
@@ -572,7 +563,7 @@ impl<'a> Generator<'a> {
         });
         let _ = instructions
             .local_get(total)
-            .string_new()
+            .bytes_new()
             .local_set(r)
             .i32_const(0)
             .local_set(seen);
@@ -585,7 +576,7 @@ impl<'a> Generator<'a> {
                     .i32_const(0)
                     .local_get(separator)
                     .string_len()
-                    .string_copy()
+                    .bytes_copy_from_string()
                     .local_get(pos)
                     .local_get(separator)
                     .string_len()
@@ -599,14 +590,14 @@ impl<'a> Generator<'a> {
                 .i32_const(0)
                 .local_get(item)
                 .string_len()
-                .string_copy()
+                .bytes_copy_from_string()
                 .local_get(pos)
                 .local_get(item)
                 .string_len()
                 .i32_add()
                 .local_set(pos);
         });
-        let _ = instructions.local_get(r).end();
+        let _ = instructions.local_get(r).string_from_bytes().end();
         function.finish(self)
     }
 }

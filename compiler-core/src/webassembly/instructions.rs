@@ -193,6 +193,36 @@ impl<'a, 'b> Instructions<'a, 'b> {
         self
     }
 
+    pub(super) fn i64_load(&mut self, arg: MemArg) -> &mut Self {
+        let memory = self.memory.expect("memory available");
+        let _ = self
+            .seq
+            .as_mut()
+            .load(memory, LoadKind::I64 { atomic: false }, arg);
+        self
+    }
+
+    pub(super) fn f64_load(&mut self, arg: MemArg) -> &mut Self {
+        let memory = self.memory.expect("memory available");
+        let _ = self.seq.as_mut().load(memory, LoadKind::F64, arg);
+        self
+    }
+
+    pub(super) fn i64_store(&mut self, arg: MemArg) -> &mut Self {
+        let memory = self.memory.expect("memory available");
+        let _ = self
+            .seq
+            .as_mut()
+            .store(memory, StoreKind::I64 { atomic: false }, arg);
+        self
+    }
+
+    pub(super) fn f64_store(&mut self, arg: MemArg) -> &mut Self {
+        let memory = self.memory.expect("memory available");
+        let _ = self.seq.as_mut().store(memory, StoreKind::F64, arg);
+        self
+    }
+
     pub(super) fn i32_load8_u(&mut self, arg: MemArg) -> &mut Self {
         let memory = self.memory.expect("memory available");
         let _ = self.seq.as_mut().load(
@@ -283,20 +313,61 @@ impl<'a, 'b> Instructions<'a, 'b> {
             .local_set(local)
     }
 
-    pub(super) fn string_new(&mut self) -> &mut Self {
-        self.array_new_default(self.string.type_index)
+    /// `[len] -> [bytes]`: a zeroed byte array to build a string.
+    pub(super) fn bytes_new(&mut self) -> &mut Self {
+        self.array_new_default(self.string.bytes_index)
     }
 
+    /// `[bytes, i, byte] -> []`.
+    pub(super) fn bytes_set(&mut self) -> &mut Self {
+        self.array_set(self.string.bytes_index)
+    }
+
+    /// `[bytes, i] -> [byte]`.
+    pub(super) fn bytes_get(&mut self) -> &mut Self {
+        self.array_get_u(self.string.bytes_index)
+    }
+
+    /// `[dst: bytes, dst_off, src: String, src_off, len] -> []`.
+    pub(super) fn bytes_copy_from_string(&mut self) -> &mut Self {
+        self.call(self.string.copy_to_bytes)
+    }
+
+    /// `[bytes] -> [String]`: the string of all the bytes, which must not be
+    /// changed afterwards.
+    pub(super) fn string_from_bytes(&mut self) -> &mut Self {
+        self.call(self.string.from_bytes)
+    }
+
+    /// `[s, i] -> [byte]`.
     pub(super) fn string_get(&mut self) -> &mut Self {
-        self.array_get_u(self.string.type_index)
+        self.call(self.string.byte_at)
     }
 
+    /// `[s] -> [len]`.
     pub(super) fn string_len(&mut self) -> &mut Self {
-        self.array_len()
+        self.struct_get(self.string.type_index, 2)
     }
 
-    pub(super) fn string_copy(&mut self) -> &mut Self {
-        self.array_copy(self.string.type_index, self.string.type_index)
+    /// `[s] -> [bytes]`: the underlying array, indexed from `string_off`.
+    pub(super) fn string_bytes(&mut self) -> &mut Self {
+        self.struct_get(self.string.type_index, 0)
+    }
+
+    /// `[s] -> [off]`.
+    pub(super) fn string_off(&mut self) -> &mut Self {
+        self.struct_get(self.string.type_index, 1)
+    }
+
+    /// `[s, start, len] -> [String]`, sharing the bytes of `s` when the slice
+    /// is big.
+    pub(super) fn string_slice(&mut self) -> &mut Self {
+        self.call(self.string.slice)
+    }
+
+    /// `[] -> [String]`: a new empty string.
+    pub(super) fn string_empty(&mut self) -> &mut Self {
+        self.i32_const(0).bytes_new().string_from_bytes()
     }
 
     /// Ensure linear memory is large enough to access the given address.
@@ -925,16 +996,195 @@ impl<'a, 'b> Instructions<'a, 'b> {
     float_unop!(float_abs, F32Abs, F64Abs);
 }
 
+/// Slices of up to this many bytes are copied instead of sharing the bytes of
+/// the original string.
+pub(super) const STRING_SLICE_COPY_MAX: i32 = 64;
+
+/// `String` is a view `{ bytes, off, len }` over an immutable byte array, so
+/// slicing is O(1). Small slices, and slices smaller than a quarter of the
+/// array they come from, are copied: tokens never retain big strings and a
+/// view retains at most 4 times its size, while consuming a string from the
+/// start stays linear (the copies form a geometric series).
 #[derive(Clone, Copy)]
 pub(super) struct StringType {
+    /// The `String` struct.
     pub(super) type_index: TypeId,
+    /// The byte array of strings.
+    pub(super) bytes_index: TypeId,
+    /// `(s: String, i: i32) -> i32`: the byte at `i`.
+    byte_at: FunctionId,
+    /// `(bytes) -> String`: a string with all of `bytes`.
+    from_bytes: FunctionId,
+    /// `(dst: bytes, dst_off: i32, src: String, src_off: i32, len: i32)`.
+    copy_to_bytes: FunctionId,
+    /// `(s: String, start: i32, len: i32) -> String`, applying the slice
+    /// rule.
+    slice: FunctionId,
 }
 
 impl StringType {
-    pub(super) fn field_type() -> FieldType {
-        FieldType {
+    pub(super) fn new(module: &mut walrus::Module) -> StringType {
+        let bytes_index = module.types.add_array(FieldType {
             element_type: StorageType::I8,
             mutable: true,
+        });
+        module.types.get_mut(bytes_index).name = Some("Bytes".into());
+        let bytes_vt = ValType::Ref(RefType {
+            heap_type: HeapType::Concrete(bytes_index),
+            nullable: false,
+        });
+        let immutable = |val_type| FieldType {
+            element_type: StorageType::Val(val_type),
+            mutable: false,
+        };
+        let type_index = module.types.add_struct(vec![
+            immutable(bytes_vt),
+            immutable(ValType::I32),
+            immutable(ValType::I32),
+        ]);
+        module.types.get_mut(type_index).name = Some("String".into());
+        let string_vt = ValType::Ref(RefType {
+            heap_type: HeapType::Concrete(type_index),
+            nullable: false,
+        });
+
+        let byte_at = {
+            let s = module.locals.add(string_vt);
+            let i = module.locals.add(ValType::I32);
+            let mut fb = FunctionBuilder::new(
+                &mut module.types,
+                &[string_vt, ValType::I32],
+                &[ValType::I32],
+            );
+            let _ = fb.name("_string_byte_at".into());
+            let _ = fb
+                .func_body()
+                .local_get(s)
+                .struct_get(type_index, 0)
+                .local_get(s)
+                .struct_get(type_index, 1)
+                .local_get(i)
+                .binop(BinaryOp::I32Add)
+                .array_get_u(bytes_index);
+            fb.finish(vec![s, i], &mut module.funcs)
+        };
+
+        let from_bytes = {
+            let bytes = module.locals.add(bytes_vt);
+            let mut fb = FunctionBuilder::new(&mut module.types, &[bytes_vt], &[string_vt]);
+            let _ = fb.name("_string_from_bytes".into());
+            let _ = fb
+                .func_body()
+                .local_get(bytes)
+                .i32_const(0)
+                .local_get(bytes)
+                .array_len()
+                .struct_new(type_index);
+            fb.finish(vec![bytes], &mut module.funcs)
+        };
+
+        let copy_to_bytes = {
+            let dst = module.locals.add(bytes_vt);
+            let dst_off = module.locals.add(ValType::I32);
+            let src = module.locals.add(string_vt);
+            let src_off = module.locals.add(ValType::I32);
+            let len = module.locals.add(ValType::I32);
+            let mut fb = FunctionBuilder::new(
+                &mut module.types,
+                &[
+                    bytes_vt,
+                    ValType::I32,
+                    string_vt,
+                    ValType::I32,
+                    ValType::I32,
+                ],
+                &[],
+            );
+            let _ = fb.name("_string_copy_to_bytes".into());
+            let _ = fb
+                .func_body()
+                .local_get(dst)
+                .local_get(dst_off)
+                .local_get(src)
+                .struct_get(type_index, 0)
+                .local_get(src)
+                .struct_get(type_index, 1)
+                .local_get(src_off)
+                .binop(BinaryOp::I32Add)
+                .local_get(len)
+                .array_copy(bytes_index, bytes_index);
+            fb.finish(vec![dst, dst_off, src, src_off, len], &mut module.funcs)
+        };
+
+        let slice = {
+            let s = module.locals.add(string_vt);
+            let start = module.locals.add(ValType::I32);
+            let len = module.locals.add(ValType::I32);
+            let bytes = module.locals.add(bytes_vt);
+            let copy = module.locals.add(bytes_vt);
+            let mut fb = FunctionBuilder::new(
+                &mut module.types,
+                &[string_vt, ValType::I32, ValType::I32],
+                &[string_vt],
+            );
+            let _ = fb.name("_string_slice".into());
+            let mut body = fb.func_body();
+            let _ = body
+                .local_get(s)
+                .struct_get(type_index, 0)
+                .local_set(bytes)
+                // len <= 64 || len < bytes.len / 4
+                .local_get(len)
+                .i32_const(STRING_SLICE_COPY_MAX)
+                .binop(BinaryOp::I32LeU)
+                .local_get(len)
+                .local_get(bytes)
+                .array_len()
+                .i32_const(2)
+                .binop(BinaryOp::I32ShrU)
+                .binop(BinaryOp::I32LtU)
+                .binop(BinaryOp::I32Or)
+                .if_else(
+                    string_vt,
+                    |then_s| {
+                        let _ = then_s
+                            .local_get(len)
+                            .array_new_default(bytes_index)
+                            .local_tee(copy)
+                            .i32_const(0)
+                            .local_get(bytes)
+                            .local_get(s)
+                            .struct_get(type_index, 1)
+                            .local_get(start)
+                            .binop(BinaryOp::I32Add)
+                            .local_get(len)
+                            .array_copy(bytes_index, bytes_index)
+                            .local_get(copy)
+                            .i32_const(0)
+                            .local_get(len)
+                            .struct_new(type_index);
+                    },
+                    |else_s| {
+                        let _ = else_s
+                            .local_get(bytes)
+                            .local_get(s)
+                            .struct_get(type_index, 1)
+                            .local_get(start)
+                            .binop(BinaryOp::I32Add)
+                            .local_get(len)
+                            .struct_new(type_index);
+                    },
+                );
+            fb.finish(vec![s, start, len], &mut module.funcs)
+        };
+
+        StringType {
+            type_index,
+            bytes_index,
+            byte_at,
+            from_bytes,
+            copy_to_bytes,
+            slice,
         }
     }
 
@@ -958,5 +1208,12 @@ impl StringType {
 
     pub(super) fn heap_type(&self) -> HeapType {
         HeapType::Concrete(self.type_index)
+    }
+
+    pub(super) fn bytes_val_type(&self) -> ValType {
+        ValType::Ref(RefType {
+            heap_type: HeapType::Concrete(self.bytes_index),
+            nullable: false,
+        })
     }
 }
