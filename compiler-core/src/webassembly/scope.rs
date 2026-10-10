@@ -16,7 +16,7 @@ use crate::{
             visit_typed_pattern, visit_typed_pipeline_assignment,
         },
     },
-    type_::{self, Type, TypedCallArg},
+    type_::{self, ModuleValueConstructor, Type, TypedCallArg},
 };
 use src_span::SrcSpan;
 
@@ -289,7 +289,17 @@ impl Locals {
     }
 
     fn insert_call(&mut self, generator: &mut Generator<'_>, fun: &TypedExpr) {
-        if !fun.is_var() {
+        // Calls to a module select of a function or constructor are direct
+        // calls, see `Generator::static_callee`.
+        let is_static_module_select = matches!(
+            fun,
+            TypedExpr::ModuleSelect {
+                constructor: ModuleValueConstructor::Fn { .. }
+                    | ModuleValueConstructor::Record { .. },
+                ..
+            }
+        );
+        if !fun.is_var() && !is_static_module_select {
             self._insert(generator, fun, &fun.type_(), "fun", fun.location())
         } else {
             set_ubound_or_generic(&fun.type_(), &type_::nil());

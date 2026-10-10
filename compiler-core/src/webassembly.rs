@@ -2488,7 +2488,9 @@ impl<'a> Generator<'a> {
             } => {
                 let args_types = arguments.iter().map(|arg| arg.value.type_());
                 let args = arguments.iter().map(|arg| &arg.value);
-                if fun.is_var() {
+                if let Some(id) = self.static_callee(&scope, fun) {
+                    let _ = instructions.expressions(self, locals, scope, args).call(id);
+                } else if fun.is_var() {
                     // the function can be evaluated after the parameters
                     let _ = instructions
                         .expressions(self, locals, scope.clone(), args)
@@ -2602,18 +2604,17 @@ impl<'a> Generator<'a> {
                 let (custom_type, _) = self.custom_type_expect(type_);
                 match custom_type {
                     CustomType::Struct { .. } | CustomType::Union { .. } => {
-                        let (params, return_) =
-                            constructor.type_().fn_types().expect("function type");
-                        let index = self.function_type_index(params, Some(return_));
+                        let id = self
+                            .static_callee(&scope, constructor)
+                            .expect("record constructor");
                         let _ = instructions
                             .expressions(
                                 self,
                                 locals,
-                                scope.clone(),
+                                scope,
                                 arguments.iter().map(|arg| &arg.value),
                             )
-                            .expression(self, locals, scope, constructor)
-                            .call_ref(index);
+                            .call(id);
                     }
                     CustomType::External { .. } | CustomType::Enum { .. } => {
                         panic!("external/enum types should not reach code generation")
@@ -2872,6 +2873,49 @@ impl<'a> Generator<'a> {
                 ..
             } if self.local_functions.contains_key(location)
         )
+    }
+
+    /// Returns the function `fun` statically names, if any, so a call to it
+    /// can be emitted as a direct `call` instead of a `call_ref` on a
+    /// function reference.
+    fn static_callee(&mut self, scope: &Scope, fun: &TypedExpr) -> Option<FunctionId> {
+        let type_ = fun.type_();
+        let id = if let TypedExpr::Var {
+            name, constructor, ..
+        } = fun
+        {
+            match &constructor.variant {
+                ValueConstructorVariant::ModuleFn { module, name, .. }
+                    if module.as_str() != self.module.name.as_str() =>
+                {
+                    self.function_imported(module, name, &type_)
+                }
+                ValueConstructorVariant::LocalVariable { location, .. } => {
+                    let info = self.local_functions.get(location).cloned()?;
+                    self.function_local_generic(&info, &type_)
+                }
+                ValueConstructorVariant::ModuleFn { .. }
+                | ValueConstructorVariant::Record { .. } => self.var_id(scope, name, &type_),
+                ValueConstructorVariant::ModuleConstant { .. } => return None,
+            }
+        } else if let TypedExpr::ModuleSelect {
+            constructor,
+            module_name,
+            label,
+            ..
+        } = fun
+        {
+            match constructor {
+                ModuleValueConstructor::Fn { .. } => {
+                    self.function_imported(module_name, label, &type_)
+                }
+                ModuleValueConstructor::Record { name, .. } => self.var_id(scope, name, &type_),
+                ModuleValueConstructor::Constant { .. } => return None,
+            }
+        } else {
+            return None;
+        };
+        Some(id.func_id())
     }
 
     fn expression_var(

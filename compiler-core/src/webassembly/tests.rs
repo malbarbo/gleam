@@ -147,6 +147,22 @@ pub fn wasm_type_names(wasm_bytes: &[u8]) -> Vec<String> {
     names
 }
 
+/// Count the `call_ref` instructions in the code of the wasm binary.
+pub fn count_call_ref(wasm_bytes: &[u8]) -> usize {
+    let mut count = 0;
+    for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
+        if let wasmparser::Payload::CodeSectionEntry(body) = payload.unwrap() {
+            let mut reader = body.get_operators_reader().unwrap();
+            while !reader.eof() {
+                if let wasmparser::Operator::CallRef { .. } = reader.read().unwrap() {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
 pub fn compile_wasm_error(src: &str) -> crate::webassembly::Error {
     let (main_module, _) = compile(src, vec![]);
     let line_numbers = LineNumbers::new(src);

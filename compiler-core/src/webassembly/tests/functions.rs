@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-use super::{run_ok, run_wasm};
+use super::{compile_wasm, count_call_ref, run_ok, run_wasm};
 
 #[test]
 fn const_function_assignment() {
@@ -1335,4 +1335,113 @@ pub fn main() {
         "WASM execution failed:\n{}",
         result.stderr
     );
+}
+
+fn assert_runs_without_call_ref(src: &str, deps: Vec<(&str, &str, &str)>) {
+    assert_eq!(count_call_ref(&compile_wasm(src, deps.clone())), 0);
+    let result = run_wasm(src, deps);
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn direct_call_module_functions() {
+    assert_runs_without_call_ref(
+        r#"
+fn inc(x: Int) -> Int { x + 1 }
+fn id(x: a) -> a { x }
+pub fn main() {
+    assert inc(1) == 2
+    assert id(3) == 3
+    assert id("a") == "a"
+    0
+}
+"#,
+        vec![],
+    );
+}
+
+#[test]
+fn direct_call_constructors_and_record_update() {
+    assert_runs_without_call_ref(
+        r#"
+type Point { Point(x: Int, y: Int) }
+type Shape { Circle(r: Int) Square(side: Int) }
+pub fn main() {
+    let p = Point(1, 2)
+    let q = Point(..p, y: 3)
+    assert q.x == 1
+    assert q.y == 3
+    assert Circle(2) != Square(2)
+    0
+}
+"#,
+        vec![],
+    );
+}
+
+#[test]
+fn direct_call_local_functions() {
+    assert_runs_without_call_ref(
+        r#"
+pub fn main() {
+    let inc = fn(x) { x + 1 }
+    let id = fn(a: a) { a }
+    assert inc(1) == 2
+    assert id(4) == 4
+    assert id("b") == "b"
+    0
+}
+"#,
+        vec![],
+    );
+}
+
+#[test]
+fn direct_call_imported_functions() {
+    assert_runs_without_call_ref(
+        r#"
+import thepackage/helpers.{Box, unbox}
+
+pub fn main() {
+    assert helpers.double(2) == 4
+    assert unbox(Box(5)) == 5
+    assert helpers.unbox(helpers.Box("c")) == "c"
+    0
+}
+"#,
+        vec![(
+            "thepackage",
+            "thepackage/helpers",
+            r#"
+pub type Box(a) {
+    Box(value: a)
+}
+
+pub fn unbox(b: Box(a)) -> a {
+    let Box(v) = b
+    v
+}
+
+pub fn double(x: Int) -> Int { x * 2 }
+"#,
+        )],
+    );
+}
+
+#[test]
+fn indirect_call_through_function_value() {
+    let src = r#"
+fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }
+fn inc(x: Int) -> Int { x + 1 }
+pub fn main() {
+    assert apply(inc, 1) == 2
+    0
+}
+"#;
+    assert_eq!(count_call_ref(&compile_wasm(src, vec![])), 1);
+    run_ok(src);
 }
