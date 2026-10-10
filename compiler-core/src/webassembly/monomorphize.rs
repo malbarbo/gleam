@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-use ecow::EcoString;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
@@ -9,9 +8,9 @@ use crate::{
         AssignmentKind, ClauseGuard, Pattern, Statement, TypedArg, TypedAssignment,
         TypedClauseGuard, TypedCustomType, TypedExpr, TypedFunction, TypedPattern,
         TypedRecordConstructor, TypedStatement,
-        visit::{Visit, visit_typed_assignment, visit_typed_expr_call},
+        visit::{Visit, visit_typed_assignment},
     },
-    type_::{self, Type, TypeVar, TypedCallArg},
+    type_::{self, Type, TypeVar},
     webassembly::LocalFunction,
 };
 use src_span::SrcSpan;
@@ -96,58 +95,11 @@ impl Monomorphizer {
         self
     }
 
-    fn bound_by_var_cell(&mut self, from: &Arc<Type>, to: &Arc<Type>) {
-        match (from.as_ref(), to.as_ref()) {
-            (Type::Var { type_ }, _) => {
-                let _ = self.map.insert(Arc::as_ptr(type_) as u64, to.clone());
-            }
-            (
-                Type::Named {
-                    arguments: from, ..
-                },
-                Type::Named { arguments: to, .. },
-            ) => {
-                for (f, t) in from.iter().zip(to) {
-                    self.bound_by_var_cell(f, t);
-                }
-            }
-            (Type::Tuple { elements: from }, Type::Tuple { elements: to }) => {
-                for (f, t) in from.iter().zip(to) {
-                    self.bound_by_var_cell(f, t);
-                }
-            }
-            (
-                Type::Fn {
-                    arguments: from_args,
-                    return_: from_return,
-                },
-                Type::Fn {
-                    arguments: to_args,
-                    return_: to_return,
-                },
-            ) => {
-                self.bound_by_var_cell(from_return, to_return);
-                for (f, t) in from_args.iter().zip(to_args) {
-                    self.bound_by_var_cell(f, t);
-                }
-            }
-            (_, _) => {}
-        }
-    }
-
     pub(super) fn function_local(
         from: &LocalFunction,
         to: &Arc<Type>,
     ) -> (Vec<TypedArg>, Vec<TypedStatement>) {
-        fn propagate_call_mappings(
-            map: &mut HashMap<u64, Arc<Type>>,
-            statements: &[TypedStatement],
-        ) {
-            propagate_call_type_vars(map, statements);
-        }
-        let mut mono = Monomorphizer::new();
-        mono.bound_by_var_cell(&from.type_, to);
-        propagate_call_mappings(&mut mono.map, &from.body);
+        let mono = Monomorphizer::with_bound(&from.type_, to);
         let mut args = from.arguments.clone();
         for arg in &mut args {
             arg.type_ = mono.type_(&arg.type_);
@@ -172,12 +124,6 @@ impl Monomorphizer {
     }
 
     pub(super) fn type_(&self, old: &Arc<Type>) -> Arc<Type> {
-        if let Type::Var { type_: cell } = old.as_ref() {
-            let ptr_id = Arc::as_ptr(cell) as u64;
-            if let Some(mapped) = self.map.get(&ptr_id) {
-                return mapped.clone();
-            }
-        }
         if let Some(id) = get_unbound_or_generic_id(old) {
             if let Some(to) = self.map.get(&id) {
                 to.clone()
@@ -499,14 +445,15 @@ impl Monomorphizer {
     }
 }
 
-/// Collects original local functions.
-/// Preserves Generic type vars for later monomorphization.
+/// Collects the functions bound to a variable by `let`, keyed by the location
+/// of the variable definition. Generic type vars are preserved for later
+/// monomorphization.
 pub(super) fn collect_local_functions(
     body: &[TypedStatement],
     parent_id: u32,
-) -> HashMap<EcoString, LocalFunction> {
+) -> HashMap<SrcSpan, LocalFunction> {
     struct LocalFunctionCollector<'a> {
-        map: &'a mut HashMap<EcoString, LocalFunction>,
+        map: &'a mut HashMap<SrcSpan, LocalFunction>,
         parent_id: u32,
     }
 
@@ -519,10 +466,13 @@ pub(super) fn collect_local_functions(
                 body,
                 ..
             } = &assignment.value
-                && let Pattern::Variable { name, .. } = &assignment.pattern
+                && let Pattern::Variable {
+                    location: definition,
+                    ..
+                } = &assignment.pattern
             {
                 let _ = self.map.insert(
-                    name.clone(),
+                    *definition,
                     LocalFunction {
                         location: *location,
                         parent_id: self.parent_id,
@@ -545,91 +495,6 @@ pub(super) fn collect_local_functions(
         collector.visit_typed_statement(statement);
     }
     map
-}
-
-/// Walks Call expressions and propagates Rc-pointer type var mappings
-/// from arguments to function parameters. Runs until fixpoint.
-fn propagate_call_type_vars(map: &mut HashMap<u64, Arc<Type>>, statements: &[TypedStatement]) {
-    struct Propagator<'a> {
-        map: &'a mut HashMap<u64, Arc<Type>>,
-        changed: &'a mut bool,
-    }
-
-    impl<'ast> Visit<'ast> for Propagator<'_> {
-        fn visit_typed_expr_call(
-            &mut self,
-            _location: &'ast SrcSpan,
-            _type_: &'ast Arc<Type>,
-            fun: &'ast TypedExpr,
-            arguments: &'ast [TypedCallArg],
-            open_parenthesis: &'ast Option<u32>,
-        ) {
-            if let Some((params, _)) = fun.type_().fn_types() {
-                for (param, arg) in params.iter().zip(arguments) {
-                    propagate_between_types(self.map, param, &arg.value.type_(), self.changed);
-                }
-            }
-            visit_typed_expr_call(self, _location, _type_, fun, arguments, open_parenthesis);
-        }
-    }
-
-    fn propagate_between_types(
-        map: &mut HashMap<u64, Arc<Type>>,
-        param: &Arc<Type>,
-        arg: &Arc<Type>,
-        changed: &mut bool,
-    ) {
-        match (param.as_ref(), arg.as_ref()) {
-            (Type::Var { type_: p }, Type::Var { type_: a }) => {
-                let p_ptr = Arc::as_ptr(p) as u64;
-                let a_ptr = Arc::as_ptr(a) as u64;
-                if !map.contains_key(&p_ptr)
-                    && let Some(target) = map.get(&a_ptr).cloned()
-                {
-                    let _ = map.insert(p_ptr, target);
-                    *changed = true;
-                }
-            }
-            (
-                Type::Fn {
-                    arguments: pa,
-                    return_: pr,
-                },
-                Type::Fn {
-                    arguments: aa,
-                    return_: ar,
-                },
-            ) => {
-                for (p, a) in pa.iter().zip(aa) {
-                    propagate_between_types(map, p, a, changed);
-                }
-                propagate_between_types(map, pr, ar, changed);
-            }
-            (Type::Named { arguments: pa, .. }, Type::Named { arguments: aa, .. }) => {
-                for (p, a) in pa.iter().zip(aa) {
-                    propagate_between_types(map, p, a, changed);
-                }
-            }
-            (Type::Tuple { elements: pe }, Type::Tuple { elements: ae }) => {
-                for (p, a) in pe.iter().zip(ae) {
-                    propagate_between_types(map, p, a, changed);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut changed = true;
-    while changed {
-        changed = false;
-        let mut visitor = Propagator {
-            map,
-            changed: &mut changed,
-        };
-        for statement in statements {
-            visitor.visit_typed_statement(statement);
-        }
-    }
 }
 
 fn get_unbound_or_generic_id(type_: &Arc<Type>) -> Option<u64> {

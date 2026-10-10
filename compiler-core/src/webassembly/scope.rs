@@ -303,7 +303,7 @@ impl Locals {
 
     fn insert_subjects(&mut self, generator: &mut Generator<'_>, subjects: &[TypedExpr]) {
         for subject in subjects {
-            if subject.is_local_var() {
+            if subject.is_local_var() && !generator.is_local_function(subject) {
                 continue;
             }
             self._insert(

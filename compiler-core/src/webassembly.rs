@@ -47,7 +47,7 @@ use crate::{
     },
     type_::{
         self, Deprecation, ModuleValueConstructor, PRELUDE_MODULE_NAME, Type, TypeVar,
-        ValueConstructorVariant,
+        ValueConstructor, ValueConstructorVariant,
         printer::{Names, Printer},
     },
 };
@@ -491,7 +491,7 @@ struct Generator<'a> {
     wasm_types: IndexMap<WasmType, TypeId>,
     types: HashMap<(EcoString, EcoString), CustomType>,
     variants: HashMap<(EcoString, EcoString), Variant>,
-    local_functions: HashMap<EcoString, LocalFunction>,
+    local_functions: HashMap<SrcSpan, LocalFunction>,
     builtins: HashMap<BuiltinFunction, FunctionId>,
     builtins_external: HashMap<BuiltinFunctionExternal, FunctionId>,
     main: Option<FunctionId>,
@@ -1945,7 +1945,7 @@ impl<'a> Generator<'a> {
             }
             Constant::Var { name, type_, .. } => {
                 let scope = Scope::Global(self.globals.clone());
-                self.expression_var(&scope, instructions, name, type_);
+                self.expression_var(&scope, instructions, name, type_, None);
             }
             Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
             Constant::RecordUpdate { .. } => {
@@ -2055,18 +2055,18 @@ impl<'a> Generator<'a> {
         function: TypedFunction,
         name: EcoString,
         export: bool,
-        original_local_functions: HashMap<EcoString, LocalFunction>,
+        original_local_functions: HashMap<SrcSpan, LocalFunction>,
     ) -> Id {
         let params = self.val_types(function_params_types(&function));
         let results = self.val_types(iter::once(function.return_type.clone()));
         let index = self.allocate_placeholder_function(&name, &params, &results);
         let id = self.add_function_to_globals(name.clone(), index);
+        let saved_local_functions =
+            std::mem::replace(&mut self.local_functions, original_local_functions);
         let locals = Locals::new(self, &function.arguments, &function.body);
         let param_ids = locals.param_ids();
         let mut code = Function::new(self, &name, &param_ids, &results);
         let mut instructions = code.extend_instructions(self);
-        let saved_local_functions =
-            std::mem::replace(&mut self.local_functions, original_local_functions);
         self.statements(
             &mut instructions,
             Scope::with_params(self.globals.clone(), &function.arguments, &param_ids),
@@ -2471,10 +2471,13 @@ impl<'a> Generator<'a> {
                 ValueConstructorVariant::ModuleConstant { literal, .. } => {
                     self._constant(instructions, literal);
                 }
-                ValueConstructorVariant::LocalVariable { .. }
-                | ValueConstructorVariant::ModuleFn { .. }
+                ValueConstructorVariant::LocalVariable { location, .. } => {
+                    let type_ = expression.type_();
+                    self.expression_var(&scope, instructions, name, &type_, Some(*location));
+                }
+                ValueConstructorVariant::ModuleFn { .. }
                 | ValueConstructorVariant::Record { .. } => {
-                    self.expression_var(&scope, instructions, name, &expression.type_());
+                    self.expression_var(&scope, instructions, name, &expression.type_(), None);
                 }
             },
             TypedExpr::Call {
@@ -2629,7 +2632,7 @@ impl<'a> Generator<'a> {
                     let _ = instructions.ref_func(id.func_id());
                 }
                 ModuleValueConstructor::Record { name, .. } => {
-                    self.expression_var(&scope, instructions, name, &expression.type_());
+                    self.expression_var(&scope, instructions, name, &expression.type_(), None);
                 }
                 ModuleValueConstructor::Constant { literal, .. } => {
                     self._constant(instructions, literal);
@@ -2799,6 +2802,7 @@ impl<'a> Generator<'a> {
         for subject in subjects {
             if let Some(name) = subject.var_name()
                 && subject.is_local_var()
+                && !self.is_local_function(subject)
             {
                 // Subject is a local variable — reuse its existing local
                 let id = self.var_id(&scope, name, &subject.type_());
@@ -2855,15 +2859,31 @@ impl<'a> Generator<'a> {
         }
     }
 
+    /// Whether `expr` is a variable bound to a local function, which must be
+    /// monomorphized for the type of each use instead of read from its local.
+    pub(super) fn is_local_function(&self, expr: &TypedExpr) -> bool {
+        matches!(
+            expr,
+            TypedExpr::Var {
+                constructor: ValueConstructor {
+                    variant: ValueConstructorVariant::LocalVariable { location, .. },
+                    ..
+                },
+                ..
+            } if self.local_functions.contains_key(location)
+        )
+    }
+
     fn expression_var(
         &mut self,
         scope: &Scope,
         instructions: &mut Instructions<'_, '_>,
         name: &EcoString,
         type_: &Arc<Type>,
+        definition: Option<SrcSpan>,
     ) {
-        if let Some(info) = self.local_functions.get(name).cloned()
-            && type_.fn_types().is_some()
+        if let Some(info) =
+            definition.and_then(|location| self.local_functions.get(&location).cloned())
         {
             let id = self.function_local_generic(&info, type_);
             let _ = instructions.ref_func(id.func_id());
@@ -3521,8 +3541,13 @@ impl<'a> Generator<'a> {
             ClauseGuard::Block { value, .. } => {
                 let _ = instructions.clause_guard(self, locals, scope, value);
             }
-            ClauseGuard::Var { name, type_, .. } => {
-                self.expression_var(scope, instructions, name, type_);
+            ClauseGuard::Var {
+                name,
+                type_,
+                definition_location,
+                ..
+            } => {
+                self.expression_var(scope, instructions, name, type_, Some(*definition_location));
             }
             ClauseGuard::TupleIndex { tuple, index, .. } => {
                 let type_index =

@@ -1133,3 +1133,206 @@ pub fn main() {
         "src/my/mod.gleam:3\n42\nsrc/my/mod.gleam:3\n\"hello\"\n"
     );
 }
+
+#[test]
+fn mono_local_generic_function_shadowed_by_let() {
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let f = fn(a: a) { a }
+    assert f(1) == 1
+    let f = fn(x: Int) { x + 100 }
+    assert f(1) == 101
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_generic_function_shadowed_by_param() {
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let f = fn(a: a) { a }
+    let h = fn(f: fn(Int) -> Int) { f(1) }
+    assert h(fn(x) { x + 100 }) == 101
+    assert f(1) == 1
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_generic_function_shadowed_by_case_pattern() {
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let f = fn(a: a) { a }
+    let r = case fn(x: Int) { x + 100 } {
+      f -> f(1)
+    }
+    assert r == 101
+    assert f(1) == 1
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_function_in_sibling_scope() {
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let r = {
+      let f = fn(x: Int) { x + 100 }
+      f(1)
+    }
+    let g = fn(f: fn(Int) -> Int) { f(2) }
+    assert r == 101
+    assert g(fn(x) { x * 10 }) == 20
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_generic_function_as_case_subject() {
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let id = fn(a: a) { a }
+    let r = case id {
+      f -> f(7)
+    }
+    assert r == 7
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_generic_function_with_nested_lambdas() {
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let id = fn(a: a) {
+      let g = fn(x) { x }
+      let h = fn(y) { g(y) }
+      h(a)
+    }
+    assert id(42) == 42
+    assert id("hello") == "hello"
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_generic_function_in_generic_function() {
+    let result = run_wasm(
+        r#"
+fn wrap(x: t) -> #(t, Int) {
+    let pair = fn(a: a, b: b) { #(a, b) }
+    let #(p, _) = pair(x, "s")
+    let #(_, q) = pair(1.5, 7)
+    #(p, q)
+}
+pub fn main() {
+    assert wrap(1) == #(1, 7)
+    assert wrap("z") == #("z", 7)
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_generic_function_passed_to_function() {
+    let result = run_wasm(
+        r#"
+fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }
+fn apply_s(f: fn(String) -> String, x: String) -> String { f(x) }
+pub fn main() {
+    let id = fn(a: a) { a }
+    assert apply(id, 3) == 3
+    assert apply_s(id, "q") == "q"
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn mono_local_generic_function_calls_generic() {
+    let result = run_wasm(
+        r#"
+pub fn main() {
+    let id = fn(a: a) { a }
+    let twice = fn(b: b) { id(id(b)) }
+    assert twice(5) == 5
+    assert twice("w") == "w"
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
