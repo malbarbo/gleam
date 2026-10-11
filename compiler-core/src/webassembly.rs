@@ -455,12 +455,23 @@ struct LocalFunction {
     body: Vec<TypedStatement>,
     /// See `Generator::local_function_captures`.
     captures: Rc<OnceCell<Vec<Capture>>>,
+    /// The types with which the function is used as a value. With captures,
+    /// the definition creates a closure for each one, bound to the hidden
+    /// name `closure_name`, so every use is the same value.
+    values: Vec<Arc<Type>>,
 }
 
 /// The name of the scope entry with the capture `capture` of the local
 /// function `info`.
 fn hidden_name(info: &LocalFunction, capture: &str) -> EcoString {
     format!("{}@{}.{capture}", info.name, info.definition.start).into()
+}
+
+/// The name of the scope entry with the closure of the local function
+/// `info` with type `type_`.
+fn closure_name(info: &LocalFunction, type_: &Arc<Type>) -> EcoString {
+    let type_name = qualified_type_name(type_).replace(" ", "");
+    hidden_name(info, &format!("closure:{type_name}"))
 }
 
 /// Maps Gleam field positions to wasm struct field indices for a union type.
@@ -2647,7 +2658,8 @@ impl<'a> Generator<'a> {
             return id;
         }
         let specialization = self.allocate_specialization();
-        let mono = Monomorphizer::new();
+        let mut mono = Monomorphizer::new();
+        mono.bind_local_functions(&function.body);
         let local_functions = collect_local_functions(&function.body, specialization, &mono);
         // Resolve Generic type vars (from inner lambdas) to Nil for valid WASM types.
         let function = mono.function(function);
@@ -2666,7 +2678,8 @@ impl<'a> Generator<'a> {
             return id;
         }
         let specialization = self.allocate_specialization();
-        let mono = Monomorphizer::with_bound(&function_type(function), required_type);
+        let mut mono = Monomorphizer::with_bound(&function_type(function), required_type);
+        mono.bind_local_functions(&function.body);
         let local_functions = collect_local_functions(&function.body, specialization, &mono);
         let mut function = mono.function(function);
         set_function_name(&mut function, name.clone());
@@ -2803,12 +2816,26 @@ impl<'a> Generator<'a> {
         let mut expanded: Vec<Capture> = vec![];
         for capture in captures {
             let captures = if let Some(info) = self.local_functions.get(&capture.definition) {
-                self.local_function_captures(info)
+                let captures = self.local_function_captures(info);
+                let closures = if captures.is_empty() {
+                    vec![]
+                } else {
+                    info.values
+                        .iter()
+                        .map(|type_| Capture {
+                            name: closure_name(info, type_),
+                            type_: type_.clone(),
+                            definition: info.definition,
+                        })
+                        .collect()
+                };
+                captures
                     .into_iter()
                     .map(|inner| Capture {
                         name: hidden_name(info, &inner.name),
                         ..inner
                     })
+                    .chain(closures)
                     .collect()
             } else {
                 vec![capture]
@@ -2858,7 +2885,8 @@ impl<'a> Generator<'a> {
     }
 
     /// Pushes the value of the local function `info` with type `type_`. With
-    /// captures, each value is a new closure.
+    /// captures, it is the closure created by the definition, or a new one
+    /// when the type is known only in a specialization.
     fn local_function_value(
         &mut self,
         scope: &Scope,
@@ -2866,6 +2894,10 @@ impl<'a> Generator<'a> {
         info: &LocalFunction,
         type_: &Arc<Type>,
     ) {
+        if let Some(local) = scope.find_local(&closure_name(info, type_)) {
+            let _ = instructions.local_get(local);
+            return;
+        }
         let id = self.function_local_generic(info, type_);
         let captures = self.local_function_captures(info);
         if captures.is_empty() {
@@ -2946,7 +2978,8 @@ impl<'a> Generator<'a> {
         }
 
         let specialization = self.allocate_specialization();
-        let mono = Monomorphizer::for_local_function(info, required_type);
+        let mut mono = Monomorphizer::for_local_function(info, required_type);
+        mono.bind_local_functions(&info.body);
         let nested = collect_local_functions(&info.body, specialization, &mono);
         let (args, body) = mono.function_local(info);
         let captures = self.local_function_captures(info);
@@ -3032,6 +3065,15 @@ impl<'a> Generator<'a> {
                             panic!("captured variable {} is not in scope", capture.name)
                         });
                         scope = scope.insert_local(hidden_name(&info, &capture.name), local);
+                    }
+                    if !self.local_function_captures(&info).is_empty() {
+                        for type_ in &info.values {
+                            self.local_function_value(&scope, instructions, &info, type_);
+                            let val_type = self.val_type(type_);
+                            let local = self.wasm_local(val_type);
+                            let _ = instructions.local_set(local);
+                            scope = scope.insert_local(closure_name(&info, type_), local);
+                        }
                     }
                     if rest.is_empty() {
                         let type_ = assignment.value.type_();

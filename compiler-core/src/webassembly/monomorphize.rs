@@ -8,11 +8,15 @@ use crate::{
         AssignmentKind, ClauseGuard, Pattern, Statement, TypedArg, TypedAssignment,
         TypedClauseGuard, TypedCustomType, TypedExpr, TypedFunction, TypedPattern,
         TypedRecordConstructor, TypedStatement,
-        visit::{Visit, visit_typed_assignment},
+        visit::{Visit, visit_typed_assignment, visit_typed_expr_call},
     },
-    type_::{self, Type, TypeVar},
+    type_::{
+        self, Type, TypeVar, TypedCallArg, ValueConstructor, ValueConstructorVariant,
+        error::VariableOrigin,
+    },
     webassembly::LocalFunction,
 };
+use ecow::EcoString;
 use src_span::SrcSpan;
 
 #[derive(Clone)]
@@ -94,6 +98,101 @@ impl Monomorphizer {
             (from, to) => panic!("unexpected type pair in monomorphizer bound: {from:?}, {to:?}"),
         }
         self
+    }
+
+    /// Binds the type variables of each local function of `body` used with a
+    /// single type. A variable not typed where it is bound can be unified
+    /// with them, and then it gets that type.
+    pub(super) fn bind_local_functions(&mut self, body: &[TypedStatement]) {
+        struct UsesCollector {
+            definitions: HashMap<SrcSpan, Arc<Type>>,
+            uses: HashMap<SrcSpan, Vec<Arc<Type>>>,
+        }
+
+        impl<'ast> Visit<'ast> for UsesCollector {
+            fn visit_typed_assignment(&mut self, assignment: &'ast TypedAssignment) {
+                if let TypedExpr::Fn { type_, .. } = &assignment.value
+                    && let Pattern::Variable { location, .. } = &assignment.pattern
+                {
+                    let _ = self.definitions.insert(*location, type_.clone());
+                }
+                visit_typed_assignment(self, assignment);
+            }
+
+            fn visit_typed_expr_var(
+                &mut self,
+                _location: &'ast SrcSpan,
+                constructor: &'ast ValueConstructor,
+                _name: &'ast EcoString,
+            ) {
+                if let ValueConstructorVariant::LocalVariable { location, .. } =
+                    &constructor.variant
+                {
+                    self.uses
+                        .entry(*location)
+                        .or_default()
+                        .push(constructor.type_.clone());
+                }
+            }
+
+            fn visit_typed_clause_guard_var(
+                &mut self,
+                _location: &'ast SrcSpan,
+                _name: &'ast EcoString,
+                type_: &'ast Arc<Type>,
+                definition_location: &'ast SrcSpan,
+                _origin: &'ast VariableOrigin,
+            ) {
+                self.uses
+                    .entry(*definition_location)
+                    .or_default()
+                    .push(type_.clone());
+            }
+        }
+
+        let mut collector = UsesCollector {
+            definitions: HashMap::new(),
+            uses: HashMap::new(),
+        };
+        for statement in body {
+            collector.visit_typed_statement(statement);
+        }
+        for (definition, type_) in collector.definitions {
+            if !self.has_free_variables(&type_) {
+                continue;
+            }
+            let uses = collector.uses.remove(&definition).unwrap_or_default();
+            if let [first, rest @ ..] = uses.as_slice()
+                && !self.has_free_variables(first)
+            {
+                let first = self.type_(first);
+                if rest.iter().all(|other| self.type_(other).same_as(&first)) {
+                    let _ = self.bound(&type_, &first);
+                }
+            }
+        }
+    }
+
+    /// Whether `type_` has type variables not bound by this monomorphizer.
+    pub(super) fn has_free_variables(&self, type_: &Arc<Type>) -> bool {
+        match type_.as_ref() {
+            Type::Var { type_ } => match &*type_.borrow() {
+                TypeVar::Unbound { id } | TypeVar::Generic { id } => !self.map.contains_key(id),
+                TypeVar::Link { type_ } => self.has_free_variables(type_),
+            },
+            Type::Named { arguments, .. } => arguments
+                .iter()
+                .any(|argument| self.has_free_variables(argument)),
+            Type::Fn { arguments, return_ } => {
+                self.has_free_variables(return_)
+                    || arguments
+                        .iter()
+                        .any(|argument| self.has_free_variables(argument))
+            }
+            Type::Tuple { elements } => elements
+                .iter()
+                .any(|element| self.has_free_variables(element)),
+        }
     }
 
     pub(super) fn for_local_function(from: &LocalFunction, to: &Arc<Type>) -> Monomorphizer {
@@ -492,6 +591,7 @@ pub(super) fn collect_local_functions(
                         arguments: arguments.clone(),
                         body: body.to_vec(),
                         captures: Rc::default(),
+                        values: vec![],
                     },
                 );
             } else {
@@ -508,7 +608,81 @@ pub(super) fn collect_local_functions(
     for statement in body {
         collector.visit_typed_statement(statement);
     }
-    collector.map
+    let mut map = collector.map;
+
+    let mut values = ValuesCollector {
+        uses: HashMap::new(),
+    };
+    for statement in body {
+        values.visit_typed_statement(statement);
+    }
+    for (definition, uses) in values.uses {
+        if let Some(info) = map.get_mut(&definition) {
+            for type_ in uses {
+                if enclosing.has_free_variables(&type_) {
+                    continue;
+                }
+                let type_ = enclosing.type_(&type_);
+                if !info.values.iter().any(|other| other.same_as(&type_)) {
+                    info.values.push(type_);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Collects the types with which each local variable is used as a value,
+/// that is, not as the function of a call.
+struct ValuesCollector {
+    uses: HashMap<SrcSpan, Vec<Arc<Type>>>,
+}
+
+impl<'ast> Visit<'ast> for ValuesCollector {
+    fn visit_typed_expr_call(
+        &mut self,
+        location: &'ast SrcSpan,
+        type_: &'ast Arc<Type>,
+        fun: &'ast TypedExpr,
+        arguments: &'ast [TypedCallArg],
+        open_parenthesis: &'ast Option<u32>,
+    ) {
+        if let TypedExpr::Var { .. } = fun {
+            for argument in arguments {
+                self.visit_typed_call_arg(argument);
+            }
+        } else {
+            visit_typed_expr_call(self, location, type_, fun, arguments, open_parenthesis);
+        }
+    }
+
+    fn visit_typed_expr_var(
+        &mut self,
+        _location: &'ast SrcSpan,
+        constructor: &'ast ValueConstructor,
+        _name: &'ast EcoString,
+    ) {
+        if let ValueConstructorVariant::LocalVariable { location, .. } = &constructor.variant {
+            self.uses
+                .entry(*location)
+                .or_default()
+                .push(constructor.type_.clone());
+        }
+    }
+
+    fn visit_typed_clause_guard_var(
+        &mut self,
+        _location: &'ast SrcSpan,
+        _name: &'ast EcoString,
+        type_: &'ast Arc<Type>,
+        definition_location: &'ast SrcSpan,
+        _origin: &'ast VariableOrigin,
+    ) {
+        self.uses
+            .entry(*definition_location)
+            .or_default()
+            .push(type_.clone());
+    }
 }
 
 fn get_unbound_or_generic_id(type_: &Arc<Type>) -> Option<u64> {

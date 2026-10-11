@@ -46,8 +46,51 @@ pub fn main() {
 }
 
 #[test]
+fn captured_functions_unified_with_type_variables() {
+    run(r#"
+pub fn main() {
+  let k = id(fn(y) { y })
+  let f = fn(x: a) { k(x) }
+  assert f("s") == "s"
+  assert map(["t"], f) == ["t"]
+}
+"#);
+}
+
+#[test]
+fn captured_functions_unified_with_type_variables_in_local_functions() {
+    run(r#"
+pub fn main() {
+  let n = 1
+  let g = fn(z: Int) {
+    let k = id(fn(y) { y })
+    let f = fn(x: a) { #(k(x), z + n) }
+    f("s")
+  }
+  assert g(2) == #("s", 3)
+}
+"#);
+}
+
+#[test]
+fn captured_functions_unified_with_type_variables_in_generic_functions() {
+    run(r#"
+fn wrap(v: b) {
+  let k = id(fn(y) { y })
+  let f = fn(x: a) { #(k(x), v) }
+  f(1.5)
+}
+
+pub fn main() {
+  assert wrap(1) == #(1.5, 1)
+  assert wrap("v") == #(1.5, "v")
+}
+"#);
+}
+
+#[test]
 #[should_panic(expected = "depends on the type variables of the local function")]
-fn captured_functions_unified_with_type_variables_are_not_supported() {
+fn captured_functions_unified_with_type_variables_of_two_types_are_not_supported() {
     run(r#"
 pub fn main() {
   let k = id(fn(y) { y })
@@ -80,7 +123,7 @@ pub fn main() {
     _ if f == f -> 1
     _ -> 2
   }
-  assert r == 2
+  assert r == 1
 }
 "#);
 }
@@ -539,9 +582,79 @@ fn equality() {
 pub fn main() {
   let n = 3
   let f = fn(x) { x + n }
-  assert f != f
+  assert f == f
   let g = f
-  assert g == g
+  assert g == f
+  assert [f] == [g]
+  let h = fn(x) { x + n }
+  assert f != h
+}
+"#);
+}
+
+#[test]
+fn equality_in_inline_functions() {
+    run(r#"
+pub fn main() {
+  let n = 3
+  let f = fn(x) { x + n }
+  let g = fn() { f }
+  let h = id(fn() { f })
+  assert g() == f
+  assert h() == f
+  assert g() == h()
+  assert map([1], f) == [4]
+}
+"#);
+}
+
+#[test]
+fn equality_of_polymorphic_local_functions() {
+    run(r#"
+pub fn main() {
+  let n = 3
+  let f = fn(x: a) { #(x, n) }
+  let i: fn(Int) -> #(Int, Int) = f
+  let s: fn(String) -> #(String, Int) = f
+  assert i == f
+  assert s == f
+  assert i(1) == #(1, 3)
+  assert s("a") == #("a", 3)
+}
+"#);
+}
+
+#[test]
+fn equality_in_case_alternatives() {
+    run(r#"
+type T {
+  A(Int)
+  B(Int)
+}
+
+pub fn main() {
+  let r = case A(1) {
+    A(n) | B(n) -> {
+      let f = fn() { n }
+      let g = f
+      g == f
+    }
+  }
+  assert r
+}
+"#);
+}
+
+#[test]
+fn equality_in_local_functions() {
+    run(r#"
+pub fn main() {
+  let n = 3
+  let f = fn(x) { x + n }
+  let g = fn(y: Int) { #(f, y) }
+  let k = fn(y: a) { #(f, y) }
+  assert g(1).0 == f
+  assert k("s").0 == f
 }
 "#);
 }
@@ -657,7 +770,7 @@ pub fn main() {
 }
 
 #[test]
-fn values_allocate_their_environment() {
+fn values_allocate_their_environment_once() {
     let wasm = super::compile_wasm(
         r#"
 fn apply(f: fn(Int) -> Int) -> Int {
@@ -681,7 +794,7 @@ pub fn main() {
             casts.push(function.to_string());
         }
     });
-    assert_eq!(allocations, ["main", "main"]);
+    assert_eq!(allocations, ["main"]);
     assert!(
         matches!(casts.as_slice(), [cast] if cast.ends_with("@closure")),
         "{casts:?}"
