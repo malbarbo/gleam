@@ -817,7 +817,6 @@ impl<'a> Generator<'a> {
         let param_vts = self.val_types(types);
         self.code_variant_constructor(
             type_index,
-            num_fields,
             tag,
             null_supertype,
             field_mapping.as_deref(),
@@ -826,11 +825,9 @@ impl<'a> Generator<'a> {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn code_variant_constructor(
         &mut self,
         struct_index: TypeId,
-        num_fields: u32,
         tag: Option<i32>,
         null_supertype: Option<TypeId>,
         field_mapping: Option<&[u32]>,
@@ -862,8 +859,8 @@ impl<'a> Generator<'a> {
                 let _ = instructions.local_get(*param_ids.get(gleam_pos as usize).expect("param"));
             }
         } else {
-            for index in 0..num_fields {
-                let _ = instructions.local_get(*param_ids.get(index as usize).expect("param"));
+            for param_id in &param_ids {
+                let _ = instructions.local_get(*param_id);
             }
         }
         let _ = instructions.struct_new(struct_index).end();
