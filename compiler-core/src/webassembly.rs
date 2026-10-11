@@ -2108,6 +2108,22 @@ impl<'a> Generator<'a> {
     }
 
     fn module_constant(&mut self, module_constant: &TypedModuleConstant) -> Id {
+        if let Constant::Var {
+            constructor: Some(constructor),
+            ..
+        } = &*module_constant.value
+            && let ValueConstructorVariant::ModuleConstant {
+                literal, module, ..
+            } = &constructor.variant
+            && *module != self.module.name
+        {
+            // A constant of another module has the value of its literal
+            return self.module_constant(&TypedModuleConstant {
+                value: Box::new(literal.clone()),
+                ..module_constant.clone()
+            });
+        }
+
         self.register_string_const(&module_constant.value);
 
         let const_name = &module_constant.name;
@@ -2263,9 +2279,17 @@ impl<'a> Generator<'a> {
                     }
                 }
             }
-            Constant::Var { name, type_, .. } if type_.fn_types().is_some() => {
+            Constant::Var {
+                name,
+                type_,
+                constructor,
+                ..
+            } if type_.fn_types().is_some() => {
                 // A function constant names the global of the closure.
-                let var_id = self.var_id(&Scope::Global(self.globals.clone()), name, type_);
+                let var_id = match self.imported_function_of(constructor.as_deref(), type_) {
+                    Some(id) => id,
+                    None => self.var_id(&Scope::Global(self.globals.clone()), name, type_),
+                };
                 let global = match var_id.kind {
                     IdKind::Func => self.closure_of(var_id.func_id(), type_),
                     IdKind::Global => var_id.global_id(),
@@ -2431,9 +2455,27 @@ impl<'a> Generator<'a> {
                         .call(id);
                 }
             }
-            Constant::Var { name, type_, .. } => {
-                let scope = Scope::Global(self.globals.clone());
-                self.expression_var(&scope, instructions, name, type_, None);
+            Constant::Var {
+                name,
+                type_,
+                constructor,
+                ..
+            } => {
+                if let Some(id) = self.imported_function_of(constructor.as_deref(), type_) {
+                    let closure = self.closure_of(id.func_id(), type_);
+                    let _ = instructions.global_get(closure);
+                } else if let Some(ValueConstructorVariant::ModuleConstant {
+                    literal, module, ..
+                }) = constructor
+                    .as_deref()
+                    .map(|constructor| &constructor.variant)
+                    && *module != self.module.name
+                {
+                    self._constant(instructions, literal);
+                } else {
+                    let scope = Scope::Global(self.globals.clone());
+                    self.expression_var(&scope, instructions, name, type_, None);
+                }
             }
             Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
             Constant::RecordUpdate { .. } => {
@@ -2498,6 +2540,25 @@ impl<'a> Generator<'a> {
             "Name not found: {:?}. Are you using closures? They are not supported yet.",
             name
         );
+    }
+
+    /// The function of another module that a constant names.
+    fn imported_function_of(
+        &mut self,
+        constructor: Option<&ValueConstructor>,
+        type_: &Arc<Type>,
+    ) -> Option<Id> {
+        match &constructor?.variant {
+            ValueConstructorVariant::ModuleFn { module, name, .. }
+                if *module != self.module.name =>
+            {
+                Some(self.function_imported(module, name, type_))
+            }
+            ValueConstructorVariant::LocalVariable { .. }
+            | ValueConstructorVariant::ModuleConstant { .. }
+            | ValueConstructorVariant::ModuleFn { .. }
+            | ValueConstructorVariant::Record { .. } => None,
+        }
     }
 
     fn var_id(&mut self, scope: &Scope, name: &EcoString, type_: &Arc<Type>) -> Id {

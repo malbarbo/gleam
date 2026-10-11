@@ -1632,3 +1632,73 @@ pub fn value(t: x.T) { let x.T(v) = t v }",
         result.stderr
     );
 }
+
+#[test]
+fn import_function_constants() {
+    let result = run_wasm(
+        r#"
+import thepackage/helpers.{step}
+
+const local_step = helpers.step
+
+const steps = [helpers.step, helpers.inc, step]
+
+const local_magic = helpers.magic
+
+const local_greeting = helpers.greeting
+
+const local_list = helpers.list
+
+fn apply(f: fn(Int) -> Int, x: Int) -> Int {
+  f(x)
+}
+
+fn apply_all(fs: List(fn(Int) -> Int), x: Int) -> Int {
+  case fs {
+    [] -> x
+    [f, ..fs] -> apply_all(fs, f(x))
+  }
+}
+
+pub fn main() {
+    assert helpers.step(1) == 2
+    assert step(1) == 2
+    assert apply(helpers.step, 1) == 2
+    assert local_step(1) == 2
+    assert apply_all(steps, 0) == 3
+    assert helpers.step == helpers.inc
+    assert local_step == step
+    assert apply_all(helpers.steps, 0) == 2
+    assert local_magic == 42
+    assert local_greeting == "hi"
+    assert local_list == [42, 2]
+    assert helpers.list == [42, 2]
+    0
+}
+"#,
+        vec![(
+            "thepackage",
+            "thepackage/helpers",
+            r#"
+pub fn inc(x: Int) -> Int {
+  x + 1
+}
+
+pub const step = inc
+
+pub const steps = [step, inc]
+
+pub const magic = 42
+
+pub const greeting = "hi"
+
+pub const list = [magic, 2]
+"#,
+        )],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
