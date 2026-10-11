@@ -333,6 +333,7 @@ impl WasmType {
             WasmTypeKind::Closure(params, results) => {
                 WasmTypeKind::Closure(val_types(params), val_types(results))
             }
+            WasmTypeKind::ClosureIdentity(closure) => WasmTypeKind::ClosureIdentity(remap(closure)),
             WasmTypeKind::Struct(fields_) => WasmTypeKind::Struct(fields(fields_)),
             WasmTypeKind::Union(fields_, supertype) => {
                 WasmTypeKind::Union(fields(fields_), supertype.map(remap))
@@ -351,6 +352,8 @@ enum WasmTypeKind {
     /// The closure struct of functions with these params (without the
     /// closure itself) and results.
     Closure(Vec<ValType>, Vec<ValType>),
+    /// The subtype of the closure struct whose closures have an identity.
+    ClosureIdentity(TypeId),
     Struct(Vec<(EcoString, ValType)>),
     Union(Vec<(EcoString, ValType)>, Option<TypeId>),
 }
@@ -455,10 +458,9 @@ struct LocalFunction {
     body: Vec<TypedStatement>,
     /// See `Generator::local_function_captures`.
     captures: Rc<OnceCell<Vec<Capture>>>,
-    /// The types with which the function is used as a value. With captures,
-    /// the definition creates a closure for each one, bound to the hidden
-    /// name `closure_name`, so every use is the same value.
-    values: Vec<Arc<Type>>,
+    /// Whether the function is used as a value, and not only called. Its
+    /// closures then have the identity of the definition (`IDENTITY`).
+    is_value: bool,
 }
 
 /// The name of the scope entry with the capture `capture` of the local
@@ -467,11 +469,24 @@ fn hidden_name(info: &LocalFunction, capture: &str) -> EcoString {
     format!("{}@{}.{capture}", info.name, info.definition.start).into()
 }
 
-/// The name of the scope entry with the closure of the local function
-/// `info` with type `type_`.
-fn closure_name(info: &LocalFunction, type_: &Arc<Type>) -> EcoString {
-    let type_name = qualified_type_name(type_).replace(" ", "");
-    hidden_name(info, &format!("closure:{type_name}"))
+/// The name of the first capture of a local function with captures that is
+/// used as a value: the identity of the definition, created where it is
+/// evaluated, which makes its closures equal.
+const IDENTITY: &str = "#identity";
+
+/// The type of `IDENTITY`, an empty struct.
+fn identity_type() -> Arc<Type> {
+    type_::named(
+        "",
+        "gleam@webassembly",
+        "Identity",
+        Publicity::Public,
+        vec![],
+    )
+}
+
+fn is_identity_type(type_: &Type) -> bool {
+    matches!(type_, Type::Named { module, name, .. } if module == "gleam@webassembly" && name == "Identity")
 }
 
 /// Maps Gleam field positions to wasm struct field indices for a union type.
@@ -1380,7 +1395,10 @@ impl<'a> Generator<'a> {
     }
 
     fn val_type(&mut self, type_: &Arc<Type>) -> ValType {
-        if type_.is_utf_codepoint() {
+        if is_identity_type(type_) {
+            let type_index = self.struct_type_index("Identity".into(), vec![]);
+            self.val_type_ref(type_index)
+        } else if type_.is_utf_codepoint() {
             ValType::I32
         } else if type_.is_int() {
             self.int.val_type()
@@ -1662,10 +1680,57 @@ impl<'a> Generator<'a> {
         code
     }
 
+    /// The subtype of `closure` whose closures have an identity in the field
+    /// 1: two of them are equal when their identities are the same.
+    ///
+    /// ```wasm
+    /// (type $identity (sub $closure (struct (field (ref $code)) (field (ref $Identity)))))
+    /// ```
+    pub(super) fn closure_identity_type(&mut self, closure: &ClosureType) -> TypeId {
+        let identity = self.val_type(&identity_type());
+        let key = WasmType {
+            name: None,
+            kind: WasmTypeKind::ClosureIdentity(closure.type_index),
+        };
+        if let Some(type_index) = self.wasm_types.get(&key) {
+            return *type_index;
+        }
+        let fields = [self.val_type_ref(closure.code_type_index), identity]
+            .into_iter()
+            .map(|val_type| FieldType {
+                element_type: StorageType::Val(val_type),
+                mutable: false,
+            })
+            .collect_vec();
+        let comp = walrus::CompositeType::Struct(walrus::StructType {
+            fields: fields.into_boxed_slice(),
+        });
+        let types = &mut self.wasm_module.types;
+        let id = types.add_composite(comp, false, Some(closure.type_index));
+        let closure_name = types
+            .get(closure.type_index)
+            .name
+            .clone()
+            .expect("closure type name");
+        types.get_mut(id).name = Some(format!("{closure_name}::identity"));
+        let _ = self.wasm_types.insert(key, id);
+        id
+    }
+
     /// The environment type of the closures of `closure` that capture
     /// `captures`. Closures with the same signature and capture val types
-    /// share it, and its name comes from the captures of the first one.
+    /// share it, and its name comes from the captures of the first one. When
+    /// the first capture is `IDENTITY`, it is a subtype of
+    /// `closure_identity_type`.
     fn closure_environment_type(&mut self, closure: &ClosureType, captures: &[Capture]) -> TypeId {
+        let supertype = if captures
+            .first()
+            .is_some_and(|capture| capture.name == IDENTITY)
+        {
+            self.closure_identity_type(closure)
+        } else {
+            closure.type_index
+        };
         let captures_val_types =
             self.val_types(captures.iter().map(|capture| capture.type_.clone()));
         let fields = iter::once(self.val_type_ref(closure.code_type_index))
@@ -1679,7 +1744,7 @@ impl<'a> Generator<'a> {
             fields: fields.into_boxed_slice(),
         });
         let types = &mut self.wasm_module.types;
-        let id = types.add_composite(comp, true, Some(closure.type_index));
+        let id = types.add_composite(comp, true, Some(supertype));
         if types.get(id).name.is_none() {
             let closure_name = types
                 .get(closure.type_index)
@@ -2867,26 +2932,12 @@ impl<'a> Generator<'a> {
         let mut expanded: Vec<Capture> = vec![];
         for capture in captures {
             let captures = if let Some(info) = self.local_functions.get(&capture.definition) {
-                let captures = self.local_function_captures(info);
-                let closures = if captures.is_empty() {
-                    vec![]
-                } else {
-                    info.values
-                        .iter()
-                        .map(|type_| Capture {
-                            name: closure_name(info, type_),
-                            type_: type_.clone(),
-                            definition: info.definition,
-                        })
-                        .collect()
-                };
-                captures
+                self.local_function_captures(info)
                     .into_iter()
                     .map(|inner| Capture {
                         name: hidden_name(info, &inner.name),
                         ..inner
                     })
-                    .chain(closures)
                     .collect()
             } else {
                 vec![capture]
@@ -2902,7 +2953,9 @@ impl<'a> Generator<'a> {
 
     /// The captures of the local function `info`, typed by the enclosing
     /// function. The definition of the local function binds each one to a
-    /// hidden name, so the calls far from it find the right variable.
+    /// hidden name, so the calls far from it find the right variable. When
+    /// there are captures and the function is used as a value, the first one
+    /// is `IDENTITY`, which the definition creates.
     fn local_function_captures(&self, info: &LocalFunction) -> Vec<Capture> {
         info.captures
             .get_or_init(|| {
@@ -2913,7 +2966,16 @@ impl<'a> Generator<'a> {
                         ..capture
                     })
                     .collect();
-                self.expand_captures(captures)
+                let captures = self.expand_captures(captures);
+                if captures.is_empty() || !info.is_value {
+                    return captures;
+                }
+                let identity = Capture {
+                    name: IDENTITY.into(),
+                    type_: identity_type(),
+                    definition: info.definition,
+                };
+                iter::once(identity).chain(captures).collect()
             })
             .clone()
     }
@@ -2936,8 +2998,9 @@ impl<'a> Generator<'a> {
     }
 
     /// Pushes the value of the local function `info` with type `type_`. With
-    /// captures, it is the closure created by the definition, or a new one
-    /// when the type is known only in a specialization.
+    /// captures, it is a new closure with the identity of the definition, or
+    /// without one when the function is not used as a value, but is the
+    /// result of the block that defines it.
     fn local_function_value(
         &mut self,
         scope: &Scope,
@@ -2945,10 +3008,6 @@ impl<'a> Generator<'a> {
         info: &LocalFunction,
         type_: &Arc<Type>,
     ) {
-        if let Some(local) = scope.find_local(&closure_name(info, type_)) {
-            let _ = instructions.local_get(local);
-            return;
-        }
         let id = self.function_local_generic(info, type_);
         let captures = self.local_function_captures(info);
         if captures.is_empty() {
@@ -3112,19 +3171,24 @@ impl<'a> Generator<'a> {
                     // block.
                     let info = info.clone();
                     for capture in self.local_function_captures(&info) {
-                        let local = scope.find_local(&capture.name).unwrap_or_else(|| {
-                            panic!("captured variable {} is not in scope", capture.name)
-                        });
-                        scope = scope.insert_local(hidden_name(&info, &capture.name), local);
-                    }
-                    if !self.local_function_captures(&info).is_empty() {
-                        for type_ in &info.values {
-                            self.local_function_value(&scope, instructions, &info, type_);
-                            let val_type = self.val_type(type_);
+                        let local = if capture.name == IDENTITY {
+                            let val_type = self.val_type(&capture.type_);
                             let local = self.wasm_local(val_type);
-                            let _ = instructions.local_set(local);
-                            scope = scope.insert_local(closure_name(&info, type_), local);
-                        }
+                            let ValType::Ref(RefType {
+                                heap_type: HeapType::Concrete(identity),
+                                ..
+                            }) = val_type
+                            else {
+                                panic!("identity type should be a struct");
+                            };
+                            let _ = instructions.struct_new(identity).local_set(local);
+                            local
+                        } else {
+                            scope.find_local(&capture.name).unwrap_or_else(|| {
+                                panic!("captured variable {} is not in scope", capture.name)
+                            })
+                        };
+                        scope = scope.insert_local(hidden_name(&info, &capture.name), local);
                     }
                     if rest.is_empty() {
                         let type_ = assignment.value.type_();
@@ -3923,6 +3987,10 @@ impl<'a> Generator<'a> {
         if let Some(info) =
             definition.and_then(|location| self.local_functions.get(&location).cloned())
         {
+            assert!(
+                info.is_value,
+                "local function {name} used as a value is not marked as one"
+            );
             self.local_function_value(scope, instructions, &info, type_);
             return;
         }

@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-use std::{collections::HashMap, rc::Rc, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+    sync::Arc,
+};
 
 use crate::{
     ast::{
@@ -105,7 +109,9 @@ impl Monomorphizer {
     /// with them, and then it gets that type.
     pub(super) fn bind_local_functions(&mut self, body: &[TypedStatement]) {
         struct UsesCollector {
-            definitions: HashMap<SrcSpan, Arc<Type>>,
+            /// In source order, so binding one function before another does
+            /// not depend on hashing.
+            definitions: Vec<(SrcSpan, Arc<Type>)>,
             uses: HashMap<SrcSpan, Vec<Arc<Type>>>,
         }
 
@@ -114,7 +120,7 @@ impl Monomorphizer {
                 if let TypedExpr::Fn { type_, .. } = &assignment.value
                     && let Pattern::Variable { location, .. } = &assignment.pattern
                 {
-                    let _ = self.definitions.insert(*location, type_.clone());
+                    self.definitions.push((*location, type_.clone()));
                 }
                 visit_typed_assignment(self, assignment);
             }
@@ -151,7 +157,7 @@ impl Monomorphizer {
         }
 
         let mut collector = UsesCollector {
-            definitions: HashMap::new(),
+            definitions: vec![],
             uses: HashMap::new(),
         };
         for statement in body {
@@ -647,7 +653,7 @@ pub(super) fn collect_local_functions(
                         arguments: arguments.clone(),
                         body: body.to_vec(),
                         captures: Rc::default(),
-                        values: vec![],
+                        is_value: false,
                     },
                 );
             } else {
@@ -667,31 +673,23 @@ pub(super) fn collect_local_functions(
     let mut map = collector.map;
 
     let mut values = ValuesCollector {
-        uses: HashMap::new(),
+        definitions: HashSet::new(),
     };
     for statement in body {
         values.visit_typed_statement(statement);
     }
-    for (definition, uses) in values.uses {
+    for definition in values.definitions {
         if let Some(info) = map.get_mut(&definition) {
-            for type_ in uses {
-                if enclosing.has_free_variables(&type_) {
-                    continue;
-                }
-                let type_ = enclosing.type_(&type_);
-                if !info.values.iter().any(|other| other.same_as(&type_)) {
-                    info.values.push(type_);
-                }
-            }
+            info.is_value = true;
         }
     }
     map
 }
 
-/// Collects the types with which each local variable is used as a value,
-/// that is, not as the function of a call.
+/// Collects the definitions of the local variables used as values, that is,
+/// not as the function of a call.
 struct ValuesCollector {
-    uses: HashMap<SrcSpan, Vec<Arc<Type>>>,
+    definitions: HashSet<SrcSpan>,
 }
 
 impl<'ast> Visit<'ast> for ValuesCollector {
@@ -719,10 +717,7 @@ impl<'ast> Visit<'ast> for ValuesCollector {
         _name: &'ast EcoString,
     ) {
         if let ValueConstructorVariant::LocalVariable { location, .. } = &constructor.variant {
-            self.uses
-                .entry(*location)
-                .or_default()
-                .push(constructor.type_.clone());
+            let _ = self.definitions.insert(*location);
         }
     }
 
@@ -730,14 +725,11 @@ impl<'ast> Visit<'ast> for ValuesCollector {
         &mut self,
         _location: &'ast SrcSpan,
         _name: &'ast EcoString,
-        type_: &'ast Arc<Type>,
+        _type_: &'ast Arc<Type>,
         definition_location: &'ast SrcSpan,
         _origin: &'ast VariableOrigin,
     ) {
-        self.uses
-            .entry(*definition_location)
-            .or_default()
-            .push(type_.clone());
+        let _ = self.definitions.insert(*definition_location);
     }
 }
 

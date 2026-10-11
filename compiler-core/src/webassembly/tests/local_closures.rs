@@ -129,6 +129,65 @@ pub fn main() {
 }
 
 #[test]
+fn equality_of_values_typed_in_specializations() {
+    run(r#"
+pub fn main() {
+  let n = 3
+  let f = fn(x: a) { #(x, n) }
+  let g = fn(y: b) {
+    let h: fn(b) -> #(b, Int) = f
+    h
+  }
+  assert g(1) == g(2)
+  assert g("a") == g("b")
+  let k = fn(z: c) { g(z) }
+  assert k(1) == k(2)
+  assert k("a") == k("b")
+  let l = fn(z: c) { g(z) == g(z) }
+  assert l(1)
+  assert l("a")
+}
+"#);
+}
+
+#[test]
+fn equality_of_values_with_unbound_types() {
+    run(r#"
+pub fn main() {
+  let n = 3
+  let f = fn(x: a) { #(x, n) }
+  let h = f
+  assert h == f
+  assert [f] == [f]
+}
+"#);
+}
+
+#[test]
+fn equality_of_different_definitions_and_evaluations() {
+    run(r#"
+pub fn main() {
+  let n = 3
+  let f = fn(x) { x + n }
+  let g = fn(x) { x + n }
+  assert f != g
+  let make = fn(m) {
+    let f = fn(x) { x + m }
+    #(f, f)
+  }
+  let #(a, b) = make(1)
+  assert a == b
+  assert a != make(1).0
+  let last = fn(m) {
+    let f = fn(x) { x + m }
+    f
+  }
+  assert last(1) != last(1)
+}
+"#);
+}
+
+#[test]
 fn equality_without_captures_in_guards() {
     run(r#"
 pub fn main() {
@@ -769,8 +828,10 @@ pub fn main() {
     });
 }
 
+// The definition allocates the identity, and each use as a value its
+// closure, all in the enclosing function. The adapter reads the environment.
 #[test]
-fn values_allocate_their_environment_once() {
+fn values_allocate_in_the_enclosing_function() {
     let wasm = super::compile_wasm(
         r#"
 fn apply(f: fn(Int) -> Int) -> Int {
@@ -794,7 +855,7 @@ pub fn main() {
             casts.push(function.to_string());
         }
     });
-    assert_eq!(allocations, ["main"]);
+    assert_eq!(allocations, ["main", "main", "main"]);
     assert!(
         matches!(casts.as_slice(), [cast] if cast.ends_with("@closure")),
         "{casts:?}"
