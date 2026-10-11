@@ -409,28 +409,16 @@ impl<'a, 'b> Instructions<'a, 'b> {
         self
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn patterns<'c>(
         &mut self,
         generator: &mut Generator<'_>,
         locals: &Locals,
         scope: &mut Scope,
-        (type_index, subtype_index): (TypeId, Option<TypeId>),
-        field_mapping: Option<&[u32]>,
-        pattern: &Pattern<Arc<Type>>,
-        elements: impl IntoIterator<Item = &'c Pattern<Arc<Type>>> + Clone,
+        fields: Fields<'_>,
+        elements: impl IntoIterator<Item = &'c Pattern<Arc<Type>>>,
         fail_target: InstrSeqId,
     ) -> &mut Self {
-        generator._patterns(
-            locals,
-            scope,
-            self,
-            (type_index, subtype_index),
-            field_mapping,
-            pattern,
-            elements,
-            fail_target,
-        );
+        generator._patterns(locals, scope, self, fields, elements, fail_target);
         self
     }
 

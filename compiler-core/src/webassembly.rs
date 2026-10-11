@@ -474,6 +474,23 @@ struct UnionFieldLayout {
     field_indices: Vec<Vec<u32>>,
 }
 
+/// A matched tuple or record, held in the local `value`, whose fields are
+/// matched against sub-patterns.
+#[derive(Clone, Copy)]
+enum Fields<'a> {
+    Struct {
+        value: LocalId,
+        type_index: TypeId,
+    },
+    /// A union variant, referenced as its supertype. `field_indices` maps
+    /// each constructor argument to its field in the variant struct.
+    Variant {
+        value: LocalId,
+        type_index: TypeId,
+        field_indices: &'a [u32],
+    },
+}
+
 impl UnionFieldLayout {
     fn compute(custom_type: &TypedCustomType) -> UnionFieldLayout {
         let constructors = &custom_type.constructors;
@@ -3666,13 +3683,12 @@ impl<'a> Generator<'a> {
             }
             Pattern::Tuple { elements, .. } => {
                 let type_index = self.tuple_type_index(elements.iter().map(|e| e.type_()));
-                let _ = instructions.patterns(
+                let value = locals.for_pattern(pattern);
+                let _ = instructions.local_set(value).patterns(
                     self,
                     locals,
                     &mut scope,
-                    (type_index, None),
-                    None,
-                    pattern,
+                    Fields::Struct { value, type_index },
                     elements.iter(),
                     fail_target,
                 );
@@ -3701,13 +3717,12 @@ impl<'a> Generator<'a> {
                         let (type_index, _) =
                             self.mono_struct_type_index(type_, &custom_type, &constructor, &args);
                         assert_eq!(constructor.arguments.len(), arguments.len());
-                        let _ = instructions.patterns(
+                        let value = locals.for_pattern(pattern);
+                        let _ = instructions.local_set(value).patterns(
                             self,
                             locals,
                             &mut scope,
-                            (type_index, None),
-                            None,
-                            pattern,
+                            Fields::Struct { value, type_index },
                             arguments.iter().map(|arg| &arg.value),
                             fail_target,
                         );
@@ -3753,14 +3768,16 @@ impl<'a> Generator<'a> {
                                     .br_if(fail_target);
                             }
                             let layout = self.union_layout(type_);
-                            let field_mapping = layout.fields(tag);
-                            let _ = instructions.local_get(right).patterns(
+                            let fields = Fields::Variant {
+                                value: right,
+                                type_index,
+                                field_indices: layout.fields(tag),
+                            };
+                            let _ = instructions.patterns(
                                 self,
                                 locals,
                                 &mut scope,
-                                (supertype_index, Some(type_index)),
-                                Some(field_mapping),
-                                pattern,
+                                fields,
                                 arguments.iter().map(|arg| &arg.value),
                                 fail_target,
                             );
@@ -3846,32 +3863,35 @@ impl<'a> Generator<'a> {
         scope
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn _patterns<'b>(
         &mut self,
         locals: &Locals,
         scope: &mut Scope,
         instructions: &mut Instructions<'_, '_>,
-        (type_index, subtype_index): (TypeId, Option<TypeId>),
-        field_mapping: Option<&[u32]>,
-        pattern: &Pattern<Arc<Type>>,
-        elements: impl IntoIterator<Item = &'b Pattern<Arc<Type>>> + Clone,
+        fields: Fields<'_>,
+        elements: impl IntoIterator<Item = &'b Pattern<Arc<Type>>>,
         fail_target: InstrSeqId,
     ) {
-        let right = locals.for_pattern(pattern);
-        let _ = instructions.local_set(right);
-        for (field_index, element) in elements.into_iter().enumerate() {
-            let _ = instructions.local_get(right);
-            if let Some(subtype_index) = subtype_index {
-                let field_index = field_mapping
-                    .and_then(|m| m.get(field_index).copied())
-                    .unwrap_or(field_index as u32 + 1);
-                let _ = instructions
-                    .ref_cast_non_null(HeapType::Concrete(subtype_index))
-                    .struct_get(subtype_index, field_index);
-            } else {
-                let _ = instructions.struct_get(type_index, field_index as u32);
-            }
+        for (index, element) in elements.into_iter().enumerate() {
+            let _ = match fields {
+                Fields::Struct { value, type_index } => instructions
+                    .local_get(value)
+                    .struct_get(type_index, index as u32),
+                Fields::Variant {
+                    value,
+                    type_index,
+                    field_indices,
+                } => {
+                    let field_index = field_indices
+                        .get(index)
+                        .copied()
+                        .expect("variant field index");
+                    instructions
+                        .local_get(value)
+                        .ref_cast_non_null(HeapType::Concrete(type_index))
+                        .struct_get(type_index, field_index)
+                }
+            };
             *scope = self._pattern(locals, scope.clone(), instructions, element, fail_target);
         }
     }
