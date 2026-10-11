@@ -162,8 +162,12 @@ where
                 // A cached module with dependencies that are stale must be
                 // recompiled as the changes in the dependencies may have affect
                 // the output, making the cache invalid.
+                //
+                // The WebAssembly backend generates whole programs from the
+                // typed modules, which are not cached, so it compiles them all.
                 Input::Cached { module }
-                    if self.stale_modules.includes_any(&module.dependencies) =>
+                    if self.target == Target::WebAssembly
+                        || self.stale_modules.includes_any(&module.dependencies) =>
                 {
                     tracing::debug!(module = %module.name, "stale_module_to_be_compiled");
                     self.stale_modules.add(module.name.clone());

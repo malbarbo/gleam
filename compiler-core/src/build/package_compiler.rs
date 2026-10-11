@@ -78,6 +78,9 @@ pub struct PackageCompiler<'a, IO> {
     pub target_support: TargetSupport,
     pub cached_warnings: CachedWarnings,
     pub check_module_conflicts: CheckModuleConflicts,
+    /// The modules of the packages this one depends on, which the WebAssembly
+    /// backend needs to generate whole programs.
+    pub webassembly_dependencies: &'a [Module],
 }
 
 impl<'a, IO> PackageCompiler<'a, IO>
@@ -113,6 +116,7 @@ where
             target_support: TargetSupport::NotEnforced,
             cached_warnings: CachedWarnings::Ignore,
             check_module_conflicts: CheckModuleConflicts::DoNotCheck,
+            webassembly_dependencies: &[],
         }
     }
 
@@ -495,7 +499,11 @@ where
         float: crate::config::WasmFloat,
         opt_level: crate::config::WasmOptLevel,
     ) -> Result<(), Error> {
-        WebAssembly::new(self.out, int, float, opt_level).render(&self.io, modules)
+        WebAssembly::new(self.out, int, float, opt_level).render(
+            &self.io,
+            modules,
+            self.webassembly_dependencies,
+        )
     }
 
     /// Link the module source .gleam file to the output directory.

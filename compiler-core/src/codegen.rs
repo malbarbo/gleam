@@ -377,10 +377,23 @@ impl<'a> WebAssembly<'a> {
         }
     }
 
-    pub fn render(&self, writer: &impl FileSystemWriter, modules: &[Module]) -> Result<()> {
-        let all_modules: HashMap<_, _> = modules.iter().map(|m| (m.name.clone(), &m.ast)).collect();
-        let all_line_numbers: HashMap<_, _> = modules
+    /// Generates a WebAssembly module for each of `modules`. Each one is a
+    /// whole program, so the modules it imports from other packages must be
+    /// in `dependencies`.
+    pub fn render(
+        &self,
+        writer: &impl FileSystemWriter,
+        modules: &[Module],
+        dependencies: &[Module],
+    ) -> Result<()> {
+        let all_modules: HashMap<_, _> = dependencies
             .iter()
+            .chain(modules)
+            .map(|m| (m.name.clone(), &m.ast))
+            .collect();
+        let all_line_numbers: HashMap<_, _> = dependencies
+            .iter()
+            .chain(modules)
             .map(|m| (m.name.clone(), LineNumbers::new(&m.code)))
             .collect();
         for module in modules {

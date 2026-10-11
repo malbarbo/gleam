@@ -102,6 +102,9 @@ pub struct ProjectCompiler<IO> {
     /// The set of modules that have had partial compilation done since the last
     /// successful compilation.
     incomplete_modules: HashSet<EcoString>,
+    /// The modules of the dependency packages. Only kept for the WebAssembly
+    /// target, which generates whole programs.
+    webassembly_dependencies: Vec<Module>,
     warnings: WarningEmitter,
     telemetry: &'static dyn Telemetry,
     options: Options,
@@ -139,6 +142,7 @@ where
             defined_modules: imbl::HashMap::new(),
             stale_modules: StaleTracker::default(),
             incomplete_modules: HashSet::new(),
+            webassembly_dependencies: vec![],
             ids: UniqueIdGenerator::new(),
             warnings: WarningEmitter::new(warning_emitter),
             subprocess_stdio: Stdio::Inherit,
@@ -206,7 +210,10 @@ where
         self.write_prelude()?;
 
         // Dependencies are compiled first.
-        let _ = self.compile_dependencies()?;
+        let dependencies = self.compile_dependencies()?;
+        if self.target() == Target::WebAssembly {
+            self.webassembly_dependencies = dependencies;
+        }
 
         // We reset the warning count as we don't want to fail the build if a
         // dependency has warnings, only if the root package does.
@@ -617,7 +624,11 @@ where
         );
         compiler.write_metadata = true;
         compiler.write_entrypoint = is_root;
-        compiler.perform_codegen = self.options.codegen.should_codegen(is_root);
+        // A WebAssembly module is a whole program, so only the modules of the
+        // root package are generated, with the dependencies inside them.
+        compiler.perform_codegen = self.options.codegen.should_codegen(is_root)
+            && (is_root || self.target() != Target::WebAssembly);
+        compiler.webassembly_dependencies = &self.webassembly_dependencies;
         compiler.compile_modules = !(self.options.compile == Compile::DepsOnly && is_root);
         compiler.subprocess_stdio = self.subprocess_stdio;
         compiler.target_support = if is_root {
