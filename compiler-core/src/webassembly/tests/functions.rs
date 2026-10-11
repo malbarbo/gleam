@@ -1742,3 +1742,29 @@ pub fn main() {
 "#,
     );
 }
+
+/// `main` is called by the `_start` export, not by the start function, so a
+/// host that calls `main` after instantiating the module runs it once.
+#[test]
+fn main_runs_once_when_called_by_the_host() {
+    let wasm_bytes = compile_wasm(
+        r#"
+pub fn main() {
+    echo "main"
+}
+"#,
+        vec![],
+    );
+    let path = std::env::temp_dir().join("gleam_wasm_test_main_runs_once.wasm");
+    std::fs::write(&path, &wasm_bytes).expect("failed to write temp wasm file");
+    let output = std::process::Command::new("wasmtime")
+        .args(["run", "-W", "function-references=y", "-W", "gc=y"])
+        .args(["--invoke", "main"])
+        .arg(&path)
+        .output()
+        .expect("wasmtime not found — install it to run WASM tests");
+    let _ = std::fs::remove_file(&path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stderr.matches("\"main\"").count(), 1, "{stderr}");
+}

@@ -158,7 +158,23 @@ impl BuiltinFunctionExternal {
 
 impl<'a> Generator<'a> {
     pub(super) fn function_start(&mut self) -> FunctionId {
+        self.code_command_start();
         self.code_start()
+    }
+
+    /// Exports `_start`, the entry point of a WASI command, which calls
+    /// `main`. `main` is not called by the start function, so the hosts that
+    /// call `_start` or `main` after instantiating the module do not run it
+    /// twice.
+    fn code_command_start(&mut self) {
+        let Some(main) = self.main else {
+            return;
+        };
+        let mut function = Function::new(self, "_start", &[], &[]);
+        let mut instructions = function.extend_instructions(self);
+        let _ = instructions.call(main).drop().end();
+        let start = function.finish(self);
+        let _ = self.wasm_module.exports.add("_start", start);
     }
 
     fn code_start(&mut self) -> FunctionId {
@@ -207,10 +223,6 @@ impl<'a> Generator<'a> {
                         .global_set(global_index);
                 }
             }
-        }
-        // main
-        if let Some(main) = self.main {
-            let _ = instructions.call(main).drop();
         }
         let _ = instructions.end();
         function.finish(self)
