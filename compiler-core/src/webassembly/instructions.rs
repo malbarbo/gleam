@@ -75,6 +75,7 @@ pub(super) enum Eq {
     I32,
     Int,
     Float,
+    Ref,
     Call(FunctionId),
 }
 
@@ -316,6 +317,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
             Eq::I32 => self.i32_eq(),
             Eq::Int => self.int_eq(),
             Eq::Float => self.float_eq(),
+            Eq::Ref => self.ref_eq(),
             Eq::Call(func) => self.call(func),
         }
     }

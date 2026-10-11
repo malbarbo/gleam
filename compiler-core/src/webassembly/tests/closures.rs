@@ -240,6 +240,73 @@ pub fn double(n: Int) -> Int {
 }
 
 #[test]
+fn function_equality() {
+    let result = super::run_wasm(
+        r#"
+import thepackage/helpers
+
+type Ops {
+  Ops(step: fn(Int) -> Int)
+}
+
+type Step {
+  Step(step: fn(Int) -> Int)
+  Stop
+}
+
+const inc_const = inc
+
+fn id(value: a) -> a {
+  value
+}
+
+fn inc(n: Int) -> Int {
+  n + 1
+}
+
+fn dec(n: Int) -> Int {
+  n - 1
+}
+
+pub fn main() {
+  assert inc == inc
+  assert inc != dec
+  assert id(inc) == inc
+  assert inc_const == inc
+  assert helpers.double == helpers.double
+  assert helpers.double != inc
+  let f = fn(n) { n * 3 }
+  assert f == f
+  assert id(f) == f
+  assert f != inc
+  assert Ops(inc) == Ops(inc)
+  assert Ops(inc) != Ops(dec)
+  assert Step(inc) == Step(id(inc))
+  assert Step(inc) != Stop
+  assert #(1, inc) == #(1, inc)
+  assert #(1, inc) != #(1, dec)
+  assert [inc, dec] == [inc, dec]
+  assert [inc, dec] != [dec, inc]
+}
+"#,
+        vec![(
+            "thepackage",
+            "thepackage/helpers",
+            r#"
+pub fn double(n: Int) -> Int {
+  n * 2
+}
+"#,
+        )],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
 fn function_values_are_shared_singletons() {
     let wasm = super::compile_wasm(
         r#"

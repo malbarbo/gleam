@@ -389,7 +389,8 @@ impl<'a> Generator<'a> {
 
     pub(super) fn function_eq(&mut self, type_: &Arc<Type>) -> Eq {
         if type_.fn_types().is_some() {
-            todo!("function equality is not yet supported");
+            // Functions are equal when they are the same closure
+            return Eq::Ref;
         } else if type_.is_int() {
             return Eq::Int;
         } else if type_.is_float() {
