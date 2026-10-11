@@ -2196,11 +2196,18 @@ impl<'a> Generator<'a> {
             && let ValueConstructorVariant::ModuleConstant {
                 literal, module, ..
             } = &constructor.variant
-            && *module != self.module.name
+            && (*module != self.module.name || is_generic_type(&literal.type_()))
         {
-            // A constant of another module has the value of its literal
+            // A constant that names a constant of another module, or a generic
+            // one, has the value of its literal, specialized to its type.
+            let literal = if is_generic_type(&literal.type_()) {
+                Monomorphizer::with_bound(&literal.type_(), &module_constant.type_)
+                    .constant(literal)
+            } else {
+                literal.clone()
+            };
             return self.module_constant(&TypedModuleConstant {
-                value: Box::new(literal.clone()),
+                value: Box::new(literal),
                 ..module_constant.clone()
             });
         }
@@ -3032,12 +3039,9 @@ impl<'a> Generator<'a> {
         captures: &[Capture],
     ) {
         for capture in captures {
-            let local = scope.find_local(&capture.name).unwrap_or_else(|| {
-                panic!(
-                    "captured variable {} is not in scope, captures of local functions are not supported yet",
-                    capture.name
-                )
-            });
+            let local = scope
+                .find_local(&capture.name)
+                .unwrap_or_else(|| panic!("captured variable {} should be in scope", capture.name));
             let _ = instructions.local_get(local);
         }
     }

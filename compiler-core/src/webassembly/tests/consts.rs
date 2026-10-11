@@ -249,6 +249,61 @@ pub const g = f
 }
 
 #[test]
+fn const_typed_alias_of_generic_const() {
+    run_ok(
+        r#"
+const empty = []
+const pair = #([], Error(Nil))
+const xs: List(Int) = empty
+pub const ys: List(String) = empty
+const p: #(List(Float), Result(Int, Nil)) = pair
+
+pub fn main() {
+    assert xs == []
+    assert ys == []
+    assert [1, ..xs] == [1]
+    assert ["a", ..ys] == ["a"]
+    assert p == #([], Error(Nil))
+}
+"#,
+    );
+}
+
+#[test]
+fn const_typed_alias_of_imported_generic_const() {
+    let result = super::run_wasm(
+        r#"
+import thepackage/helpers
+
+const xs: List(Int) = helpers.empty
+const ys: List(String) = helpers.alias
+
+pub fn main() {
+    assert xs == []
+    assert ys == []
+    assert [1, ..xs] == [1]
+    assert ["a", ..ys] == ["a"]
+    0
+}
+"#,
+        vec![(
+            "thepackage",
+            "thepackage/helpers",
+            r#"
+pub const empty = []
+
+pub const alias = empty
+"#,
+        )],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
 fn const_constructors() {
     run_ok(
         r#"
