@@ -2843,6 +2843,12 @@ impl<'a> Generator<'a> {
                     if fname == HASH {
                         return self.function_hash_external(required_type);
                     }
+                    if let Some(builtin) = BuiltinFunctionExternal::by_name(fname) {
+                        // Created on first use, also for externals declared in
+                        // imported modules.
+                        let index = self.get_function_builtin_external(builtin);
+                        return Id::func(fname.clone(), index);
+                    }
                     return self.find_global_expect(fname);
                 }
                 let export = function.publicity.is_public();
@@ -3344,6 +3350,12 @@ impl<'a> Generator<'a> {
             }
             if fname == HASH {
                 return self.function_hash_external(required_type);
+            }
+            if let Some(builtin) = BuiltinFunctionExternal::by_name(fname) {
+                // Created on first use, also for externals declared in
+                // imported modules.
+                let index = self.get_function_builtin_external(builtin);
+                return Id::func(fname.clone(), index);
             }
             return self.find_global_expect(fname);
         }

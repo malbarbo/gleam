@@ -160,3 +160,29 @@ fn unused_builtins_are_removed() {
     let size = super::compile_wasm("pub fn main() { 1 }", vec![]).len();
     assert!(size < 1000, "{size} bytes");
 }
+
+#[test]
+fn externals_of_imported_modules() {
+    let output = super::run_wasm(
+        r#"
+import other
+
+pub fn main() {
+    let assert 2.0 = other.floor(2.5)
+    let assert "abc" = other.lowercase("ABC")
+}
+"#,
+        vec![(
+            "other_package",
+            "other",
+            r#"
+@external(webassembly, "builtins", "_float_floor")
+pub fn floor(a: Float) -> Float
+
+@external(webassembly, "rust", "string_lowercase")
+pub fn lowercase(a: String) -> String
+"#,
+        )],
+    );
+    assert!(output.status.success(), "{}", output.stderr);
+}
