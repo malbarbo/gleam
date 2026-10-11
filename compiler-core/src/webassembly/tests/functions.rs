@@ -1705,7 +1705,7 @@ pub const list = [magic, 2]
 
 #[test]
 fn builtins_as_values() {
-    super::run_ok(
+    run_ok(
         r#"
 @external(webassembly, "builtins", "_string_concat")
 fn concat(a: String, b: String) -> String
