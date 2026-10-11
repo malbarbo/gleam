@@ -4,11 +4,15 @@ use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     ast::{
-        ArgNames, AssignName, AssignmentKind, FunctionLiteralKind, StringPrefixLeftSideAssignment,
-        TypeAst, TypedArg, TypedAssignment, TypedPattern, TypedStatement,
-        visit::{Visit, visit_typed_assignment, visit_typed_expr_fn, visit_typed_pattern_assign},
+        ArgNames, AssignName, AssignmentKind, FunctionLiteralKind, Pattern,
+        StringPrefixLeftSideAssignment, TypeAst, TypedArg, TypedAssignment, TypedExpr,
+        TypedPattern, TypedStatement,
+        visit::{
+            Visit, visit_typed_assignment, visit_typed_expr_call, visit_typed_expr_fn,
+            visit_typed_pattern_assign,
+        },
     },
-    type_::{Type, ValueConstructor, ValueConstructorVariant, error::VariableOrigin},
+    type_::{Type, TypedCallArg, ValueConstructor, ValueConstructorVariant, error::VariableOrigin},
 };
 use src_span::SrcSpan;
 use vec1::Vec1;
@@ -35,49 +39,83 @@ pub(super) fn captures(
     arguments: &[TypedArg],
     body: &[TypedStatement],
 ) -> Vec<Capture> {
-    let mut visit = CapturesVisit::default();
-    for argument in arguments {
-        visit.bind_argument(argument);
-    }
-    for statement in body {
-        visit.visit_typed_statement(statement);
-    }
-
-    let mut captured = HashSet::new();
-    let mut captures = vec![];
-    for (name, type_, definition) in visit.references {
-        let key = (definition, name);
-        if visit.bindings.contains(&key) || captured.contains(&key) {
-            continue;
-        }
-        let (definition, name) = key;
-        if location.start <= definition.start && definition.end <= location.end {
-            panic!("binding of variable {name} at {definition:?} not found in the function");
-        }
-        let _ = captured.insert((definition, name.clone()));
-        captures.push(Capture {
-            name,
-            type_,
-            definition,
-        });
-    }
-    debug_assert!(
-        captures.iter().map(|capture| &capture.name).all_unique(),
-        "each captured name denotes a single variable"
-    );
-    captures
+    Variables::of(arguments, body).captures(location)
 }
 
+/// A reference to a local variable.
+pub(super) struct Reference {
+    pub name: EcoString,
+    pub type_: Arc<Type>,
+    /// Where the variable is bound.
+    pub definition: SrcSpan,
+    /// Whether the reference is the function of a call, see
+    /// `local_variable_definition`.
+    pub called: bool,
+}
+
+/// A function bound to a variable by `let`.
+pub(super) struct LetFunction<'a> {
+    pub assignment: &'a TypedAssignment,
+    /// Whether it is in the body of another function bound by `let`.
+    pub nested: bool,
+}
+
+/// The local variables that a function body binds and references, and the
+/// functions it binds by `let`, collected in a single visit.
 #[derive(Default)]
-struct CapturesVisit {
-    /// The variables bound in the function, by definition location and name.
+pub(super) struct Variables<'a> {
+    /// The variables bound in the body, by definition location and name.
     bindings: HashSet<(SrcSpan, EcoString)>,
-    /// The local variables referenced in the function, with their types and
-    /// definition locations.
-    references: Vec<(EcoString, Arc<Type>, SrcSpan)>,
+    /// The references to local variables, in visit order.
+    pub references: Vec<Reference>,
+    /// The functions bound by `let`, in source order.
+    pub let_functions: Vec<LetFunction<'a>>,
+    /// How many functions bound by `let` contain the visit.
+    depth: usize,
 }
 
-impl CapturesVisit {
+impl<'a> Variables<'a> {
+    pub(super) fn of(arguments: &'a [TypedArg], body: &'a [TypedStatement]) -> Self {
+        let mut variables = Variables::default();
+        for argument in arguments {
+            variables.bind_argument(argument);
+        }
+        for statement in body {
+            variables.visit_typed_statement(statement);
+        }
+        variables
+    }
+
+    /// The variables referenced but not bound, see `captures`.
+    fn captures(&self, location: SrcSpan) -> Vec<Capture> {
+        let mut captured = HashSet::new();
+        let mut captures = vec![];
+        for reference in &self.references {
+            let key = (reference.definition, reference.name.clone());
+            if is_generated(&reference.name)
+                || self.bindings.contains(&key)
+                || captured.contains(&key)
+            {
+                continue;
+            }
+            let (definition, name) = key;
+            if location.start <= definition.start && definition.end <= location.end {
+                panic!("binding of variable {name} at {definition:?} not found in the function");
+            }
+            let _ = captured.insert((definition, name.clone()));
+            captures.push(Capture {
+                name,
+                type_: reference.type_.clone(),
+                definition,
+            });
+        }
+        debug_assert!(
+            captures.iter().map(|capture| &capture.name).all_unique(),
+            "each captured name denotes a single variable"
+        );
+        captures
+    }
+
     fn bind(&mut self, name: &EcoString, location: SrcSpan) {
         if !is_generated(name) {
             let _ = self.bindings.insert((location, name.clone()));
@@ -96,11 +134,19 @@ impl CapturesVisit {
         }
     }
 
-    fn reference(&mut self, name: &EcoString, type_: &Arc<Type>, definition: SrcSpan) {
-        if !is_generated(name) {
-            self.references
-                .push((name.clone(), type_.clone(), definition));
-        }
+    fn reference(
+        &mut self,
+        name: &EcoString,
+        type_: &Arc<Type>,
+        definition: SrcSpan,
+        called: bool,
+    ) {
+        self.references.push(Reference {
+            name: name.clone(),
+            type_: type_.clone(),
+            definition,
+            called,
+        });
     }
 }
 
@@ -108,7 +154,26 @@ fn is_generated(name: &str) -> bool {
     name.starts_with('_')
 }
 
-impl<'ast> Visit<'ast> for CapturesVisit {
+/// Where the local variable that `expr` names is bound. A call whose function
+/// is a local function named this way is direct, and every other reference to
+/// it is a value, see `Generator::local_function_of`.
+pub(super) fn local_variable_definition(expr: &TypedExpr) -> Option<SrcSpan> {
+    if let TypedExpr::Var {
+        constructor:
+            ValueConstructor {
+                variant: ValueConstructorVariant::LocalVariable { location, .. },
+                ..
+            },
+        ..
+    } = expr
+    {
+        Some(*location)
+    } else {
+        None
+    }
+}
+
+impl<'ast> Visit<'ast> for Variables<'ast> {
     fn visit_typed_expr_fn(
         &mut self,
         location: &'ast SrcSpan,
@@ -133,7 +198,19 @@ impl<'ast> Visit<'ast> for CapturesVisit {
     }
 
     fn visit_typed_assignment(&mut self, assignment: &'ast TypedAssignment) {
+        let is_function = matches!(assignment.value, TypedExpr::Fn { .. })
+            && matches!(assignment.pattern, Pattern::Variable { .. });
+        if is_function {
+            self.let_functions.push(LetFunction {
+                assignment,
+                nested: self.depth > 0,
+            });
+            self.depth += 1;
+        }
         visit_typed_assignment(self, assignment);
+        if is_function {
+            self.depth -= 1;
+        }
         // The default visit skips the message
         if let AssignmentKind::Assert {
             message: Some(message),
@@ -144,6 +221,26 @@ impl<'ast> Visit<'ast> for CapturesVisit {
         }
     }
 
+    fn visit_typed_expr_call(
+        &mut self,
+        location: &'ast SrcSpan,
+        type_: &'ast Arc<Type>,
+        fun: &'ast TypedExpr,
+        arguments: &'ast [TypedCallArg],
+        open_parenthesis: &'ast Option<u32>,
+    ) {
+        if let (Some(definition), TypedExpr::Var { name, .. }) =
+            (local_variable_definition(fun), fun)
+        {
+            self.reference(name, &fun.type_(), definition, true);
+            for argument in arguments {
+                self.visit_typed_call_arg(argument);
+            }
+        } else {
+            visit_typed_expr_call(self, location, type_, fun, arguments, open_parenthesis);
+        }
+    }
+
     fn visit_typed_expr_var(
         &mut self,
         _location: &'ast SrcSpan,
@@ -151,7 +248,7 @@ impl<'ast> Visit<'ast> for CapturesVisit {
         name: &'ast EcoString,
     ) {
         if let ValueConstructorVariant::LocalVariable { location, .. } = &constructor.variant {
-            self.reference(name, &constructor.type_, *location);
+            self.reference(name, &constructor.type_, *location, false);
         }
     }
 
@@ -163,7 +260,7 @@ impl<'ast> Visit<'ast> for CapturesVisit {
         definition_location: &'ast SrcSpan,
         _origin: &'ast VariableOrigin,
     ) {
-        self.reference(name, type_, *definition_location);
+        self.reference(name, type_, *definition_location, false);
     }
 
     fn visit_typed_bit_array_size_variable(
@@ -176,7 +273,7 @@ impl<'ast> Visit<'ast> for CapturesVisit {
         if let Some(constructor) = constructor
             && let ValueConstructorVariant::LocalVariable { location, .. } = &constructor.variant
         {
-            self.reference(name, type_, *location);
+            self.reference(name, type_, *location, false);
         }
     }
 
