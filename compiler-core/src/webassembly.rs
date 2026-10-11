@@ -3,6 +3,8 @@
 
 #![allow(clippy::todo)]
 mod builtins;
+#[allow(dead_code, reason = "captures are not supported yet")]
+mod captures;
 mod instructions;
 mod monomorphize;
 mod scope;

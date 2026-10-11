@@ -402,6 +402,7 @@ macro_rules! assert_wasm_validate_error {
 }
 
 mod bools;
+mod captures;
 mod case_;
 mod closures;
 mod consts;
