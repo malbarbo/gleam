@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use crate::{
     ast::{
@@ -476,18 +476,22 @@ pub(super) fn collect_local_functions(
             } = &assignment.value
                 && let Pattern::Variable {
                     location: definition,
+                    name,
                     ..
                 } = &assignment.pattern
             {
                 let _ = self.map.insert(
                     *definition,
                     LocalFunction {
+                        name: name.clone(),
+                        definition: *definition,
                         location: *location,
                         specialization: self.specialization,
                         enclosing: self.enclosing.clone(),
                         type_: type_.clone(),
                         arguments: arguments.clone(),
                         body: body.to_vec(),
+                        captures: Rc::default(),
                     },
                 );
             } else {

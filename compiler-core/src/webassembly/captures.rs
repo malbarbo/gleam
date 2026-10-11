@@ -14,7 +14,7 @@ use src_span::SrcSpan;
 use vec1::Vec1;
 
 /// A local variable that a function uses but does not bind.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct Capture {
     pub name: EcoString,
     pub type_: Arc<Type>,

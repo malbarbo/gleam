@@ -412,6 +412,7 @@ mod errors;
 mod fail;
 mod functions;
 mod lists;
+mod local_closures;
 mod memory;
 mod numbers;
 mod strings;

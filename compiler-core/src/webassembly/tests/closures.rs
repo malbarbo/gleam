@@ -706,21 +706,6 @@ pub fn main() {
 }
 
 #[test]
-#[should_panic(expected = "captures of local functions are not supported yet")]
-fn captures_of_local_functions_are_not_supported() {
-    let _ = super::compile_wasm(
-        r#"
-pub fn main() {
-  let y = 1
-  let g = fn(x) { fn() { #(x, y) } }
-  g(2)()
-}
-"#,
-        vec![],
-    );
-}
-
-#[test]
 fn closures_with_captures_allocate_their_environment() {
     let wasm = super::compile_wasm(
         r#"
