@@ -102,12 +102,9 @@ pub(super) enum Scope {
 }
 
 impl Scope {
-    pub(super) fn with_params(
-        globals: Rc<RefCell<Vec<Id>>>,
-        args: &[TypedArg],
-        param_ids: &[LocalId],
-    ) -> Scope {
-        let mut scope = Scope::Global(globals);
+    /// The scope `base` extended with the params.
+    pub(super) fn with_params(base: Scope, args: &[TypedArg], param_ids: &[LocalId]) -> Scope {
+        let mut scope = base;
         for (arg, &index) in args.iter().zip(param_ids) {
             if let Some(name) = arg.get_variable_name() {
                 scope = scope.insert_local(name.clone(), index);
@@ -125,6 +122,15 @@ impl Scope {
             Scope::Global(globals) => find_global(name, globals),
             Scope::Entry(id, _scope) if &id.name == name => Some(id.clone()),
             Scope::Entry(_id, scope) => scope.find(name),
+        }
+    }
+
+    /// Finds a local variable, without looking at the globals.
+    pub(super) fn find_local(&self, name: &EcoString) -> Option<LocalId> {
+        match self {
+            Scope::Global(_) => None,
+            Scope::Entry(id, _scope) if &id.name == name => Some(id.local_id()),
+            Scope::Entry(_id, scope) => scope.find_local(name),
         }
     }
 
@@ -300,7 +306,9 @@ impl Locals {
                 ..
             }
         );
-        if !fun.is_var() && !is_static_module_select {
+        if matches!(fun, TypedExpr::Fn { .. }) {
+            // Called directly, see `Generator::function_literal_call`
+        } else if !fun.is_var() && !is_static_module_select {
             self._insert(generator, fun, &fun.type_(), "fun", fun.location())
         } else {
             set_ubound_or_generic(&fun.type_(), &type_::nil());

@@ -3,7 +3,6 @@
 
 #![allow(clippy::todo)]
 mod builtins;
-#[allow(dead_code, reason = "captures are not supported yet")]
 mod captures;
 mod instructions;
 mod monomorphize;
@@ -13,6 +12,7 @@ mod tests;
 
 pub use builtins::builtin_function_names;
 use builtins::*;
+use captures::Capture;
 use instructions::*;
 use monomorphize::*;
 use scope::*;
@@ -1592,16 +1592,14 @@ impl<'a> Generator<'a> {
         global
     }
 
-    #[allow(dead_code, reason = "captures are not supported yet")]
-    /// The environment type of the closures of `closure` that capture values of
-    /// `captures`. Closures with the same signature and captures share it.
-    fn closure_environment_type(
-        &mut self,
-        closure: &ClosureType,
-        captures: Vec<ValType>,
-    ) -> TypeId {
+    /// The environment type of the closures of `closure` that capture
+    /// `captures`. Closures with the same signature and capture val types
+    /// share it, and its name comes from the captures of the first one.
+    fn closure_environment_type(&mut self, closure: &ClosureType, captures: &[Capture]) -> TypeId {
+        let captures_val_types =
+            self.val_types(captures.iter().map(|capture| capture.type_.clone()));
         let fields = iter::once(self.val_type_ref(closure.code_type_index))
-            .chain(captures)
+            .chain(captures_val_types)
             .map(|val_type| FieldType {
                 element_type: StorageType::Val(val_type),
                 mutable: false,
@@ -1612,12 +1610,18 @@ impl<'a> Generator<'a> {
         });
         let types = &mut self.wasm_module.types;
         let id = types.add_composite(comp, true, Some(closure.type_index));
-        let name = types
-            .get(closure.type_index)
-            .name
-            .clone()
-            .expect("closure type name");
-        types.get_mut(id).name = Some(name + "::environment");
+        if types.get(id).name.is_none() {
+            let closure_name = types
+                .get(closure.type_index)
+                .name
+                .clone()
+                .expect("closure type name");
+            let captures_names = captures
+                .iter()
+                .map(|capture| qualified_type_name(&capture.type_).replace(" ", ""))
+                .join(",");
+            types.get_mut(id).name = Some(format!("{closure_name}::environment({captures_names})"));
+        }
         id
     }
 
@@ -2499,7 +2503,11 @@ impl<'a> Generator<'a> {
         let mut instructions = code.extend_instructions(self);
         self.statements(
             &mut instructions,
-            Scope::with_params(self.globals.clone(), &function.arguments, &param_ids),
+            Scope::with_params(
+                Scope::Global(self.globals.clone()),
+                &function.arguments,
+                &param_ids,
+            ),
             &locals,
             &function.body,
             true,
@@ -2550,9 +2558,10 @@ impl<'a> Generator<'a> {
         self._function(function, name, export, specialization, local_functions)
     }
 
-    /// Generates a local function. With `closure`, it is the code of a
-    /// closure: its first param is the closure, which `arguments` don't
-    /// include.
+    /// Generates a local function that uses `captures`. With `closure`, it is
+    /// the code of a closure: its first param is the closure, which
+    /// `arguments` don't include, and the captures are read from its
+    /// environment. Without it, the captures are the first params.
     fn _function_local(
         &mut self,
         name: EcoString,
@@ -2560,11 +2569,20 @@ impl<'a> Generator<'a> {
         arguments: &[TypedArg],
         body: &[TypedStatement],
         closure: Option<ClosureType>,
+        captures: &[Capture],
     ) -> Id {
         let (gleam_params, return_) = type_.fn_types().expect("function type");
+        let captures_val_types =
+            self.val_types(captures.iter().map(|capture| capture.type_.clone()));
         let closure_param = closure.map(|closure| self.val_type_ref(closure.type_index));
+        let captures_params = if closure.is_some() {
+            vec![]
+        } else {
+            captures_val_types.clone()
+        };
         let params = closure_param
             .into_iter()
+            .chain(captures_params)
             .chain(self.val_types(gleam_params))
             .collect_vec();
         let results = self.val_types(iter::once(return_));
@@ -2572,16 +2590,49 @@ impl<'a> Generator<'a> {
         let id = self.add_function_to_globals(name.clone(), index);
         let locals = Locals::new(self, arguments, body);
         let param_ids = locals.param_ids();
-        let all_param_ids = closure_param
-            .map(|val_type| self.wasm_local(val_type))
+        let closure_local = closure_param.map(|val_type| self.wasm_local(val_type));
+        let captures_locals = captures_val_types
             .into_iter()
+            .map(|val_type| self.wasm_local(val_type))
+            .collect_vec();
+        let captures_param_ids = if closure.is_some() {
+            vec![]
+        } else {
+            captures_locals.clone()
+        };
+        let all_param_ids = closure_local
+            .into_iter()
+            .chain(captures_param_ids)
             .chain(param_ids.iter().copied())
             .collect_vec();
         let mut code = Function::new(self, &name, &all_param_ids, &results);
         let mut instructions = code.extend_instructions(self);
+        if let (Some(closure), Some(closure_local)) = (closure, closure_local)
+            && !captures.is_empty()
+        {
+            // Copy the captures from the environment to their locals
+            let environment_type = self.closure_environment_type(&closure, captures);
+            let environment = self.wasm_local(self.val_type_ref(environment_type));
+            let _ = instructions
+                .local_get(closure_local)
+                .ref_cast_non_null(HeapType::Concrete(environment_type))
+                .local_set(environment);
+            for (field, local) in (1..).zip(&captures_locals) {
+                let _ = instructions
+                    .local_get(environment)
+                    .struct_get(environment_type, field)
+                    .local_set(*local);
+            }
+        }
+        // The variables bound in the body shadow the captures
+        let mut scope = Scope::Global(self.globals.clone());
+        for (capture, local) in captures.iter().zip(captures_locals) {
+            scope = scope.insert_local(capture.name.clone(), local);
+            self.wasm_module.locals.get_mut(local).name = Some(capture.name.to_string());
+        }
         self.statements(
             &mut instructions,
-            Scope::with_params(self.globals.clone(), arguments, &param_ids),
+            Scope::with_params(scope, arguments, &param_ids),
             &locals,
             body,
             true,
@@ -2602,12 +2653,88 @@ impl<'a> Generator<'a> {
         type_: &Arc<Type>,
         arguments: &[TypedArg],
         body: &[TypedStatement],
-        closure: ClosureType,
+        closure: Option<ClosureType>,
+        captures: &[Capture],
     ) -> Id {
         if let Some(id) = self.find_global(&name) {
             return id;
         }
-        self._function_local(name, type_, arguments, body, Some(closure))
+        self._function_local(name, type_, arguments, body, closure, captures)
+    }
+
+    /// The name of the code of the function literal at `location`.
+    fn function_literal_name(&self, location: SrcSpan, type_: &Arc<Type>) -> EcoString {
+        let type_name = qualified_type_name(type_).replace(" ", "");
+        format!(
+            "anonymous@{}-{}#{}:{type_name}",
+            location.start, location.end, self.specialization
+        )
+        .into()
+    }
+
+    /// The captures of a function literal, without the local functions, which
+    /// are called directly.
+    fn function_literal_captures(
+        &self,
+        location: SrcSpan,
+        arguments: &[TypedArg],
+        body: &[TypedStatement],
+    ) -> Vec<Capture> {
+        captures::captures(location, arguments, body)
+            .into_iter()
+            .filter(|capture| !self.local_functions.contains_key(&capture.definition))
+            .collect()
+    }
+
+    /// Pushes the values of `captures`, which are locals of `scope`.
+    fn captures_values(
+        &self,
+        scope: &Scope,
+        instructions: &mut Instructions<'_, '_>,
+        captures: &[Capture],
+    ) {
+        for capture in captures {
+            let local = scope.find_local(&capture.name).unwrap_or_else(|| {
+                panic!(
+                    "captured variable {} is not in scope, captures of local functions are not supported yet",
+                    capture.name
+                )
+            });
+            let _ = instructions.local_get(local);
+        }
+    }
+
+    /// Calls the function literal `fun` directly, without creating its
+    /// closure: its captures are the first arguments.
+    fn function_literal_call<'e>(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        locals: &Locals,
+        scope: Scope,
+        fun: &TypedExpr,
+        arguments: impl IntoIterator<Item = &'e TypedExpr>,
+        tail: bool,
+    ) {
+        let TypedExpr::Fn {
+            location,
+            type_,
+            arguments: parameters,
+            body,
+            ..
+        } = fun
+        else {
+            panic!("function literal");
+        };
+        let name = self.function_literal_name(*location, type_) + "@direct";
+        let captures = self.function_literal_captures(*location, parameters, body);
+        let id = self.function_local(name, type_, parameters, body, None, &captures);
+        self.captures_values(&scope, instructions, &captures);
+        let _ = instructions.expressions(self, locals, scope, arguments);
+        let _ = if tail {
+            instructions.return_call(id.func_id())
+        } else {
+            instructions.call(id.func_id())
+        };
     }
 
     fn function_local_generic(&mut self, info: &LocalFunction, required_type: &Arc<Type>) -> Id {
@@ -2629,7 +2756,7 @@ impl<'a> Generator<'a> {
         let nested_locations: Vec<_> = nested.keys().copied().collect();
         let saved_specialization = std::mem::replace(&mut self.specialization, specialization);
         self.local_functions.extend(nested);
-        let id = self._function_local(name, required_type, &args, &body, None);
+        let id = self._function_local(name, required_type, &args, &body, None, &[]);
         for location in nested_locations {
             let _ = self.local_functions.remove(&location);
         }
@@ -3001,7 +3128,9 @@ impl<'a> Generator<'a> {
                 // stack, so a tail call gains nothing there.
                 let tail = tail && !fun.is_record_constructor_function();
                 let args = arguments.iter().map(|arg| &arg.value);
-                if let Some(id) = self.static_callee(&scope, fun) {
+                if let TypedExpr::Fn { .. } = fun.as_ref() {
+                    self.function_literal_call(instructions, locals, scope, fun, args, tail);
+                } else if let Some(id) = self.static_callee(&scope, fun) {
                     let _ = instructions.expressions(self, locals, scope, args);
                     let _ = if tail {
                         instructions.return_call(id)
@@ -3042,17 +3171,21 @@ impl<'a> Generator<'a> {
                 body,
                 ..
             } => {
-                let type_name = qualified_type_name(type_).replace(" ", "");
-                let name: EcoString = format!(
-                    "anonymous@{}-{}#{}:{type_name}",
-                    location.start, location.end, self.specialization
-                )
-                .into();
+                let name = self.function_literal_name(*location, type_);
+                let captures = self.function_literal_captures(*location, arguments, body);
                 let (params, return_) = type_.fn_types().expect("function type");
                 let closure = self.closure_type(params, return_);
-                let id = self.function_local(name, type_, arguments, body, closure);
-                let closure = self.closure_global(id.func_id(), &closure);
-                let _ = instructions.global_get(closure);
+                let id =
+                    self.function_local(name, type_, arguments, body, Some(closure), &captures);
+                if captures.is_empty() {
+                    let closure = self.closure_global(id.func_id(), &closure);
+                    let _ = instructions.global_get(closure);
+                } else {
+                    let environment = self.closure_environment_type(&closure, &captures);
+                    let _ = instructions.ref_func(id.func_id());
+                    self.captures_values(&scope, instructions, &captures);
+                    let _ = instructions.struct_new(environment);
+                }
             }
             TypedExpr::Case {
                 type_,

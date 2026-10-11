@@ -358,11 +358,10 @@ impl Monomorphizer {
                 }
                 self.expression(finally);
             }
-            TypedExpr::Int { .. }
-            | TypedExpr::Float { .. }
-            | TypedExpr::String { .. }
-            | TypedExpr::NegateBool { .. }
-            | TypedExpr::NegateInt { .. } => {}
+            TypedExpr::NegateBool { value, .. } | TypedExpr::NegateInt { value, .. } => {
+                self.expression(value);
+            }
+            TypedExpr::Int { .. } | TypedExpr::Float { .. } | TypedExpr::String { .. } => {}
             TypedExpr::BitArray { .. } => todo!("BitArray expressions are not yet supported"),
             TypedExpr::ModuleSelect { type_, .. } => {
                 *type_ = self.type_(type_);
