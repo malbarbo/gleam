@@ -1355,6 +1355,11 @@ impl<'a> Generator<'a> {
 
     fn constants(&mut self) {
         for module_constant in &self.module.definitions.constants {
+            // A generic constant is specialized by each use, see
+            // `constant_value`.
+            if is_generic_type(&module_constant.type_) {
+                continue;
+            }
             let _ = self.module_constant(module_constant);
         }
     }
@@ -2140,6 +2145,21 @@ impl<'a> Generator<'a> {
         let const_name = &module_constant.name;
         let export = module_constant.publicity.is_public();
 
+        let type_ = &module_constant.type_;
+        if type_.fn_types().is_some() {
+            // A function constant names the global of the closure.
+            let function = self
+                .constant_function(&module_constant.value, type_)
+                .expect("function constant to name a function");
+            let global = self.closure_of(function, type_);
+            if export {
+                let _ = self.wasm_module.exports.add(const_name, global);
+            }
+            let id = Id::global(const_name.clone(), global);
+            self.globals.borrow_mut().push(id.clone());
+            return id;
+        }
+
         match &*module_constant.value {
             Constant::Int { int_value, .. } => self.add_const(
                 const_name,
@@ -2289,29 +2309,6 @@ impl<'a> Generator<'a> {
                         panic!("external types should not reach code generation")
                     }
                 }
-            }
-            Constant::Var {
-                name,
-                type_,
-                constructor,
-                ..
-            } if type_.fn_types().is_some() => {
-                // A function constant names the global of the closure.
-                let var_id = match self.imported_function_of(constructor.as_deref(), type_) {
-                    Some(id) => id,
-                    None => self.var_id(&Scope::Global(self.globals.clone()), name, type_),
-                };
-                let global = match var_id.kind {
-                    IdKind::Func => self.closure_of(var_id.func_id(), type_),
-                    IdKind::Global => var_id.global_id(),
-                    IdKind::Local => panic!("module constant should not name a local"),
-                };
-                if export {
-                    let _ = self.wasm_module.exports.add(const_name, global);
-                }
-                let id = Id::global(const_name.clone(), global);
-                self.globals.borrow_mut().push(id.clone());
-                id
             }
             Constant::Var { name, type_, .. } => {
                 let (expr, val_type) = if type_.is_int() {
@@ -2472,17 +2469,17 @@ impl<'a> Generator<'a> {
                 constructor,
                 ..
             } => {
-                if let Some(id) = self.imported_function_of(constructor.as_deref(), type_) {
-                    let closure = self.closure_of(id.func_id(), type_);
+                if let Some(function) = self.constant_function(const_, type_) {
+                    let closure = self.closure_of(function, type_);
                     let _ = instructions.global_get(closure);
                 } else if let Some(ValueConstructorVariant::ModuleConstant {
                     literal, module, ..
                 }) = constructor
                     .as_deref()
                     .map(|constructor| &constructor.variant)
-                    && *module != self.module.name
+                    && (*module != self.module.name || is_generic_type(&literal.type_()))
                 {
-                    self._constant(instructions, literal);
+                    self.constant_value(instructions, literal, type_);
                 } else {
                     let scope = Scope::Global(self.globals.clone());
                     self.expression_var(&scope, instructions, name, type_, None);
@@ -2553,22 +2550,76 @@ impl<'a> Generator<'a> {
         );
     }
 
-    /// The function of another module that a constant names.
-    fn imported_function_of(
+    /// The function that the constant `constant` names, with type `type_`. A
+    /// function constant is an alias of the function, so a generic one is
+    /// specialized by each use.
+    fn constant_function(
         &mut self,
-        constructor: Option<&ValueConstructor>,
+        constant: &TypedConstant,
         type_: &Arc<Type>,
-    ) -> Option<Id> {
-        match &constructor?.variant {
-            ValueConstructorVariant::ModuleFn { module, name, .. }
-                if *module != self.module.name =>
-            {
-                Some(self.function_imported(module, name, type_))
+    ) -> Option<FunctionId> {
+        let _ = type_.fn_types()?;
+        let global = Scope::Global(self.globals.clone());
+        let (name, constructor) = match constant {
+            Constant::Var {
+                name,
+                constructor: Some(constructor),
+                ..
+            } => (name, constructor),
+            Constant::Record {
+                name,
+                arguments: None,
+                ..
+            } => return Some(self.var_id(&global, name, type_).func_id()),
+            Constant::Int { .. }
+            | Constant::Float { .. }
+            | Constant::String { .. }
+            | Constant::Tuple { .. }
+            | Constant::List { .. }
+            | Constant::Record { .. }
+            | Constant::RecordUpdate { .. }
+            | Constant::BitArray { .. }
+            | Constant::Var { .. }
+            | Constant::BinaryOperator { .. }
+            | Constant::Invalid { .. }
+            | Constant::Todo { .. } => return None,
+        };
+        let id = match &constructor.variant {
+            ValueConstructorVariant::ModuleFn {
+                module,
+                name: function_name,
+                ..
+            } if *module != self.module.name => {
+                self.function_imported(module, function_name, type_)
             }
-            ValueConstructorVariant::LocalVariable { .. }
-            | ValueConstructorVariant::ModuleConstant { .. }
-            | ValueConstructorVariant::ModuleFn { .. }
-            | ValueConstructorVariant::Record { .. } => None,
+            ValueConstructorVariant::ModuleConstant { literal, .. } => {
+                return self.constant_function(literal, type_);
+            }
+            ValueConstructorVariant::ModuleFn { .. } | ValueConstructorVariant::Record { .. } => {
+                self.var_id(&global, name, type_)
+            }
+            ValueConstructorVariant::LocalVariable { .. } => return None,
+        };
+        matches!(id.kind, IdKind::Func).then(|| id.func_id())
+    }
+
+    /// Pushes the value of the constant `constant` used with type `type_`. A
+    /// generic constant is specialized to the type of each use.
+    fn constant_value(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        constant: &TypedConstant,
+        type_: &Arc<Type>,
+    ) {
+        if let Some(function) = self.constant_function(constant, type_) {
+            let closure = self.closure_of(function, type_);
+            let _ = instructions.global_get(closure);
+        } else if is_generic_type(&constant.type_()) {
+            let constant = Monomorphizer::with_bound(&constant.type_(), type_).constant(constant);
+            self.register_string_const(&constant);
+            self._constant(instructions, &constant);
+        } else {
+            self._constant(instructions, constant);
         }
     }
 
@@ -3366,7 +3417,7 @@ impl<'a> Generator<'a> {
                     let _ = instructions.global_get(closure);
                 }
                 ValueConstructorVariant::ModuleConstant { literal, .. } => {
-                    self._constant(instructions, literal);
+                    self.constant_value(instructions, literal, &expression.type_());
                 }
                 ValueConstructorVariant::LocalVariable { location, .. } => {
                     let type_ = expression.type_();
@@ -3577,7 +3628,7 @@ impl<'a> Generator<'a> {
                     self.expression_var(&scope, instructions, name, &expression.type_(), None);
                 }
                 ModuleValueConstructor::Constant { literal, .. } => {
-                    self._constant(instructions, literal);
+                    self.constant_value(instructions, literal, &expression.type_());
                 }
             },
             TypedExpr::Invalid { .. } => {
@@ -3835,7 +3886,9 @@ impl<'a> Generator<'a> {
                 ValueConstructorVariant::LocalVariable { .. } => return None,
                 ValueConstructorVariant::ModuleFn { .. }
                 | ValueConstructorVariant::Record { .. } => self.var_id(scope, name, &type_),
-                ValueConstructorVariant::ModuleConstant { .. } => return None,
+                ValueConstructorVariant::ModuleConstant { literal, .. } => {
+                    return self.constant_function(literal, &type_);
+                }
             }
         } else if let TypedExpr::ModuleSelect {
             constructor,
@@ -3849,7 +3902,9 @@ impl<'a> Generator<'a> {
                     self.function_imported(module_name, label, &type_)
                 }
                 ModuleValueConstructor::Record { name, .. } => self.var_id(scope, name, &type_),
-                ModuleValueConstructor::Constant { .. } => return None,
+                ModuleValueConstructor::Constant { literal, .. } => {
+                    return self.constant_function(literal, &type_);
+                }
             }
         } else {
             return None;

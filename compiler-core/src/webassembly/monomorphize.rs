@@ -5,8 +5,8 @@ use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use crate::{
     ast::{
-        AssignmentKind, ClauseGuard, Pattern, Statement, TypedArg, TypedAssignment,
-        TypedClauseGuard, TypedCustomType, TypedExpr, TypedFunction, TypedPattern,
+        AssignmentKind, ClauseGuard, Constant, Pattern, Statement, TypedArg, TypedAssignment,
+        TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr, TypedFunction, TypedPattern,
         TypedRecordConstructor, TypedStatement,
         visit::{Visit, visit_typed_assignment, visit_typed_expr_call},
     },
@@ -226,6 +226,62 @@ impl Monomorphizer {
         self.statements(&mut function.body);
 
         function
+    }
+
+    pub(super) fn constant(&self, constant: &TypedConstant) -> TypedConstant {
+        let mut constant = constant.clone();
+        self.constant_types(&mut constant);
+        constant
+    }
+
+    fn constant_types(&self, constant: &mut TypedConstant) {
+        match constant {
+            Constant::Int { .. }
+            | Constant::Float { .. }
+            | Constant::String { .. }
+            | Constant::BitArray { .. }
+            | Constant::RecordUpdate { .. }
+            | Constant::Invalid { .. }
+            | Constant::Todo { .. } => {}
+            Constant::Tuple {
+                elements, type_, ..
+            } => {
+                *type_ = self.type_(type_);
+                for element in elements {
+                    self.constant_types(element);
+                }
+            }
+            Constant::List {
+                elements,
+                type_,
+                tail,
+                ..
+            } => {
+                *type_ = self.type_(type_);
+                for element in elements {
+                    self.constant_types(element);
+                }
+                if let Some(tail) = tail {
+                    self.constant_types(tail);
+                }
+            }
+            Constant::Record {
+                arguments, type_, ..
+            } => {
+                *type_ = self.type_(type_);
+                for argument in arguments.iter_mut().flatten() {
+                    self.constant_types(&mut argument.value);
+                }
+            }
+            Constant::Var { type_, .. } => *type_ = self.type_(type_),
+            Constant::BinaryOperator {
+                left, right, type_, ..
+            } => {
+                *type_ = self.type_(type_);
+                self.constant_types(left);
+                self.constant_types(right);
+            }
+        }
     }
 
     pub(super) fn type_(&self, old: &Arc<Type>) -> Arc<Type> {

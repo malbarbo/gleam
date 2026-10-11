@@ -140,3 +140,194 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn const_generic_function() {
+    run_ok(
+        r#"
+fn identity(x: a) -> a {
+  x
+}
+
+fn apply(f: fn(a) -> b, x: a) -> b {
+  f(x)
+}
+
+const f = identity
+
+const g = f
+
+const h: fn(Int) -> Int = f
+
+pub fn main() {
+    assert f(1) == 1
+    assert f("a") == "a"
+    assert g(1.5) == 1.5
+    assert h(2) == 2
+    assert apply(f, 3) == 3
+    assert apply(g, "b") == "b"
+    let i: fn(Int) -> Int = f
+    assert i == h
+    assert i == identity
+}
+"#,
+    );
+}
+
+#[test]
+fn const_generic_constructor() {
+    run_ok(
+        r#"
+type Box(a) {
+  Box(value: a)
+}
+
+const make = Box
+
+pub fn main() {
+    assert make(1) == Box(1)
+    assert make("a").value == "a"
+}
+"#,
+    );
+}
+
+#[test]
+fn const_generic_values() {
+    run_ok(
+        r#"
+const empty = []
+
+const nothing = Error(Nil)
+
+pub fn main() {
+    assert [1, ..empty] == [1]
+    assert ["a", ..empty] == ["a"]
+    let r: Result(Int, Nil) = nothing
+    assert r == Error(Nil)
+}
+"#,
+    );
+}
+
+#[test]
+fn const_imported_generic_function() {
+    let result = super::run_wasm(
+        r#"
+import thepackage/helpers.{f}
+
+const g = helpers.f
+
+pub fn main() {
+    assert helpers.f(1) == 1
+    assert f("a") == "a"
+    assert g(1.5) == 1.5
+    assert helpers.g(2) == 2
+    assert helpers.f == f
+    0
+}
+"#,
+        vec![(
+            "thepackage",
+            "thepackage/helpers",
+            r#"
+pub fn identity(x: a) -> a {
+  x
+}
+
+pub const f = identity
+
+pub const g = f
+"#,
+        )],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn const_constructors() {
+    run_ok(
+        r#"
+type Point {
+  Point(x: Int, y: Int)
+}
+
+const make = Point
+
+const make_again = make
+
+pub fn main() {
+    assert make(1, 2) == Point(1, 2)
+    assert make_again(1, 2).y == 2
+    assert make == Point
+}
+"#,
+    );
+}
+
+#[test]
+fn const_nested_generic_values() {
+    run_ok(
+        r#"
+fn identity(x: a) -> a {
+  x
+}
+
+const empty = []
+
+const pair = #(empty, 1)
+
+const functions = [identity, identity]
+
+pub fn main() {
+    let #(l, n) = pair
+    assert ["a", ..l] == ["a"]
+    assert n == 1
+    let #(m, _) = pair
+    assert [1.5, ..m] == [1.5]
+    let assert [f, ..] = functions
+    assert f(2) == 2
+    let assert [_, g] = functions
+    assert g("b") == "b"
+}
+"#,
+    );
+}
+
+#[test]
+fn const_imported_generic_values() {
+    let result = super::run_wasm(
+        r#"
+import thepackage/helpers.{empty}
+
+const local = helpers.pair
+
+pub fn main() {
+    assert [1, ..empty] == [1]
+    assert ["a", ..helpers.empty] == ["a"]
+    let #(l, n) = local
+    assert [1.5, ..l] == [1.5]
+    assert n == 2
+    0
+}
+"#,
+        vec![(
+            "thepackage",
+            "thepackage/helpers",
+            r#"
+pub const empty = []
+
+pub const pair = #(empty, 2)
+"#,
+        )],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
