@@ -410,6 +410,7 @@ mod custom_types;
 mod echo;
 mod errors;
 mod fail;
+mod function_fields;
 mod functions;
 mod lists;
 mod local_closures;
