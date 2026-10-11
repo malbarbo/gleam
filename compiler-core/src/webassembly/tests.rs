@@ -166,20 +166,29 @@ pub fn wasm_function_names(wasm_bytes: &[u8]) -> Vec<String> {
     names
 }
 
-/// Count the `call_ref` instructions in the code of the wasm binary.
-pub fn count_call_ref(wasm_bytes: &[u8]) -> usize {
+/// Count the calls through function references (`call_ref` and
+/// `return_call_ref`) in the code of the wasm binary.
+pub fn count_ref_calls(wasm_bytes: &[u8]) -> usize {
     let mut count = 0;
+    for_each_operator(wasm_bytes, |op| {
+        if let wasmparser::Operator::CallRef { .. } | wasmparser::Operator::ReturnCallRef { .. } =
+            op
+        {
+            count += 1;
+        }
+    });
+    count
+}
+
+pub fn for_each_operator(wasm_bytes: &[u8], mut f: impl FnMut(wasmparser::Operator<'_>)) {
     for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
         if let wasmparser::Payload::CodeSectionEntry(body) = payload.unwrap() {
             let mut reader = body.get_operators_reader().unwrap();
             while !reader.eof() {
-                if let wasmparser::Operator::CallRef { .. } = reader.read().unwrap() {
-                    count += 1;
-                }
+                f(reader.read().unwrap());
             }
         }
     }
-    count
 }
 
 pub fn compile_wasm_error(src: &str) -> crate::webassembly::Error {
@@ -355,4 +364,5 @@ mod lists;
 mod memory;
 mod numbers;
 mod strings;
+mod tail_calls;
 mod tuples;

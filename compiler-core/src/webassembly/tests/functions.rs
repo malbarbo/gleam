@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-use super::{compile_wasm, count_call_ref, run_ok, run_wasm, wasm_function_names, wasm_type_names};
+use super::{
+    compile_wasm, count_ref_calls, run_ok, run_wasm, wasm_function_names, wasm_type_names,
+};
 
 #[test]
 fn const_function_assignment() {
@@ -1338,7 +1340,7 @@ pub fn main() {
 }
 
 fn assert_runs_without_call_ref(src: &str, deps: Vec<(&str, &str, &str)>) {
-    assert_eq!(count_call_ref(&compile_wasm(src, deps.clone())), 0);
+    assert_eq!(count_ref_calls(&compile_wasm(src, deps.clone())), 0);
     let result = run_wasm(src, deps);
     assert!(
         result.status.success(),
@@ -1442,7 +1444,7 @@ pub fn main() {
     0
 }
 "#;
-    assert_eq!(count_call_ref(&compile_wasm(src, vec![])), 1);
+    assert_eq!(count_ref_calls(&compile_wasm(src, vec![])), 1);
     run_ok(src);
 }
 

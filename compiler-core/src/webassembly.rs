@@ -39,8 +39,8 @@ use walrus::{
 
 use crate::{
     ast::{
-        AssignName, AssignmentKind, BinOp, ClauseGuard, Constant, OperatorKind, Pattern, Publicity,
-        Statement, StringPrefixLeftSideAssignment, TypeAst, TypeAstVar, TypedArg, TypedAssignment,
+        AssignName, AssignmentKind, BinOp, ClauseGuard, Constant, Pattern, Publicity, Statement,
+        StringPrefixLeftSideAssignment, TypeAst, TypeAstVar, TypedArg, TypedAssignment,
         TypedClause, TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr, TypedFunction,
         TypedModule, TypedModuleConstant, TypedPattern, TypedRecordConstructor,
         TypedRecordConstructorArg, TypedStatement, visit::Visit,
@@ -2440,6 +2440,7 @@ impl<'a> Generator<'a> {
             Scope::with_params(self.globals.clone(), &function.arguments, &param_ids),
             &locals,
             &function.body,
+            true,
         );
         self.local_functions = saved_local_functions;
         self.specialization = saved_specialization;
@@ -2508,6 +2509,7 @@ impl<'a> Generator<'a> {
             Scope::with_params(self.globals.clone(), arguments, &param_ids),
             &locals,
             body,
+            true,
         );
         let _ = instructions.end();
 
@@ -2599,6 +2601,7 @@ impl<'a> Generator<'a> {
         mut scope: Scope,
         locals: &Locals,
         statements: &[TypedStatement],
+        tail: bool,
     ) {
         let mut remaining = statements;
         while let Some((statement, rest)) = remaining.split_first() {
@@ -2618,14 +2621,15 @@ impl<'a> Generator<'a> {
                 Statement::Assignment(assignment)
                     if matches!(assignment.kind, AssignmentKind::Assert { .. }) =>
                 {
-                    self.assignment_assert(locals, scope, instructions, assignment, rest);
+                    self.assignment_assert(locals, scope, instructions, assignment, rest, tail);
                     return;
                 }
                 Statement::Expression(_)
                 | Statement::Assignment(_)
                 | Statement::Use(_)
                 | Statement::Assert(_) => {
-                    scope = self.statement(instructions, scope, locals, statement);
+                    let tail = tail && rest.is_empty();
+                    scope = self.statement(instructions, scope, locals, statement, tail);
                     if !rest.is_empty() {
                         let _ = instructions.drop();
                     }
@@ -2641,10 +2645,11 @@ impl<'a> Generator<'a> {
         mut scope: Scope,
         locals: &Locals,
         statement: &TypedStatement,
+        tail: bool,
     ) -> Scope {
         match statement {
             Statement::Expression(expression) => {
-                let _ = instructions.expression(self, locals, scope.clone(), expression);
+                let _ = instructions.tail_expression(self, locals, scope.clone(), expression, tail);
             }
             Statement::Assignment(assignment) => {
                 scope = self.assignment(locals, scope, instructions, assignment);
@@ -2653,7 +2658,7 @@ impl<'a> Generator<'a> {
                 self.assert(instructions, &scope, locals, assert);
             }
             Statement::Use(use_) => {
-                let _ = instructions.expression(self, locals, scope.clone(), &use_.call);
+                let _ = instructions.tail_expression(self, locals, scope.clone(), &use_.call, tail);
             }
         }
         scope
@@ -2700,6 +2705,7 @@ impl<'a> Generator<'a> {
         scope: Scope,
         instructions: &mut Instructions<'_, '_>,
         expression: &TypedExpr,
+        tail: bool,
     ) {
         match expression {
             TypedExpr::Todo { message, .. } | TypedExpr::Panic { message, .. } => {
@@ -2808,6 +2814,42 @@ impl<'a> Generator<'a> {
                 }
             }
             TypedExpr::BinOp {
+                operator: BinOp::And,
+                left,
+                right,
+                ..
+            } => {
+                let _ = instructions
+                    .expression(self, locals, scope.clone(), left)
+                    .if_else(
+                        BOOL_VALTYPE,
+                        |then_s| {
+                            let _ = then_s.tail_expression(self, locals, scope, right, tail);
+                        },
+                        |else_s| {
+                            let _ = else_s.bool_const(false);
+                        },
+                    );
+            }
+            TypedExpr::BinOp {
+                operator: BinOp::Or,
+                left,
+                right,
+                ..
+            } => {
+                let _ = instructions
+                    .expression(self, locals, scope.clone(), left)
+                    .if_else(
+                        BOOL_VALTYPE,
+                        |then_s| {
+                            let _ = then_s.bool_const(true);
+                        },
+                        |else_s| {
+                            let _ = else_s.tail_expression(self, locals, scope, right, tail);
+                        },
+                    );
+            }
+            TypedExpr::BinOp {
                 operator,
                 left,
                 right,
@@ -2827,7 +2869,7 @@ impl<'a> Generator<'a> {
                     .bool_not();
             }
             TypedExpr::Block { statements, .. } => {
-                self.statements(instructions, scope, locals, statements);
+                self.statements(instructions, scope, locals, statements, tail);
             }
             TypedExpr::Pipeline {
                 first_value,
@@ -2848,7 +2890,7 @@ impl<'a> Generator<'a> {
                         .local_set(assign_index);
                     scope = scope.insert_local(assignment.name.clone(), assign_index);
                 }
-                let _ = instructions.expression(self, locals, scope, finally);
+                let _ = instructions.tail_expression(self, locals, scope, finally, tail);
             }
             TypedExpr::Var {
                 name, constructor, ..
@@ -2877,24 +2919,41 @@ impl<'a> Generator<'a> {
                 arguments,
                 ..
             } => {
+                // `return_call*` requires the callee results to match the
+                // current function results. They do: both have the same Gleam
+                // type, and equal Gleam types map to equal wasm types (module
+                // validation fails otherwise). Constructors don't grow the
+                // stack, so a tail call gains nothing there.
+                let tail = tail && !fun.is_record_constructor_function();
                 let args_types = arguments.iter().map(|arg| arg.value.type_());
                 let args = arguments.iter().map(|arg| &arg.value);
                 if let Some(id) = self.static_callee(&scope, fun) {
-                    let _ = instructions.expressions(self, locals, scope, args).call(id);
-                } else if fun.is_var() {
-                    // the function can be evaluated after the parameters
-                    let _ = instructions
-                        .expressions(self, locals, scope.clone(), args)
-                        .expression(self, locals, scope, fun)
-                        .call_ref(self.function_type_index(args_types, Some(type_.clone())));
+                    let _ = instructions.expressions(self, locals, scope, args);
+                    let _ = if tail {
+                        instructions.return_call(id)
+                    } else {
+                        instructions.call(id)
+                    };
                 } else {
-                    let index = locals.for_call(fun);
-                    let _ = instructions
-                        .expression(self, locals, scope.clone(), fun)
-                        .local_set(index)
-                        .expressions(self, locals, scope, args)
-                        .local_get(index)
-                        .call_ref(self.function_type_index(args_types, Some(type_.clone())));
+                    if fun.is_var() {
+                        // the function can be evaluated after the parameters
+                        let _ = instructions
+                            .expressions(self, locals, scope.clone(), args)
+                            .expression(self, locals, scope, fun);
+                    } else {
+                        let index = locals.for_call(fun);
+                        let _ = instructions
+                            .expression(self, locals, scope.clone(), fun)
+                            .local_set(index)
+                            .expressions(self, locals, scope, args)
+                            .local_get(index);
+                    }
+                    let ty = self.function_type_index(args_types, Some(type_.clone()));
+                    let _ = if tail {
+                        instructions.return_call_ref(ty)
+                    } else {
+                        instructions.call_ref(ty)
+                    };
                 }
             }
             TypedExpr::Fn {
@@ -2919,7 +2978,11 @@ impl<'a> Generator<'a> {
                 clauses,
                 ..
             } => {
-                self.expression_case(locals, scope, instructions, type_, subjects, clauses);
+                let subjects = self.case_subjects(locals, &scope, instructions, subjects);
+                let case_type = self.val_type(type_);
+                let _ = instructions.block_(case_type, |case_b| {
+                    self.case_clauses(locals, scope, case_b, &subjects, clauses, tail);
+                });
             }
             echo @ TypedExpr::Echo {
                 expression,
@@ -3094,37 +3157,13 @@ impl<'a> Generator<'a> {
         left: &TypedExpr,
         right: &TypedExpr,
     ) {
-        if name.operator_kind() != OperatorKind::BooleanLogic {
-            let _ = instructions
-                .expression(self, locals, scope.clone(), left)
-                .expression(self, locals, scope.clone(), right);
-        }
+        let _ = instructions
+            .expression(self, locals, scope.clone(), left)
+            .expression(self, locals, scope.clone(), right);
 
         let _ = match name {
-            // Bool
-            BinOp::And => {
-                let _ = instructions.expression(self, locals, scope.clone(), left);
-                instructions.if_else(
-                    BOOL_VALTYPE,
-                    |then_s| {
-                        let _ = then_s.expression(self, locals, scope.clone(), right);
-                    },
-                    |else_s| {
-                        let _ = else_s.bool_const(false);
-                    },
-                )
-            }
-            BinOp::Or => {
-                let _ = instructions.expression(self, locals, scope.clone(), left);
-                instructions.if_else(
-                    BOOL_VALTYPE,
-                    |then_s| {
-                        let _ = then_s.bool_const(true);
-                    },
-                    |else_s| {
-                        let _ = else_s.expression(self, locals, scope.clone(), right);
-                    },
-                )
+            BinOp::And | BinOp::Or => {
+                unreachable!("short-circuit operators are generated in _expression")
             }
             // Int
             BinOp::AddInt => instructions.int_add(),
@@ -3169,8 +3208,38 @@ impl<'a> Generator<'a> {
         };
     }
 
-    /// Generates a case expression. Each clause alternative is wrapped
-    /// in a block that `_pattern` branches out of on failure.
+    /// Returns the locals holding the values of the case `subjects`.
+    fn case_subjects(
+        &mut self,
+        locals: &Locals,
+        scope: &Scope,
+        instructions: &mut Instructions<'_, '_>,
+        subjects: &[TypedExpr],
+    ) -> Vec<LocalId> {
+        let mut subjects_locals = vec![];
+        for subject in subjects {
+            if let Some(name) = subject.var_name()
+                && subject.is_local_var()
+                && !self.is_local_function(subject)
+            {
+                // Subject is a local variable — reuse its existing local
+                let id = self.var_id(scope, name, &subject.type_());
+                subjects_locals.push(id.local_id());
+            } else {
+                let index = locals.for_subject(subject);
+                // evaluate and save subject into a new local
+                let _ = instructions
+                    .expression(self, locals, scope.clone(), subject)
+                    .local_set(index);
+                subjects_locals.push(index);
+            }
+        }
+        subjects_locals
+    }
+
+    /// Generates the clauses of a case expression in the `case` block. Each
+    /// clause alternative is wrapped in a block that `_pattern` branches out
+    /// of on failure.
     ///
     /// ```wat
     /// block case (result T):
@@ -3184,64 +3253,42 @@ impl<'a> Generator<'a> {
     ///   unreachable
     /// end case
     /// ```
-    fn expression_case(
+    fn case_clauses(
         &mut self,
         locals: &Locals,
         scope: Scope,
-        instructions: &mut Instructions<'_, '_>,
-        type_: &Arc<Type>,
-        subjects: &[TypedExpr],
+        case_b: &mut Instructions<'_, '_>,
+        subjects_locals: &[LocalId],
         clauses: &[TypedClause],
+        tail: bool,
     ) {
-        let mut subjects_locals = vec![];
-        for subject in subjects {
-            if let Some(name) = subject.var_name()
-                && subject.is_local_var()
-                && !self.is_local_function(subject)
-            {
-                // Subject is a local variable — reuse its existing local
-                let id = self.var_id(&scope, name, &subject.type_());
-                subjects_locals.push(id.local_id());
-            } else {
-                let index = locals.for_subject(subject);
-                // evaluate and save subject into a new local
-                let _ = instructions
-                    .expression(self, locals, scope.clone(), subject)
-                    .local_set(index);
-                subjects_locals.push(index);
+        let case_id = case_b.id();
+        for clause in clauses {
+            let mut scope = scope.clone();
+            for patterns in iter::once(&clause.pattern).chain(&clause.alternative_patterns) {
+                // block alt — _pattern branches here on failure
+                let _ = case_b.block_(InstrSeqType::Simple(None), |alt_b| {
+                    let alt_id = alt_b.id();
+                    for (pattern, subject_local) in patterns.iter().zip(subjects_locals) {
+                        let _ = alt_b.local_get(*subject_local);
+                        scope = self._pattern(locals, scope.clone(), alt_b, pattern, alt_id);
+                    }
+                    // All patterns matched — check guard if present
+                    if let Some(guard) = &clause.guard {
+                        let _ = alt_b
+                            .clause_guard(self, locals, &scope, guard)
+                            .bool_not()
+                            .br_if(alt_id);
+                    }
+                    let _ = alt_b
+                        .tail_expression(self, locals, scope.clone(), &clause.then, tail)
+                        // exit block case
+                        .br(case_id);
+                });
             }
         }
-        // block case
-        let case_type = self.val_type(type_);
-        let _ = instructions.block_(case_type, |case_b| {
-            let case_id = case_b.id();
-            for clause in clauses {
-                let mut scope = scope.clone();
-                for patterns in iter::once(&clause.pattern).chain(&clause.alternative_patterns) {
-                    // block alt — _pattern branches here on failure
-                    let _ = case_b.block_(InstrSeqType::Simple(None), |alt_b| {
-                        let alt_id = alt_b.id();
-                        for (pattern, subject_local) in patterns.iter().zip(&subjects_locals) {
-                            let _ = alt_b.local_get(*subject_local);
-                            scope = self._pattern(locals, scope.clone(), alt_b, pattern, alt_id);
-                        }
-                        // All patterns matched — check guard if present
-                        if let Some(guard) = &clause.guard {
-                            let _ = alt_b
-                                .clause_guard(self, locals, &scope, guard)
-                                .bool_not()
-                                .br_if(alt_id);
-                        }
-                        let _ = alt_b
-                            .expression(self, locals, scope.clone(), &clause.then)
-                            // exit block case
-                            .br(case_id);
-                    });
-                }
-            }
-            // end block case
-            let _ = case_b.unreachable();
-        });
+        // end block case
+        let _ = case_b.unreachable();
     }
 
     fn is_ref_non_null(&self, type_: &Arc<Type>) -> bool {
@@ -3480,6 +3527,7 @@ impl<'a> Generator<'a> {
         instructions: &mut Instructions<'_, '_>,
         assignment: &TypedAssignment,
         remaining: &[TypedStatement],
+        tail: bool,
     ) {
         let right = locals.for_assigment(assignment);
         let _ = instructions
@@ -3516,7 +3564,7 @@ impl<'a> Generator<'a> {
                 );
                 // Pattern matched — remaining statements run here.
                 if !remaining.is_empty() {
-                    self.statements(fail_b, scope.clone(), locals, remaining);
+                    self.statements(fail_b, scope.clone(), locals, remaining, tail);
                 } else {
                     let _ = fail_b.local_get(right);
                 }

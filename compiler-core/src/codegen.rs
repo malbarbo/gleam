@@ -428,7 +428,13 @@ impl<'a> WebAssembly<'a> {
     fn run_wasm_opt(&self, path: &Utf8Path) -> Result<()> {
         let flag = self.opt_level.as_flag();
         let result = std::process::Command::new("wasm-opt")
-            .args([flag, "--enable-gc", "--enable-reference-types", "-o"])
+            .args([
+                flag,
+                "--enable-gc",
+                "--enable-reference-types",
+                "--enable-tail-call",
+                "-o",
+            ])
             .arg(path.as_str())
             .arg(path.as_str())
             .status();

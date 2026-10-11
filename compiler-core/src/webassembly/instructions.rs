@@ -365,7 +365,22 @@ impl<'a, 'b> Instructions<'a, 'b> {
         scope: Scope,
         expression: &TypedExpr,
     ) -> &mut Self {
-        generator._expression(locals, scope, self, expression);
+        generator._expression(locals, scope, self, expression, false);
+        self
+    }
+
+    /// Like [`Self::expression`], but `expression` keeps the position of the
+    /// expression that contains it, which is a tail position when `tail` is
+    /// true.
+    pub(super) fn tail_expression(
+        &mut self,
+        generator: &mut Generator<'_>,
+        locals: &Locals,
+        scope: Scope,
+        expression: &TypedExpr,
+        tail: bool,
+    ) -> &mut Self {
+        generator._expression(locals, scope, self, expression, tail);
         self
     }
 
@@ -377,7 +392,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
         expressions: impl IntoIterator<Item = &'c TypedExpr>,
     ) -> &mut Self {
         for expression in expressions {
-            generator._expression(locals, scope.clone(), self, expression);
+            generator._expression(locals, scope.clone(), self, expression, false);
         }
         self
     }
@@ -486,6 +501,8 @@ impl<'a, 'b> Instructions<'a, 'b> {
         ref_eq(),
         call_ref(index: TypeId),
         call(index: FunctionId),
+        return_call_ref(index: TypeId),
+        return_call(index: FunctionId),
         array_new_default(type_index: TypeId),
         array_new_data(type_index: TypeId, data_segment: DataId),
         array_len(),
