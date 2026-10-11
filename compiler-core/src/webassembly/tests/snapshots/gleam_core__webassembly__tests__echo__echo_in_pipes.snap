@@ -1,0 +1,29 @@
+---
+source: compiler-core/src/webassembly/tests/echo.rs
+expression: "\nfn inc(x: Int) -> Int {\n    x + 1\n}\n\npub fn main() {\n    let n = 1\n    let f = fn(x: Int) { x + n }\n    let y = 1 |> echo\n    let z = y |> echo |> inc |> echo as \"inc\"\n    let g = f |> echo\n    assert g(z) == 3\n}\n"
+---
+----- SOURCE CODE
+
+fn inc(x: Int) -> Int {
+    x + 1
+}
+
+pub fn main() {
+    let n = 1
+    let f = fn(x: Int) { x + n }
+    let y = 1 |> echo
+    let z = y |> echo |> inc |> echo as "inc"
+    let g = f |> echo
+    assert g(z) == 3
+}
+
+
+----- STDERR
+src/my/mod.gleam:9
+1
+src/my/mod.gleam:10
+1
+src/my/mod.gleam:10 "inc"
+2
+src/my/mod.gleam:11
+//fn(Int) -> Int { ... }

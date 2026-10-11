@@ -75,3 +75,23 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn echo_in_pipes() {
+    assert_wasm_echo!(
+        r#"
+fn inc(x: Int) -> Int {
+    x + 1
+}
+
+pub fn main() {
+    let n = 1
+    let f = fn(x: Int) { x + n }
+    let y = 1 |> echo
+    let z = y |> echo |> inc |> echo as "inc"
+    let g = f |> echo
+    assert g(z) == 3
+}
+"#,
+    );
+}

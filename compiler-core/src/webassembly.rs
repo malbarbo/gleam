@@ -41,10 +41,10 @@ use walrus::{
 
 use crate::{
     ast::{
-        AssignName, AssignmentKind, BinOp, ClauseGuard, Constant, Pattern, Publicity, Statement,
-        StringPrefixLeftSideAssignment, TypeAst, TypeAstVar, TypedArg, TypedAssignment,
-        TypedClause, TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr, TypedFunction,
-        TypedModule, TypedModuleConstant, TypedPattern, TypedRecordConstructor,
+        AssignName, AssignmentKind, BinOp, ClauseGuard, Constant, PIPE_VARIABLE, Pattern,
+        Publicity, Statement, StringPrefixLeftSideAssignment, TypeAst, TypeAstVar, TypedArg,
+        TypedAssignment, TypedClause, TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr,
+        TypedFunction, TypedModule, TypedModuleConstant, TypedPattern, TypedRecordConstructor,
         TypedRecordConstructorArg, TypedStatement, visit::Visit,
     },
     type_::{
@@ -4032,72 +4032,78 @@ impl<'a> Generator<'a> {
         expression: &Option<Box<TypedExpr>>,
         message: &Option<Box<TypedExpr>>,
     ) {
+        let print = self.find_global_expect(PRINT).func_id();
+        let heap_base = self.find_global_expect(HEAP_BASE).func_id();
+        let string_to_memory =
+            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
+        let (mod_name, line) = self.source_location(echo.location().start);
+        let suffix = if message.is_some() { ' ' } else { '\n' };
+        let string_index =
+            self.string_index(&format!("src/{mod_name}.gleam:{line}{suffix}").into());
+
+        let (dest, expr) = locals.for_echo(echo);
+
+        let expr = match expr {
+            Ok(expr) => expr,
+            Err(name) => self.var_id(scope, name, &echo.type_()).local_id(),
+        };
+
         if let Some(expression) = expression {
-            let print = self.find_global_expect(PRINT).func_id();
-            let heap_base = self.find_global_expect(HEAP_BASE).func_id();
-            let string_to_memory =
-                self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
-            let (mod_name, line) = self.source_location(echo.location().start);
-            let suffix = if message.is_some() { ' ' } else { '\n' };
-            let string_index =
-                self.string_index(&format!("src/{mod_name}.gleam:{line}{suffix}").into());
+            let _ = instructions.expression(self, locals, scope.clone(), expression);
+        } else {
+            // `|> echo` prints the value of the previous step
+            let previous = scope
+                .find_local(&PIPE_VARIABLE.into())
+                .expect("echo with no previous step in a pipe");
+            let _ = instructions.local_get(previous);
+        }
+        let _ = instructions
+            .local_set(expr)
+            // write the module name and line number
+            .global_as_non_null(string_index)
+            .call(heap_base)
+            .local_tee(dest)
+            .call(string_to_memory)
+            // update end
+            .local_get(dest)
+            .i32_add()
+            .local_set(dest);
 
-            let (dest, expr) = locals.for_echo(echo);
-
-            let expr = match expr {
-                Ok(expr) => expr,
-                Err(name) => self.var_id(scope, name, &echo.type_()).local_id(),
-            };
-
+        if let Some(message) = message {
             let _ = instructions
-                .expression(self, locals, scope.clone(), expression)
-                .local_set(expr)
-                // write the module name and line number
-                .global_as_non_null(string_index)
-                .call(heap_base)
-                .local_tee(dest)
-                .call(string_to_memory)
-                // update end
+                .expression(self, locals, scope.clone(), message)
                 .local_get(dest)
-                .i32_add()
-                .local_set(dest);
-
-            if let Some(message) = message {
-                let _ = instructions
-                    .expression(self, locals, scope.clone(), message)
-                    .local_get(dest)
-                    .call(self.function_repr(&message.type_()))
-                    // update end
-                    .local_get(dest)
-                    .i32_add()
-                    .local_tee(dest)
-                    // add new line
-                    .byte_store(b'\n')
-                    .i32_inc(dest);
-            }
-
-            let _ = instructions
-                .local_get(expr)
-                .local_get(dest)
-                .call(self.function_repr(&expression.type_()))
+                .call(self.function_repr(&message.type_()))
                 // update end
                 .local_get(dest)
                 .i32_add()
                 .local_tee(dest)
                 // add new line
                 .byte_store(b'\n')
-                .i32_inc(dest)
-                // call print
-                .i32_const(STDERR)
-                .call(heap_base)
-                .local_get(dest)
-                .call(heap_base)
-                .i32_sub()
-                .call(print)
-                .drop()
-                // recover expression value
-                .local_get(expr);
+                .i32_inc(dest);
         }
+
+        let _ = instructions
+            .local_get(expr)
+            .local_get(dest)
+            .call(self.function_repr(&echo.type_()))
+            // update end
+            .local_get(dest)
+            .i32_add()
+            .local_tee(dest)
+            // add new line
+            .byte_store(b'\n')
+            .i32_inc(dest)
+            // call print
+            .i32_const(STDERR)
+            .call(heap_base)
+            .local_get(dest)
+            .call(heap_base)
+            .i32_sub()
+            .call(print)
+            .drop()
+            // recover expression value
+            .local_get(expr);
     }
 
     fn assignment(
