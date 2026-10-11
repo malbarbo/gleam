@@ -293,13 +293,6 @@ impl WasmType {
         }
     }
 
-    fn function(params: Vec<ValType>, results: Vec<ValType>) -> WasmType {
-        WasmType {
-            name: None,
-            kind: WasmTypeKind::Function(params, results),
-        }
-    }
-
     fn struct_(name: EcoString, fields: Vec<(EcoString, ValType)>) -> WasmType {
         WasmType {
             name: Some(name),
@@ -335,9 +328,6 @@ impl WasmType {
             WasmTypeKind::Array(storage_type) => {
                 WasmTypeKind::Array(remap_storage_type(storage_type, remap))
             }
-            WasmTypeKind::Function(params, results) => {
-                WasmTypeKind::Function(val_types(params), val_types(results))
-            }
             WasmTypeKind::Closure(params, results) => {
                 WasmTypeKind::Closure(val_types(params), val_types(results))
             }
@@ -356,8 +346,6 @@ impl WasmType {
 #[derive(Hash, PartialEq, Eq)]
 enum WasmTypeKind {
     Array(StorageType),
-    Function(Vec<ValType>, Vec<ValType>),
-    #[allow(dead_code, reason = "closures are not used yet")]
     /// The closure struct of functions with these params (without the
     /// closure itself) and results.
     Closure(Vec<ValType>, Vec<ValType>),
@@ -365,11 +353,10 @@ enum WasmTypeKind {
     Union(Vec<(EcoString, ValType)>, Option<TypeId>),
 }
 
-#[allow(dead_code, reason = "closures are not used yet")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ClosureType {
-    clo: TypeId,
-    code: TypeId,
+    type_index: TypeId,
+    code_type_index: TypeId,
 }
 
 enum CustomTypeId {
@@ -407,10 +394,6 @@ enum WasmConst {
         type_index: TypeId,
         tag: Option<i32>,
         elements: Vec<TypedConstant>,
-    },
-    Function {
-        dest: GlobalId,
-        src: FunctionId,
     },
     Var {
         global_index: GlobalId,
@@ -578,6 +561,9 @@ struct Generator<'a> {
     types: HashMap<(EcoString, EcoString), CustomType>,
     variants: HashMap<(EcoString, EcoString), Variant>,
     local_functions: HashMap<SrcSpan, LocalFunction>,
+    /// The closure singleton of each code function, and of each function
+    /// used as a value (whose code is an adapter).
+    closures: HashMap<FunctionId, GlobalId>,
     /// Anonymous functions are named after the specialization that contains
     /// them, as their code depends on its substitution.
     specialization: u32,
@@ -628,6 +614,7 @@ impl<'a> Generator<'a> {
             types: HashMap::new(),
             variants: HashMap::new(),
             local_functions: HashMap::new(),
+            closures: HashMap::new(),
             specialization: 0,
             next_specialization: 0,
             builtins: HashMap::new(),
@@ -1372,8 +1359,8 @@ impl<'a> Generator<'a> {
             let type_index = self.tuple_type_index(types);
             self.composite_val_type(type_index)
         } else if let Some((params, return_)) = type_.fn_types() {
-            let type_index = self.function_type_index(params, Some(return_));
-            self.function_val_type(type_index)
+            let closure = self.closure_type(params, return_);
+            self.val_type_ref(closure.type_index)
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             self.custom_type_val_type(type_, &custom_type, args)
         } else if let Some((_, name)) = type_.named_type_name() {
@@ -1418,7 +1405,7 @@ impl<'a> Generator<'a> {
         } else if let Some(types) = type_.tuple_types() {
             self.tuple_type_index(types)
         } else if let Some((params, return_)) = type_.fn_types() {
-            self.function_type_index(params, Some(return_))
+            self.closure_type(params, return_).type_index
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             match custom_type {
                 CustomType::External { .. } | CustomType::Enum { .. } => {
@@ -1448,42 +1435,13 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn function_type_index(
-        &mut self,
-        arguments: impl IntoIterator<Item = Arc<Type>>,
-        return_: Option<Arc<Type>>,
-    ) -> TypeId {
-        let params = self.val_types(arguments);
-        let results = self.val_types(return_);
-        self.function_type_index_with_val_types(params, results)
-    }
-
-    fn function_type_index_with_val_types(
-        &mut self,
-        params: Vec<ValType>,
-        result: Vec<ValType>,
-    ) -> TypeId {
-        let key = WasmType::function(params.clone(), result.clone());
-        if let Some(id) = self.wasm_types.get(&key) {
-            return *id;
-        }
-        let id = self.wasm_module.types.add(&params, &result);
-        let _ = self.wasm_types.insert(key, id);
-        id
-    }
-
-    fn function_val_type(&self, type_index: TypeId) -> ValType {
-        self.val_type_ref(type_index)
-    }
-
-    #[allow(dead_code, reason = "closures are not used yet")]
     /// The closure types of functions with these arguments and return. They
     /// are created once for each signature, in their own rec group:
     ///
     /// ```wat
     /// (rec
-    ///   (type $clo (sub (struct (field (ref $code)))))
-    ///   (type $code (func (param (ref $clo) A...) (result R))))
+    ///   (type $closure (sub (struct (field (ref $code)))))
+    ///   (type $code (func (param (ref $closure) A...) (result R))))
     /// ```
     ///
     /// `$code` is final and has no supertype, so the type that
@@ -1502,8 +1460,8 @@ impl<'a> Generator<'a> {
             name: None,
             kind: WasmTypeKind::Closure(params.clone(), results.clone()),
         };
-        if let Some(clo) = self.wasm_types.get(&key) {
-            return self.closure_type_of(*clo);
+        if let Some(type_index) = self.wasm_types.get(&key) {
+            return self.closure_type_of(*type_index);
         }
         let ref_ = |id| {
             ValType::Ref(RefType {
@@ -1512,43 +1470,49 @@ impl<'a> Generator<'a> {
             })
         };
         let ids = self.wasm_module.types.add_rec_group(2, |ids| {
-            let &[clo, code] = ids else {
+            let &[type_index, code_type_index] = ids else {
                 panic!("two closure types");
             };
-            let clo_def = walrus::CompositeType::Struct(walrus::StructType {
+            let closure_definition = walrus::CompositeType::Struct(walrus::StructType {
                 fields: Box::new([FieldType {
-                    element_type: StorageType::Val(ref_(code)),
+                    element_type: StorageType::Val(ref_(code_type_index)),
                     mutable: false,
                 }]),
             });
-            let code_params = iter::once(ref_(clo)).chain(params).collect_vec();
-            let code_def = walrus::CompositeType::Function(walrus::FunctionType::new(
+            let code_params = iter::once(ref_(type_index)).chain(params).collect_vec();
+            let code_definition = walrus::CompositeType::Function(walrus::FunctionType::new(
                 code_params.into_boxed_slice(),
                 results.into_boxed_slice(),
             ));
-            vec![(clo_def, false, None), (code_def, true, None)]
+            vec![
+                (closure_definition, false, None),
+                (code_definition, true, None),
+            ]
         });
-        let [clo, code] = ids[..] else {
+        let [type_index, code_type_index] = ids[..] else {
             panic!("two closure types");
         };
         let name = qualified_type_name(&type_::fn_(arguments, return_)).replace(" ", "");
         let types = &mut self.wasm_module.types;
-        types.get_mut(code).name = Some(format!("{name}::code"));
-        types.get_mut(clo).name = Some(name.into());
-        let _ = self.wasm_types.insert(key, clo);
-        ClosureType { clo, code }
+        types.get_mut(code_type_index).name = Some(format!("{name}::code"));
+        types.get_mut(type_index).name = Some(name.into());
+        let _ = self.wasm_types.insert(key, type_index);
+        ClosureType {
+            type_index,
+            code_type_index,
+        }
     }
 
-    #[allow(dead_code, reason = "closures are not used yet")]
-    fn closure_type_of(&self, clo: TypeId) -> ClosureType {
-        let walrus::CompositeType::Struct(struct_) = self.wasm_module.types.get(clo).kind() else {
+    fn closure_type_of(&self, type_index: TypeId) -> ClosureType {
+        let walrus::CompositeType::Struct(struct_) = self.wasm_module.types.get(type_index).kind()
+        else {
             panic!("closure type should be a struct");
         };
         let [
             FieldType {
                 element_type:
                     StorageType::Val(ValType::Ref(RefType {
-                        heap_type: HeapType::Concrete(code),
+                        heap_type: HeapType::Concrete(code_type_index),
                         ..
                     })),
                 ..
@@ -1557,14 +1521,84 @@ impl<'a> Generator<'a> {
         else {
             panic!("closure type field should be a code reference");
         };
-        ClosureType { clo, code }
+        ClosureType {
+            type_index,
+            code_type_index,
+        }
     }
 
-    #[allow(dead_code, reason = "closures are not used yet")]
-    /// The env type of the closures of `closure` that capture values of
+    /// The closure of the code function `code`, a singleton global.
+    fn closure_global(&mut self, code: FunctionId, closure: &ClosureType) -> GlobalId {
+        if let Some(global) = self.closures.get(&code) {
+            return *global;
+        }
+        let name = self.wasm_module.funcs.get(code).name.clone();
+        let global = self.wasm_module.globals.add_local(
+            self.val_type_ref(closure.type_index),
+            false,
+            false,
+            ConstExpr::Extended(vec![
+                walrus::ConstOp::RefFunc(code),
+                walrus::ConstOp::StructNew(closure.type_index),
+            ]),
+        );
+        self.wasm_module.globals.get_mut(global).name = name;
+        let _ = self.closures.insert(code, global);
+        global
+    }
+
+    /// The closure that calls `function`, whose type is `type_`. Its code is
+    /// an adapter that drops the closure param.
+    fn closure_of(&mut self, function: FunctionId, type_: &Arc<Type>) -> GlobalId {
+        if let Some(global) = self.closures.get(&function) {
+            return *global;
+        }
+        let (arguments, return_) = type_.fn_types().expect("function type");
+        let closure = self.closure_type(arguments, return_);
+        let function_type = self.wasm_module.funcs.get(function).ty();
+        let function_type = self.wasm_module.types.get(function_type);
+        let (params, results) = (
+            function_type.params().to_vec(),
+            function_type.results().to_vec(),
+        );
+        let name = format!(
+            "{}@closure",
+            self.wasm_module
+                .funcs
+                .get(function)
+                .name
+                .as_deref()
+                .unwrap_or("function")
+        );
+        let closure_param = self.wasm_local(self.val_type_ref(closure.type_index));
+        let params = params
+            .into_iter()
+            .map(|param| self.wasm_local(param))
+            .collect_vec();
+        let all_params = iter::once(closure_param)
+            .chain(params.iter().copied())
+            .collect_vec();
+        let mut adapter = Function::new(self, &name, &all_params, &results);
+        let mut instructions = adapter.extend_instructions(self);
+        for param in params {
+            let _ = instructions.local_get(param);
+        }
+        let _ = instructions.return_call(function).end();
+        let code = adapter.finish(self);
+        let global = self.closure_global(code, &closure);
+        let _ = self.closures.insert(function, global);
+        global
+    }
+
+    #[allow(dead_code, reason = "captures are not supported yet")]
+    /// The environment type of the closures of `closure` that capture values of
     /// `captures`. Closures with the same signature and captures share it.
-    fn closure_env_type(&mut self, closure: &ClosureType, captures: Vec<ValType>) -> TypeId {
-        let fields = iter::once(self.val_type_ref(closure.code))
+    fn closure_environment_type(
+        &mut self,
+        closure: &ClosureType,
+        captures: Vec<ValType>,
+    ) -> TypeId {
+        let fields = iter::once(self.val_type_ref(closure.code_type_index))
             .chain(captures)
             .map(|val_type| FieldType {
                 element_type: StorageType::Val(val_type),
@@ -1575,13 +1609,13 @@ impl<'a> Generator<'a> {
             fields: fields.into_boxed_slice(),
         });
         let types = &mut self.wasm_module.types;
-        let id = types.add_composite(comp, true, Some(closure.clo));
+        let id = types.add_composite(comp, true, Some(closure.type_index));
         let name = types
-            .get(closure.clo)
+            .get(closure.type_index)
             .name
             .clone()
             .expect("closure type name");
-        types.get_mut(id).name = Some(name + "::env");
+        types.get_mut(id).name = Some(name + "::environment");
         id
     }
 
@@ -2169,6 +2203,21 @@ impl<'a> Generator<'a> {
                     }
                 }
             }
+            Constant::Var { name, type_, .. } if type_.fn_types().is_some() => {
+                // A function constant names the global of the closure.
+                let var_id = self.var_id(&Scope::Global(self.globals.clone()), name, type_);
+                let global = match var_id.kind {
+                    IdKind::Func => self.closure_of(var_id.func_id(), type_),
+                    IdKind::Global => var_id.global_id(),
+                    IdKind::Local => panic!("module constant should not name a local"),
+                };
+                if export {
+                    let _ = self.wasm_module.exports.add(const_name, global);
+                }
+                let id = Id::global(const_name.clone(), global);
+                self.globals.borrow_mut().push(id.clone());
+                id
+            }
             Constant::Var { name, type_, .. } => {
                 let (expr, val_type) = if type_.is_int() {
                     (self.int.int_const(&0.into()), self.int.val_type())
@@ -2188,18 +2237,12 @@ impl<'a> Generator<'a> {
                     )
                 };
                 let id = self.add_const(const_name, val_type, expr, export, true);
-                let var_id = self.var_id(&Scope::Global(self.globals.clone()), name, type_);
-                if let IdKind::Func = var_id.kind {
-                    self.consts.push(WasmConst::Function {
-                        dest: id.global_id(),
-                        src: var_id.func_id(),
-                    });
-                } else {
-                    self.consts.push(WasmConst::Var {
-                        global_index: id.global_id(),
-                        name: name.clone(),
-                    });
-                }
+                // Generates the named constant if it is not yet.
+                let _ = self.var_id(&Scope::Global(self.globals.clone()), name, type_);
+                self.consts.push(WasmConst::Var {
+                    global_index: id.global_id(),
+                    name: name.clone(),
+                });
                 id
             }
             Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
@@ -2505,21 +2548,34 @@ impl<'a> Generator<'a> {
         self._function(function, name, export, specialization, local_functions)
     }
 
+    /// Generates a local function. With `closure`, it is the code of a
+    /// closure: its first param is the closure, which `arguments` don't
+    /// include.
     fn _function_local(
         &mut self,
         name: EcoString,
         type_: &Arc<Type>,
         arguments: &[TypedArg],
         body: &[TypedStatement],
+        closure: Option<ClosureType>,
     ) -> Id {
         let (gleam_params, return_) = type_.fn_types().expect("function type");
-        let params = self.val_types(gleam_params);
+        let closure_param = closure.map(|closure| self.val_type_ref(closure.type_index));
+        let params = closure_param
+            .into_iter()
+            .chain(self.val_types(gleam_params))
+            .collect_vec();
         let results = self.val_types(iter::once(return_));
         let index = self.allocate_placeholder_function(&name, &params, &results);
         let id = self.add_function_to_globals(name.clone(), index);
         let locals = Locals::new(self, arguments, body);
         let param_ids = locals.param_ids();
-        let mut code = Function::new(self, &name, &param_ids, &results);
+        let all_param_ids = closure_param
+            .map(|val_type| self.wasm_local(val_type))
+            .into_iter()
+            .chain(param_ids.iter().copied())
+            .collect_vec();
+        let mut code = Function::new(self, &name, &all_param_ids, &results);
         let mut instructions = code.extend_instructions(self);
         self.statements(
             &mut instructions,
@@ -2544,11 +2600,12 @@ impl<'a> Generator<'a> {
         type_: &Arc<Type>,
         arguments: &[TypedArg],
         body: &[TypedStatement],
+        closure: ClosureType,
     ) -> Id {
         if let Some(id) = self.find_global(&name) {
             return id;
         }
-        self._function_local(name, type_, arguments, body)
+        self._function_local(name, type_, arguments, body, Some(closure))
     }
 
     fn function_local_generic(&mut self, info: &LocalFunction, required_type: &Arc<Type>) -> Id {
@@ -2570,7 +2627,7 @@ impl<'a> Generator<'a> {
         let nested_locations: Vec<_> = nested.keys().copied().collect();
         let saved_specialization = std::mem::replace(&mut self.specialization, specialization);
         self.local_functions.extend(nested);
-        let id = self._function_local(name, required_type, &args, &body);
+        let id = self._function_local(name, required_type, &args, &body, None);
         for location in nested_locations {
             let _ = self.local_functions.remove(&location);
         }
@@ -2631,8 +2688,10 @@ impl<'a> Generator<'a> {
                     // the result of the block.
                     if rest.is_empty() {
                         let info = info.clone();
-                        let id = self.function_local_generic(&info, &assignment.value.type_());
-                        let _ = instructions.ref_func(id.func_id());
+                        let type_ = assignment.value.type_();
+                        let id = self.function_local_generic(&info, &type_);
+                        let closure = self.closure_of(id.func_id(), &type_);
+                        let _ = instructions.global_get(closure);
                     }
                 }
                 Statement::Assignment(assignment)
@@ -2915,8 +2974,10 @@ impl<'a> Generator<'a> {
                 ValueConstructorVariant::ModuleFn { module, name, .. }
                     if module.as_str() != self.module.name.as_str() =>
                 {
-                    let id = self.function_imported(module, name, &expression.type_());
-                    let _ = instructions.ref_func(id.func_id());
+                    let type_ = expression.type_();
+                    let id = self.function_imported(module, name, &type_);
+                    let closure = self.closure_of(id.func_id(), &type_);
+                    let _ = instructions.global_get(closure);
                 }
                 ValueConstructorVariant::ModuleConstant { literal, .. } => {
                     self._constant(instructions, literal);
@@ -2930,19 +2991,13 @@ impl<'a> Generator<'a> {
                     self.expression_var(&scope, instructions, name, &expression.type_(), None);
                 }
             },
-            TypedExpr::Call {
-                type_,
-                fun,
-                arguments,
-                ..
-            } => {
+            TypedExpr::Call { fun, arguments, .. } => {
                 // `return_call*` requires the callee results to match the
                 // current function results. They do: both have the same Gleam
                 // type, and equal Gleam types map to equal wasm types (module
                 // validation fails otherwise). Constructors don't grow the
                 // stack, so a tail call gains nothing there.
                 let tail = tail && !fun.is_record_constructor_function();
-                let args_types = arguments.iter().map(|arg| arg.value.type_());
                 let args = arguments.iter().map(|arg| &arg.value);
                 if let Some(id) = self.static_callee(&scope, fun) {
                     let _ = instructions.expressions(self, locals, scope, args);
@@ -2952,24 +3007,29 @@ impl<'a> Generator<'a> {
                         instructions.call(id)
                     };
                 } else {
+                    // The closure is the first argument, and its field 0 is
+                    // the code to call.
                     if fun.is_var() {
-                        // the function can be evaluated after the parameters
+                        // Evaluating a variable again has no effects.
                         let _ = instructions
+                            .expression(self, locals, scope.clone(), fun)
                             .expressions(self, locals, scope.clone(), args)
                             .expression(self, locals, scope, fun);
                     } else {
                         let index = locals.for_call(fun);
                         let _ = instructions
                             .expression(self, locals, scope.clone(), fun)
-                            .local_set(index)
+                            .local_tee(index)
                             .expressions(self, locals, scope, args)
                             .local_get(index);
                     }
-                    let ty = self.function_type_index(args_types, Some(type_.clone()));
+                    let (params, return_) = fun.type_().fn_types().expect("function type");
+                    let closure = self.closure_type(params, return_);
+                    let _ = instructions.struct_get(closure.type_index, 0);
                     let _ = if tail {
-                        instructions.return_call_ref(ty)
+                        instructions.return_call_ref(closure.code_type_index)
                     } else {
-                        instructions.call_ref(ty)
+                        instructions.call_ref(closure.code_type_index)
                     };
                 }
             }
@@ -2986,8 +3046,11 @@ impl<'a> Generator<'a> {
                     location.start, location.end, self.specialization
                 )
                 .into();
-                let id = self.function_local(name, type_, arguments, body);
-                let _ = instructions.ref_func(id.func_id());
+                let (params, return_) = type_.fn_types().expect("function type");
+                let closure = self.closure_type(params, return_);
+                let id = self.function_local(name, type_, arguments, body, closure);
+                let closure = self.closure_global(id.func_id(), &closure);
+                let _ = instructions.global_get(closure);
             }
             TypedExpr::Case {
                 type_,
@@ -3103,8 +3166,10 @@ impl<'a> Generator<'a> {
                 ..
             } => match constructor {
                 ModuleValueConstructor::Fn { .. } => {
-                    let id = self.function_imported(module_name, label, &expression.type_());
-                    let _ = instructions.ref_func(id.func_id());
+                    let type_ = expression.type_();
+                    let id = self.function_imported(module_name, label, &type_);
+                    let closure = self.closure_of(id.func_id(), &type_);
+                    let _ = instructions.global_get(closure);
                 }
                 ModuleValueConstructor::Record { name, .. } => {
                     self.expression_var(&scope, instructions, name, &expression.type_(), None);
@@ -3396,7 +3461,8 @@ impl<'a> Generator<'a> {
             definition.and_then(|location| self.local_functions.get(&location).cloned())
         {
             let id = self.function_local_generic(&info, type_);
-            let _ = instructions.ref_func(id.func_id());
+            let closure = self.closure_of(id.func_id(), type_);
+            let _ = instructions.global_get(closure);
             return;
         }
         let id = self.var_id(scope, name, type_);
@@ -3413,7 +3479,8 @@ impl<'a> Generator<'a> {
                     // variant with no args must be called
                     instructions.call(id.func_id())
                 } else {
-                    instructions.ref_func(id.func_id())
+                    let closure = self.closure_of(id.func_id(), type_);
+                    instructions.global_get(closure)
                 }
             }
             IdKind::Global => {

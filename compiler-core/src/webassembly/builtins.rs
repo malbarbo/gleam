@@ -201,9 +201,6 @@ impl<'a> Generator<'a> {
                         .struct_new(type_index)
                         .global_set(global_index);
                 }
-                WasmConst::Function { dest, src } => {
-                    let _ = instructions.ref_func(src).global_set(dest);
-                }
                 WasmConst::Var { global_index, name } => {
                     let _ = instructions
                         .global_get(self.find_global_expect(&name).global_id())

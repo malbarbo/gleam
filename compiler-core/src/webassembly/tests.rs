@@ -166,11 +166,30 @@ pub fn wasm_function_names(wasm_bytes: &[u8]) -> Vec<String> {
     names
 }
 
+/// Extract global names from the wasm binary's name section.
+pub fn wasm_global_names(wasm_bytes: &[u8]) -> Vec<String> {
+    let mut names = vec![];
+    for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
+        if let wasmparser::Payload::CustomSection(section) = payload.unwrap()
+            && let wasmparser::KnownCustom::Name(name_section) = section.as_known()
+        {
+            for subsection in name_section {
+                if let wasmparser::Name::Global(global_names) = subsection.unwrap() {
+                    for naming in global_names {
+                        names.push(naming.unwrap().name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
 /// Count the calls through function references (`call_ref` and
 /// `return_call_ref`) in the code of the wasm binary.
 pub fn count_ref_calls(wasm_bytes: &[u8]) -> usize {
     let mut count = 0;
-    for_each_operator(wasm_bytes, |op| {
+    for_each_operator(wasm_bytes, |_, op| {
         if let wasmparser::Operator::CallRef { .. } | wasmparser::Operator::ReturnCallRef { .. } =
             op
         {
@@ -180,13 +199,44 @@ pub fn count_ref_calls(wasm_bytes: &[u8]) -> usize {
     count
 }
 
-pub fn for_each_operator(wasm_bytes: &[u8], mut f: impl FnMut(wasmparser::Operator<'_>)) {
+/// Calls `f` with each operator in the code of the wasm binary and the name
+/// of the function that contains it.
+pub fn for_each_operator(wasm_bytes: &[u8], mut f: impl FnMut(&str, wasmparser::Operator<'_>)) {
+    let mut names = HashMap::new();
     for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
-        if let wasmparser::Payload::CodeSectionEntry(body) = payload.unwrap() {
-            let mut reader = body.get_operators_reader().unwrap();
-            while !reader.eof() {
-                f(reader.read().unwrap());
+        if let wasmparser::Payload::CustomSection(section) = payload.unwrap()
+            && let wasmparser::KnownCustom::Name(name_section) = section.as_known()
+        {
+            for subsection in name_section {
+                if let wasmparser::Name::Function(function_names) = subsection.unwrap() {
+                    for naming in function_names {
+                        let naming = naming.unwrap();
+                        let _ = names.insert(naming.index, naming.name.to_string());
+                    }
+                }
             }
+        }
+    }
+    let mut index = 0;
+    for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
+        match payload.unwrap() {
+            wasmparser::Payload::ImportSection(imports) => {
+                index += imports
+                    .into_iter()
+                    .filter(|import| {
+                        matches!(import.as_ref().unwrap().ty, wasmparser::TypeRef::Func(_))
+                    })
+                    .count() as u32;
+            }
+            wasmparser::Payload::CodeSectionEntry(body) => {
+                let name = names.get(&index).map_or("", String::as_str);
+                let mut reader = body.get_operators_reader().unwrap();
+                while !reader.eof() {
+                    f(name, reader.read().unwrap());
+                }
+                index += 1;
+            }
+            _ => {}
         }
     }
 }

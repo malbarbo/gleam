@@ -4,10 +4,13 @@
 use super::{compile_wasm, for_each_operator, run_ok};
 
 /// Returns the number of `return_call` and `return_call_ref` in the module
-/// compiled from `src`.
+/// compiled from `src`, without the closure adapters.
 fn tail_calls(src: &str) -> (usize, usize) {
     let mut counts = (0, 0);
-    for_each_operator(&compile_wasm(src, vec![]), |op| {
+    for_each_operator(&compile_wasm(src, vec![]), |function, op| {
+        if function.ends_with("@closure") {
+            return;
+        }
         counts.0 += usize::from(matches!(op, wasmparser::Operator::ReturnCall { .. }));
         counts.1 += usize::from(matches!(op, wasmparser::Operator::ReturnCallRef { .. }));
     });
