@@ -1702,3 +1702,43 @@ pub const list = [magic, 2]
         result.stderr
     );
 }
+
+#[test]
+fn builtins_as_values() {
+    super::run_ok(
+        r#"
+@external(webassembly, "builtins", "_string_concat")
+fn concat(a: String, b: String) -> String
+
+@external(webassembly, "builtins", "_string_num_bytes")
+fn num_bytes(a: String) -> Int
+
+@external(webassembly, "builtins", "_string_get_byte")
+fn get_byte(a: String, i: Int) -> Result(Int, Nil)
+
+@external(webassembly, "builtins", "_int_to_utf_codepoint")
+fn to_codepoint(i: Int) -> Result(UtfCodepoint, Nil)
+
+@external(webassembly, "builtins", "_parse_int")
+fn parse_int(s: String) -> Result(Int, Nil)
+
+fn apply2(f, a, b) { f(a, b) }
+fn apply(f, a) { f(a) }
+fn tail(s) { concat(s, "!") }
+fn tail_bytes(s) { num_bytes(s) }
+
+pub fn main() {
+    let c = concat
+    assert c("a", "b") == "ab"
+    assert apply2(concat, "x", "y") == "xy"
+    assert apply(num_bytes, "abc") == 3
+    assert apply2(get_byte, "a", 0) == Ok(97)
+    assert apply(to_codepoint, 97) == to_codepoint(97)
+    assert apply(parse_int, "42") == Ok(42)
+    assert tail("a") == "a!"
+    assert tail_bytes("ab") == 2
+    assert c == concat
+}
+"#,
+    );
+}
