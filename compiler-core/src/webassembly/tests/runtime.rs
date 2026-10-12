@@ -180,6 +180,9 @@ pub fn dict(data: Dynamic) -> Result(Dict(Dynamic, Dynamic), Nil)
 
 @external(webassembly, "builtins", "dynamic_index")
 pub fn index(data: Dynamic, key: Dynamic) -> Result(Result(Dynamic, Nil), String)
+
+@external(webassembly, "builtins", "dynamic_array")
+pub fn array(items: List(Dynamic)) -> Dynamic
 "#;
 
 #[track_caller]
@@ -242,7 +245,7 @@ pub fn main() {
 #[test]
 fn dynamic_of_arrays() {
     let _ = run_dynamic(
-        r#"
+        r##"
 import dict
 import dynamic
 
@@ -268,7 +271,42 @@ pub fn main() {
   let assert Ok(1) = dict.get(d, dynamic.cast(from_list(range(100_000, []))))
   let assert Ok(2) = dict.get(d, dynamic.cast(range(100_000, [])))
   let assert Error(Nil) = dict.get(d, dynamic.cast(range(100_000, [0])))
+  // And indexed in constant time.
+  let assert True = index_all(dynamic.cast(big), 0)
+  let assert True = index_all(dynamic.array(cast_range(100_000, [])), 0)
+  let assert Ok(Error(Nil)) = dynamic.index(dynamic.cast(big), dynamic.cast(100_000))
+  let assert Ok(Error(Nil)) = dynamic.index(dynamic.cast(big), dynamic.cast(-1))
+  let assert Ok(Ok(x)) = dynamic.index(dynamic.cast(#(1, "a", 2.0)), dynamic.cast(1))
+  let assert Ok("a") = dynamic.string(x)
+  let assert Ok(Error(Nil)) = dynamic.index(dynamic.cast(#(1, "a")), dynamic.cast(2))
+  let assert Ok([]) = dynamic.list_items(dynamic.cast(#()))
+  let assert "#(1, \"a\", [#()])" = inspect(dynamic.cast(#(1, "a", [#()])))
+  let assert "#(1, 2)" = inspect(dynamic.cast(from_list([1, 2])))
+  let assert "#()" = inspect(dynamic.cast(from_list([])))
 }
+
+/// Indexes each element of the `Dynamic` of `range(100_000, [])`.
+fn index_all(data: dynamic.Dynamic, i: Int) -> Bool {
+  case i == 100_000 {
+    True -> True
+    False -> {
+      let assert Ok(Ok(x)) = dynamic.index(data, dynamic.cast(i))
+      let assert Ok(n) = dynamic.int(x)
+      n == i + 1 && index_all(data, i + 1)
+    }
+  }
+}
+
+/// The casts of `range(i, acc)`.
+fn cast_range(i: Int, acc: List(dynamic.Dynamic)) -> List(dynamic.Dynamic) {
+  case i {
+    0 -> acc
+    _ -> cast_range(i - 1, [dynamic.cast(i), ..acc])
+  }
+}
+
+@external(webassembly, "builtins", "_inspect")
+fn inspect(value: a) -> String
 
 fn range(i: Int, acc: List(Int)) -> List(Int) {
   case i {
@@ -276,7 +314,7 @@ fn range(i: Int, acc: List(Int)) -> List(Int) {
     _ -> range(i - 1, [i, ..acc])
   }
 }
-"#,
+"##,
     );
 }
 

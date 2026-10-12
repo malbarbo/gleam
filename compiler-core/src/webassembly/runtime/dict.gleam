@@ -5,7 +5,8 @@
 //// `@external(webassembly, "builtins", "Dict")`, as there is no runtime map
 //// that can hold Gleam values. Its public functions are reached with
 //// `@external(webassembly, "builtins", "dict_...")`. It is plain Gleam that
-//// imports nothing, so it also compiles (and can be tested) on Erlang.
+//// imports only `builtins/array`, so it also compiles (and can be tested) on
+//// Erlang.
 ////
 //// Keys are hashed to 32 bits and consumed 5 bits at a time, so the trie has
 //// at most 7 levels of bitmap nodes. Keys whose 32 bit hashes are equal end up
@@ -24,6 +25,11 @@
 
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
+
+import builtins/array.{
+  type Array, array_from_list, array_get, array_insert, array_remove,
+  array_set, array_size,
+}
 
 pub opaque type Dict(k, v) {
   Dict(size: Int, root: Node(k, v))
@@ -1116,69 +1122,6 @@ fn list_length(list: List(a), acc: Int) -> Int {
     [_, ..rest] -> list_length(rest, acc + 1)
   }
 }
-
-// -- Arrays -------------------------------------------------------------------
-
-/// An immutable array. On Erlang it is a tuple, so this module can be tested
-/// there. An index out of range gives an error, or the same array.
-@external(webassembly, "builtins", "Array")
-type Array(a)
-
-@external(erlang, "erlang", "tuple_size")
-@external(webassembly, "builtins", "_array_size")
-fn array_size(array: Array(a)) -> Int
-
-@external(webassembly, "builtins", "_array_get")
-fn array_get(array: Array(a), index: Int) -> Result(a, Nil) {
-  case is_index(array, index) {
-    True -> Ok(element(index + 1, array))
-    False -> Error(Nil)
-  }
-}
-
-@external(webassembly, "builtins", "_array_set")
-fn array_set(array: Array(a), index: Int, value: a) -> Array(a) {
-  case is_index(array, index) {
-    True -> set_element(index + 1, array, value)
-    False -> array
-  }
-}
-
-@external(webassembly, "builtins", "_array_insert")
-fn array_insert(array: Array(a), index: Int, value: a) -> Array(a) {
-  case index == array_size(array) || is_index(array, index) {
-    True -> insert_element(index + 1, array, value)
-    False -> array
-  }
-}
-
-@external(webassembly, "builtins", "_array_remove")
-fn array_remove(array: Array(a), index: Int) -> Array(a) {
-  case is_index(array, index) {
-    True -> delete_element(index + 1, array)
-    False -> array
-  }
-}
-
-fn is_index(array: Array(a), index: Int) -> Bool {
-  index >= 0 && index < array_size(array)
-}
-
-@external(erlang, "erlang", "list_to_tuple")
-@external(webassembly, "builtins", "_array_from_list")
-fn array_from_list(list: List(a)) -> Array(a)
-
-@external(erlang, "erlang", "element")
-fn element(index: Int, array: Array(a)) -> a
-
-@external(erlang, "erlang", "setelement")
-fn set_element(index: Int, array: Array(a), value: a) -> Array(a)
-
-@external(erlang, "erlang", "insert_element")
-fn insert_element(index: Int, array: Array(a), value: a) -> Array(a)
-
-@external(erlang, "erlang", "delete_element")
-fn delete_element(index: Int, array: Array(a)) -> Array(a)
 
 fn reverse_and_prepend(list: List(a), to suffix: List(a)) -> List(a) {
   case list {

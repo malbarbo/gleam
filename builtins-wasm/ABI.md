@@ -271,8 +271,9 @@ GC array of the representation of `a`)
 
 The functions that change an array return a copy, or the same array when the
 index is out of range. Arrays are compared, hashed and inspected like tuples (`#(1, 2)`), as
-tuples on Erlang and arrays on JavaScript. The runtime uses them for the
-nodes of `Dict`.
+tuples on Erlang and arrays on JavaScript. The runtime declares them in
+`builtins/array` and uses them for the nodes of `Dict` and the tuples and
+arrays of `Dynamic`.
 
 | Name | Gleam type | Semantics |
 |---|---|---|
@@ -312,7 +313,7 @@ function once the external types are replaced by their representation.
 |---|---|---|
 | `Dict(k, v)` | `builtins/dict` | a CHAMP (hash trie) with `Array` nodes, with the hash of `_hash` |
 | `StringTree` | `builtins/string_tree` | a rope that stores the size of each node |
-| `Dynamic` | `builtins/dynamic` | a closed sum: `DInt`, `DFloat`, `DString`, `DBool`, `DNil`, `DList`, `DArray`, `DDict` and `DOther(AnyRef, VTable)` |
+| `Dynamic` | `builtins/dynamic` | a closed sum: `DInt`, `DFloat`, `DString`, `DBool`, `DNil`, `DList`, `DArray` (an `Array(Dynamic)`), `DDict` and `DOther(AnyRef, VTable)` |
 
 Their functions are named after the type: `dict_*`, `string_tree_*` and
 `dynamic_*` (see the modules). The equality, the hash and the text of
@@ -329,4 +330,4 @@ runtime (`dict_equal`, `dict_hash`, `dict_inspect`, and the same for
 | `dynamic_decode_int` / `_float` / `_string` | `fn(Dynamic) -> Result(T, T)` | the value, or `Error` with the zero value |
 | `dynamic_decode_list_items` | `fn(Dynamic) -> Result(List(Dynamic), Nil)` | lists and arrays |
 | `dynamic_decode_dict` | `fn(Dynamic) -> Result(Dict(Dynamic, Dynamic), Nil)` | |
-| `dynamic_index` | `fn(Dynamic, Dynamic) -> Result(Result(Dynamic, Nil), String)` | Erlang `index` semantics, with `Result(_, Nil)` for `Option` |
+| `dynamic_index` | `fn(Dynamic, Dynamic) -> Result(Result(Dynamic, Nil), String)` | Erlang `index` semantics, with `Result(_, Nil)` for `Option`; constant time for arrays |
