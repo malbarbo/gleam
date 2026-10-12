@@ -697,3 +697,109 @@ pub fn main() {
 "#,
     );
 }
+
+/// Types that grow in their recursion. The equality, hash and inspect of a
+/// type only handle its constructors with values, so they do not need the
+/// ones of every `#(…)` level.
+#[test]
+fn growing_types() {
+    let _ = run_dynamic(
+        r##"
+import dict
+import dynamic
+
+pub type T(a) {
+  T(a, List(T(#(a, a))))
+}
+
+pub type N(a) {
+  Flat(a)
+  Nest(N(#(a, a)))
+}
+
+pub type D(a) {
+  D(a, dict.Dict(D(#(a, a)), Int))
+}
+
+@external(webassembly, "builtins", "_inspect")
+fn inspect(value: a) -> String
+
+fn t(x: Int) -> T(Int) {
+  T(1, [T(#(2, 3), [T(#(#(4, 5), #(6, x)), [])])])
+}
+
+fn n(x: Int) -> N(Int) {
+  Nest(Nest(Flat(#(#(1, 2), #(3, x)))))
+}
+
+fn d(x: Int) -> D(Int) {
+  D(1, dict.from_list([#(D(#(2, 3), dict.new()), x)]))
+}
+
+pub fn main() {
+  let assert True = t(7) == t(7)
+  let assert False = t(7) == t(8)
+  let assert "T(1, [T(#(2, 3), [T(#(#(4, 5), #(6, 7)), [])])])" = inspect(t(7))
+  let assert True = n(7) == n(7)
+  let assert False = n(7) == n(8)
+  let assert False = n(7) == Flat(7)
+  let assert "Nest(Nest(Flat(#(#(1, 2), #(3, 7)))))" = inspect(n(7))
+  let assert True = d(7) == d(7)
+  let assert False = d(7) == d(8)
+  let assert "D(1, dict.from_list([#(D(#(2, 3), dict.from_list([])), 7)]))" =
+    inspect(d(7))
+  let keys = dict.from_list([#(t(7), "t"), #(t(8), "u")])
+  let assert Ok("t") = dict.get(keys, t(7))
+  let assert Ok("u") = dict.get(keys, t(8))
+  let assert Error(Nil) = dict.get(keys, t(9))
+  let keys = dict.from_list([#(n(7), "n"), #(n(8), "m")])
+  let assert Ok("n") = dict.get(keys, n(7))
+  let assert Error(Nil) = dict.get(keys, n(9))
+  let keys = dict.from_list([#(d(7), "d")])
+  let assert Ok("d") = dict.get(keys, d(7))
+  let assert Error(Nil) = dict.get(keys, d(8))
+  let assert True = dynamic.cast(t(7)) == dynamic.cast(t(7))
+  let assert False = dynamic.cast(n(7)) == dynamic.cast(n(8))
+  let assert True = [1, 2] == [1, 2]
+}
+"##,
+    );
+}
+
+/// The values of constants have the derived functions of their types, and a
+/// constructor used only in a pattern changes nothing.
+#[test]
+fn derived_functions_of_constants() {
+    let _ = run_dynamic(
+        r#"
+pub type P {
+  P(Int)
+  Q(Int)
+  R(Int)
+}
+
+const a = [P(1), Q(2)]
+
+const b = [P(1), Q(2)]
+
+const c = [P(1), P(2)]
+
+@external(webassembly, "builtins", "_inspect")
+fn inspect(value: a) -> String
+
+fn is_r(p: P) -> Bool {
+  case p {
+    R(_) -> True
+    _ -> False
+  }
+}
+
+pub fn main() {
+  let assert True = a == b
+  let assert False = a == c
+  let assert "[P(1), Q(2)]" = inspect(a)
+  let assert [False, False] = [is_r(P(1)), is_r(Q(2))]
+}
+"#,
+    );
+}

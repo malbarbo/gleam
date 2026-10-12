@@ -165,6 +165,9 @@ impl<'a> Generator<'a> {
             };
         }
         let builtin = BuiltinFunction::Hash(self.val_type(type_), self.type_pretty_name(type_));
+        if let Some((CustomType::Struct { .. }, _)) = self.custom_type(type_) {
+            return Hash::Call(self.get_function_derived(builtin, type_, DerivedKind::Hash));
+        }
         let type_ = type_.clone();
         let index = self.get_function_builtin(builtin, |s| s.code_hash(&type_));
         Hash::Call(index)
@@ -201,7 +204,7 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    fn code_hash(&mut self, type_: &Arc<Type>) -> FunctionId {
+    pub(super) fn code_hash(&mut self, type_: &Arc<Type>) -> FunctionId {
         if type_.is_string() {
             self.code_string_hash()
         } else if let Some(types) = type_.tuple_types() {
@@ -346,13 +349,12 @@ impl<'a> Generator<'a> {
     /// value into `h`.
     fn function_union_hash_into(&mut self, type_: &Arc<Type>) -> FunctionId {
         let builtin = BuiltinFunction::HashInto(self.val_type(type_), self.type_pretty_name(type_));
-        let type_ = type_.clone();
-        self.get_function_builtin(builtin, |s| s.code_union_hash_into(&type_))
+        self.get_function_derived(builtin, type_, DerivedKind::HashInto)
     }
 
     /// Dispatches on the tag to the `_hash_into` of the variant, with a tail
     /// call.
-    fn code_union_hash_into(&mut self, type_: &Arc<Type>) -> FunctionId {
+    pub(super) fn code_union_hash_into(&mut self, type_: &Arc<Type>) -> FunctionId {
         let Some((CustomType::Union { custom_type, .. }, args)) = self.custom_type(type_) else {
             panic!("union type expected")
         };
@@ -368,7 +370,7 @@ impl<'a> Generator<'a> {
         let mut variant_hashes: Vec<Option<(TypeId, FunctionId)>> =
             Vec::with_capacity(custom_type.constructors.len());
         for (i, constructor) in custom_type.constructors.iter().enumerate() {
-            if null_tag == Some(i) {
+            if null_tag == Some(i) || !self.is_constructed(type_, i) {
                 variant_hashes.push(None);
             } else {
                 let (_, type_index, types) =

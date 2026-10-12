@@ -295,9 +295,9 @@ impl BuiltinFunctionExternal {
 }
 
 impl<'a> Generator<'a> {
-    pub(super) fn function_start(&mut self) -> FunctionId {
+    pub(super) fn function_start(&mut self, constants: FunctionId) -> FunctionId {
         self.code_command_start();
-        self.code_start()
+        self.code_start(constants)
     }
 
     /// Exports `_start`, the entry point of a WASI command, which calls
@@ -315,7 +315,9 @@ impl<'a> Generator<'a> {
         let _ = self.wasm_module.exports.add("_start", start);
     }
 
-    fn code_start(&mut self) -> FunctionId {
+    /// The start function: configures the rust builtins, creates the strings
+    /// and calls `constants`.
+    fn code_start(&mut self, constants: FunctionId) -> FunctionId {
         let mut function = Function::new(self, "$start", &[], &[]);
         let mut instructions = function.extend_instructions(self);
         // the configuration of the rust builtins
@@ -344,7 +346,17 @@ impl<'a> Generator<'a> {
                 .string_from_bytes()
                 .global_set(index);
         }
-        // constants
+        let _ = instructions.call(constants).end();
+        function.finish(self)
+    }
+
+    /// Creates the constants of the module. It is generated before the
+    /// derived functions (see `derived_functions`), because it constructs
+    /// values, and called by the start function after the strings are
+    /// created.
+    pub(super) fn function_constants(&mut self) -> FunctionId {
+        let mut function = Function::new(self, "$constants", &[], &[]);
+        let mut instructions = function.extend_instructions(self);
         for const_ in self.consts.clone() {
             match const_ {
                 WasmConst::String { dest, src } => {
@@ -387,6 +399,7 @@ impl<'a> Generator<'a> {
         return_: Arc<Type>,
         variant: Variant,
     ) -> FunctionId {
+        self.constructed(&return_, variant.tag.unwrap_or(0) as usize);
         let mut constructor_name = self.type_pretty_name(&return_);
         if let CustomType::Union { .. } = &variant.custom_type {
             constructor_name += ".";
@@ -589,6 +602,11 @@ impl<'a> Generator<'a> {
         }
 
         let builtin = BuiltinFunction::Equal(self.val_type(type_), self.type_pretty_name(type_));
+        if let Some((CustomType::Struct { .. } | CustomType::Union { .. }, _)) =
+            self.custom_type(type_)
+        {
+            return Eq::Call(self.get_function_derived(builtin, type_, DerivedKind::Equal));
+        }
         let type_ = type_.clone();
         let index = self.get_function_builtin(builtin, |s| s.code_eq(&type_));
         Eq::Call(index)
@@ -930,7 +948,7 @@ impl<'a> Generator<'a> {
         let mut variant_eqs: Vec<Option<(TypeId, FunctionId)>> =
             Vec::with_capacity(custom_type.constructors.len());
         for (i, constructor) in custom_type.constructors.iter().enumerate() {
-            if null_tag == Some(i) {
+            if null_tag == Some(i) || !self.is_constructed(type_, i) {
                 variant_eqs.push(None);
             } else {
                 let (type_index, eq_index) =
@@ -993,7 +1011,8 @@ impl<'a> Generator<'a> {
                     });
             }
         }
-        let _ = instructions.bool_const(false).end();
+        // The tags are equal, so this is a constructor without values.
+        let _ = instructions.unreachable().end();
         function.finish(self)
     }
 
@@ -1337,6 +1356,14 @@ impl<'a> Generator<'a> {
             panic!("unexpected type should not reach repr: {type_:#?}");
         };
 
+        if type_.is_list()
+            || matches!(
+                self.custom_type(type_),
+                Some((CustomType::Struct { .. } | CustomType::Union { .. }, _))
+            )
+        {
+            return self.get_function_derived(repr, type_, DerivedKind::Repr);
+        }
         let type_ = type_.clone();
         self.get_function_builtin(repr, |s| s.code_repr(&type_))
     }
@@ -1828,9 +1855,29 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
+    /// The repr of a list type without non-empty lists, see
+    /// `derived_functions`.
+    fn code_empty_list_repr(&mut self, list_type: &Arc<Type>) -> FunctionId {
+        let list_vt = self.val_type(list_type);
+        // params
+        let lst = self.wasm_local(list_vt); // List(a)
+        let ptr = self.wasm_local(ValType::I32); // I32
+        let mut function = Function::new(self, "_repr_list", &[lst, ptr], &[ValType::I32]);
+        let _ = function
+            .extend_instructions(self)
+            .write_byte(ptr, b'[')
+            .write_byte(ptr, b']')
+            .i32_const(2)
+            .end();
+        function.finish(self)
+    }
+
     fn code_list_repr(&mut self, item_type: &Arc<Type>) -> FunctionId {
         let list_type = type_::list(item_type.clone());
         let (custom_type, cons, _, args) = self.list_type_cons(&list_type);
+        if !self.is_constructed(&list_type, 1) {
+            return self.code_empty_list_repr(&list_type);
+        }
         let (_, struct_index, _) =
             self.mono_union_subtype_index(&list_type, &custom_type, &cons, &args);
         let item_repr = self.function_repr(item_type);
@@ -2141,7 +2188,7 @@ impl<'a> Generator<'a> {
                 let mut variant_reprs: Vec<Option<(TypeId, FunctionId)>> =
                     Vec::with_capacity(custom_type.constructors.len());
                 for (i, constructor) in custom_type.constructors.iter().enumerate() {
-                    if null_tag == Some(i) {
+                    if null_tag == Some(i) || !self.is_constructed(type_, i) {
                         variant_reprs.push(None);
                     } else {
                         let (type_index, repr_index) =
@@ -2377,4 +2424,133 @@ impl<'a> Generator<'a> {
         replace_function_body(&mut self.wasm_module, placeholder_id, real_id);
         placeholder_id
     }
+
+    /// Like `get_function_builtin`, for the equality, hash and inspect of
+    /// `type_`, which only handle the constructors of `type_` with values.
+    /// The body is generated by `derived_functions`.
+    pub(super) fn get_function_derived(
+        &mut self,
+        builtin: BuiltinFunction,
+        type_: &Arc<Type>,
+        kind: DerivedKind,
+    ) -> FunctionId {
+        if let Some(index) = self.builtins.get(&builtin) {
+            return *index;
+        }
+        let (params, results) = self.builtin_type(&builtin);
+        let placeholder_id = self.allocate_placeholder_function(&builtin.name(), &params, &results);
+        let _ = self.builtins.insert(builtin, placeholder_id);
+        self.derived.push(Derived {
+            function: placeholder_id,
+            type_: type_.clone(),
+            kind,
+            constructors: None,
+        });
+        placeholder_id
+    }
+
+    /// Generates the bodies of the functions of `get_function_derived`,
+    /// after all the code that constructs values.
+    ///
+    /// A function only handles the constructors of its type with values, so
+    /// the equality of `T(Int)` in `type T(a) { T(a, List(T(#(a, a)))) }`
+    /// does not need the equality of `T(#(Int, Int))` when no
+    /// `List(T(#(Int, Int)))` is constructed; otherwise it would need the
+    /// equality of every `T(#(…))`. Generating a body may construct values,
+    /// for example in the inspect of a `Dict`, so the bodies are generated
+    /// again until the constructors with values of each type stop changing.
+    /// This terminates because the program constructs values of a finite
+    /// number of types.
+    pub(super) fn derived_functions(&mut self) {
+        loop {
+            let mut changed = false;
+            let mut i = 0;
+            while let Some(derived) = self.derived.get(i).cloned() {
+                let constructors = self.constructors(&derived.type_);
+                if derived.constructors != Some(constructors) {
+                    if let Some(derived) = self.derived.get_mut(i) {
+                        derived.constructors = Some(constructors);
+                    }
+                    let type_ = &derived.type_;
+                    let id = if constructors == 0 && self.is_struct(type_) {
+                        self.code_unreachable(derived.function)
+                    } else {
+                        match derived.kind {
+                            DerivedKind::Equal => self.code_eq(type_),
+                            DerivedKind::Hash => self.code_hash(type_),
+                            DerivedKind::HashInto => self.code_union_hash_into(type_),
+                            DerivedKind::Repr => self.code_repr(type_),
+                        }
+                    };
+                    replace_function_body(&mut self.wasm_module, derived.function, id);
+                    changed = true;
+                }
+                i += 1;
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    /// Records that the program constructs values of the constructor at
+    /// `index` of `type_`.
+    pub(super) fn constructed(&mut self, type_: &Arc<Type>, index: usize) {
+        let name = qualified_type_name(&self.represent(type_));
+        let _ = self.constructed.entry(name).or_default().insert(index);
+    }
+
+    /// Whether the program constructs values of the constructor at `index`
+    /// of `type_`.
+    pub(super) fn is_constructed(&self, type_: &Arc<Type>, index: usize) -> bool {
+        self.constructed
+            .get(&qualified_type_name(&self.represent(type_)))
+            .is_some_and(|indexes| indexes.contains(&index))
+    }
+
+    /// The number of constructors of `type_` with values.
+    fn constructors(&self, type_: &Arc<Type>) -> usize {
+        self.constructed
+            .get(&qualified_type_name(&self.represent(type_)))
+            .map_or(0, |indexes| indexes.len())
+    }
+
+    fn is_struct(&self, type_: &Arc<Type>) -> bool {
+        matches!(
+            self.custom_type(type_),
+            Some((CustomType::Struct { .. }, _))
+        )
+    }
+
+    /// A function with the type of `function` that is never called.
+    fn code_unreachable(&mut self, function: FunctionId) -> FunctionId {
+        let type_ = self
+            .wasm_module
+            .types
+            .get(self.wasm_module.funcs.get(function).ty());
+        let (params, results) = (type_.params().to_vec(), type_.results().to_vec());
+        let params: Vec<LocalId> = params.into_iter().map(|vt| self.wasm_local(vt)).collect();
+        let mut function = Function::new(self, "_unreachable", &params, &results);
+        let _ = function.extend_instructions(self).unreachable().end();
+        function.finish(self)
+    }
+}
+
+/// A function generated by `derived_functions`.
+#[derive(Clone)]
+pub(super) struct Derived {
+    function: FunctionId,
+    type_: Arc<Type>,
+    kind: DerivedKind,
+    /// The number of constructors of `type_` with values when the body was
+    /// generated.
+    constructors: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum DerivedKind {
+    Equal,
+    Hash,
+    HashInto,
+    Repr,
 }
