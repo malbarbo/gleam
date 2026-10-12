@@ -412,3 +412,95 @@ pub fn main() {
         0,
     );
 }
+
+#[test]
+fn returned_function_literals() {
+    run(
+        r#"
+fn adder(k: Int) -> fn(Int, Int) -> Int {
+  fn(acc, x) { acc + x * k }
+}
+
+fn flip(f: fn(a, b) -> c) -> fn(b, a) -> c {
+  fn(b, a) { f(a, b) }
+}
+
+pub fn main() {
+  let k = 1
+  assert fold([1, 2, 3], 0, adder(10)) == 60
+  assert fold([1, 2, 3], 0, flip(fn(x, acc) { acc + x * k })) == 6
+  let add_2 = adder(2)
+  assert fold([1, 2, 3], 0, add_2) == 12
+}
+"#,
+        0,
+    );
+}
+
+#[test]
+fn returned_function_literals_passed_to_the_same_function_terminate() {
+    run_ok(&format!(
+        "{FOLD}\n{}",
+        r#"
+fn inc(g: fn(Int) -> Int) -> fn(Int) -> Int {
+  fn(x) { g(x) + 1 }
+}
+
+fn f(g: fn(Int) -> Int, n: Int) -> Int {
+  case n {
+    0 -> g(0)
+    _ -> f(inc(g), n - 1)
+  }
+}
+
+fn h(g: fn(Int) -> Int, n: Int) -> Int {
+  case n {
+    0 -> g(0)
+    _ -> {
+      let next = inc(g)
+      h(next, n - 1)
+    }
+  }
+}
+
+pub fn main() {
+  assert f(fn(x) { x }, 10) == 10
+  assert h(fn(x) { x }, 10) == 10
+}
+"#
+    ));
+}
+
+#[test]
+fn pipes() {
+    run(
+        r#"
+fn add(a: Int, b: Int) -> Int {
+  a + b
+}
+
+fn apply(f: fn(Int) -> Int, x: Int) -> Int {
+  f(x)
+}
+
+fn apply_piped(f: fn(Int) -> Int, x: Int) -> Int {
+  f |> apply(x)
+}
+
+fn adder(k: Int) -> fn(Int) -> Int {
+  fn(x) { x + k }
+}
+
+pub fn main() {
+  let k = 10
+  assert add |> fold([1, 2, 3], 0, _) == 6
+  assert fn(x) { x + k } |> apply(1) == 11
+  assert fn(x) { x * k } |> apply_piped(2) == 20
+  assert 5 |> adder |> apply(1) == 6
+}
+"#,
+        // A pipe into a function capture calls the capture literal, which is
+        // not specialized
+        1,
+    );
+}

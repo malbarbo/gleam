@@ -2792,12 +2792,13 @@ impl<'a> Generator<'a> {
         export: bool,
         specialization: u32,
         local_functions: HashMap<SrcSpan, Rc<LocalFunction>>,
-        known_arguments: HashMap<SrcSpan, Known>,
+        known_arguments: HashMap<SrcSpan, KnownVariable>,
     ) -> Id {
         let params = self.val_types(function_params_types(&function));
         let results = self.val_types(iter::once(function.return_type.clone()));
         let index = self.allocate_placeholder_function(&name, &params, &results);
         let id = self.add_function_to_globals(name.clone(), index);
+        self.specializations.generated(index, specialization);
         let saved_local_functions = std::mem::replace(&mut self.local_functions, local_functions);
         let saved_specialization = std::mem::replace(&mut self.specialization, specialization);
         let saved_known_arguments =
@@ -2978,12 +2979,7 @@ impl<'a> Generator<'a> {
 
     /// The name of the code of the function literal at `location`.
     fn function_literal_name(&self, location: SrcSpan, type_: &Arc<Type>) -> EcoString {
-        let type_name = qualified_type_name(type_).replace(" ", "");
-        format!(
-            "anonymous@{}-{}#{}:{type_name}",
-            location.start, location.end, self.specialization
-        )
-        .into()
+        function_literal_name(location, type_, self.specialization)
     }
 
     /// The captures of a function literal.
@@ -3148,12 +3144,7 @@ impl<'a> Generator<'a> {
     }
 
     fn function_local_generic(&mut self, info: &LocalFunction, required_type: &Arc<Type>) -> Id {
-        let type_name = qualified_type_name(required_type).replace(" ", "");
-        let name: EcoString = format!(
-            "anonymous@{}-{}#{}:{type_name}",
-            info.location.start, info.location.end, info.specialization
-        )
-        .into();
+        let name = function_literal_name(info.location, required_type, info.specialization);
 
         if let Some(id) = self.find_global(&name) {
             return id;
@@ -3528,12 +3519,25 @@ impl<'a> Generator<'a> {
                 ..
             } => {
                 let mut scope = scope;
+                // The references to a pipe variable are defined at its value
+                self.bind_known_value(
+                    &scope,
+                    first_value.value.location(),
+                    &first_value.value,
+                    true,
+                );
                 let first_index = locals.for_pipeline_assignment(first_value);
                 let _ = instructions
                     .expression(self, locals, scope.clone(), &first_value.value)
                     .local_set(first_index);
                 scope = scope.insert_local(first_value.name.clone(), first_index);
                 for (assignment, _) in assignments {
+                    self.bind_known_value(
+                        &scope,
+                        assignment.value.location(),
+                        &assignment.value,
+                        true,
+                    );
                     let assign_index = locals.for_pipeline_assignment(assignment);
                     let _ = instructions
                         .expression(self, locals, scope.clone(), &assignment.value)
@@ -3574,7 +3578,8 @@ impl<'a> Generator<'a> {
                 let tail = tail && !fun.is_record_constructor_function();
                 let args = arguments.iter().map(|arg| &arg.value);
                 let known = captures::local_variable_definition(fun).and_then(|location| {
-                    self.specializations.known_arguments.get(&location).copied()
+                    let variable = self.specializations.known_arguments.get(&location)?;
+                    Some(variable.known)
                 });
                 if let TypedExpr::Fn { .. } = fun.as_ref() {
                     self.function_literal_call(instructions, locals, scope, fun, args, tail);
@@ -4206,13 +4211,8 @@ impl<'a> Generator<'a> {
         instructions: &mut Instructions<'_, '_>,
         assignment: &TypedAssignment,
     ) -> Scope {
-        if let Pattern::Variable { location, .. } = &assignment.pattern
-            && let Some(known) = self.known_value(&scope, &assignment.value)
-        {
-            let _ = self
-                .specializations
-                .known_arguments
-                .insert(*location, known);
+        if let Pattern::Variable { location, .. } = &assignment.pattern {
+            self.bind_known_value(&scope, *location, &assignment.value, false);
         }
         let right = locals.for_assigment(assignment);
         let body_id = instructions.id();
@@ -4921,6 +4921,17 @@ fn mangle(name: &EcoString, type_: &Arc<Type>) -> EcoString {
     } else {
         name.clone() + "::" + type_name.replace(" ", "")
     }
+}
+
+/// The name of the code of the function literal at `location` in the
+/// function generated with `specialization`.
+fn function_literal_name(location: SrcSpan, type_: &Arc<Type>, specialization: u32) -> EcoString {
+    let type_name = qualified_type_name(type_).replace(" ", "");
+    format!(
+        "anonymous@{}-{}#{specialization}:{type_name}",
+        location.start, location.end
+    )
+    .into()
 }
 
 /// The name of `type_` with the types qualified by their module, except

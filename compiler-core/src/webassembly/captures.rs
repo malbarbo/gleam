@@ -9,10 +9,10 @@ use crate::{
     ast::{
         ArgNames, AssignName, AssignmentKind, FunctionLiteralKind, Pattern,
         StringPrefixLeftSideAssignment, TypeAst, TypedArg, TypedAssignment, TypedExpr,
-        TypedPattern, TypedStatement,
+        TypedPattern, TypedPipelineAssignment, TypedStatement,
         visit::{
             Visit, visit_typed_assignment, visit_typed_expr_call, visit_typed_expr_fn,
-            visit_typed_pattern_assign,
+            visit_typed_pattern_assign, visit_typed_pipeline_assignment,
         },
     },
     type_::{Type, TypedCallArg, ValueConstructor, ValueConstructorVariant, error::VariableOrigin},
@@ -212,6 +212,12 @@ impl<'ast> Visit<'ast> for CallUses {
                 .extend(local_variable_definition(&assignment.value));
         }
         visit_typed_assignment(self, assignment);
+    }
+
+    fn visit_typed_pipeline_assignment(&mut self, assignment: &'ast TypedPipelineAssignment) {
+        self.definitions
+            .extend(local_variable_definition(&assignment.value));
+        visit_typed_pipeline_assignment(self, assignment);
     }
 }
 

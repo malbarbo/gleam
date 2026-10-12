@@ -15,6 +15,14 @@
 //! list.fold(xs, 0, fn(acc, x) { acc + k }) // fold with f = the literal code
 //! ```
 //!
+//! A call to a function that returns a function literal is also known, as
+//! the code of that literal in the function called:
+//!
+//! ```gleam
+//! list.sort(xs, order.reverse(int.compare)) // sort with the literal code of
+//!                                           // reverse with int.compare
+//! ```
+//!
 //! The argument is still the same closure value, so equality, storing and
 //! returning it behave as without the specialization. The known arguments
 //! are kept by the location of the parameter definition, and not in its type,
@@ -39,6 +47,16 @@ pub(super) enum Known {
     Code(FunctionId),
 }
 
+/// A variable whose code is known: a specialized parameter or a variable
+/// bound to a known value.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct KnownVariable {
+    pub(super) known: Known,
+    /// Whether the code was made where the variable is bound, and is not a
+    /// function, see `specialized_callee`.
+    fresh: bool,
+}
+
 #[derive(PartialEq, Eq, Hash)]
 struct SpecializationKey {
     base_name: EcoString,
@@ -50,7 +68,7 @@ struct SpecializationKey {
 pub(super) struct Specializations {
     /// The known function arguments of the function being generated, by the
     /// location where the parameter, or a variable bound to it, is defined.
-    pub(super) known_arguments: HashMap<SrcSpan, Known>,
+    pub(super) known_arguments: HashMap<SrcSpan, KnownVariable>,
     /// The base names of the specializations being generated.
     generating: Vec<EcoString>,
     /// The name of each specialization, registered before its generation, so
@@ -60,6 +78,16 @@ pub(super) struct Specializations {
     counts: HashMap<(EcoString, EcoString), usize>,
     /// Which parameters of each function are specialized, by base name.
     parameters: HashMap<EcoString, Rc<[bool]>>,
+    /// The specialization number of each generated function, which names
+    /// its function literals.
+    specialization_numbers: HashMap<FunctionId, u32>,
+}
+
+impl Specializations {
+    /// Records that the function `id` is generated with `specialization`.
+    pub(super) fn generated(&mut self, id: FunctionId, specialization: u32) {
+        let _ = self.specialization_numbers.insert(id, specialization);
+    }
 }
 
 /// A function with a body that a call names.
@@ -250,8 +278,8 @@ impl<'a> Generator<'a> {
         let type_ = argument.type_();
         let _ = type_.fn_types()?;
         if let Some(location) = captures::local_variable_definition(argument) {
-            if let Some(known) = self.specializations.known_arguments.get(&location) {
-                return Some(*known);
+            if let Some(variable) = self.specializations.known_arguments.get(&location) {
+                return (!(variable.fresh && recursive)).then_some(variable.known);
             }
             let info = self.local_functions.get(&location)?.clone();
             if recursive {
@@ -283,6 +311,12 @@ impl<'a> Generator<'a> {
             let id = self.function_local(name, &type_, arguments, body, Some(closure), &captures);
             return Some(Known::Code(id.func_id()));
         }
+        if let TypedExpr::Call { fun, arguments, .. } = argument {
+            if recursive {
+                return None;
+            }
+            return self.returned_literal(scope, fun, arguments, &type_);
+        }
         // A function named by a variable or a module select
         let id = self.static_callee(scope, argument)?;
         Some(if argument.is_record_constructor_function() {
@@ -292,20 +326,70 @@ impl<'a> Generator<'a> {
         })
     }
 
+    /// The code of the function literal that the call of `fun` with
+    /// `arguments` returns, if its body ends with one. It is the code in the
+    /// function that the call is emitted to, specialized or not.
+    fn returned_literal(
+        &mut self,
+        scope: &Scope,
+        fun: &TypedExpr,
+        arguments: &[CallArg<TypedExpr>],
+        type_: &Arc<Type>,
+    ) -> Option<Known> {
+        let callee = self.callee_definition(fun)?;
+        let Some(Statement::Expression(TypedExpr::Fn { location, .. })) =
+            callee.function.body.last()
+        else {
+            return None;
+        };
+        let id = match self.specialized_callee(scope, fun, arguments) {
+            Some(id) => id,
+            None => self.static_callee(scope, fun)?,
+        };
+        let specialization = *self.specializations.specialization_numbers.get(&id)?;
+        let name = function_literal_name(*location, type_, specialization);
+        // Not generated yet when the function is being generated
+        Some(Known::Code(self.find_global(&name)?.func_id()))
+    }
+
+    /// Binds the variable defined at `location` to the known code of
+    /// `value`, if any. A function literal bound by `let` is a local
+    /// function, see `local_functions`, but not one bound by a pipe.
+    pub(super) fn bind_known_value(
+        &mut self,
+        scope: &Scope,
+        location: SrcSpan,
+        value: &TypedExpr,
+        pipe: bool,
+    ) {
+        if let Some(variable) = self.known_value(scope, value, pipe) {
+            let _ = self
+                .specializations
+                .known_arguments
+                .insert(location, variable);
+        }
+    }
+
     /// The known code of `value`, bound to a variable, if it is a known
-    /// argument or a function. A local function is not, as it would not be
-    /// checked for `recursive` in `known_argument`.
-    pub(super) fn known_value(&mut self, scope: &Scope, value: &TypedExpr) -> Option<Known> {
+    /// variable, a function, a function literal bound by a pipe or a call
+    /// that returns a function literal. A local function is not, as it would
+    /// not be checked for `recursive` in `known_argument`.
+    fn known_value(
+        &mut self,
+        scope: &Scope,
+        value: &TypedExpr,
+        pipe: bool,
+    ) -> Option<KnownVariable> {
         let _ = value.type_().fn_types()?;
         if let Some(location) = captures::local_variable_definition(value) {
             return self.specializations.known_arguments.get(&location).copied();
         }
-        if let TypedExpr::Fn { .. } = value {
-            // A local function, see `local_functions`
-            None
-        } else {
-            self.known_argument(scope, value, false)
+        let fresh = matches!(value, TypedExpr::Fn { .. } | TypedExpr::Call { .. });
+        if !pipe && let TypedExpr::Fn { .. } = value {
+            return None;
         }
+        let known = self.known_argument(scope, value, false)?;
+        Some(KnownVariable { known, fresh })
     }
 
     /// The specialization `name` of `callee` used with type `type_` for the
@@ -333,7 +417,13 @@ impl<'a> Generator<'a> {
             .arguments
             .iter()
             .zip(knowns)
-            .filter_map(|(argument, known)| Some((parameter_location(argument)?, (*known)?)))
+            .filter_map(|(argument, known)| {
+                let known = KnownVariable {
+                    known: (*known)?,
+                    fresh: false,
+                };
+                Some((parameter_location(argument)?, known))
+            })
             .collect();
         let module = std::mem::replace(&mut self.current_module_name, callee.module.clone());
         self.specializations
