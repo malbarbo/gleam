@@ -218,13 +218,15 @@ impl Locals {
         }
     }
 
+    /// Operands that are local variables are read from their locals, the
+    /// others (like module constants) are stored in new locals.
     fn insert_div(&mut self, generator: &mut Generator<'_>, left: &TypedExpr, right: &TypedExpr) {
-        if !left.is_var() {
+        if !left.is_local_var() {
             self._insert(generator, left, &left.type_(), "div_left", left.location());
         } else {
             // use var name
         }
-        if !right.is_var() {
+        if !right.is_local_var() {
             self._insert(
                 generator,
                 right,
@@ -243,12 +245,16 @@ impl Locals {
         left: &TypedExpr,
         right: &TypedExpr,
     ) -> (LocalId, LocalId) {
-        let left = if let Some(name) = left.var_name() {
+        let left = if let Some(name) = left.var_name()
+            && left.is_local_var()
+        {
             scope.find_expect(name).local_id()
         } else {
             self._get(left)
         };
-        let right = if let Some(name) = right.var_name() {
+        let right = if let Some(name) = right.var_name()
+            && right.is_local_var()
+        {
             scope.find_expect(name).local_id()
         } else {
             self._get(right)

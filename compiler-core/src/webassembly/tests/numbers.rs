@@ -573,3 +573,23 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn division_of_module_constants() {
+    run_ok(
+        r#"
+const forty = 40
+
+const four = 4.0
+
+fn id(x: a) -> a { x }
+
+pub fn main() {
+  let assert 4 = id(forty / 10)
+  let assert 0 = id(forty % 10)
+  let assert 10 = id(400 / forty)
+  let assert 2.0 = id(8.0 /. four)
+}
+"#,
+    );
+}
