@@ -515,14 +515,17 @@ fn inc(n: Int) -> Int {
 }
 
 pub fn main() {
-  let _ = apply(fn(n) { inc(n) }, 1)
+  // A function read from a list is not known where `apply` is called
+  let assert [f] = [fn(n) { inc(n) }]
+  let _ = apply(f, 1)
   let _ = field(Ops(inc), 1)
   Nil
 }
 "#,
             (1, 2),
         ),
-        // use
+        // use, `with` is specialized for the callback and calls it
+        // directly
         (
             r#"
 fn with(n: Int, k: fn(Int) -> Int) -> Int {
@@ -539,7 +542,7 @@ pub fn main() {
   Nil
 }
 "#,
-            (1, 1),
+            (2, 0),
         ),
         // the last call of main
         (

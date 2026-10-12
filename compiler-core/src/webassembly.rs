@@ -7,6 +7,7 @@ mod captures;
 mod instructions;
 mod monomorphize;
 mod scope;
+mod specialization;
 #[cfg(test)]
 mod tests;
 
@@ -16,6 +17,7 @@ use captures::{Capture, Variables};
 use instructions::*;
 use monomorphize::*;
 use scope::*;
+use specialization::*;
 
 use ecow::EcoString;
 use indexmap::IndexMap;
@@ -608,6 +610,7 @@ struct Generator<'a> {
     types: HashMap<(EcoString, EcoString), CustomType>,
     variants: HashMap<(EcoString, EcoString), Variant>,
     local_functions: HashMap<SrcSpan, Rc<LocalFunction>>,
+    specializations: Specializations,
     /// The closure singleton of each code function, and of each function
     /// used as a value (whose code is an adapter).
     closures: HashMap<FunctionId, GlobalId>,
@@ -666,6 +669,7 @@ impl<'a> Generator<'a> {
             types: HashMap::new(),
             variants: HashMap::new(),
             local_functions: HashMap::new(),
+            specializations: Specializations::default(),
             closures: HashMap::new(),
             adapters: HashMap::new(),
             closure_types: HashMap::new(),
@@ -2788,6 +2792,7 @@ impl<'a> Generator<'a> {
         export: bool,
         specialization: u32,
         local_functions: HashMap<SrcSpan, Rc<LocalFunction>>,
+        known_arguments: HashMap<SrcSpan, Known>,
     ) -> Id {
         let params = self.val_types(function_params_types(&function));
         let results = self.val_types(iter::once(function.return_type.clone()));
@@ -2795,6 +2800,8 @@ impl<'a> Generator<'a> {
         let id = self.add_function_to_globals(name.clone(), index);
         let saved_local_functions = std::mem::replace(&mut self.local_functions, local_functions);
         let saved_specialization = std::mem::replace(&mut self.specialization, specialization);
+        let saved_known_arguments =
+            std::mem::replace(&mut self.specializations.known_arguments, known_arguments);
         let locals = Locals::new(self, &function.arguments, &function.body);
         let param_ids = locals.param_ids();
         let mut code = Function::new(self, &name, &param_ids, &results);
@@ -2812,6 +2819,7 @@ impl<'a> Generator<'a> {
         );
         self.local_functions = saved_local_functions;
         self.specialization = saved_specialization;
+        self.specializations.known_arguments = saved_known_arguments;
         let _ = instructions.end();
 
         for (local_id, lname) in locals.names() {
@@ -2836,7 +2844,14 @@ impl<'a> Generator<'a> {
         let local_functions = collect_local_functions(&variables, specialization, &mono);
         // Resolve Generic type vars (from inner lambdas) to Nil for valid WASM types.
         let function = mono.function(function);
-        self._function(function, base_name, export, specialization, local_functions)
+        self._function(
+            function,
+            base_name,
+            export,
+            specialization,
+            local_functions,
+            HashMap::new(),
+        )
     }
 
     fn function_generic(
@@ -2857,7 +2872,14 @@ impl<'a> Generator<'a> {
         let local_functions = collect_local_functions(&variables, specialization, &mono);
         let mut function = mono.function(function);
         set_function_name(&mut function, name.clone());
-        self._function(function, name, export, specialization, local_functions)
+        self._function(
+            function,
+            name,
+            export,
+            specialization,
+            local_functions,
+            HashMap::new(),
+        )
     }
 
     /// Generates a local function that uses `captures`. With `closure`, it is
@@ -3551,8 +3573,36 @@ impl<'a> Generator<'a> {
                 // stack, so a tail call gains nothing there.
                 let tail = tail && !fun.is_record_constructor_function();
                 let args = arguments.iter().map(|arg| &arg.value);
+                let known = captures::local_variable_definition(fun).and_then(|location| {
+                    self.specializations.known_arguments.get(&location).copied()
+                });
                 if let TypedExpr::Fn { .. } = fun.as_ref() {
                     self.function_literal_call(instructions, locals, scope, fun, args, tail);
+                } else if let Some(known) = known {
+                    // A parameter specialized for its argument, see
+                    // `specialization`
+                    let (id, tail) = match known {
+                        Known::Function(id) => (id, tail),
+                        Known::Constructor(id) => (id, false),
+                        Known::Code(id) => {
+                            // The closure is the first argument
+                            let _ = instructions.expression(self, locals, scope.clone(), fun);
+                            (id, tail)
+                        }
+                    };
+                    let _ = instructions.expressions(self, locals, scope, args);
+                    let _ = if tail {
+                        instructions.return_call(id)
+                    } else {
+                        instructions.call(id)
+                    };
+                } else if let Some(id) = self.specialized_callee(&scope, fun, arguments) {
+                    let _ = instructions.expressions(self, locals, scope, args);
+                    let _ = if tail {
+                        instructions.return_call(id)
+                    } else {
+                        instructions.call(id)
+                    };
                 } else if let Some(info) = self.local_function_of(fun).cloned() {
                     // The captures are the first arguments
                     let id = self.function_local_generic(&info, &fun.type_());
@@ -4156,6 +4206,14 @@ impl<'a> Generator<'a> {
         instructions: &mut Instructions<'_, '_>,
         assignment: &TypedAssignment,
     ) -> Scope {
+        if let Pattern::Variable { location, .. } = &assignment.pattern
+            && let Some(known) = self.known_value(&scope, &assignment.value)
+        {
+            let _ = self
+                .specializations
+                .known_arguments
+                .insert(*location, known);
+        }
         let right = locals.for_assigment(assignment);
         let body_id = instructions.id();
         let _ = instructions

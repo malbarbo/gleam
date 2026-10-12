@@ -1440,7 +1440,9 @@ fn indirect_call_through_function_value() {
 fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }
 fn inc(x: Int) -> Int { x + 1 }
 pub fn main() {
-    assert apply(inc, 1) == 2
+    // A function read from a list is not known where `apply` is called
+    let assert [f] = [inc]
+    assert apply(f, 1) == 2
     0
 }
 "#;

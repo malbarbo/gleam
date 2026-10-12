@@ -3,7 +3,7 @@
 
 use ecow::EcoString;
 use itertools::Itertools;
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, iter, sync::Arc};
 
 use crate::{
     ast::{
@@ -173,6 +173,45 @@ pub(super) fn local_variable_definition(expr: &TypedExpr) -> Option<SrcSpan> {
         Some(*location)
     } else {
         None
+    }
+}
+
+/// The definitions of the local variables that `body` calls, passes to a
+/// call or binds to another variable.
+pub(super) fn called_or_passed(body: &[TypedStatement]) -> HashSet<SrcSpan> {
+    let mut visitor = CallUses::default();
+    for statement in body {
+        visitor.visit_typed_statement(statement);
+    }
+    visitor.definitions
+}
+
+#[derive(Default)]
+struct CallUses {
+    definitions: HashSet<SrcSpan>,
+}
+
+impl<'ast> Visit<'ast> for CallUses {
+    fn visit_typed_expr_call(
+        &mut self,
+        location: &'ast SrcSpan,
+        type_: &'ast Arc<Type>,
+        fun: &'ast TypedExpr,
+        arguments: &'ast [TypedCallArg],
+        open_parenthesis: &'ast Option<u32>,
+    ) {
+        let values = iter::once(fun).chain(arguments.iter().map(|argument| &argument.value));
+        self.definitions
+            .extend(values.filter_map(local_variable_definition));
+        visit_typed_expr_call(self, location, type_, fun, arguments, open_parenthesis);
+    }
+
+    fn visit_typed_assignment(&mut self, assignment: &'ast TypedAssignment) {
+        if let Pattern::Variable { .. } = assignment.pattern {
+            self.definitions
+                .extend(local_variable_definition(&assignment.value));
+        }
+        visit_typed_assignment(self, assignment);
     }
 }
 
