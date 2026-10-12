@@ -3184,10 +3184,7 @@ impl<'a> Generator<'a> {
         for capture in &self.local_function_captures_of(info).variables {
             let outer = info.enclosing.type_(&capture.type_);
             let inner = mono.type_(&capture.type_);
-            // A type variable left in the outer type has no wasm type.
-            if !outer.same_as(&inner)
-                && (is_generic_type(&outer) || self.val_type(&outer) != self.val_type(&inner))
-            {
+            if !outer.same_as(&inner) && self.val_type(&outer) != self.val_type(&inner) {
                 panic!(
                     "the type of the captured variable {} depends on the type variables of the local function, this is not supported yet",
                     capture.name
