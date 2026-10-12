@@ -1,0 +1,17 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+assertion_line: 40
+expression: "\n@external(webassembly, \"builtins\", \"unknown_func\")\nfn unknown(a: String) -> String\n\npub fn main() {\n    unknown(\"a\")\n}\n"
+---
+----- SOURCE CODE
+
+@external(webassembly, "builtins", "unknown_func")
+fn unknown(a: String) -> String
+
+pub fn main() {
+    unknown("a")
+}
+
+
+----- ERROR
+UnknownBuiltinFunction { location: SrcSpan { start: 52, end: 73 }, name: "unknown_func" }

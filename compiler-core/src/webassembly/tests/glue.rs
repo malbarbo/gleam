@@ -1,45 +1,45 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-//! `@external(webassembly, "rust", ...)`: glue to the functions of
+//! `@external(webassembly, "builtins", ...)`: glue to the functions of
 //! builtins-wasm.
 
 use super::{run_ok, run_ok_i64};
 
 const RUST: &str = r#"
-@external(webassembly, "rust", "int_parse")
+@external(webassembly, "builtins", "int_parse")
 fn int_parse(a: String) -> Result(Int, Nil)
-@external(webassembly, "rust", "int_to_base_string")
+@external(webassembly, "builtins", "int_to_base_string")
 fn to_base_string(a: Int, b: Int) -> String
-@external(webassembly, "rust", "float_parse")
+@external(webassembly, "builtins", "float_parse")
 fn float_parse(a: String) -> Result(Float, Nil)
-@external(webassembly, "rust", "float_to_string")
+@external(webassembly, "builtins", "float_to_string")
 fn float_to_string(a: Float) -> String
-@external(webassembly, "rust", "float_power")
+@external(webassembly, "builtins", "float_power")
 fn power(a: Float, b: Float) -> Float
-@external(webassembly, "rust", "string_length")
+@external(webassembly, "builtins", "string_length")
 fn length(a: String) -> Int
-@external(webassembly, "rust", "string_lowercase")
+@external(webassembly, "builtins", "string_lowercase")
 fn lowercase(a: String) -> String
-@external(webassembly, "rust", "string_trim")
+@external(webassembly, "builtins", "string_trim")
 fn trim(a: String) -> String
-@external(webassembly, "rust", "string_contains")
+@external(webassembly, "builtins", "string_contains")
 fn contains(a: String, b: String) -> Bool
-@external(webassembly, "rust", "string_split")
+@external(webassembly, "builtins", "string_split")
 fn split(a: String, b: String) -> List(String)
-@external(webassembly, "rust", "string_split_once")
+@external(webassembly, "builtins", "string_split_once")
 fn split_once(a: String, b: String) -> Result(#(String, String), Nil)
-@external(webassembly, "rust", "string_replace")
+@external(webassembly, "builtins", "string_replace")
 fn replace(a: String, b: String, c: String) -> String
-@external(webassembly, "rust", "string_to_graphemes")
+@external(webassembly, "builtins", "string_to_graphemes")
 fn to_graphemes(a: String) -> List(String)
-@external(webassembly, "rust", "string_to_utf_codepoints")
+@external(webassembly, "builtins", "string_to_utf_codepoints")
 fn to_utf_codepoints(a: String) -> List(UtfCodepoint)
-@external(webassembly, "rust", "string_from_utf_codepoints")
+@external(webassembly, "builtins", "string_from_utf_codepoints")
 fn from_utf_codepoints(a: List(UtfCodepoint)) -> String
-@external(webassembly, "rust", "string_inspect")
+@external(webassembly, "builtins", "string_inspect")
 fn string_inspect(a: String) -> String
-@external(webassembly, "rust", "uri_parse_query")
+@external(webassembly, "builtins", "uri_parse_query")
 fn parse_query(a: String) -> Result(List(#(String, String)), Nil)
 @external(webassembly, "builtins", "_string_byte_slice")
 fn byte_slice(a: String, start: Int, length: Int) -> String
@@ -127,7 +127,7 @@ fn pop_grapheme() {
         r#"
 @external(webassembly, "builtins", "_string_pop_grapheme")
 fn pop_grapheme(a: String) -> Result(#(String, String), Nil)
-@external(webassembly, "rust", "string_length")
+@external(webassembly, "builtins", "string_length")
 fn length(a: String) -> Int
 
 fn count(s: String, n: Int) -> Int {
@@ -179,7 +179,7 @@ pub fn main() {
 @external(webassembly, "builtins", "_float_floor")
 pub fn floor(a: Float) -> Float
 
-@external(webassembly, "rust", "string_lowercase")
+@external(webassembly, "builtins", "string_lowercase")
 pub fn lowercase(a: String) -> String
 "#,
         )],

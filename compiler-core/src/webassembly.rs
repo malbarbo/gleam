@@ -1128,15 +1128,15 @@ impl<'a> Generator<'a> {
         let functions: Vec<_> = self.module.definitions.functions.iter().collect();
         for function in functions {
             if let Some((module, name, _)) = &function.external_webassembly {
-                if module == RUST_MODULE {
-                    self.validate_rust_external(function, name, available)?;
-                    continue;
-                }
                 if module != BUILTINS_MODULE {
                     return Err(Error::UnknownExternalModule {
                         location: function.location,
                         module: module.clone(),
                     });
+                }
+                if is_glued(name) {
+                    self.validate_rust_external(function, name, available)?;
+                    continue;
                 }
                 if let Some((params, results)) = available.get(name) {
                     let wasm_params =
@@ -1219,7 +1219,7 @@ impl<'a> Generator<'a> {
             return Err(Error::UnsupportedFeature {
                 location: function.location,
                 feature: format!(
-                    "the type {} in a rust external",
+                    "the type {} in a Rust builtin",
                     self.type_pretty_name(&function_type(function))
                 )
                 .into(),
@@ -2833,8 +2833,8 @@ impl<'a> Generator<'a> {
 
         for function in &self.module.definitions.functions {
             if function_name(function) == name {
-                if let Some((module, fname, _)) = &function.external_webassembly {
-                    if module == RUST_MODULE {
+                if let Some((_, fname, _)) = &function.external_webassembly {
+                    if is_glued(fname) {
                         return self.function_rust(fname, &function_type(function));
                     }
                     if fname == INSPECT {
@@ -3341,8 +3341,8 @@ impl<'a> Generator<'a> {
         required_type: &Arc<Type>,
     ) -> Id {
         let function = self.module_function_definition(module_name, fn_name);
-        if let Some((module, fname, _)) = &function.external_webassembly {
-            if module == RUST_MODULE {
+        if let Some((_, fname, _)) = &function.external_webassembly {
+            if is_glued(fname) {
                 return self.function_rust(fname, &function_type(function));
             }
             if fname == INSPECT {

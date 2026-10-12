@@ -36,6 +36,34 @@ pub fn main() {
 }
 
 #[test]
+fn unknown_glued_builtin_function() {
+    assert_wasm_error!(
+        r#"
+@external(webassembly, "builtins", "unknown_func")
+fn unknown(a: String) -> String
+
+pub fn main() {
+    unknown("a")
+}
+"#,
+    );
+}
+
+#[test]
+fn unknown_external_function_module() {
+    assert_wasm_error!(
+        r#"
+@external(webassembly, "rust", "string_length")
+fn length(a: String) -> Int
+
+pub fn main() {
+    length("a")
+}
+"#,
+    );
+}
+
+#[test]
 fn wrong_inspect_signature() {
     assert_wasm_error!(
         r#"

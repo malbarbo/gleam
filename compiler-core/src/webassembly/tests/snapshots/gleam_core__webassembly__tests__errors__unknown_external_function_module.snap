@@ -1,0 +1,17 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+assertion_line: 54
+expression: "\n@external(webassembly, \"rust\", \"string_length\")\nfn length(a: String) -> Int\n\npub fn main() {\n    length(\"a\")\n}\n"
+---
+----- SOURCE CODE
+
+@external(webassembly, "rust", "string_length")
+fn length(a: String) -> Int
+
+pub fn main() {
+    length("a")
+}
+
+
+----- ERROR
+UnknownExternalModule { location: SrcSpan { start: 49, end: 69 }, module: "rust" }
