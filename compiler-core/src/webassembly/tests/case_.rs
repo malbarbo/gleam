@@ -10,39 +10,37 @@ fn wasm_func_local_count(wasm_bytes: &[u8], func_name: &str) -> u32 {
     let mut local_counts: Vec<u32> = vec![];
     let mut import_count = 0u32;
     for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
-        match payload.unwrap() {
-            wasmparser::Payload::ImportSection(section) => {
-                import_count = section.count();
-            }
-            wasmparser::Payload::CodeSectionEntry(body) => {
-                let count: u32 = body
-                    .get_locals_reader()
-                    .unwrap()
-                    .into_iter()
-                    .map(|l| l.unwrap().0)
-                    .sum();
-                local_counts.push(count);
-            }
-            wasmparser::Payload::CustomSection(section) => {
-                if let wasmparser::KnownCustom::Name(name_section) = section.as_known() {
-                    for subsection in name_section {
-                        if let wasmparser::Name::Function(names) = subsection.unwrap() {
-                            for n in names {
-                                let n = n.unwrap();
-                                func_indices_order.push((n.index, n.name.to_string()));
-                                if n.name == func_name {
-                                    func_index = Some(n.index);
-                                }
-                            }
+        let payload = payload.expect("valid wasm");
+        if let wasmparser::Payload::ImportSection(section) = payload {
+            import_count = section.count();
+        } else if let wasmparser::Payload::CodeSectionEntry(body) = payload {
+            let count: u32 = body
+                .get_locals_reader()
+                .expect("valid wasm")
+                .into_iter()
+                .map(|locals| locals.expect("valid wasm").0)
+                .sum();
+            local_counts.push(count);
+        } else if let wasmparser::Payload::CustomSection(section) = payload
+            && let wasmparser::KnownCustom::Name(name_section) = section.as_known()
+        {
+            for subsection in name_section {
+                if let wasmparser::Name::Function(names) = subsection.expect("valid wasm") {
+                    for naming in names {
+                        let naming = naming.expect("valid wasm");
+                        func_indices_order.push((naming.index, naming.name.to_string()));
+                        if naming.name == func_name {
+                            func_index = Some(naming.index);
                         }
                     }
                 }
             }
-            _ => {}
         }
     }
-    let idx = func_index.expect("function not found") - import_count;
-    local_counts[idx as usize]
+    let index = func_index.expect("function not found") - import_count;
+    *local_counts
+        .get(index as usize)
+        .expect("function with a body")
 }
 
 #[test]

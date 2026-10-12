@@ -33,8 +33,10 @@ pub fn compile(
     let mut dep_modules = HashMap::new();
 
     deps.iter().for_each(|(dep_package, dep_name, dep_src)| {
-        let mut dep_config = PackageConfig::default();
-        dep_config.name = (*dep_package).into();
+        let dep_config = PackageConfig {
+            name: (*dep_package).into(),
+            ..Default::default()
+        };
         let parsed = crate::parse::parse_module(
             Utf8PathBuf::from("test/path"),
             dep_src,
@@ -69,8 +71,10 @@ pub fn compile(
     let mut ast = parsed.module;
     ast.name = "my/mod".into();
     let line_numbers = LineNumbers::new(src);
-    let mut config = PackageConfig::default();
-    config.name = "thepackage".into();
+    let config = PackageConfig {
+        name: "thepackage".into(),
+        ..Default::default()
+    };
 
     let module = crate::analyse::ModuleAnalyzerConstructor::<()> {
         target: Target::WebAssembly,
@@ -131,13 +135,13 @@ pub fn compile_wasm_with_config(
 pub fn wasm_type_names(wasm_bytes: &[u8]) -> Vec<String> {
     let mut names = vec![];
     for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
-        if let wasmparser::Payload::CustomSection(section) = payload.unwrap()
+        if let wasmparser::Payload::CustomSection(section) = payload.expect("valid wasm")
             && let wasmparser::KnownCustom::Name(name_section) = section.as_known()
         {
             for subsection in name_section {
-                if let wasmparser::Name::Type(type_names) = subsection.unwrap() {
+                if let wasmparser::Name::Type(type_names) = subsection.expect("valid wasm") {
                     for naming in type_names {
-                        let naming = naming.unwrap();
+                        let naming = naming.expect("valid wasm");
                         names.push(naming.name.to_string());
                     }
                 }
@@ -151,13 +155,14 @@ pub fn wasm_type_names(wasm_bytes: &[u8]) -> Vec<String> {
 pub fn wasm_function_names(wasm_bytes: &[u8]) -> Vec<String> {
     let mut names = vec![];
     for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
-        if let wasmparser::Payload::CustomSection(section) = payload.unwrap()
+        if let wasmparser::Payload::CustomSection(section) = payload.expect("valid wasm")
             && let wasmparser::KnownCustom::Name(name_section) = section.as_known()
         {
             for subsection in name_section {
-                if let wasmparser::Name::Function(function_names) = subsection.unwrap() {
+                if let wasmparser::Name::Function(function_names) = subsection.expect("valid wasm")
+                {
                     for naming in function_names {
-                        names.push(naming.unwrap().name.to_string());
+                        names.push(naming.expect("valid wasm").name.to_string());
                     }
                 }
             }
@@ -170,13 +175,13 @@ pub fn wasm_function_names(wasm_bytes: &[u8]) -> Vec<String> {
 pub fn wasm_global_names(wasm_bytes: &[u8]) -> Vec<String> {
     let mut names = vec![];
     for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
-        if let wasmparser::Payload::CustomSection(section) = payload.unwrap()
+        if let wasmparser::Payload::CustomSection(section) = payload.expect("valid wasm")
             && let wasmparser::KnownCustom::Name(name_section) = section.as_known()
         {
             for subsection in name_section {
-                if let wasmparser::Name::Global(global_names) = subsection.unwrap() {
+                if let wasmparser::Name::Global(global_names) = subsection.expect("valid wasm") {
                     for naming in global_names {
-                        names.push(naming.unwrap().name.to_string());
+                        names.push(naming.expect("valid wasm").name.to_string());
                     }
                 }
             }
@@ -204,13 +209,14 @@ pub fn count_ref_calls(wasm_bytes: &[u8]) -> usize {
 pub fn for_each_operator(wasm_bytes: &[u8], mut f: impl FnMut(&str, wasmparser::Operator<'_>)) {
     let mut names = HashMap::new();
     for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
-        if let wasmparser::Payload::CustomSection(section) = payload.unwrap()
+        if let wasmparser::Payload::CustomSection(section) = payload.expect("valid wasm")
             && let wasmparser::KnownCustom::Name(name_section) = section.as_known()
         {
             for subsection in name_section {
-                if let wasmparser::Name::Function(function_names) = subsection.unwrap() {
+                if let wasmparser::Name::Function(function_names) = subsection.expect("valid wasm")
+                {
                     for naming in function_names {
-                        let naming = naming.unwrap();
+                        let naming = naming.expect("valid wasm");
                         let _ = names.insert(naming.index, naming.name.to_string());
                     }
                 }
@@ -219,24 +225,24 @@ pub fn for_each_operator(wasm_bytes: &[u8], mut f: impl FnMut(&str, wasmparser::
     }
     let mut index = 0;
     for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
-        match payload.unwrap() {
-            wasmparser::Payload::ImportSection(imports) => {
-                index += imports
-                    .into_iter()
-                    .filter(|import| {
-                        matches!(import.as_ref().unwrap().ty, wasmparser::TypeRef::Func(_))
-                    })
-                    .count() as u32;
+        let payload = payload.expect("valid wasm");
+        if let wasmparser::Payload::ImportSection(imports) = payload {
+            index += imports
+                .into_iter()
+                .filter(|import| {
+                    matches!(
+                        import.as_ref().expect("valid wasm").ty,
+                        wasmparser::TypeRef::Func(_)
+                    )
+                })
+                .count() as u32;
+        } else if let wasmparser::Payload::CodeSectionEntry(body) = payload {
+            let name = names.get(&index).map_or("", String::as_str);
+            let mut reader = body.get_operators_reader().expect("valid wasm");
+            while !reader.eof() {
+                f(name, reader.read().expect("valid wasm"));
             }
-            wasmparser::Payload::CodeSectionEntry(body) => {
-                let name = names.get(&index).map_or("", String::as_str);
-                let mut reader = body.get_operators_reader().unwrap();
-                while !reader.eof() {
-                    f(name, reader.read().unwrap());
-                }
-                index += 1;
-            }
-            _ => {}
+            index += 1;
         }
     }
 }
