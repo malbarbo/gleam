@@ -478,6 +478,18 @@ fn hidden_name(info: &LocalFunction, capture: &str) -> EcoString {
     format!("{}@{}.{capture}", info.name, info.definition.start).into()
 }
 
+/// The locals of `scope` with the captured variables `names`.
+fn scope_locals(scope: &Scope, names: impl IntoIterator<Item = EcoString>) -> Vec<LocalId> {
+    names
+        .into_iter()
+        .map(|name| {
+            scope
+                .find_local(&name)
+                .unwrap_or_else(|| panic!("captured variable {name} should be in scope"))
+        })
+        .collect()
+}
+
 /// The name of the first capture of a local function with captures that is
 /// used as a value: the identity of the definition, created where it is
 /// evaluated, which makes its closures equal.
@@ -3068,15 +3080,11 @@ impl<'a> Generator<'a> {
     /// The locals with the captures of the local function `info`, bound by
     /// its definition in `scope`.
     fn local_function_captures_locals(&self, scope: &Scope, info: &LocalFunction) -> Vec<LocalId> {
-        self.local_function_captures(info)
+        let captures = self.local_function_captures(info);
+        let names = captures
             .iter()
-            .map(|capture| {
-                let name = hidden_name(info, &capture.name);
-                scope
-                    .find_local(&name)
-                    .unwrap_or_else(|| panic!("captured variable {name} is not in scope"))
-            })
-            .collect()
+            .map(|capture| hidden_name(info, &capture.name));
+        scope_locals(scope, names)
     }
 
     /// Pushes the value of the local function `info` with type `type_`. With
@@ -3106,14 +3114,7 @@ impl<'a> Generator<'a> {
 
     /// The locals of `scope` with the values of `captures`.
     fn captures_locals(&self, scope: &Scope, captures: &[Capture]) -> Vec<LocalId> {
-        captures
-            .iter()
-            .map(|capture| {
-                scope.find_local(&capture.name).unwrap_or_else(|| {
-                    panic!("captured variable {} should be in scope", capture.name)
-                })
-            })
-            .collect()
+        scope_locals(scope, captures.iter().map(|capture| capture.name.clone()))
     }
 
     /// Calls the function literal `fun` directly, without creating its
@@ -3144,11 +3145,7 @@ impl<'a> Generator<'a> {
             let _ = instructions.local_get(local);
         }
         let _ = instructions.expressions(self, locals, scope, arguments);
-        let _ = if tail {
-            instructions.return_call(id.func_id())
-        } else {
-            instructions.call(id.func_id())
-        };
+        let _ = instructions.call_maybe_tail(id.func_id(), tail);
     }
 
     fn function_local_generic(&mut self, info: &LocalFunction, required_type: &Arc<Type>) -> Id {
@@ -3613,12 +3610,9 @@ impl<'a> Generator<'a> {
                     CallTarget::Dynamic => None,
                 };
                 if let Some((id, tail)) = direct {
-                    let _ = instructions.expressions(self, locals, scope, args);
-                    let _ = if tail {
-                        instructions.return_call(id)
-                    } else {
-                        instructions.call(id)
-                    };
+                    let _ = instructions
+                        .expressions(self, locals, scope, args)
+                        .call_maybe_tail(id, tail);
                 } else {
                     // The closure is the first argument, and its field 0 is
                     // the code to call.
@@ -3638,12 +3632,9 @@ impl<'a> Generator<'a> {
                     }
                     let (params, return_) = fun.type_().fn_types().expect("function type");
                     let closure = self.closure_type(params, return_);
-                    let _ = instructions.struct_get(closure.type_index, 0);
-                    let _ = if tail {
-                        instructions.return_call_ref(closure.code_type_index)
-                    } else {
-                        instructions.call_ref(closure.code_type_index)
-                    };
+                    let _ = instructions
+                        .struct_get(closure.type_index, 0)
+                        .call_ref_maybe_tail(closure.code_type_index, tail);
                 }
             }
             TypedExpr::Fn {

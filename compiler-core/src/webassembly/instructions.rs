@@ -125,6 +125,25 @@ impl<'a, 'b> Instructions<'a, 'b> {
         self
     }
 
+    /// Calls `function`, as a tail call when `tail`.
+    pub(super) fn call_maybe_tail(&mut self, function: FunctionId, tail: bool) -> &mut Self {
+        if tail {
+            self.return_call(function)
+        } else {
+            self.call(function)
+        }
+    }
+
+    /// Calls the function reference with type `type_index`, as a tail call
+    /// when `tail`.
+    pub(super) fn call_ref_maybe_tail(&mut self, type_index: TypeId, tail: bool) -> &mut Self {
+        if tail {
+            self.return_call_ref(type_index)
+        } else {
+            self.call_ref(type_index)
+        }
+    }
+
     pub(super) fn ref_cast_non_null(&mut self, ht: HeapType) -> &mut Self {
         let _ = self.seq.as_mut().ref_cast(false, ht);
         self
