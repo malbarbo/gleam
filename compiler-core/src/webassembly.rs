@@ -625,13 +625,13 @@ struct Generator<'a> {
     specializations: Specializations,
     /// The closure singleton of each code function.
     closure_globals: HashMap<FunctionId, GlobalId>,
-    /// The closure singleton of each function used as a value, by its
-    /// closure type: an external with a generic signature has one function
-    /// for all its types.
-    function_closures: HashMap<(FunctionId, TypeId), GlobalId>,
-    /// The closure code of each function used as a value, by its closure type
-    /// and the number of its first params that are captures.
-    adapters: HashMap<(FunctionId, TypeId, usize), FunctionId>,
+    /// The closure singleton of each function used as a value, by the
+    /// qualified name of its type: an external with a generic signature has
+    /// one function for all its types.
+    function_closures: HashMap<(FunctionId, EcoString), GlobalId>,
+    /// The closure code of each function used as a value, by the qualified
+    /// name of its type and the number of its first params that are captures.
+    adapters: HashMap<(FunctionId, EcoString, usize), FunctionId>,
     /// The closure type of each function type, by its qualified name, see
     /// `closure_type`.
     closure_types: HashMap<EcoString, TypeId>,
@@ -1547,8 +1547,28 @@ impl<'a> Generator<'a> {
         arguments: impl IntoIterator<Item = Arc<Type>>,
         return_: Arc<Type>,
     ) -> ClosureType {
+        self.named_closure_type(arguments, return_).1
+    }
+
+    /// The closure type of `closure_type`, with the qualified name of the
+    /// function type, which does not change when the closure type moves.
+    fn named_closure_type(
+        &mut self,
+        arguments: impl IntoIterator<Item = Arc<Type>>,
+        return_: Arc<Type>,
+    ) -> (EcoString, ClosureType) {
         let arguments = arguments.into_iter().collect_vec();
         let name = qualified_function_type_name(&arguments, &return_);
+        let closure = self.closure_type_by_name(name.clone(), arguments, return_);
+        (name, closure)
+    }
+
+    fn closure_type_by_name(
+        &mut self,
+        name: EcoString,
+        arguments: Vec<Arc<Type>>,
+        return_: Arc<Type>,
+    ) -> ClosureType {
         if let Some(type_index) = self.closure_types.get(&name) {
             return self.closure_type_of(*type_index);
         }
@@ -1653,8 +1673,8 @@ impl<'a> Generator<'a> {
     /// an adapter that drops the closure param.
     fn closure_of(&mut self, function: FunctionId, type_: &Arc<Type>) -> GlobalId {
         let (arguments, return_) = type_.fn_types().expect("function type");
-        let closure = self.closure_type(arguments, return_);
-        let key = (function, closure.type_index);
+        let (name, closure) = self.named_closure_type(arguments, return_);
+        let key = (function, name);
         if let Some(global) = self.function_closures.get(&key) {
             return *global;
         }
@@ -1674,8 +1694,8 @@ impl<'a> Generator<'a> {
         captures: &[Capture],
     ) -> FunctionId {
         let (arguments, return_) = type_.fn_types().expect("function type");
-        let closure = self.closure_type(arguments, return_);
-        let key = (function, closure.type_index, captures.len());
+        let (name, closure) = self.named_closure_type(arguments, return_);
+        let key = (function, name, captures.len());
         if let Some(adapter) = self.adapters.get(&key) {
             return *adapter;
         }
@@ -2100,16 +2120,6 @@ impl<'a> Generator<'a> {
         for id in self.closure_types.values_mut() {
             *id = remap(*id);
         }
-        self.function_closures = std::mem::take(&mut self.function_closures)
-            .into_iter()
-            .map(|((function, closure), global)| ((function, remap(closure)), global))
-            .collect();
-        self.adapters = std::mem::take(&mut self.adapters)
-            .into_iter()
-            .map(|((function, closure, captures), code)| {
-                ((function, remap(closure), captures), code)
-            })
-            .collect();
         remap(id)
     }
 
@@ -3618,16 +3628,14 @@ impl<'a> Generator<'a> {
                         let _ = instructions.expression(self, locals, scope.clone(), fun);
                         Some((id, tail))
                     }
-                    CallTarget::Known(Known::Function(id) | Known::Constructor(id)) => {
+                    CallTarget::Known(known @ (Known::Function(id) | Known::Constructor(id))) => {
                         if !fun.is_var() {
                             // Evaluated for its effects
                             let _ = instructions
                                 .expression(self, locals, scope.clone(), fun)
                                 .drop();
                         }
-                        let constructor =
-                            matches!(target, CallTarget::Known(Known::Constructor(_)));
-                        Some((id, tail && !constructor))
+                        Some((id, tail && !matches!(known, Known::Constructor(_))))
                     }
                     CallTarget::Direct(id) => Some((id, tail)),
                     CallTarget::Local(ref info, id) => {
