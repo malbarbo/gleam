@@ -1343,17 +1343,19 @@ impl<'a> Generator<'a> {
         let s_i = self.wasm_local(ValType::I32); // I32
         let dest = self.wasm_local(ValType::I32); // I32
         let needed = self.wasm_local(ValType::I32); // I32
+        let next = self.wasm_local(ValType::I32); // I32
+        let digit = self.wasm_local(ValType::I32); // I32
         // return I32 - number of written bytes
 
         let mut function = Function::new(self, "_repr_string", &[s, ptr], &[ValType::I32]);
         let mut instructions = function.extend_instructions(self);
         #[rustfmt::skip]
         let _ = instructions
-            // max output = ptr + 2 + len * 2
+            // max output = ptr + 2 + len * 8, as a byte can become `\u{00XX}`
             .local_get(ptr)
             .local_get(s)
             .string_len()
-            .i32_const(2)
+            .i32_const(8)
             .i32_mul()
             .i32_add()
             .i32_const(2)
@@ -1403,6 +1405,69 @@ impl<'a> Generator<'a> {
                                     .local_get(s_i)
                                     .try_escape(dest, b'\t', b't')
                                     .br_if(block_id)
+                                    // the other control characters, as on Erlang:
+                                    // below 32, 127, and from 128 to 159, which
+                                    // are 0xC2 followed by 0x80 to 0x9F
+                                    .local_get(s_i)
+                                    .i32_const(32)
+                                    .i32_lt_u()
+                                    .local_get(s_i)
+                                    .i32_const(127)
+                                    .i32_eq()
+                                    .i32_or()
+                                    .if_else(
+                                        ValType::I32,
+                                        |then_s| {
+                                            let _ = then_s
+                                                .escape_unicode(dest, s_i, digit)
+                                                .i32_const(1);
+                                        },
+                                        |else_s| {
+                                            let _ = else_s.i32_const(0);
+                                        },
+                                    )
+                                    .br_if(block_id)
+                                    .local_get(s_i)
+                                    .i32_const(0xC2)
+                                    .i32_eq()
+                                    .local_get(i)
+                                    .i32_const(1)
+                                    .i32_add()
+                                    .local_get(len)
+                                    .i32_lt_u()
+                                    .i32_and()
+                                    .if_else(
+                                        ValType::I32,
+                                        |then_s| {
+                                            let _ = then_s
+                                                .local_get(s)
+                                                .local_get(i)
+                                                .i32_const(1)
+                                                .i32_add()
+                                                .string_get()
+                                                .local_tee(next)
+                                                .i32_const(0x80)
+                                                .i32_sub()
+                                                .i32_const(0x20)
+                                                .i32_lt_u()
+                                                .if_else(
+                                                    ValType::I32,
+                                                    |then_s| {
+                                                        let _ = then_s
+                                                            .escape_unicode(dest, next, digit)
+                                                            .i32_inc(i)
+                                                            .i32_const(1);
+                                                    },
+                                                    |else_s| {
+                                                        let _ = else_s.i32_const(0);
+                                                    },
+                                                );
+                                        },
+                                        |else_s| {
+                                            let _ = else_s.i32_const(0);
+                                        },
+                                    )
+                                    .br_if(block_id)
                                     // default, do not escape
                                     .local_get(dest)
                                     .local_get(s_i)
@@ -1423,6 +1488,9 @@ impl<'a> Generator<'a> {
 
         trait Escape {
             fn try_escape(&mut self, dest: LocalId, byte: u8, escape: u8) -> &mut Self;
+            fn escape_unicode(&mut self, dest: LocalId, code: LocalId, digit: LocalId)
+            -> &mut Self;
+            fn hex_digit(&mut self, dest: LocalId, digit: LocalId) -> &mut Self;
         }
 
         impl<'a, 'b> Escape for Instructions<'a, 'b> {
@@ -1447,13 +1515,61 @@ impl<'a> Generator<'a> {
                         },
                     )
             }
+
+            /// Writes `\u{00XX}`, with `XX` the hex digits of `code`, a byte.
+            #[rustfmt::skip]
+            fn escape_unicode(&mut self, dest: LocalId, code: LocalId, digit: LocalId)
+            -> &mut Self {
+                for byte in *b"\\u{00" {
+                    let _ = self.local_get(dest).byte_store(byte).i32_inc(dest);
+                }
+                self.local_get(code)
+                    .i32_const(4)
+                    .i32_shr_u()
+                    .local_set(digit)
+                    .hex_digit(dest, digit)
+                    .local_get(code)
+                    .i32_const(15)
+                    .i32_and()
+                    .local_set(digit)
+                    .hex_digit(dest, digit)
+                    .local_get(dest)
+                    .byte_store(b'}')
+                    .i32_inc(dest)
+            }
+
+            /// Writes the uppercase hex digit of `digit`.
+            #[rustfmt::skip]
+            fn hex_digit(&mut self, dest: LocalId, digit: LocalId) -> &mut Self {
+                self.local_get(dest)
+                    .local_get(digit)
+                    .local_get(digit)
+                    .i32_const(10)
+                    .i32_lt_u()
+                    .if_else(
+                        ValType::I32,
+                        |then_s| {
+                            let _ = then_s.i32_const(b'0' as i32);
+                        },
+                        |else_s| {
+                            let _ = else_s.i32_const(b'A' as i32 - 10);
+                        },
+                    )
+                    .i32_add()
+                    .i32_store8(MemArg { offset: 0, align: 0 })
+                    .i32_inc(dest)
+            }
         }
 
         function.finish(self)
     }
 
     fn code_repr(&mut self, type_: &Arc<Type>) -> FunctionId {
-        if let Some(item_type) = type_.list_type() {
+        if let Some(item_type) = type_.list_type()
+            && item_type.is_int()
+        {
+            self.code_charlist_repr()
+        } else if let Some(item_type) = type_.list_type() {
             self.code_list_repr(&item_type)
         } else if let Some(types) = type_.tuple_types() {
             self.code_tuple_repr(&types)
@@ -1466,6 +1582,128 @@ impl<'a> Generator<'a> {
         } else {
             panic!("unexpected type should not reach repr: {type_:#?}");
         }
+    }
+
+    /// The repr of a `List(Int)`. As on Erlang and JavaScript, a list of
+    /// printable ASCII codes is shown as `charlist.from_string("...")`.
+    fn code_charlist_repr(&mut self) -> FunctionId {
+        let list_type = type_::list(type_::int());
+        let (custom_type, cons, _, args) = self.list_type_cons(&list_type);
+        let (_, struct_index, _) =
+            self.mono_union_subtype_index(&list_type, &custom_type, &cons, &args);
+        let list_repr = self.code_list_repr(&type_::int());
+        let list_vt = self.val_type(&list_type);
+        let int_vt = self.int.val_type();
+        let prefix = b"charlist.from_string(\"";
+        // params
+        let list = self.wasm_local(list_vt); // List(Int)
+        let ptr = self.wasm_local(ValType::I32); // I32
+        // locals
+        let current = self.wasm_local(list_vt); // List(Int)
+        let item = self.wasm_local(int_vt); // Int
+        let count = self.wasm_local(ValType::I32); // I32
+        let dest = self.wasm_local(ValType::I32); // I32
+        let needed = self.wasm_local(ValType::I32); // I32
+        // return I32 - number of written bytes
+        let mut function = Function::new(self, "_repr_charlist", &[list, ptr], &[ValType::I32]);
+        let mut instructions = function.extend_instructions(self);
+        let first = |s: &mut Instructions<'_, '_>, list: LocalId| {
+            let _ = s
+                .local_get(list)
+                .ref_cast_non_null(HeapType::Concrete(struct_index))
+                .struct_get(struct_index, 2);
+        };
+        let rest = |s: &mut Instructions<'_, '_>, list: LocalId| {
+            let _ = s
+                .local_get(list)
+                .ref_cast_non_null(HeapType::Concrete(struct_index))
+                .struct_get(struct_index, 1);
+        };
+        #[rustfmt::skip]
+        let _ = instructions
+            // an empty list is `[]`
+            .local_get(list)
+            .ref_is_null()
+            .if_(InstrSeqType::Simple(None), |then_s| {
+                let _ = then_s
+                    .local_get(list)
+                    .local_get(ptr)
+                    .return_call(list_repr);
+            })
+            // count the items, falling back to the list repr on the first
+            // that is not printable
+            .local_get(list)
+            .local_set(current)
+            .block_(InstrSeqType::Simple(None), |block_s| {
+                let block_id = block_s.id();
+                let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
+                    let loop_id = loop_s.id();
+                    let _ = loop_s.local_get(current).ref_is_null().br_if(block_id);
+                    first(loop_s, current);
+                    let _ = loop_s
+                        .local_tee(item)
+                        .int_const(&32.into())
+                        .int_lt()
+                        .local_get(item)
+                        .int_const(&126.into())
+                        .int_gt()
+                        .i32_or()
+                        .if_(InstrSeqType::Simple(None), |then_s| {
+                            let _ = then_s
+                                .local_get(list)
+                                .local_get(ptr)
+                                .return_call(list_repr);
+                        })
+                        .i32_inc(count);
+                    rest(loop_s, current);
+                    let _ = loop_s.local_set(current).br(loop_id);
+                });
+            })
+            // ptr + prefix + count + `")`
+            .local_get(ptr)
+            .local_get(count)
+            .i32_add()
+            .i32_const(prefix.len() as i32 + 2)
+            .i32_add()
+            .ensure_memory(needed)
+            .local_get(ptr)
+            .local_set(dest);
+        for byte in prefix {
+            let _ = instructions.local_get(dest).byte_store(*byte).i32_inc(dest);
+        }
+        #[rustfmt::skip]
+        let _ = instructions
+            .local_get(list)
+            .local_set(current)
+            .block_(InstrSeqType::Simple(None), |block_s| {
+                let block_id = block_s.id();
+                let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
+                    let loop_id = loop_s.id();
+                    let _ = loop_s
+                        .local_get(current)
+                        .ref_is_null()
+                        .br_if(block_id)
+                        .local_get(dest);
+                    first(loop_s, current);
+                    let _ = loop_s
+                        .int_to_i32()
+                        .i32_store8(MemArg { offset: 0, align: 0 })
+                        .i32_inc(dest);
+                    rest(loop_s, current);
+                    let _ = loop_s.local_set(current).br(loop_id);
+                });
+            })
+            .local_get(dest)
+            .byte_store(b'"')
+            .i32_inc(dest)
+            .local_get(dest)
+            .byte_store(b')')
+            .i32_inc(dest)
+            .local_get(dest)
+            .local_get(ptr)
+            .i32_sub()
+            .end();
+        function.finish(self)
     }
 
     fn code_list_repr(&mut self, item_type: &Arc<Type>) -> FunctionId {
@@ -1557,7 +1795,30 @@ impl<'a> Generator<'a> {
 
     fn code_tuple_repr(&mut self, types: &[Arc<Type>]) -> FunctionId {
         let type_index = self.tuple_type_index(types.iter().cloned());
+        if types.is_empty() {
+            let value_vt = self.val_type_ref(type_index);
+            return self.code_constant_repr(value_vt, "#()");
+        }
         self.code_composite_repr(&"#".into(), None, type_index, types)
+    }
+
+    /// A repr that writes `text` for any value.
+    fn code_constant_repr(&mut self, value_vt: ValType, text: &str) -> FunctionId {
+        // params
+        let value = self.wasm_local(value_vt);
+        let ptr = self.wasm_local(ValType::I32); // I32
+        // return I32 - number of written bytes
+        let string_index = self.string_index(&text.into());
+        let string_to_memory =
+            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
+        let mut function = Function::new(self, "_repr_constant", &[value, ptr], &[ValType::I32]);
+        let _ = function
+            .extend_instructions(self)
+            .global_as_non_null(string_index)
+            .local_get(ptr)
+            .call(string_to_memory)
+            .end();
+        function.finish(self)
     }
 
     fn code_composite_repr(
@@ -1636,23 +1897,16 @@ impl<'a> Generator<'a> {
     }
 
     fn code_function_repr(&mut self, type_: &Arc<Type>) -> FunctionId {
+        // As on Erlang and JavaScript, only the arity is shown.
+        let (arguments, _) = type_.fn_types().expect("function type");
+        let names = (0..arguments.len())
+            .map(|index| {
+                let letter = (b'a' + (index % 26) as u8) as char;
+                letter.to_string().repeat(index / 26 + 1)
+            })
+            .join(", ");
         let fn_vt = self.val_type(type_);
-        // params
-        let _func = self.wasm_local(fn_vt); // Function
-        let ptr = self.wasm_local(ValType::I32); // I32
-        // return I32 - number of written bytes
-        let repr = format!("//{} {{ ... }}", self.type_pretty_name(type_));
-        let string_index = self.string_index(&repr.into());
-        let string_to_memory =
-            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
-        let mut function = Function::new(self, "_repr_function", &[_func, ptr], &[ValType::I32]);
-        let _ = function
-            .extend_instructions(self)
-            .global_as_non_null(string_index)
-            .local_get(ptr)
-            .call(string_to_memory)
-            .end();
-        function.finish(self)
+        self.code_constant_repr(fn_vt, &format!("//fn({names}) {{ ... }}"))
     }
 
     pub(super) fn code_utf_codepoint_repr(&mut self) -> FunctionId {

@@ -26,4 +26,4 @@ src/my/mod.gleam:10
 src/my/mod.gleam:10 "inc"
 2
 src/my/mod.gleam:11
-//fn(Int) -> Int { ... }
+//fn(a) { ... }

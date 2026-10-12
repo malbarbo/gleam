@@ -26,4 +26,4 @@ src/my/mod.gleam:5
 src/my/mod.gleam:6
 []
 src/my/mod.gleam:7
-#(1, 2.0, "home", #, //fn() -> Bool { ... })
+#(1, 2.0, "home", #(), //fn() { ... })

@@ -32,6 +32,24 @@ pub fn main() {
 }
 
 #[test]
+fn inspect_string_control_characters() {
+    run_ok(
+        r#"
+@external(webassembly, "builtins", "_inspect")
+fn inspect(value: a) -> String
+
+pub fn main() {
+    assert inspect("\t\f\r\n") == "\"\\t\\f\\r\\n\""
+    assert inspect("a\u{0008}b") == "\"a\\u{0008}b\""
+    assert inspect("\u{001B}\u{0000}") == "\"\\u{001B}\\u{0000}\""
+    assert inspect("\u{007F}\u{0080}\u{009F}") == "\"\\u{007F}\\u{0080}\\u{009F}\""
+    assert inspect("\u{00A0}é") == "\"\u{00A0}é\""
+}
+"#,
+    );
+}
+
+#[test]
 fn inspect_list() {
     run_ok(
         r#"
