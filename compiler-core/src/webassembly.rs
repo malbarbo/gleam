@@ -655,6 +655,8 @@ struct Generator<'a> {
     module: &'a TypedModule,
     line_numbers: &'a LineNumbers,
     all_modules: &'a HashMap<EcoString, &'a TypedModule>,
+    /// The functions of every module, by module and function name.
+    functions: HashMap<(EcoString, EcoString), &'a TypedFunction>,
     all_line_numbers: &'a HashMap<EcoString, LineNumbers>,
     /// The module currently being compiled (may differ from self.module for imports).
     current_module_name: EcoString,
@@ -706,6 +708,17 @@ impl<'a> Generator<'a> {
             module,
             line_numbers,
             all_modules,
+            functions: iter::once(module)
+                .chain(all_modules.values().copied())
+                .flat_map(|module| {
+                    module.definitions.functions.iter().map(|function| {
+                        (
+                            (module.name.clone(), function_name(function).clone()),
+                            function,
+                        )
+                    })
+                })
+                .collect(),
             all_line_numbers,
             current_module_name: module.name.clone(),
         }
@@ -3209,32 +3222,35 @@ impl<'a> Generator<'a> {
         fn_name: &EcoString,
         required_type: &Arc<Type>,
     ) -> Id {
-        let module = self.module_imported(module_name);
-
-        for function in &module.definitions.functions {
-            if function_name(function) == fn_name {
-                if let Some((_, fname, _)) = &function.external_webassembly {
-                    if fname == INSPECT {
-                        return self.function_inspect(required_type);
-                    }
-                    return self.find_global_expect(fname);
-                }
-                // Track which module we're compiling for correct diagnostics.
-                let prev_module =
-                    std::mem::replace(&mut self.current_module_name, module_name.clone());
-                // Build a module-qualified name to avoid collisions
-                let base_name: EcoString = format!("{module_name}.{fn_name}").into();
-                let id = if is_generic_type(&function_type(function)) {
-                    self.function_generic(function, required_type, false, base_name)
-                } else {
-                    self.function(function, false, base_name)
-                };
-                self.current_module_name = prev_module;
-                return id;
+        let function = self.module_function_definition(module_name, fn_name);
+        if let Some((_, fname, _)) = &function.external_webassembly {
+            if fname == INSPECT {
+                return self.function_inspect(required_type);
             }
+            return self.find_global_expect(fname);
         }
+        // Track which module we're compiling for correct diagnostics.
+        let prev_module = std::mem::replace(&mut self.current_module_name, module_name.clone());
+        let base_name = imported_base_name(module_name, fn_name);
+        let id = if is_generic_type(&function_type(function)) {
+            self.function_generic(function, required_type, false, base_name)
+        } else {
+            self.function(function, false, base_name)
+        };
+        self.current_module_name = prev_module;
+        id
+    }
 
-        panic!("imported function not found during code generation: {module_name}.{fn_name}");
+    /// The definition of the function `name` of the module `module`.
+    fn module_function_definition(
+        &self,
+        module: &EcoString,
+        name: &EcoString,
+    ) -> &'a TypedFunction {
+        self.functions
+            .get(&(module.clone(), name.clone()))
+            .copied()
+            .unwrap_or_else(|| panic!("function not found during code generation: {module}.{name}"))
     }
 
     fn statements(
@@ -5074,6 +5090,12 @@ fn custom_type_inferred_constructor<'a>(
     type_
         .custom_type_inferred_variant()
         .and_then(|index| custom_type.constructors.get(index as usize))
+}
+
+/// The base name of the function `name` imported from the module `module`,
+/// qualified to avoid collisions.
+fn imported_base_name(module: &EcoString, name: &EcoString) -> EcoString {
+    format!("{module}.{name}").into()
 }
 
 /// The name of the constructor `constructor`, written as `name`: an imported

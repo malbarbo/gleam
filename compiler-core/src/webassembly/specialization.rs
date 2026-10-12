@@ -234,23 +234,13 @@ impl<'a> Generator<'a> {
 
     /// The function `name` of the module `module`, if it has a body.
     fn module_function(&self, module: &EcoString, name: &EcoString) -> Option<Callee<'a>> {
-        let imported = *module != self.module.name;
-        let definitions = if imported {
-            self.module_imported(module)
-        } else {
-            self.module
-        };
-        let function = definitions
-            .definitions
-            .functions
-            .iter()
-            .find(|function| function_name(function) == name)?;
+        let function = self.module_function_definition(module, name);
         if function.external_webassembly.is_some() {
             return None;
         }
         // The same base names as `var` and `function_imported`
-        let base_name = if imported {
-            format!("{module}.{name}").into()
+        let base_name = if *module != self.module.name {
+            imported_base_name(module, name)
         } else {
             name.clone()
         };
