@@ -2156,13 +2156,13 @@ Is your editor still running and connected to the language server?"
                             "The external type \"{name}\" is not supported by the WebAssembly target."
                         ),
                         None,
-                        *location,
+                        Some(*location),
                     ),
                     crate::webassembly::Error::UnknownBuiltinFunction { location, name } => (
                         "Unknown builtin function",
                         format!("The function \"{name}\" is not available in the builtins module."),
                         did_you_mean(name, &crate::webassembly::builtin_function_names()),
-                        *location,
+                        Some(*location),
                     ),
                     crate::webassembly::Error::WrongBuiltinFunctionSignature {
                         location,
@@ -2175,7 +2175,7 @@ Is your editor still running and connected to the language server?"
                             "The function \"{name}\" has an incorrect signature for the WebAssembly target.\n\nExpected: {expected}\n     Got: {got}"
                         ),
                         None,
-                        *location,
+                        Some(*location),
                     ),
                     crate::webassembly::Error::UnknownExternalModule { location, module } => (
                         "Unknown external module",
@@ -2183,7 +2183,7 @@ Is your editor still running and connected to the language server?"
                             "The module \"{module}\" is not available. Only \"builtins\" is supported for the WebAssembly target."
                         ),
                         None,
-                        *location,
+                        Some(*location),
                     ),
                     crate::webassembly::Error::ReservedModuleName { name } => (
                         "Reserved module name",
@@ -2192,7 +2192,7 @@ Is your editor still running and connected to the language server?"
 which provides a module with this name."
                         ),
                         Some("Rename the module.".into()),
-                        SrcSpan::default(),
+                        Some(SrcSpan::default()),
                     ),
                     crate::webassembly::Error::WrongExternalTypeArity {
                         location,
@@ -2205,13 +2205,13 @@ which provides a module with this name."
                             "The external type \"{name}\" of the WebAssembly target takes {expected} type parameters, but this one has {got}."
                         ),
                         None,
-                        *location,
+                        Some(*location),
                     ),
                     crate::webassembly::Error::UnsupportedFeature { location, feature } => (
                         "Unsupported feature",
                         format!("{feature} is not yet supported by the WebAssembly target."),
                         None,
-                        *location,
+                        Some(*location),
                     ),
                     crate::webassembly::Error::IntLiteralOutOfRange {
                         location,
@@ -2221,7 +2221,7 @@ which provides a module with this name."
                         "Integer literal out of range",
                         format!("The value {value} does not fit in {target}."),
                         None,
-                        *location,
+                        Some(*location),
                     ),
                     crate::webassembly::Error::FloatLiteralOutOfRange {
                         location,
@@ -2231,20 +2231,30 @@ which provides a module with this name."
                         "Float literal out of range",
                         format!("The value {value} does not fit in {target}."),
                         None,
-                        *location,
+                        Some(*location),
+                    ),
+                    crate::webassembly::Error::TypeTooLarge { type_, definition } => (
+                        "Type too large",
+                        format!(
+                            "The type {type_} is too large for the WebAssembly target, \
+which generates code for each type a function or a custom type is used with.
+
+A type grows without bound when a function calls itself, through other \
+functions, with a larger type, or when a custom type has a field that is a \
+function that returns the same custom type with a larger type."
+                        ),
+                        None,
+                        definition.as_ref().map(|(_, location)| *location),
                     ),
                 };
                 vec![Diagnostic {
                     title: title.into(),
                     text,
                     level: Level::Error,
-                    location: Some(Location {
+                    location: location.map(|span| Location {
                         src: src.clone(),
                         path: path.clone(),
-                        label: Label {
-                            text: None,
-                            span: location,
-                        },
+                        label: Label { text: None, span },
                         extra_labels: vec![],
                     }),
                     hint,

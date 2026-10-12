@@ -148,6 +148,28 @@ pub enum Error {
         value: EcoString,
         target: EcoString,
     },
+    /// A type is too large to be generated, see `val_type`. `definition` is
+    /// the module and the location of the outermost custom type in it.
+    TypeTooLarge {
+        type_: EcoString,
+        definition: Option<(EcoString, SrcSpan)>,
+    },
+}
+
+impl Error {
+    /// The module of the location of the error, when it may not be the
+    /// module being generated.
+    pub fn module(&self) -> Option<&EcoString> {
+        if let Error::TypeTooLarge {
+            definition: Some((module, _)),
+            ..
+        } = self
+        {
+            Some(module)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -710,6 +732,8 @@ struct Generator<'a> {
     /// The functions of builtins-wasm, by name.
     rust_functions: HashMap<EcoString, FunctionId>,
     main: Option<FunctionId>,
+    /// The first error found while generating the code, see `val_type`.
+    error: Option<Error>,
     /// Interned string literals and the global each one owns. Insertion
     /// ordered: `code_start` walks this map to lay out the data segments, so
     /// a `HashMap` here would make the emitted module differ between runs of
@@ -775,6 +799,7 @@ impl<'a> Generator<'a> {
             builtins_external: HashMap::new(),
             rust_functions: HashMap::new(),
             main: None,
+            error: None,
             strings: IndexMap::new(),
             consts: vec![],
             globals: Rc::default(),
@@ -932,7 +957,11 @@ impl<'a> Generator<'a> {
         self.constants();
         self.functions();
         let constants = self.function_constants();
-        Ok(self.function_start(constants))
+        let start = self.function_start(constants);
+        match self.error.take() {
+            Some(error) => Err(error),
+            None => Ok(start),
+        }
     }
 
     fn functions_builtins(
@@ -1775,6 +1804,23 @@ impl<'a> Generator<'a> {
         }
     }
 
+    /// The module and the location of the definition of the outermost custom
+    /// type in `type_`, looking first at `type_` and then at its arguments.
+    fn custom_type_definition(&self, type_: &Arc<Type>) -> Option<(EcoString, SrcSpan)> {
+        if let Some((module, _, _)) = type_.named_type_information()
+            && module != PRELUDE_MODULE_NAME
+            && let Some((
+                CustomType::Struct { custom_type, .. } | CustomType::Union { custom_type, .. },
+                _,
+            )) = self.custom_type(type_)
+        {
+            return Some((module, custom_type.location));
+        }
+        type_arguments(type_)
+            .iter()
+            .find_map(|argument| self.custom_type_definition(argument))
+    }
+
     fn custom_type_expect(&self, type_: &Arc<Type>) -> (CustomType, Vec<Arc<Type>>) {
         self.custom_type(type_)
             .unwrap_or_else(|| panic!("custom type to be registered for {type_:?}"))
@@ -1842,7 +1888,24 @@ impl<'a> Generator<'a> {
         }
     }
 
+    /// The wasm type of `type_`. A type deeper than `TYPE_DEPTH_LIMIT` or
+    /// larger than `TYPE_SIZE_LIMIT` is an error: it is the sign of a type
+    /// that grows without bound, and generating it would not terminate. The
+    /// type is replaced by `anyref`, and no more function bodies are
+    /// generated (see `_function`), so the generation stops and reports the
+    /// error.
     fn val_type(&mut self, type_: &Arc<Type>) -> ValType {
+        let mut size = TYPE_SIZE_LIMIT;
+        if is_type_too_large(type_, TYPE_DEPTH_LIMIT, &mut size) {
+            if self.error.is_none() {
+                let name = self.type_pretty_name(type_);
+                self.error = Some(Error::TypeTooLarge {
+                    type_: truncate(&name, 60),
+                    definition: self.custom_type_definition(type_),
+                });
+            }
+            return ANYREF;
+        }
         if is_identity_type(type_) {
             let type_index = self.struct_type_index("Identity".into(), vec![]);
             self.val_type_ref(type_index)
@@ -3311,6 +3374,10 @@ impl<'a> Generator<'a> {
         let results = self.val_types(iter::once(function.return_type.clone()));
         let index = self.allocate_placeholder_function(&name, &params, &results);
         let id = self.add_function_to_globals(name.clone(), index);
+        if self.error.is_some() {
+            // The code is not used, see `val_type`.
+            return id;
+        }
         let saved_local_functions = std::mem::replace(&mut self.local_functions, local_functions);
         let saved_specialization = std::mem::replace(&mut self.specialization, specialization);
         let saved_known_arguments =
@@ -5412,6 +5479,61 @@ fn is_main_funtion(function: &TypedFunction) -> bool {
         .map(|name| name.1 == MAIN)
         .unwrap_or(false)
         && function.arguments.is_empty()
+}
+
+/// The largest depth of a type, as `List(List(Int))` has depth 3, and the
+/// largest number of types in it, counting the type and each of its
+/// arguments, see `val_type`. Types of real programs are much smaller. A type
+/// that grows without bound passes the depth when it grows by one level each
+/// time, as `List(a)`, and the size first when it doubles, as `#(a, a)`. The
+/// depth also bounds the recursion of the generation, which goes one level
+/// deeper for each larger type.
+const TYPE_DEPTH_LIMIT: usize = 20;
+const TYPE_SIZE_LIMIT: usize = 1000;
+
+/// Whether `type_` is deeper than `depth` or has more than `size` types. It
+/// stops at `size`: a type that grows without bound usually shares its
+/// arguments, as `#(a, a)`, and its tree is exponentially large.
+fn is_type_too_large(type_: &Arc<Type>, depth: usize, size: &mut usize) -> bool {
+    if let Type::Var { type_ } = type_.as_ref() {
+        return match &*type_.borrow() {
+            TypeVar::Link { type_ } => is_type_too_large(type_, depth, size),
+            TypeVar::Unbound { .. } | TypeVar::Generic { .. } => false,
+        };
+    }
+    if depth == 0 || *size == 0 {
+        return true;
+    }
+    *size -= 1;
+    type_arguments(type_)
+        .iter()
+        .any(|argument| is_type_too_large(argument, depth - 1, size))
+}
+
+/// The types in `type_`: the arguments of a named type, the params and the
+/// return of a function, and the elements of a tuple.
+fn type_arguments(type_: &Arc<Type>) -> Vec<Arc<Type>> {
+    match type_.as_ref() {
+        Type::Named { arguments, .. } => arguments.clone(),
+        Type::Fn { arguments, return_ } => arguments
+            .iter()
+            .chain(iter::once(return_))
+            .cloned()
+            .collect(),
+        Type::Tuple { elements } => elements.clone(),
+        Type::Var { type_ } => match &*type_.borrow() {
+            TypeVar::Link { type_ } => type_arguments(type_),
+            TypeVar::Unbound { .. } | TypeVar::Generic { .. } => vec![],
+        },
+    }
+}
+
+/// The first `length` characters of `text`, followed by `…` if it is longer.
+fn truncate(text: &str, length: usize) -> EcoString {
+    match text.char_indices().nth(length) {
+        Some((index, _)) => format!("{}…", &text[..index]).into(),
+        None => text.into(),
+    }
 }
 
 fn type_pretty_name(names: &Names, type_: &Arc<Type>) -> EcoString {

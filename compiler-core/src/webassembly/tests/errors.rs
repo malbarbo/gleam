@@ -166,6 +166,90 @@ pub fn main() {
     );
 }
 
+#[test]
+fn type_too_large_polymorphic_recursion() {
+    assert_wasm_error!(
+        r#"
+pub type N(a) {
+  Flat(a)
+  Nest(N(#(a, a)))
+}
+
+pub fn build(n: Int, x: a) -> N(a) {
+  case n {
+    0 -> Flat(x)
+    _ -> Nest(helper(n, x))
+  }
+}
+
+fn helper(n: Int, x: b) -> N(#(b, b)) {
+  build(n - 1, #(x, x))
+}
+
+pub fn main() {
+  build(3, 1)
+}
+"#,
+    );
+}
+
+#[test]
+fn type_too_large_polymorphic_recursion_by_one_level() {
+    assert_wasm_error!(
+        r#"
+pub type N(a) {
+  Flat(a)
+  Nest(N(List(a)))
+}
+
+pub fn build(n: Int, x: a) -> N(a) {
+  case n {
+    0 -> Flat(x)
+    _ -> Nest(helper(n, x))
+  }
+}
+
+fn helper(n: Int, x: b) -> N(List(b)) {
+  build(n - 1, [x])
+}
+
+pub fn main() {
+  build(3, 1)
+}
+"#,
+    );
+}
+
+#[test]
+fn type_too_large_function_field() {
+    assert_wasm_error!(
+        r#"
+pub type F(a) {
+  F(a, fn() -> F(#(a, a)))
+}
+
+pub fn main() {
+  F(1, fn() { panic })
+}
+"#,
+    );
+}
+
+#[test]
+fn type_too_large_function_field_by_one_level() {
+    assert_wasm_error!(
+        r#"
+pub type F(a) {
+  F(a, fn() -> F(List(a)))
+}
+
+pub fn main() {
+  F(1, fn() { panic })
+}
+"#,
+    );
+}
+
 // Module imports are not yet supported but the test infrastructure
 // doesn't support multi-module compilation, so we can't test this
 // error here yet.

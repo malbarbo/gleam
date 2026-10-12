@@ -396,9 +396,21 @@ impl<'a> WebAssembly<'a> {
             .chain(modules)
             .map(|m| (m.name.clone(), LineNumbers::new(&m.code)))
             .collect();
+        let sources: HashMap<_, _> = dependencies
+            .iter()
+            .chain(modules)
+            .map(|m| (m.name.clone(), m))
+            .collect();
         for module in modules {
             let wasm_name = module.name.clone();
-            self.wasm_module(writer, module, &wasm_name, &all_modules, &all_line_numbers)?
+            self.wasm_module(
+                writer,
+                module,
+                &wasm_name,
+                &all_modules,
+                &all_line_numbers,
+                &sources,
+            )?
         }
         Ok(())
     }
@@ -410,6 +422,7 @@ impl<'a> WebAssembly<'a> {
         wasm_name: &str,
         all_modules: &HashMap<EcoString, &TypedModule>,
         all_line_numbers: &HashMap<EcoString, LineNumbers>,
+        sources: &HashMap<EcoString, &Module>,
     ) -> Result<()> {
         let name = format!("{wasm_name}.wasm");
         println!("Generating {name}");
@@ -423,10 +436,17 @@ impl<'a> WebAssembly<'a> {
             self.int,
             self.float,
         )
-        .map_err(|error| crate::Error::WebAssembly {
-            path: module.input_path.clone(),
-            src: module.code.clone(),
-            error,
+        .map_err(|error| {
+            // The location of the error may be in another module.
+            let module = error
+                .module()
+                .and_then(|name| sources.get(name).copied())
+                .unwrap_or(module);
+            crate::Error::WebAssembly {
+                path: module.input_path.clone(),
+                src: module.code.clone(),
+                error,
+            }
         })?;
         tracing::debug!(name = ?name, "Generated WebAssembly module");
         writer.write_bytes(&path, &output)?;

@@ -1,0 +1,29 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+expression: "\npub type N(a) {\n  Flat(a)\n  Nest(N(#(a, a)))\n}\n\npub fn build(n: Int, x: a) -> N(a) {\n  case n {\n    0 -> Flat(x)\n    _ -> Nest(helper(n, x))\n  }\n}\n\nfn helper(n: Int, x: b) -> N(#(b, b)) {\n  build(n - 1, #(x, x))\n}\n\npub fn main() {\n  build(3, 1)\n}\n"
+---
+----- SOURCE CODE
+
+pub type N(a) {
+  Flat(a)
+  Nest(N(#(a, a)))
+}
+
+pub fn build(n: Int, x: a) -> N(a) {
+  case n {
+    0 -> Flat(x)
+    _ -> Nest(helper(n, x))
+  }
+}
+
+fn helper(n: Int, x: b) -> N(#(b, b)) {
+  build(n - 1, #(x, x))
+}
+
+pub fn main() {
+  build(3, 1)
+}
+
+
+----- ERROR
+TypeTooLarge { type_: "N(#(#(#(#(#(#(#(#(#(Int, Int), #(Int, Int)), #(#(Int, Int), …", definition: Some(("my/mod", SrcSpan { start: 1, end: 14 })) }
