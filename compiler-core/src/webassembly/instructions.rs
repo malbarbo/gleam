@@ -644,6 +644,8 @@ impl<'a, 'b> Instructions<'a, 'b> {
     }
 
     binop!(i32_eq, I32Eq);
+    binop!(f32_add, F32Add);
+    binop!(f64_add, F64Add);
     binop!(i32_ne, I32Ne);
     binop!(i32_lt_u, I32LtU);
     binop!(i32_le_u, I32LeU);

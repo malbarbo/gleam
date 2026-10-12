@@ -102,10 +102,20 @@ impl<'a> Generator<'a> {
                 let fold = self.function_fold_i64();
                 instructions.call(fold).call(mix)
             }
-            Hash::F32 => instructions.f32_reinterpret().call(mix),
+            // `-0.0 + 0.0` is `0.0`, as `0.0 == -0.0`
+            Hash::F32 => instructions
+                .f32_const(0.0)
+                .f32_add()
+                .f32_reinterpret()
+                .call(mix),
             Hash::F64 => {
                 let fold = self.function_fold_i64();
-                instructions.f64_reinterpret().call(fold).call(mix)
+                instructions
+                    .f64_const(0.0)
+                    .f64_add()
+                    .f64_reinterpret()
+                    .call(fold)
+                    .call(mix)
             }
             Hash::Call(function) => instructions.call(function),
             Hash::Hook(function) => {

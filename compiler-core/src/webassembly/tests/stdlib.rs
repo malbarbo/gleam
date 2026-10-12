@@ -359,3 +359,34 @@ pub fn main() {
 "#,
     );
 }
+
+/// The external floats hash `-0.0` like `0.0`, as they are equal.
+#[test]
+fn hash_external_floats_negative_zero() {
+    run_ok(
+        r#"
+@external(webassembly, "builtins", "F32")
+type F32
+
+@external(webassembly, "builtins", "F64")
+type F64
+
+@external(webassembly, "builtins", "_float_to_f32")
+fn to_f32(value: Float) -> F32
+
+@external(webassembly, "builtins", "_float_to_f64")
+fn to_f64(value: Float) -> F64
+
+@external(webassembly, "builtins", "_hash")
+fn hash(a: a) -> Int
+
+pub fn main() {
+    let assert True = to_f32(0.0) == to_f32(-0.0)
+    let assert True = hash(to_f32(0.0)) == hash(to_f32(-0.0))
+    let assert True = to_f64(0.0) == to_f64(-0.0)
+    let assert True = hash(to_f64(0.0)) == hash(to_f64(-0.0))
+    let assert False = hash(to_f64(1.0)) == hash(to_f64(2.0))
+}
+"#,
+    );
+}
