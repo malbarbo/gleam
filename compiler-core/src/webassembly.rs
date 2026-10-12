@@ -2743,52 +2743,27 @@ impl<'a> Generator<'a> {
         type_: &Arc<Type>,
     ) -> Option<FunctionId> {
         let _ = type_.fn_types()?;
+        let target = constant_target(constant)?;
         let global = Scope::Global(self.globals.clone());
-        let (name, constructor) = match constant {
-            Constant::Var {
-                name,
-                constructor: Some(constructor),
-                ..
-            } => (name, constructor),
-            Constant::Record {
-                name,
-                arguments: None,
-                record_constructor,
-                ..
-            } => {
-                let name = record_constant_name(name, record_constructor);
-                return Some(self.var_id(&global, name, type_).func_id());
-            }
-            Constant::Int { .. }
-            | Constant::Float { .. }
-            | Constant::String { .. }
-            | Constant::Tuple { .. }
-            | Constant::List { .. }
-            | Constant::Record { .. }
-            | Constant::RecordUpdate { .. }
-            | Constant::BitArray { .. }
-            | Constant::Var { .. }
-            | Constant::BinaryOperator { .. }
-            | Constant::Invalid { .. }
-            | Constant::Todo { .. } => return None,
-        };
-        let id = match &constructor.variant {
-            ValueConstructorVariant::ModuleFn {
-                module,
-                name: function_name,
-                ..
-            } if *module != self.module.name => {
-                self.function_imported(module, function_name, type_)
-            }
-            ValueConstructorVariant::ModuleConstant { literal, .. } => {
-                return self.constant_function(literal, type_);
-            }
-            ValueConstructorVariant::ModuleFn { .. } | ValueConstructorVariant::Record { .. } => {
-                self.var_id(&global, constructor_name(name, constructor), type_)
-            }
-            ValueConstructorVariant::LocalVariable { .. } => return None,
-        };
+        let id = self.static_target_id(&global, target, type_);
         matches!(id.kind, IdKind::Func).then(|| id.func_id())
+    }
+
+    /// The id of the function `target` used with type `type_`.
+    fn static_target_id(
+        &mut self,
+        scope: &Scope,
+        target: StaticTarget<'_>,
+        type_: &Arc<Type>,
+    ) -> Id {
+        match target {
+            StaticTarget::Function { module, name } if *module != self.module.name => {
+                self.function_imported(module, name, type_)
+            }
+            StaticTarget::Function { name, .. } | StaticTarget::Constructor(name) => {
+                self.var_id(scope, name, type_)
+            }
+        }
     }
 
     /// Pushes the value of the constant `constant` used with type `type_`. A
@@ -4054,47 +4029,10 @@ impl<'a> Generator<'a> {
     /// can be emitted as a direct `call` instead of a `call_ref` on a
     /// function reference.
     fn static_callee(&mut self, scope: &Scope, fun: &TypedExpr) -> Option<FunctionId> {
-        let type_ = fun.type_();
-        let id = if let TypedExpr::Var {
-            name, constructor, ..
-        } = fun
-        {
-            match &constructor.variant {
-                ValueConstructorVariant::ModuleFn { module, name, .. }
-                    if module.as_str() != self.module.name.as_str() =>
-                {
-                    self.function_imported(module, name, &type_)
-                }
-                // Local functions take their captures, see `local_function_of`
-                ValueConstructorVariant::LocalVariable { .. } => return None,
-                ValueConstructorVariant::ModuleFn { .. }
-                | ValueConstructorVariant::Record { .. } => {
-                    self.var_id(scope, constructor_name(name, constructor), &type_)
-                }
-                ValueConstructorVariant::ModuleConstant { literal, .. } => {
-                    return self.constant_function(literal, &type_);
-                }
-            }
-        } else if let TypedExpr::ModuleSelect {
-            constructor,
-            module_name,
-            label,
-            ..
-        } = fun
-        {
-            match constructor {
-                ModuleValueConstructor::Fn { .. } => {
-                    self.function_imported(module_name, label, &type_)
-                }
-                ModuleValueConstructor::Record { name, .. } => self.var_id(scope, name, &type_),
-                ModuleValueConstructor::Constant { literal, .. } => {
-                    return self.constant_function(literal, &type_);
-                }
-            }
-        } else {
-            return None;
-        };
-        Some(id.func_id())
+        // Local functions take their captures, see `local_function_of`
+        let target = static_target(fun)?;
+        let id = self.static_target_id(scope, target, &fun.type_());
+        matches!(id.kind, IdKind::Func).then(|| id.func_id())
     }
 
     fn expression_var(
@@ -5125,6 +5063,86 @@ fn record_constant_name<'a>(
     record_constructor
         .as_deref()
         .map_or(name, |constructor| constructor_name(name, constructor))
+}
+
+/// What a function value statically names.
+#[derive(Debug, Clone, Copy)]
+enum StaticTarget<'a> {
+    /// The function `name` of the module `module`.
+    Function {
+        module: &'a EcoString,
+        name: &'a EcoString,
+    },
+    /// The record constructor with the real name `name`.
+    Constructor(&'a EcoString),
+}
+
+/// What the expression `fun` statically names, following constant aliases.
+fn static_target(fun: &TypedExpr) -> Option<StaticTarget<'_>> {
+    if let TypedExpr::Var { constructor, .. } = fun {
+        variant_target(&constructor.variant)
+    } else if let TypedExpr::ModuleSelect {
+        constructor,
+        module_name,
+        label,
+        ..
+    } = fun
+    {
+        match constructor {
+            ModuleValueConstructor::Fn { .. } => Some(StaticTarget::Function {
+                module: module_name,
+                name: label,
+            }),
+            ModuleValueConstructor::Record { name, .. } => Some(StaticTarget::Constructor(name)),
+            ModuleValueConstructor::Constant { literal, .. } => constant_target(literal),
+        }
+    } else {
+        None
+    }
+}
+
+/// What the constant `constant` statically names, following constant aliases.
+fn constant_target(constant: &TypedConstant) -> Option<StaticTarget<'_>> {
+    match constant {
+        Constant::Var {
+            constructor: Some(constructor),
+            ..
+        } => variant_target(&constructor.variant),
+        Constant::Record {
+            name,
+            arguments: None,
+            record_constructor,
+            ..
+        } => Some(StaticTarget::Constructor(record_constant_name(
+            name,
+            record_constructor,
+        ))),
+        Constant::Int { .. }
+        | Constant::Float { .. }
+        | Constant::String { .. }
+        | Constant::Tuple { .. }
+        | Constant::List { .. }
+        | Constant::Record { .. }
+        | Constant::RecordUpdate { .. }
+        | Constant::BitArray { .. }
+        | Constant::Var { .. }
+        | Constant::BinaryOperator { .. }
+        | Constant::Invalid { .. }
+        | Constant::Todo { .. } => None,
+    }
+}
+
+/// What a value with the variant `variant` statically names. A local
+/// variable names nothing statically.
+fn variant_target(variant: &ValueConstructorVariant) -> Option<StaticTarget<'_>> {
+    match variant {
+        ValueConstructorVariant::ModuleFn { module, name, .. } => {
+            Some(StaticTarget::Function { module, name })
+        }
+        ValueConstructorVariant::Record { name, .. } => Some(StaticTarget::Constructor(name)),
+        ValueConstructorVariant::ModuleConstant { literal, .. } => constant_target(literal),
+        ValueConstructorVariant::LocalVariable { .. } => None,
+    }
 }
 
 fn is_generic_type(type_: &Arc<Type>) -> bool {

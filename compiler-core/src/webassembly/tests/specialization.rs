@@ -142,6 +142,52 @@ pub fn fold(list: List(a), acc: b, f: fn(b, a) -> b) -> b {
 }
 
 #[test]
+fn constant_aliases_of_callees() {
+    let src = r#"
+import thepackage/lists
+
+const folder = fold
+
+const again = folder
+
+fn fold(list: List(a), acc: b, f: fn(b, a) -> b) -> b {
+  case list {
+    [] -> acc
+    [x, ..rest] -> fold(rest, f(acc, x), f)
+  }
+}
+
+fn add(a: Int, b: Int) -> Int {
+  a + b
+}
+
+pub fn main() {
+  assert again([1, 2, 3], 0, add) == 6
+  assert lists.again([1, 2, 3], 0, add) == 6
+}
+"#;
+    let deps = vec![(
+        "thepackage",
+        "thepackage/lists",
+        r#"
+pub const again = folder
+
+const folder = fold
+
+pub fn fold(list: List(a), acc: b, f: fn(b, a) -> b) -> b {
+  case list {
+    [] -> acc
+    [x, ..rest] -> fold(rest, f(acc, x), f)
+  }
+}
+"#,
+    )];
+    let result = run_wasm(src, deps.clone());
+    assert!(result.status.success(), "{}", result.stderr);
+    assert_eq!(count_ref_calls(&compile_wasm(src, deps)), 0);
+}
+
+#[test]
 fn labelled_arguments() {
     run(
         r#"

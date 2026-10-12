@@ -183,52 +183,9 @@ impl<'a> Generator<'a> {
 
     /// The function with a body that `fun` names, if any.
     fn callee_definition(&self, fun: &TypedExpr) -> Option<Callee<'a>> {
-        if let TypedExpr::Var { constructor, .. } = fun {
-            match &constructor.variant {
-                ValueConstructorVariant::ModuleFn { module, name, .. } => {
-                    self.module_function(module, name)
-                }
-                ValueConstructorVariant::ModuleConstant { literal, .. } => {
-                    self.constant_callee(literal)
-                }
-                ValueConstructorVariant::LocalVariable { .. }
-                | ValueConstructorVariant::Record { .. } => None,
-            }
-        } else if let TypedExpr::ModuleSelect {
-            constructor,
-            module_name,
-            label,
-            ..
-        } = fun
-        {
-            match constructor {
-                ModuleValueConstructor::Fn { .. } => self.module_function(module_name, label),
-                ModuleValueConstructor::Constant { literal, .. } => self.constant_callee(literal),
-                ModuleValueConstructor::Record { .. } => None,
-            }
-        } else {
-            None
-        }
-    }
-
-    /// The function with a body that the constant `constant` names, if any.
-    fn constant_callee(&self, constant: &TypedConstant) -> Option<Callee<'a>> {
-        let Constant::Var {
-            constructor: Some(constructor),
-            ..
-        } = constant
-        else {
-            return None;
-        };
-        match &constructor.variant {
-            ValueConstructorVariant::ModuleFn { module, name, .. } => {
-                self.module_function(module, name)
-            }
-            ValueConstructorVariant::ModuleConstant { literal, .. } => {
-                self.constant_callee(literal)
-            }
-            ValueConstructorVariant::LocalVariable { .. }
-            | ValueConstructorVariant::Record { .. } => None,
+        match static_target(fun)? {
+            StaticTarget::Function { module, name } => self.module_function(module, name),
+            StaticTarget::Constructor(_) => None,
         }
     }
 

@@ -415,6 +415,9 @@ pub fn main() {
     assert unwrap(nothing) == 0
     assert unwrap(Nothing) == 0
     assert h == make
+    assert unwrap(helpers.make(5)) == 5
+    assert unwrap(helpers.empty) == 0
+    assert helpers.make == make
     0
 }
 "#,
@@ -426,6 +429,10 @@ pub type Wrapper {
   Empty
   Wrap(Int)
 }
+
+pub const make = Wrap
+
+pub const empty = Empty
 "#,
         )],
     );
