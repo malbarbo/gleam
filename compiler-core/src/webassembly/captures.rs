@@ -177,7 +177,8 @@ pub(super) fn local_variable_definition(expr: &TypedExpr) -> Option<SrcSpan> {
 }
 
 /// The definitions of the local variables that `body` calls, passes to a
-/// call or binds to another variable.
+/// call or binds to another variable. Arguments of a constructor or an
+/// external are only stored or given away, so they do not count.
 pub(super) fn called_or_passed(body: &[TypedStatement]) -> HashSet<SrcSpan> {
     let mut visitor = CallUses::default();
     for statement in body {
@@ -200,7 +201,11 @@ impl<'ast> Visit<'ast> for CallUses {
         arguments: &'ast [TypedCallArg],
         open_parenthesis: &'ast Option<u32>,
     ) {
-        let values = iter::once(fun).chain(arguments.iter().map(|argument| &argument.value));
+        let passed = (!stores_arguments(fun))
+            .then_some(arguments)
+            .into_iter()
+            .flatten();
+        let values = iter::once(fun).chain(passed.map(|argument| &argument.value));
         self.definitions
             .extend(values.filter_map(local_variable_definition));
         visit_typed_expr_call(self, location, type_, fun, arguments, open_parenthesis);
@@ -219,6 +224,25 @@ impl<'ast> Visit<'ast> for CallUses {
             .extend(local_variable_definition(&assignment.value));
         visit_typed_pipeline_assignment(self, assignment);
     }
+}
+
+/// Whether the function `fun` only stores its arguments or gives them away,
+/// without calling them in Gleam code: a constructor or an external.
+fn stores_arguments(fun: &TypedExpr) -> bool {
+    fun.is_record_constructor_function()
+        || matches!(
+            fun,
+            TypedExpr::Var {
+                constructor: ValueConstructor {
+                    variant: ValueConstructorVariant::ModuleFn {
+                        external_webassembly: Some(_),
+                        ..
+                    },
+                    ..
+                },
+                ..
+            }
+        )
 }
 
 impl<'ast> Visit<'ast> for Variables<'ast> {

@@ -262,8 +262,9 @@ impl<'a> Generator<'a> {
     }
 
     /// Which parameters of `callee` are specialized: the ones declared with a
-    /// function type that its body calls or passes to a call. A parameter
-    /// that is only stored gains nothing from it.
+    /// function type that its body calls or passes to a call, see
+    /// `captures::called_or_passed`. A parameter that is only stored gains
+    /// nothing from it.
     fn specialized_parameters(&mut self, callee: &Callee<'a>) -> Rc<[bool]> {
         if let Some(parameters) = self.specializations.parameters.get(&callee.base_name) {
             return parameters.clone();

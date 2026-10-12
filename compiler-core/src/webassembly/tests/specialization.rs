@@ -345,13 +345,26 @@ fn first(x: a, g: fn(a) -> a) -> a {
   g(x)
 }
 
+pub type Holder {
+  Holder(fn(Int) -> Int)
+}
+
+fn wrap(g: fn(Int) -> Int) -> Holder {
+  Holder(g)
+}
+
 pub fn main() {
   let assert [g] = store(fn(x) { x + 1 })
   assert g(1) == 2
   assert first(fn(x) { x * 2 }, fn(h) { h })(2) == 4
+  let assert Holder(h) = wrap(fn(x) { x + 3 })
+  let assert Holder(k) = wrap(fn(x) { x * 3 })
+  assert h(1) == 4
+  assert k(2) == 6
 }
 "#;
     assert_eq!(specializations(src, "store"), Vec::<String>::new());
+    assert_eq!(specializations(src, "wrap"), Vec::<String>::new());
     assert_eq!(specializations(src, "first").len(), 1);
     run_ok(&format!("{FOLD}\n{src}"));
 }
