@@ -400,6 +400,25 @@ impl<'a, 'b> Instructions<'a, 'b> {
         self
     }
 
+    /// Writes `byte` at the address in `dest` and increments it, growing the
+    /// memory when `dest` is past its end.
+    pub(super) fn write_byte(&mut self, dest: LocalId, byte: u8) -> &mut Self {
+        #[rustfmt::skip]
+        let _ = self
+            .local_get(dest)
+            .memory_size()
+            .i32_const(16)
+            .i32_shl()
+            .i32_ge_u()
+            .if_(InstrSeqType::Simple(None), |body| {
+                let _ = body.i32_const(1).memory_grow().drop();
+            })
+            .local_get(dest)
+            .byte_store(byte)
+            .i32_inc(dest);
+        self
+    }
+
     pub(super) fn byte_store(&mut self, byte: u8) -> &mut Self {
         self.i32_const(byte as i32).i32_store8(MemArg {
             offset: 0,

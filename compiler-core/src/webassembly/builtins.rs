@@ -1310,9 +1310,15 @@ impl<'a> Generator<'a> {
             IntType::I32 => self.find_global_expect(I32_TO_STR),
             IntType::I64 => self.find_global_expect(I64_TO_STR),
         };
+        let needed = self.wasm_local(ValType::I32);
         let mut function = Function::new(self, "_repr_int", &[value, ptr], &[ValType::I32]);
         let _ = function
             .extend_instructions(self)
+            // the longest text of a number is shorter than 64 bytes
+            .local_get(ptr)
+            .i32_const(64)
+            .i32_add()
+            .ensure_memory(needed)
             .local_get(value)
             .local_get(ptr)
             .call(id.func_id())
@@ -1357,9 +1363,15 @@ impl<'a> Generator<'a> {
             FloatType::F32 => self.find_global_expect(F32_TO_STR),
             FloatType::F64 => self.find_global_expect(F64_TO_STR),
         };
+        let needed = self.wasm_local(ValType::I32);
         let mut function = Function::new(self, "_repr_float", &[value, ptr], &[ValType::I32]);
         let _ = function
             .extend_instructions(self)
+            // the longest text of a number is shorter than 64 bytes
+            .local_get(ptr)
+            .i32_const(64)
+            .i32_add()
+            .ensure_memory(needed)
             .local_get(value)
             .local_get(ptr)
             .call(id.func_id())
@@ -1513,9 +1525,7 @@ impl<'a> Generator<'a> {
                             .br(loop_id);
                     });
             })
-            .local_get(dest)
-            .byte_store(b'"')
-            .i32_inc(dest)
+            .write_byte(dest, b'"')
             .local_get(dest)
             .local_get(ptr)
             .i32_sub()
@@ -1537,12 +1547,8 @@ impl<'a> Generator<'a> {
                         ValType::I32,
                         |then_s| {
                             let _ = then_s
-                                .local_get(dest)
-                                .byte_store(b'\\')
-                                .i32_inc(dest)
-                                .local_get(dest)
-                                .byte_store(escape)
-                                .i32_inc(dest)
+                                .write_byte(dest, b'\\')
+                                .write_byte(dest, escape)
                                 .i32_const(1);
                         },
                         |else_s| {
@@ -1556,7 +1562,7 @@ impl<'a> Generator<'a> {
             fn escape_unicode(&mut self, dest: LocalId, code: LocalId, digit: LocalId)
             -> &mut Self {
                 for byte in *b"\\u{00" {
-                    let _ = self.local_get(dest).byte_store(byte).i32_inc(dest);
+                    let _ = self.write_byte(dest, byte);
                 }
                 self.local_get(code)
                     .i32_const(4)
@@ -1568,9 +1574,7 @@ impl<'a> Generator<'a> {
                     .i32_and()
                     .local_set(digit)
                     .hex_digit(dest, digit)
-                    .local_get(dest)
-                    .byte_store(b'}')
-                    .i32_inc(dest)
+                    .write_byte(dest, b'}')
             }
 
             /// Writes the uppercase hex digit of `digit`.
@@ -1752,7 +1756,7 @@ impl<'a> Generator<'a> {
             .local_get(ptr)
             .local_set(dest);
         for byte in prefix {
-            let _ = instructions.local_get(dest).byte_store(*byte).i32_inc(dest);
+            let _ = instructions.write_byte(dest, *byte);
         }
         #[rustfmt::skip]
         let _ = instructions
@@ -1776,12 +1780,8 @@ impl<'a> Generator<'a> {
                     let _ = loop_s.local_set(current).br(loop_id);
                 });
             })
-            .local_get(dest)
-            .byte_store(b'"')
-            .i32_inc(dest)
-            .local_get(dest)
-            .byte_store(b')')
-            .i32_inc(dest)
+            .write_byte(dest, b'"')
+            .write_byte(dest, b')')
             .local_get(dest)
             .local_get(ptr)
             .i32_sub()
@@ -1807,19 +1807,14 @@ impl<'a> Generator<'a> {
         #[rustfmt::skip]
         let _ = instructions
             .local_get(ptr)
-            .local_tee(dest)
-            .byte_store(b'[')
-            .i32_inc(dest)
+            .local_set(dest)
+            .write_byte(dest, b'[')
             .local_get(lst)
             .ref_is_null()
             .if_else(
                 InstrSeqType::Simple(None),
                 |then_s| {
-                    let _ = then_s
-                        .local_get(dest)
-                        .byte_store(b']')
-                        .i32_const(2)
-                        .return_();
+                    let _ = then_s.write_byte(dest, b']').i32_const(2).return_();
                 },
                 |else_s| {
                     let _ = else_s
@@ -1845,18 +1840,12 @@ impl<'a> Generator<'a> {
                         InstrSeqType::Simple(None),
                         |then_s| {
                             let _ = then_s
-                                .local_get(dest)
-                                .byte_store(b']')
-                                .i32_inc(dest);
+                                .write_byte(dest, b']');
                         },
                         |else_s| {
                             let _ = else_s
-                                .local_get(dest)
-                                .byte_store(b',')
-                                .i32_inc(dest)
-                                .local_get(dest)
-                                .byte_store(b' ')
-                                .i32_inc(dest)
+                                .write_byte(dest, b',')
+                                .write_byte(dest, b' ')
                                 .local_get(lst)
                                 .ref_cast_non_null(HeapType::Concrete(struct_index))
                                 .struct_get(struct_index, 2) // first
@@ -1943,9 +1932,7 @@ impl<'a> Generator<'a> {
         if let Some((first_type, &first_idx)) = fields_iter.next() {
             let first_repr = self.function_repr(first_type);
             let _ = instructions
-                .local_get(dest)
-                .byte_store(b'(')
-                .i32_inc(dest)
+                .write_byte(dest, b'(')
                 .local_get(value)
                 .struct_get(type_index, first_idx)
                 .local_get(dest)
@@ -1957,12 +1944,8 @@ impl<'a> Generator<'a> {
             for (type_, &field_index) in fields_iter {
                 let repr = self.function_repr(type_);
                 let _ = instructions
-                    .local_get(dest)
-                    .byte_store(b',')
-                    .i32_inc(dest)
-                    .local_get(dest)
-                    .byte_store(b' ')
-                    .i32_inc(dest)
+                    .write_byte(dest, b',')
+                    .write_byte(dest, b' ')
                     .local_get(value)
                     .struct_get(type_index, field_index)
                     .local_get(dest)
@@ -1972,7 +1955,7 @@ impl<'a> Generator<'a> {
                     .local_set(dest);
             }
 
-            let _ = instructions.local_get(dest).byte_store(b')').i32_inc(dest);
+            let _ = instructions.write_byte(dest, b')');
         }
 
         let _ = instructions.local_get(dest).local_get(ptr).i32_sub().end();
@@ -2032,10 +2015,16 @@ impl<'a> Generator<'a> {
             CustomType::External { to_str, .. } => {
                 let to_str = to_str.expect("external type with a text");
                 let to_str_fn = self.find_global_expect(to_str);
+                let needed = self.wasm_local(ValType::I32);
                 let mut function =
                     Function::new(self, "_repr_external", &[value, ptr], &[ValType::I32]);
                 let _ = function
                     .extend_instructions(self)
+                    // the longest text of a number is shorter than 64 bytes
+                    .local_get(ptr)
+                    .i32_const(64)
+                    .i32_add()
+                    .ensure_memory(needed)
                     .local_get(value)
                     .local_get(ptr)
                     .call(to_str_fn.func_id())

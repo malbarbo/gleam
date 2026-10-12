@@ -113,3 +113,41 @@ pub fn main() {
 "#,
     );
 }
+
+/// The text of a big value needs more memory than there is at the start.
+#[test]
+fn inspect_grows_the_memory() {
+    run_ok(
+        r#"
+@external(webassembly, "builtins", "_inspect")
+fn inspect(value: a) -> String
+
+@external(webassembly, "builtins", "_string_byte_size")
+fn byte_size(string: String) -> Int
+
+type Nested {
+  Nested(Nested, Int)
+  Leaf
+}
+
+fn nest(n: Int, acc: Nested) -> Nested {
+  case n {
+    0 -> acc
+    _ -> nest(n - 1, Nested(acc, 123_456_789))
+  }
+}
+
+fn numbers(n: Int, acc: List(Int)) -> List(Int) {
+  case n {
+    0 -> acc
+    _ -> numbers(n - 1, [n * 1000, ..acc])
+  }
+}
+
+pub fn main() {
+  let assert 38_004 = byte_size(inspect(nest(2000, Leaf)))
+  let assert True = byte_size(inspect(numbers(20_000, []))) > 150_000
+}
+"#,
+    );
+}
