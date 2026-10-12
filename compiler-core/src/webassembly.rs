@@ -51,7 +51,7 @@ use crate::{
     },
     type_::{
         self, Deprecation, ModuleValueConstructor, PRELUDE_MODULE_NAME, Type, TypeVar,
-        ValueConstructorVariant,
+        ValueConstructor, ValueConstructorVariant,
         printer::{Names, Printer},
     },
 };
@@ -2360,8 +2360,10 @@ impl<'a> Generator<'a> {
                 type_,
                 arguments,
                 name,
+                record_constructor,
                 ..
             } => {
+                let name = record_constant_name(name, record_constructor);
                 let (custom_type, args) = self.custom_type_expect(type_);
                 match custom_type {
                     CustomType::Enum { values } => {
@@ -2567,8 +2569,10 @@ impl<'a> Generator<'a> {
                 name,
                 arguments,
                 type_,
+                record_constructor,
                 ..
             } => {
+                let name = record_constant_name(name, record_constructor);
                 if let Some((CustomType::Enum { values }, _)) = self.custom_type(type_) {
                     let value = Self::enum_value_index(&values, name);
                     let _ = instructions.i32_const(value as i32);
@@ -2697,8 +2701,12 @@ impl<'a> Generator<'a> {
             Constant::Record {
                 name,
                 arguments: None,
+                record_constructor,
                 ..
-            } => return Some(self.var_id(&global, name, type_).func_id()),
+            } => {
+                let name = record_constant_name(name, record_constructor);
+                return Some(self.var_id(&global, name, type_).func_id());
+            }
             Constant::Int { .. }
             | Constant::Float { .. }
             | Constant::String { .. }
@@ -2724,7 +2732,7 @@ impl<'a> Generator<'a> {
                 return self.constant_function(literal, type_);
             }
             ValueConstructorVariant::ModuleFn { .. } | ValueConstructorVariant::Record { .. } => {
-                self.var_id(&global, name, type_)
+                self.var_id(&global, constructor_name(name, constructor), type_)
             }
             ValueConstructorVariant::LocalVariable { .. } => return None,
         };
@@ -3162,7 +3170,10 @@ impl<'a> Generator<'a> {
         for capture in &self.local_function_captures_of(info).variables {
             let outer = info.enclosing.type_(&capture.type_);
             let inner = mono.type_(&capture.type_);
-            if !outer.same_as(&inner) && self.val_type(&outer) != self.val_type(&inner) {
+            // A type variable left in the outer type has no wasm type.
+            if !outer.same_as(&inner)
+                && (is_generic_type(&outer) || self.val_type(&outer) != self.val_type(&inner))
+            {
                 panic!(
                     "the type of the captured variable {} depends on the type variables of the local function, this is not supported yet",
                     capture.name
@@ -3556,6 +3567,7 @@ impl<'a> Generator<'a> {
                 }
                 ValueConstructorVariant::ModuleFn { .. }
                 | ValueConstructorVariant::Record { .. } => {
+                    let name = constructor_name(name, constructor);
                     self.expression_var(&scope, instructions, name, &expression.type_(), None);
                 }
             },
@@ -4027,7 +4039,9 @@ impl<'a> Generator<'a> {
                 // Local functions take their captures, see `local_function_of`
                 ValueConstructorVariant::LocalVariable { .. } => return None,
                 ValueConstructorVariant::ModuleFn { .. }
-                | ValueConstructorVariant::Record { .. } => self.var_id(scope, name, &type_),
+                | ValueConstructorVariant::Record { .. } => {
+                    self.var_id(scope, constructor_name(name, constructor), &type_)
+                }
                 ValueConstructorVariant::ModuleConstant { literal, .. } => {
                     return self.constant_function(literal, &type_);
                 }
@@ -4377,11 +4391,13 @@ impl<'a> Generator<'a> {
                 );
             }
             Pattern::Constructor {
-                name,
+                constructor,
                 type_,
                 arguments,
                 ..
             } => {
+                // The name as written can be an alias of an imported constructor.
+                let name = &constructor.expect_ref("inferred pattern constructor").name;
                 let (custom_type, args) = self.custom_type_expect(type_);
                 match custom_type {
                     CustomType::Enum { values } => {
@@ -5033,6 +5049,27 @@ fn custom_type_inferred_constructor<'a>(
     type_
         .custom_type_inferred_variant()
         .and_then(|index| custom_type.constructors.get(index as usize))
+}
+
+/// The name of the constructor `constructor`, written as `name`: an imported
+/// constructor can be written with an alias.
+fn constructor_name<'a>(name: &'a EcoString, constructor: &'a ValueConstructor) -> &'a EcoString {
+    match &constructor.variant {
+        ValueConstructorVariant::Record { name, .. } => name,
+        ValueConstructorVariant::LocalVariable { .. }
+        | ValueConstructorVariant::ModuleConstant { .. }
+        | ValueConstructorVariant::ModuleFn { .. } => name,
+    }
+}
+
+/// The name of the constructor of the record constant written as `name`.
+fn record_constant_name<'a>(
+    name: &'a EcoString,
+    record_constructor: &'a Option<Box<ValueConstructor>>,
+) -> &'a EcoString {
+    record_constructor
+        .as_deref()
+        .map_or(name, |constructor| constructor_name(name, constructor))
 }
 
 fn is_generic_type(type_: &Arc<Type>) -> bool {

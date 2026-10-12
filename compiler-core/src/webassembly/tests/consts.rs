@@ -386,3 +386,52 @@ pub const pair = #(empty, 2)
         result.stderr
     );
 }
+
+#[test]
+fn aliased_imported_constructors() {
+    let result = super::run_wasm(
+        r#"
+import thepackage/helpers.{type Wrapper, Empty as Nothing, Wrap as Box}
+
+const make = Box
+
+const boxed = Box(3)
+
+const nothing = Nothing
+
+fn unwrap(wrapper: Wrapper) -> Int {
+    case wrapper {
+        Box(value) -> value
+        Nothing -> 0
+    }
+}
+
+pub fn main() {
+    let h = Box
+    assert unwrap(Box(1)) == 1
+    assert unwrap(h(2)) == 2
+    assert unwrap(make(4)) == 4
+    assert unwrap(boxed) == 3
+    assert unwrap(nothing) == 0
+    assert unwrap(Nothing) == 0
+    assert h == make
+    0
+}
+"#,
+        vec![(
+            "thepackage",
+            "thepackage/helpers",
+            r#"
+pub type Wrapper {
+  Empty
+  Wrap(Int)
+}
+"#,
+        )],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
