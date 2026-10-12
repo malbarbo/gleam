@@ -243,6 +243,7 @@ pub fn main() {
 fn dynamic_of_arrays() {
     let _ = run_dynamic(
         r#"
+import dict
 import dynamic
 
 @external(webassembly, "builtins", "Array")
@@ -262,6 +263,11 @@ pub fn main() {
   let big = from_list(range(100_000, []))
   let assert True = dynamic.cast(big) == dynamic.cast(from_list(range(100_000, [])))
   let assert False = dynamic.cast(big) == dynamic.cast(from_list(range(100_000, [0])))
+  // And hashed without growing the stack.
+  let d = dict.from_list([#(dynamic.cast(big), 1), #(dynamic.cast(range(100_000, [])), 2)])
+  let assert Ok(1) = dict.get(d, dynamic.cast(from_list(range(100_000, []))))
+  let assert Ok(2) = dict.get(d, dynamic.cast(range(100_000, [])))
+  let assert Error(Nil) = dict.get(d, dynamic.cast(range(100_000, [0])))
 }
 
 fn range(i: Int, acc: List(Int)) -> List(Int) {

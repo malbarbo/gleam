@@ -1049,6 +1049,9 @@ impl<'a> Generator<'a> {
                 (vec![s, s], vec![BOOL_VALTYPE])
             }
             BuiltinFunction::Hash(val_type, _) => (vec![*val_type], vec![ValType::I32]),
+            BuiltinFunction::HashInto(val_type, _) => {
+                (vec![*val_type, ValType::I32], vec![ValType::I32])
+            }
             BuiltinFunction::HashExternal(val_type, _) => {
                 (vec![*val_type], vec![self.int.val_type()])
             }

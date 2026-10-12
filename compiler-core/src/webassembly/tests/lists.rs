@@ -93,6 +93,49 @@ pub fn main() {
     );
 }
 
+/// The hash of the rest of a list is a tail call, so long lists don't exhaust
+/// the stack.
+#[test]
+fn long_list_hash() {
+    run_ok(
+        r#"
+type Stream {
+  Stream(head: Int, tail: Stream)
+  End
+}
+
+@external(webassembly, "builtins", "_hash")
+fn hash(value: a) -> Int
+
+fn range(i: Int, acc: List(Int)) -> List(Int) {
+  case i {
+    0 -> acc
+    _ -> range(i - 1, [i, ..acc])
+  }
+}
+
+fn stream(i: Int, acc: Stream) -> Stream {
+  case i {
+    0 -> acc
+    _ -> stream(i - 1, Stream(i, acc))
+  }
+}
+
+pub fn main() {
+    let assert True = hash(range(1_000_000, [])) == hash(range(1_000_000, []))
+    let assert False = hash(range(1_000_000, [])) == hash(range(1_000_000, [0]))
+    let assert True = hash([range(1_000_000, [])]) == hash([range(1_000_000, [])])
+    let assert True = hash(stream(1_000_000, End)) == hash(stream(1_000_000, End))
+    let assert False =
+      hash(stream(1_000_000, End)) == hash(stream(1_000_000, Stream(0, End)))
+    let assert False = hash([1, 2]) == hash([2, 1])
+    let assert False = hash([[1], []]) == hash([[], [1]])
+    let assert False = hash([]) == hash([[]])
+}
+"#,
+    );
+}
+
 /// The equality of the rest of a list is a tail call, so long lists don't
 /// exhaust the stack.
 #[test]

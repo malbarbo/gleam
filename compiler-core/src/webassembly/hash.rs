@@ -206,7 +206,7 @@ impl<'a> Generator<'a> {
             self.code_string_hash()
         } else if let Some(types) = type_.tuple_types() {
             let type_index = self.tuple_type_index(types.clone());
-            self.code_composite_hash(type_index, None, 0, types)
+            self.code_composite_hash(type_index, types)
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             match custom_type {
                 CustomType::Struct {
@@ -215,12 +215,9 @@ impl<'a> Generator<'a> {
                 } => {
                     let (type_index, types) =
                         self.mono_struct_type_index(type_, &custom_type, &constructor, &args);
-                    self.code_composite_hash(type_index, None, 0, types)
+                    self.code_composite_hash(type_index, types)
                 }
-                CustomType::Union { custom_type, .. } => {
-                    let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
-                    self.code_union_hash(type_, supertype_index, &custom_type, &args)
-                }
+                CustomType::Union { .. } => self.code_union_hash(type_),
                 CustomType::Array => {
                     let element = args.first().expect("array element type");
                     self.code_array_hash(element)
@@ -291,12 +288,10 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    /// Combines the hashes of the fields in order, starting from `tag`.
+    /// Combines the hashes of the fields in order.
     fn code_composite_hash(
         &mut self,
         type_index: TypeId,
-        field_mapping: Option<&[u32]>,
-        tag: i32,
         types: impl IntoIterator<Item = Arc<Type>>,
     ) -> FunctionId {
         let composite_vt = self.val_type_ref(type_index);
@@ -307,23 +302,17 @@ impl<'a> Generator<'a> {
         let h = self.wasm_local(ValType::I32);
         let hashes = types
             .into_iter()
-            .enumerate()
-            .map(|(gleam_index, type_)| {
-                let field_index = field_mapping
-                    .and_then(|m| m.get(gleam_index).copied())
-                    .unwrap_or(gleam_index as u32);
-                (field_index, self.function_hash(&type_))
-            })
+            .map(|type_| self.function_hash(&type_))
             .collect_vec();
         let mut function = Function::new(self, "_hash_composite", &[value], &[ValType::I32]);
         let mut instructions = function.extend_instructions(self);
-        let _ = instructions.i32_const(SEED ^ tag).local_set(h);
-        for (field_index, hash) in hashes {
+        let _ = instructions.i32_const(SEED).local_set(h);
+        for (field_index, hash) in hashes.into_iter().enumerate() {
             // h = (h ^ hash(field)) * MULTIPLIER
             let _ = instructions
                 .local_get(h)
                 .local_get(value)
-                .struct_get(type_index, field_index);
+                .struct_get(type_index, field_index as u32);
             self.hash_instructions(&mut instructions, hash);
             let _ = instructions
                 .i32_xor()
@@ -335,22 +324,44 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    fn code_union_hash(
-        &mut self,
-        type_: &Arc<Type>,
-        supertype_index: TypeId,
-        custom_type: &TypedCustomType,
-        args: &[Arc<Type>],
-    ) -> FunctionId {
-        let null_tag = Self::null_variant_tag(custom_type);
-        let composite_vt = if null_tag.is_some() {
-            self.val_type_ref_nullable(supertype_index)
-        } else {
-            self.val_type_ref(supertype_index)
-        };
+    /// `mix(_hash_into(value, SEED))`.
+    fn code_union_hash(&mut self, type_: &Arc<Type>) -> FunctionId {
+        let hash_into = self.function_union_hash_into(type_);
+        let union_vt = self.val_type(type_);
         let mix = self.function_hash_mix();
         // params
-        let value = self.wasm_local(composite_vt);
+        let value = self.wasm_local(union_vt);
+        let mut function = Function::new(self, "_hash_union", &[value], &[ValType::I32]);
+        let _ = function
+            .extend_instructions(self)
+            .local_get(value)
+            .i32_const(SEED)
+            .call(hash_into)
+            .call(mix)
+            .end();
+        function.finish(self)
+    }
+
+    /// `_hash_into(T)` of a union: `fn(T, h) -> h`, combining the hash of the
+    /// value into `h`.
+    fn function_union_hash_into(&mut self, type_: &Arc<Type>) -> FunctionId {
+        let builtin = BuiltinFunction::HashInto(self.val_type(type_), self.type_pretty_name(type_));
+        let type_ = type_.clone();
+        self.get_function_builtin(builtin, |s| s.code_union_hash_into(&type_))
+    }
+
+    /// Dispatches on the tag to the `_hash_into` of the variant, with a tail
+    /// call.
+    fn code_union_hash_into(&mut self, type_: &Arc<Type>) -> FunctionId {
+        let Some((CustomType::Union { custom_type, .. }, args)) = self.custom_type(type_) else {
+            panic!("union type expected")
+        };
+        let null_tag = Self::null_variant_tag(&custom_type);
+        let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
+        let union_vt = self.val_type(type_);
+        // params
+        let value = self.wasm_local(union_vt);
+        let h = self.wasm_local(ValType::I32);
         // locals
         let tag = self.wasm_local(ValType::I32);
         let layout = self.union_layout(type_);
@@ -361,23 +372,30 @@ impl<'a> Generator<'a> {
                 variant_hashes.push(None);
             } else {
                 let (_, type_index, types) =
-                    self.mono_union_subtype_index(type_, custom_type, constructor, args);
+                    self.mono_union_subtype_index(type_, &custom_type, constructor, &args);
                 let mapping = layout.fields(i).to_vec();
                 let name = self.type_pretty_name(type_) + "." + constructor.name.clone();
-                let builtin = BuiltinFunction::Hash(self.val_type_ref(type_index), name);
+                let builtin = BuiltinFunction::HashInto(self.val_type_ref(type_index), name);
                 let hash_index = self.get_function_builtin(builtin, |s| {
-                    s.code_composite_hash(type_index, Some(&mapping), i as i32, types)
+                    s.code_variant_hash_into(type_index, &mapping, i as i32, types, type_)
                 });
                 variant_hashes.push(Some((type_index, hash_index)));
             }
         }
-        let mut function = Function::new(self, "_hash_union", &[value], &[ValType::I32]);
+        let mut function = Function::new(self, "_hash_into_union", &[value, h], &[ValType::I32]);
         let mut instructions = function.extend_instructions(self);
         if let Some(null_tag) = null_tag {
             let _ = instructions.local_get(value).ref_is_null().if_(
                 InstrSeqType::Simple(None),
                 |body| {
-                    let _ = body.i32_const(SEED ^ null_tag as i32).call(mix).return_();
+                    // (h ^ (SEED ^ tag)) * MULTIPLIER
+                    let _ = body
+                        .local_get(h)
+                        .i32_const(SEED ^ null_tag as i32)
+                        .i32_xor()
+                        .i32_const(MULTIPLIER)
+                        .i32_mul()
+                        .return_();
                 },
             );
         }
@@ -396,12 +414,78 @@ impl<'a> Generator<'a> {
                         let _ = body
                             .local_get(value)
                             .ref_cast_non_null(HeapType::Concrete(type_index))
-                            .call(hash_index)
-                            .return_();
+                            .local_get(h)
+                            .return_call(hash_index);
                     });
             }
         }
         let _ = instructions.unreachable().end();
+        function.finish(self)
+    }
+
+    /// `fn(variant, h) -> h`: combines the tag and the hashes of the fields
+    /// into `h`. A field of the type of the union (the rest of a list) is
+    /// combined last, with a tail call, so that long lists don't overflow the
+    /// stack.
+    fn code_variant_hash_into(
+        &mut self,
+        type_index: TypeId,
+        field_mapping: &[u32],
+        tag: i32,
+        types: Vec<Arc<Type>>,
+        parent: &Arc<Type>,
+    ) -> FunctionId {
+        let variant_vt = self.val_type_ref(type_index);
+        // params
+        let value = self.wasm_local(variant_vt);
+        let h = self.wasm_local(ValType::I32);
+        let last = types.iter().rposition(|type_| type_.same_as(parent));
+        let fields = types
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != last)
+            .map(|(index, type_)| (index, self.function_hash(type_)))
+            .collect_vec();
+        let mut function = Function::new(self, "_hash_into_variant", &[value, h], &[ValType::I32]);
+        let mut instructions = function.extend_instructions(self);
+        // h = (h ^ (SEED ^ tag)) * MULTIPLIER
+        let _ = instructions
+            .local_get(h)
+            .i32_const(SEED ^ tag)
+            .i32_xor()
+            .i32_const(MULTIPLIER)
+            .i32_mul()
+            .local_set(h);
+        let field_index = |gleam_index: usize| {
+            field_mapping
+                .get(gleam_index)
+                .copied()
+                .unwrap_or(gleam_index as u32)
+        };
+        for (gleam_index, hash) in fields {
+            // h = (h ^ hash(field)) * MULTIPLIER
+            let _ = instructions
+                .local_get(h)
+                .local_get(value)
+                .struct_get(type_index, field_index(gleam_index));
+            self.hash_instructions(&mut instructions, hash);
+            let _ = instructions
+                .i32_xor()
+                .i32_const(MULTIPLIER)
+                .i32_mul()
+                .local_set(h);
+        }
+        if let Some(last) = last {
+            let hash_into = self.function_union_hash_into(parent);
+            let _ = instructions
+                .local_get(value)
+                .struct_get(type_index, field_index(last))
+                .local_get(h)
+                .return_call(hash_into)
+                .end();
+        } else {
+            let _ = instructions.local_get(h).end();
+        }
         function.finish(self)
     }
 }
