@@ -623,12 +623,16 @@ struct Generator<'a> {
     variants: HashMap<(EcoString, EcoString), Variant>,
     local_functions: HashMap<SrcSpan, Rc<LocalFunction>>,
     specializations: Specializations,
-    /// The closure singleton of each code function, and of each function
-    /// used as a value (whose code is an adapter).
-    closures: HashMap<FunctionId, GlobalId>,
-    /// The closure code of each function used as a value.
-    adapters: HashMap<FunctionId, FunctionId>,
-    /// The closure type of each function type, by its name, see
+    /// The closure singleton of each code function.
+    closure_globals: HashMap<FunctionId, GlobalId>,
+    /// The closure singleton of each function used as a value, by its
+    /// closure type: an external with a generic signature has one function
+    /// for all its types.
+    function_closures: HashMap<(FunctionId, TypeId), GlobalId>,
+    /// The closure code of each function used as a value, by its closure type
+    /// and the number of its first params that are captures.
+    adapters: HashMap<(FunctionId, TypeId, usize), FunctionId>,
+    /// The closure type of each function type, by its qualified name, see
     /// `closure_type`.
     closure_types: HashMap<EcoString, TypeId>,
     /// Anonymous functions are named after the specialization that contains
@@ -682,7 +686,8 @@ impl<'a> Generator<'a> {
             variants: HashMap::new(),
             local_functions: HashMap::new(),
             specializations: Specializations::default(),
-            closures: HashMap::new(),
+            closure_globals: HashMap::new(),
+            function_closures: HashMap::new(),
             adapters: HashMap::new(),
             closure_types: HashMap::new(),
             specialization: 0,
@@ -1529,12 +1534,11 @@ impl<'a> Generator<'a> {
         arguments: impl IntoIterator<Item = Arc<Type>>,
         return_: Arc<Type>,
     ) -> ClosureType {
-        let type_ = type_::fn_(arguments.into_iter().collect(), return_);
-        let name = qualified_type_name(&type_).replace(" ", "");
+        let arguments = arguments.into_iter().collect_vec();
+        let name = qualified_function_type_name(&arguments, &return_);
         if let Some(type_index) = self.closure_types.get(&name) {
             return self.closure_type_of(*type_index);
         }
-        let (arguments, return_) = type_.fn_types().expect("function type");
         // Computing the val types may define recursive types that move the
         // closure types, so the cache is checked after it.
         let params = self.val_types(arguments.iter().cloned());
@@ -1577,8 +1581,9 @@ impl<'a> Generator<'a> {
             panic!("two closure types");
         };
         let types = &mut self.wasm_module.types;
-        types.get_mut(code_type_index).name = Some(format!("{name}::code"));
-        types.get_mut(type_index).name = Some(name.to_string());
+        let wasm_name = name.replace(" ", "");
+        types.get_mut(code_type_index).name = Some(format!("{wasm_name}::code"));
+        types.get_mut(type_index).name = Some(wasm_name.to_string());
         let _ = self.wasm_types.insert(key, type_index);
         let _ = self.closure_types.insert(name, type_index);
         ClosureType {
@@ -1613,7 +1618,7 @@ impl<'a> Generator<'a> {
 
     /// The closure of the code function `code`, a singleton global.
     fn closure_global(&mut self, code: FunctionId, closure: &ClosureType) -> GlobalId {
-        if let Some(global) = self.closures.get(&code) {
+        if let Some(global) = self.closure_globals.get(&code) {
             return *global;
         }
         let name = self.wasm_module.funcs.get(code).name.clone();
@@ -1627,21 +1632,22 @@ impl<'a> Generator<'a> {
             ]),
         );
         self.wasm_module.globals.get_mut(global).name = name;
-        let _ = self.closures.insert(code, global);
+        let _ = self.closure_globals.insert(code, global);
         global
     }
 
     /// The closure that calls `function`, whose type is `type_`. Its code is
     /// an adapter that drops the closure param.
     fn closure_of(&mut self, function: FunctionId, type_: &Arc<Type>) -> GlobalId {
-        if let Some(global) = self.closures.get(&function) {
-            return *global;
-        }
         let (arguments, return_) = type_.fn_types().expect("function type");
         let closure = self.closure_type(arguments, return_);
+        let key = (function, closure.type_index);
+        if let Some(global) = self.function_closures.get(&key) {
+            return *global;
+        }
         let code = self.closure_adapter(function, type_, &[]);
         let global = self.closure_global(code, &closure);
-        let _ = self.closures.insert(function, global);
+        let _ = self.function_closures.insert(key, global);
         global
     }
 
@@ -1654,11 +1660,12 @@ impl<'a> Generator<'a> {
         type_: &Arc<Type>,
         captures: &[Capture],
     ) -> FunctionId {
-        if let Some(adapter) = self.adapters.get(&function) {
-            return *adapter;
-        }
         let (arguments, return_) = type_.fn_types().expect("function type");
         let closure = self.closure_type(arguments, return_);
+        let key = (function, closure.type_index, captures.len());
+        if let Some(adapter) = self.adapters.get(&key) {
+            return *adapter;
+        }
         let function_type = self.wasm_module.funcs.get(function).ty();
         let function_type = self.wasm_module.types.get(function_type);
         let (params, results) = (
@@ -1695,7 +1702,7 @@ impl<'a> Generator<'a> {
         }
         let _ = instructions.return_call(function).end();
         let code = adapter.finish(self);
-        let _ = self.adapters.insert(function, code);
+        let _ = self.adapters.insert(key, code);
         if let Some(known) = self.specializations.returns.get(&function).copied() {
             let _ = self.specializations.returns.insert(code, known);
         }
@@ -2080,6 +2087,16 @@ impl<'a> Generator<'a> {
         for id in self.closure_types.values_mut() {
             *id = remap(*id);
         }
+        self.function_closures = std::mem::take(&mut self.function_closures)
+            .into_iter()
+            .map(|((function, closure), global)| ((function, remap(closure)), global))
+            .collect();
+        self.adapters = std::mem::take(&mut self.adapters)
+            .into_iter()
+            .map(|((function, closure, captures), code)| {
+                ((function, remap(closure), captures), code)
+            })
+            .collect();
         remap(id)
     }
 
@@ -4924,61 +4941,81 @@ fn function_literal_name(location: SrcSpan, type_: &Arc<Type>, specialization: u
 /// The name of `type_` with the types qualified by their module, except
 /// the prelude ones, so different types have different names.
 fn qualified_type_name(type_: &Arc<Type>) -> EcoString {
-    fn write(name: &mut EcoString, type_vars: &mut Vec<u64>, type_: &Arc<Type>) {
-        match &**type_ {
-            Type::Named {
-                module,
-                name: type_name,
-                arguments,
-                ..
-            } => {
-                if module != PRELUDE_MODULE_NAME {
-                    name.push_str(module);
-                    name.push('.');
-                }
-                name.push_str(type_name);
-                if !arguments.is_empty() {
-                    write_all(name, type_vars, arguments);
-                }
-            }
-            Type::Fn { arguments, return_ } => {
-                name.push_str("fn");
-                write_all(name, type_vars, arguments);
-                name.push_str(" -> ");
-                write(name, type_vars, return_);
-            }
-            Type::Tuple { elements } => {
-                name.push('#');
-                write_all(name, type_vars, elements);
-            }
-            Type::Var { type_ } => match type_.borrow().deref() {
-                TypeVar::Link { type_ } => write(name, type_vars, type_),
-                TypeVar::Unbound { id } | TypeVar::Generic { id } => {
-                    let index = type_vars
-                        .iter()
-                        .position(|var| var == id)
-                        .unwrap_or_else(|| {
-                            type_vars.push(*id);
-                            type_vars.len() - 1
-                        });
-                    name.push_str(&format!("t{index}"));
-                }
-            },
-        }
-    }
-    fn write_all(name: &mut EcoString, type_vars: &mut Vec<u64>, types: &[Arc<Type>]) {
-        name.push('(');
-        for (index, type_) in types.iter().enumerate() {
-            if index > 0 {
-                name.push_str(", ");
-            }
-            write(name, type_vars, type_);
-        }
-        name.push(')');
-    }
     let mut name = EcoString::new();
-    write(&mut name, &mut vec![], type_);
+    write_qualified_type_name(&mut name, &mut vec![], type_);
     name
+}
+
+/// The qualified name of the function type with `arguments` and `return_`,
+/// without creating the type.
+fn qualified_function_type_name(arguments: &[Arc<Type>], return_: &Arc<Type>) -> EcoString {
+    let mut name = EcoString::new();
+    let mut type_vars = vec![];
+    write_qualified_function_type_name(&mut name, &mut type_vars, arguments, return_);
+    name
+}
+
+fn write_qualified_type_name(name: &mut EcoString, type_vars: &mut Vec<u64>, type_: &Arc<Type>) {
+    match &**type_ {
+        Type::Named {
+            module,
+            name: type_name,
+            arguments,
+            ..
+        } => {
+            if module != PRELUDE_MODULE_NAME {
+                name.push_str(module);
+                name.push('.');
+            }
+            name.push_str(type_name);
+            if !arguments.is_empty() {
+                write_qualified_type_names(name, type_vars, arguments);
+            }
+        }
+        Type::Fn { arguments, return_ } => {
+            write_qualified_function_type_name(name, type_vars, arguments, return_);
+        }
+        Type::Tuple { elements } => {
+            name.push('#');
+            write_qualified_type_names(name, type_vars, elements);
+        }
+        Type::Var { type_ } => match type_.borrow().deref() {
+            TypeVar::Link { type_ } => write_qualified_type_name(name, type_vars, type_),
+            TypeVar::Unbound { id } | TypeVar::Generic { id } => {
+                let index = type_vars
+                    .iter()
+                    .position(|var| var == id)
+                    .unwrap_or_else(|| {
+                        type_vars.push(*id);
+                        type_vars.len() - 1
+                    });
+                name.push_str(&format!("t{index}"));
+            }
+        },
+    }
+}
+
+fn write_qualified_function_type_name(
+    name: &mut EcoString,
+    type_vars: &mut Vec<u64>,
+    arguments: &[Arc<Type>],
+    return_: &Arc<Type>,
+) {
+    name.push_str("fn");
+    write_qualified_type_names(name, type_vars, arguments);
+    name.push_str(" -> ");
+    write_qualified_type_name(name, type_vars, return_);
+}
+
+fn write_qualified_type_names(name: &mut EcoString, type_vars: &mut Vec<u64>, types: &[Arc<Type>]) {
+    name.push('(');
+    for (index, type_) in types.iter().enumerate() {
+        if index > 0 {
+            name.push_str(", ");
+        }
+        write_qualified_type_name(name, type_vars, type_);
+    }
+    name.push(')');
 }
 
 fn remap_val_type(val_type: &ValType, remap: &impl Fn(TypeId) -> TypeId) -> ValType {
