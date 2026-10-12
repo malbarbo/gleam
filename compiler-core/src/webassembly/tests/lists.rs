@@ -92,3 +92,40 @@ pub fn main() {
 "#,
     );
 }
+
+/// The equality of the rest of a list is a tail call, so long lists don't
+/// exhaust the stack.
+#[test]
+fn long_list_equality() {
+    run_ok(
+        r#"
+type Stream {
+  Stream(head: Int, tail: Stream)
+  End
+}
+
+fn range(i: Int, acc: List(Int)) -> List(Int) {
+  case i {
+    0 -> acc
+    _ -> range(i - 1, [i, ..acc])
+  }
+}
+
+fn stream(i: Int, acc: Stream) -> Stream {
+  case i {
+    0 -> acc
+    _ -> stream(i - 1, Stream(i, acc))
+  }
+}
+
+pub fn main() {
+    let a = range(1_000_000, [])
+    let assert True = a == range(1_000_000, [])
+    let assert False = a == range(1_000_000, [0])
+    let assert True = [a] == [range(1_000_000, [])]
+    let assert True = stream(1_000_000, End) == stream(1_000_000, End)
+    let assert False = stream(1_000_000, End) == stream(1_000_000, Stream(0, End))
+}
+"#,
+    );
+}

@@ -455,6 +455,15 @@ impl<'a, 'b> Instructions<'a, 'b> {
         }
     }
 
+    /// `[a, b] -> [Bool]`, returning the result: a tail call when the
+    /// equality is a call.
+    pub(super) fn eq_tail(&mut self, eq: Eq) -> &mut Self {
+        match eq {
+            Eq::Call(func) => self.return_call(func),
+            Eq::I32 | Eq::Int | Eq::Float | Eq::I64 | Eq::F32 | Eq::F64 => self.eq(eq),
+        }
+    }
+
     pub(super) fn bool_const(&mut self, value: bool) -> &mut Self {
         self.i32_const(value as _)
     }

@@ -600,7 +600,7 @@ impl<'a> Generator<'a> {
         let name = self.type_pretty_name(type_) + "." + constructor.name.clone();
         let builtin = BuiltinFunction::Equal(self.val_type_ref(type_index), name);
         let eq_index = self.get_function_builtin(builtin, |s| {
-            s.code_composite_or_union_eq(type_index, Some(&mapping), types)
+            s.code_composite_or_union_eq(type_index, Some(&mapping), types, Some(type_))
         });
         (type_index, eq_index)
     }
@@ -610,7 +610,7 @@ impl<'a> Generator<'a> {
             self.code_string_eq()
         } else if let Some(types) = type_.tuple_types() {
             let type_index = self.tuple_type_index(types.clone());
-            self.code_composite_eq(type_index, types)
+            self.code_composite_or_union_eq(type_index, None, types, None)
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             match custom_type {
                 CustomType::Struct {
@@ -619,7 +619,7 @@ impl<'a> Generator<'a> {
                 } => {
                     let (type_index, types) =
                         self.mono_struct_type_index(type_, &custom_type, &constructor, &args);
-                    self.code_composite_eq(type_index, types)
+                    self.code_composite_or_union_eq(type_index, None, types, Some(type_))
                 }
                 CustomType::Union { custom_type, .. } => {
                     let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
@@ -824,19 +824,17 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    fn code_composite_eq(
-        &mut self,
-        type_index: TypeId,
-        types: impl IntoIterator<Item = Arc<Type>>,
-    ) -> FunctionId {
-        self.code_composite_or_union_eq(type_index, None, types)
-    }
-
+    /// The equality of the fields `types` of a struct, a tuple or a variant
+    /// of the union `parent`. The last field compared is a field of type
+    /// `parent` when there is one (the rest of a list), otherwise the last
+    /// field, and it is compared with a tail call, so comparing a long list
+    /// doesn't grow the stack.
     fn code_composite_or_union_eq(
         &mut self,
         type_index: TypeId,
         field_mapping: Option<&[u32]>,
-        types: impl IntoIterator<Item = Arc<Type>>,
+        types: Vec<Arc<Type>>,
+        parent: Option<&Arc<Type>>,
     ) -> FunctionId {
         let composite_vt = self.val_type_ref(type_index);
         // params
@@ -855,17 +853,30 @@ impl<'a> Generator<'a> {
                     .bool_const(true)
                     .return_();
             });
-        for (gleam_index, type_) in types.into_iter().enumerate() {
+        let last = parent
+            .and_then(|parent| types.iter().rposition(|type_| type_.same_as(parent)))
+            .or(types.len().checked_sub(1));
+        let order = types
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != last)
+            .chain(last.and_then(|last| types.get(last).map(|type_| (last, type_))));
+        for (gleam_index, type_) in order {
             let field_index = field_mapping
                 .and_then(|m| m.get(gleam_index).copied())
                 .unwrap_or(gleam_index as u32);
-            let eq = self.function_eq(&type_);
-            #[rustfmt::skip]
+            let eq = self.function_eq(type_);
             let _ = instructions
                 .local_get(a)
                 .struct_get(type_index, field_index)
                 .local_get(b)
-                .struct_get(type_index, field_index)
+                .struct_get(type_index, field_index);
+            if Some(gleam_index) == last {
+                let _ = instructions.eq_tail(eq).end();
+                return function.finish(self);
+            }
+            #[rustfmt::skip]
+            let _ = instructions
                 .eq(eq)
                 .bool_not()
                 .if_(InstrSeqType::Simple(None), |body| {
@@ -961,8 +972,7 @@ impl<'a> Generator<'a> {
                             .ref_cast_non_null(HeapType::Concrete(type_index))
                             .local_get(b)
                             .ref_cast_non_null(HeapType::Concrete(type_index))
-                            .call(eq_index)
-                            .return_();
+                            .return_call(eq_index);
                     });
             }
         }
