@@ -17,7 +17,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-import builtins/array.{type Array, array_from_list, array_get, array_to_list}
+import builtins/array.{
+  type Array, array_from_list, array_get, array_size, array_to_list,
+}
 import builtins/dict.{type Dict}
 
 pub type Dynamic {
@@ -195,7 +197,11 @@ pub fn dynamic_index(
   case data, key {
     DDict(dict), _ -> Ok(dict.dict_get(dict, key))
     DList(items), DInt(index) if index >= 0 && index < 8 -> Ok(at(items, index))
-    DArray(items), DInt(index) -> Ok(array_get(items, index))
+    DArray(items), DInt(index) ->
+      case index >= 0 && index < array_size(items) {
+        True -> Ok(Ok(array_get(items, index)))
+        False -> Ok(Error(Nil))
+      }
     _, DInt(_) -> Error("Indexable")
     _, _ -> Error("Dict")
   }

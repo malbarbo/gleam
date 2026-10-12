@@ -1151,7 +1151,13 @@ impl<'a> Generator<'a> {
                     &custom_type.external_webassembly
                 {
                     assert!(custom_type.constructors.is_empty());
-                    match self.external_type(custom_type, external_module, name, *span) {
+                    match self.external_type(
+                        custom_type,
+                        &module.type_info.package,
+                        external_module,
+                        name,
+                        *span,
+                    ) {
                         Ok(type_) => type_,
                         Err(error) if is_main => return Err(error),
                         Err(_) => continue,
@@ -1172,11 +1178,12 @@ impl<'a> Generator<'a> {
         Ok(())
     }
 
-    /// The representation of the external type `custom_type`, declared as
-    /// `@external(webassembly, module, name)`.
+    /// The representation of the external type `custom_type` of `package`,
+    /// declared as `@external(webassembly, module, name)`.
     fn external_type(
         &self,
         custom_type: &TypedCustomType,
+        package: &EcoString,
         module: &EcoString,
         name: &EcoString,
         location: SrcSpan,
@@ -1193,7 +1200,8 @@ impl<'a> Generator<'a> {
             "F32" => (ValType::F32, Some(F32_TO_STR)),
             "F64" => (ValType::F64, Some(F64_TO_STR)),
             "AnyRef" => (ANYREF, None),
-            "Array" => {
+            // Only for the runtime, which reads the positions it knows.
+            "Array" if package == RUNTIME_PACKAGE => {
                 if custom_type.parameters.len() != 1 {
                     return Err(Error::WrongExternalTypeArity {
                         location,
@@ -1432,7 +1440,9 @@ impl<'a> Generator<'a> {
                     }
                 } else if let Some(builtin) = BuiltinFunctionExternal::by_name(name) {
                     builtins.push((builtin, name.clone(), function_type(function)));
-                } else if let Some(array_function) = ArrayFunction::by_name(name) {
+                } else if let Some(array_function) = ArrayFunction::by_name(name)
+                    && self.module.type_info.package == RUNTIME_PACKAGE
+                {
                     self.validate_array_external(function, name, array_function)?;
                 } else if name == HASH {
                     if !(function.arguments.len() == 1

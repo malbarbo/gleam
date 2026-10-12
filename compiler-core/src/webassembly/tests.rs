@@ -23,6 +23,15 @@ pub fn compile(
     src: &str,
     deps: Vec<(&str, &str, &str)>,
 ) -> (TypedModule, HashMap<EcoString, TypedModule>) {
+    compile_in("thepackage", src, deps)
+}
+
+/// Like `compile`, with the module in `package`.
+pub fn compile_in(
+    package: &str,
+    src: &str,
+    deps: Vec<(&str, &str, &str)>,
+) -> (TypedModule, HashMap<EcoString, TypedModule>) {
     let mut modules = imbl::HashMap::new();
     let ids = UniqueIdGenerator::new();
     let _ = modules.insert(
@@ -72,7 +81,7 @@ pub fn compile(
     ast.name = "my/mod".into();
     let line_numbers = LineNumbers::new(src);
     let config = PackageConfig {
-        name: "thepackage".into(),
+        name: package.into(),
         ..Default::default()
     };
 
@@ -108,11 +117,22 @@ pub fn compile_wasm_with_config(
     int: crate::config::WasmInt,
     float: crate::config::WasmFloat,
 ) -> Vec<u8> {
+    compile_wasm_in("thepackage", src, deps, int, float)
+}
+
+/// Like `compile_wasm_with_config`, with the module in `package`.
+pub fn compile_wasm_in(
+    package: &str,
+    src: &str,
+    deps: Vec<(&str, &str, &str)>,
+    int: crate::config::WasmInt,
+    float: crate::config::WasmFloat,
+) -> Vec<u8> {
     let mut all_line_numbers: HashMap<EcoString, LineNumbers> = deps
         .iter()
         .map(|(_, name, dep_src)| (EcoString::from(*name), LineNumbers::new(dep_src)))
         .collect();
-    let (main_module, dep_modules) = compile(src, deps);
+    let (main_module, dep_modules) = compile_in(package, src, deps);
     let line_numbers = LineNumbers::new(src);
     let _ = all_line_numbers.insert(main_module.name.clone(), line_numbers.clone());
     let mut all_modules: HashMap<_, _> = dep_modules
@@ -248,7 +268,12 @@ pub fn for_each_operator(wasm_bytes: &[u8], mut f: impl FnMut(&str, wasmparser::
 }
 
 pub fn compile_wasm_error(src: &str) -> crate::webassembly::Error {
-    let (main_module, _) = compile(src, vec![]);
+    compile_wasm_error_in("thepackage", src)
+}
+
+/// Like `compile_wasm_error`, with the module in `package`.
+pub fn compile_wasm_error_in(package: &str, src: &str) -> crate::webassembly::Error {
+    let (main_module, _) = compile_in(package, src, vec![]);
     let line_numbers = LineNumbers::new(src);
     let main_ref: &TypedModule = &main_module;
     let all_modules = HashMap::from([(main_module.name.clone(), main_ref)]);
@@ -286,7 +311,18 @@ pub fn run_wasm_with_config(
     int: crate::config::WasmInt,
     float: crate::config::WasmFloat,
 ) -> WasmOutput {
-    let wasm_bytes = compile_wasm_with_config(src, deps, int, float);
+    run_wasm_in("thepackage", src, deps, int, float)
+}
+
+/// Like `run_wasm_with_config`, with the module in `package`.
+pub fn run_wasm_in(
+    package: &str,
+    src: &str,
+    deps: Vec<(&str, &str, &str)>,
+    int: crate::config::WasmInt,
+    float: crate::config::WasmFloat,
+) -> WasmOutput {
+    let wasm_bytes = compile_wasm_in(package, src, deps, int, float);
     let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("gleam_wasm_test_{id}.wasm"));
     std::fs::write(&tmp, &wasm_bytes).expect("failed to write temp wasm file");

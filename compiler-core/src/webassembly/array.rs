@@ -2,20 +2,22 @@
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
 //! `Array(a)`: an immutable array, represented by a wasm GC array of the
-//! representation of `a`. Programs declare it as an external type and reach
-//! its functions as builtins:
+//! representation of `a`. Only the runtime declares it as an external type
+//! and reaches its functions as builtins, as the nodes of its `Dict`:
 //!
 //! ```gleam
 //! @external(webassembly, "builtins", "Array")
 //! pub type Array(a)
 //!
 //! @external(webassembly, "builtins", "_array_get")
-//! fn get(array: Array(a), index: Int) -> Result(a, Nil)
+//! fn get(array: Array(a), index: Int) -> a
 //! ```
 //!
-//! The functions that change an array return a copy, or the same array when
-//! the index is out of range. Arrays are compared, hashed and inspected like
-//! tuples, as they are on Erlang (tuples) and JavaScript (arrays).
+//! `_array_get` traps when the index is out of range, as the runtime only
+//! reads the positions it knows. The functions that change an array return a
+//! copy, or the same array when the index is out of range. Arrays are
+//! compared, hashed and inspected like tuples, as they are on Erlang (tuples)
+//! and JavaScript (arrays).
 
 use super::*;
 
@@ -24,8 +26,8 @@ use super::*;
 pub(super) enum ArrayFunction {
     /// `fn(Array(a)) -> Int`.
     Size,
-    /// `fn(Array(a), Int) -> Result(a, Nil)`: the element at the index, or
-    /// an error when the index is out of range.
+    /// `fn(Array(a), Int) -> a`: the element at the index, which traps
+    /// when the index is out of range.
     Get,
     /// `fn(Array(a), Int, a) -> Array(a)`: a copy with the element at the
     /// index replaced.
@@ -47,8 +49,6 @@ enum Shape {
     Element,
     Int,
     List,
-    /// `Result(a, Nil)`.
-    Result,
 }
 
 impl ArrayFunction {
@@ -81,7 +81,7 @@ impl ArrayFunction {
     fn shape(self) -> (&'static [Shape], Shape) {
         match self {
             ArrayFunction::Size => (&[Shape::Array], Shape::Int),
-            ArrayFunction::Get => (&[Shape::Array, Shape::Int], Shape::Result),
+            ArrayFunction::Get => (&[Shape::Array, Shape::Int], Shape::Element),
             ArrayFunction::Set | ArrayFunction::Insert => {
                 (&[Shape::Array, Shape::Int, Shape::Element], Shape::Array)
             }
@@ -93,7 +93,7 @@ impl ArrayFunction {
     fn signature(self) -> &'static str {
         match self {
             ArrayFunction::Size => "fn(Array(a)) -> Int",
-            ArrayFunction::Get => "fn(Array(a), Int) -> Result(a, Nil)",
+            ArrayFunction::Get => "fn(Array(a), Int) -> a",
             ArrayFunction::Set | ArrayFunction::Insert => "fn(Array(a), Int, a) -> Array(a)",
             ArrayFunction::Remove => "fn(Array(a), Int) -> Array(a)",
             ArrayFunction::FromList => "fn(List(a)) -> Array(a)",
@@ -148,10 +148,6 @@ impl<'a> Generator<'a> {
                     self.array_element(type_)?
                 }
                 Shape::List => type_.list_type()?,
-                Shape::Result => match type_.result_types()? {
-                    (ok, error) if error.is_nil() => ok,
-                    _ => return None,
-                },
             };
             match &element {
                 Some(element) if !element.same_as(&found) => return None,
@@ -212,14 +208,12 @@ impl<'a> Generator<'a> {
         let array_index = self.array_type_index(element);
         let array_vt = self.val_type_ref(array_index);
         let list_vt = self.val_type(&type_::list(element.clone()));
-        let result_vt = self.val_type(&type_::result(element.clone(), type_::nil()));
         let (shapes, return_shape) = array_function.shape();
         let val_type = |shape: &Shape| match shape {
             Shape::Array => array_vt,
             Shape::Element => element_vt,
             Shape::Int => int,
             Shape::List => list_vt,
-            Shape::Result => result_vt,
         };
         let builtin = BuiltinFunction::Array {
             function: array_function,
@@ -272,22 +266,15 @@ impl<'a> Generator<'a> {
                 function.finish(self)
             }
             ArrayFunction::Get => {
-                let result_vt = self.val_type(&type_::result(element.clone(), type_::nil()));
-                let ok = self.ok_variant_constructor(element.clone(), type_::nil());
-                let error = self.error_variant_constructor(element.clone(), type_::nil());
                 let array = self.wasm_local(array_vt);
                 let index = self.wasm_local(int_vt);
-                let mut function = Function::new(self, name, &[array, index], &[result_vt]);
+                let mut function = Function::new(self, name, &[array, index], &[element_vt]);
                 let _ = function
                     .extend_instructions(self)
-                    .array_out_of_range(array, index, false, |then_s| {
-                        let _ = then_s.nil_const().call(error).return_();
-                    })
                     .local_get(array)
                     .local_get(index)
                     .int_to_i32()
                     .array_get(array_index)
-                    .call(ok)
                     .end();
                 function.finish(self)
             }

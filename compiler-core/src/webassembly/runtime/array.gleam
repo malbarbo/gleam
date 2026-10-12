@@ -1,7 +1,7 @@
 //// An immutable array, the external type `Array` of the WebAssembly target,
-//// with its builtins. An index out of range gives an error, or the same
-//// array. On Erlang it is a tuple, so the modules that use it can be tested
-//// there.
+//// with its builtins. Reading an index out of range traps, as the runtime
+//// only reads the positions it knows, and changing one gives the same array.
+//// On Erlang it is a tuple, so the modules that use it can be tested there.
 
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
@@ -14,11 +14,8 @@ pub type Array(a)
 pub fn array_size(array: Array(a)) -> Int
 
 @external(webassembly, "builtins", "_array_get")
-pub fn array_get(array: Array(a), index: Int) -> Result(a, Nil) {
-  case is_index(array, index) {
-    True -> Ok(element(index + 1, array))
-    False -> Error(Nil)
-  }
+pub fn array_get(array: Array(a), index: Int) -> a {
+  element(index + 1, array)
 }
 
 @external(webassembly, "builtins", "_array_set")
@@ -71,8 +68,8 @@ pub fn array_to_list(array: Array(a)) -> List(a) {
 }
 
 fn array_to_list_loop(array: Array(a), i: Int, acc: List(a)) -> List(a) {
-  case array_get(array, i) {
-    Ok(value) -> array_to_list_loop(array, i - 1, [value, ..acc])
-    Error(Nil) -> acc
+  case i < 0 {
+    True -> acc
+    False -> array_to_list_loop(array, i - 1, [array_get(array, i), ..acc])
   }
 }

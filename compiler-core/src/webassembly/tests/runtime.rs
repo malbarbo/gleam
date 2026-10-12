@@ -4,7 +4,8 @@
 //! Types and functions of the runtime written in Gleam, reached through
 //! externals of the `"builtins"` module.
 
-use super::run_wasm;
+use super::{run_wasm, run_wasm_in};
+use crate::webassembly::runtime::RUNTIME_PACKAGE;
 
 const DICT: &str = r#"
 @external(webassembly, "builtins", "Dict")
@@ -241,10 +242,12 @@ pub fn main() {
     );
 }
 
-/// An `Array` is an array, as a tuple, with its elements cast too.
+/// An `Array` is an array, as a tuple, with its elements cast too. Only the
+/// runtime has arrays, so the modules are in its package.
 #[test]
 fn dynamic_of_arrays() {
-    let _ = run_dynamic(
+    let result = run_wasm_in(
+        RUNTIME_PACKAGE,
         r##"
 import dict
 import dynamic
@@ -315,6 +318,17 @@ fn range(i: Int, acc: List(Int)) -> List(Int) {
   }
 }
 "##,
+        vec![
+            (RUNTIME_PACKAGE, "dict", DICT),
+            (RUNTIME_PACKAGE, "dynamic", DYNAMIC),
+        ],
+        crate::config::WasmInt::I32,
+        crate::config::WasmFloat::F64,
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
     );
 }
 

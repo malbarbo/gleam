@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-//! The external type `Array` and its builtins.
+//! The external type `Array` and its builtins, which only the runtime
+//! reaches, so the modules of these tests are in its package.
 
-use super::{run_wasm, run_wasm_with_config};
+use super::{compile_wasm_error_in, run_wasm_in};
+use crate::config::{WasmFloat, WasmInt};
+use crate::webassembly::runtime::RUNTIME_PACKAGE;
 
 const ARRAY: &str = r#"
 @external(webassembly, "builtins", "Array")
@@ -13,7 +16,7 @@ pub type Array(a)
 pub fn size(array: Array(a)) -> Int
 
 @external(webassembly, "builtins", "_array_get")
-pub fn get(array: Array(a), index: Int) -> Result(a, Nil)
+pub fn get(array: Array(a), index: Int) -> a
 
 @external(webassembly, "builtins", "_array_set")
 pub fn set(array: Array(a), index: Int, value: a) -> Array(a)
@@ -41,8 +44,7 @@ fn to_list_loop(array: Array(a), i: Int, acc: List(a)) -> List(a) {
   case i < 0 {
     True -> acc
     False -> {
-      let assert Ok(value) = get(array, i)
-      to_list_loop(array, i - 1, [value, ..acc])
+      to_list_loop(array, i - 1, [get(array, i), ..acc])
     }
   }
 }
@@ -50,7 +52,13 @@ fn to_list_loop(array: Array(a), i: Int, acc: List(a)) -> List(a) {
 
 #[track_caller]
 fn run_array(src: &str) -> String {
-    let result = run_wasm(src, vec![("thepackage", "array", ARRAY)]);
+    let result = run_wasm_in(
+        RUNTIME_PACKAGE,
+        src,
+        vec![(RUNTIME_PACKAGE, "array", ARRAY)],
+        WasmInt::I32,
+        WasmFloat::F64,
+    );
     assert!(
         result.status.success(),
         "WASM execution failed:\n{}",
@@ -61,11 +69,12 @@ fn run_array(src: &str) -> String {
 
 #[track_caller]
 fn run_array_i64(src: &str) {
-    let result = run_wasm_with_config(
+    let result = run_wasm_in(
+        RUNTIME_PACKAGE,
         src,
-        vec![("thepackage", "array", ARRAY)],
-        crate::config::WasmInt::I64,
-        crate::config::WasmFloat::F64,
+        vec![(RUNTIME_PACKAGE, "array", ARRAY)],
+        WasmInt::I64,
+        WasmFloat::F64,
     );
     assert!(
         result.status.success(),
@@ -80,7 +89,7 @@ import array
 pub fn main() {
   let a = array.from_list([10, 20, 30])
   let assert 3 = array.size(a)
-  let assert Ok(20) = array.get(a, 1)
+  let assert 20 = array.get(a, 1)
   let assert [10, 25, 30] = array.to_list(array.set(a, 1, 25))
   let assert [5, 10, 20, 30] = array.to_list(array.insert(a, 0, 5))
   let assert [10, 15, 20, 30] = array.to_list(array.insert(a, 1, 15))
@@ -122,12 +131,11 @@ pub fn main() {
   let floats = array.from_list([1.5, 2.5]) |> array.set(0, 0.5)
   let assert [0.5, 2.5] = array.to_list(floats)
   let points = array.from_list([Point(1, 2)]) |> array.insert(0, Point(0, 0))
-  let assert Ok(Point(1, 2)) = array.get(points, 1)
+  let assert Point(1, 2) = array.get(points, 1)
   let bools = array.from_list([True, False])
-  let assert Ok(False) = array.get(bools, 1)
+  let assert False = array.get(bools, 1)
   let nested = array.from_list([array.from_list([1]), array.from_list([2, 3])])
-  let assert Ok(inner) = array.get(nested, 1)
-  let assert Ok(3) = array.get(inner, 1)
+  let assert 3 = array.get(array.get(nested, 1), 1)
   let assert [Nil] = array.to_list(array.from_list([Nil]))
 }
 "#,
@@ -155,8 +163,7 @@ fn sum(tree: Tree) -> Int {
 fn sum_loop(children: Array(Tree), i: Int, acc: Int) -> Int {
   case i < array.size(children) {
     True -> {
-      let assert Ok(child) = array.get(children, i)
-      sum_loop(children, i + 1, acc + sum(child))
+      sum_loop(children, i + 1, acc + sum(array.get(children, i)))
     }
     False -> acc
   }
@@ -200,9 +207,6 @@ import array
 
 pub fn main() {
   let a = array.from_list([1, 2])
-  let assert Error(Nil) = array.get(a, 2)
-  let assert Error(Nil) = array.get(a, -1)
-  let assert Error(Nil) = array.get(array.from_list([]), 0)
   let assert [1, 2] = array.to_list(array.set(a, 2, 0))
   let assert [1, 2] = array.to_list(array.set(a, -1, 0))
   let assert [1, 2] = array.to_list(array.insert(a, 3, 0))
@@ -213,7 +217,7 @@ pub fn main() {
 }
 "#;
 
-/// An index out of range gives an error, or the same array.
+/// Changing an index out of range gives the same array.
 #[test]
 fn array_index_out_of_range() {
     let _ = run_array(OUT_OF_RANGE);
@@ -233,8 +237,6 @@ import array
 
 pub fn main() {
   let a = array.from_list([1, 2])
-  let assert Error(Nil) = array.get(a, 4_294_967_296)
-  let assert Error(Nil) = array.get(a, 4_294_967_297)
   let assert [1, 2] = array.to_list(array.set(a, 4_294_967_296, 0))
   let assert [1, 2] = array.to_list(array.insert(a, 4_294_967_296, 0))
   let assert [1, 2] = array.to_list(array.remove(a, 4_294_967_297))
@@ -243,9 +245,71 @@ pub fn main() {
     );
 }
 
+/// Reading an index out of range is a bug of the runtime, and traps.
+#[test]
+fn array_get_out_of_range_traps() {
+    let result = run_wasm_in(
+        RUNTIME_PACKAGE,
+        r#"
+import array
+
+pub fn main() {
+  array.get(array.from_list([1, 2]), 2)
+}
+"#,
+        vec![(RUNTIME_PACKAGE, "array", ARRAY)],
+        WasmInt::I32,
+        WasmFloat::F64,
+    );
+    assert!(!result.status.success(), "{}", result.stderr);
+    assert!(result.stderr.contains("out of bounds"), "{}", result.stderr);
+}
+
+/// Outside the runtime, `Array` is not an external type.
+#[test]
+fn array_outside_the_runtime() {
+    let error = super::compile_wasm_error(
+        r#"
+@external(webassembly, "builtins", "Array")
+type Array(a)
+
+pub fn main() { Nil }
+"#,
+    );
+    assert!(
+        matches!(
+            error,
+            crate::webassembly::Error::UnknownExternalType { ref name, .. } if name == "Array"
+        ),
+        "{error:?}"
+    );
+}
+
+/// Outside the runtime, the functions of `Array` are not builtins.
+#[test]
+fn array_function_outside_the_runtime() {
+    let error = super::compile_wasm_error(
+        r#"
+@external(webassembly, "builtins", "_array_size")
+fn size(array: a) -> Int
+
+pub fn main() { Nil }
+"#,
+    );
+    assert!(
+        matches!(
+            error,
+            crate::webassembly::Error::UnknownBuiltinFunction { ref name, .. }
+                if name == "_array_size"
+        ),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn array_with_a_wrong_arity() {
-    let error = super::compile_wasm_error(
+    let error = compile_wasm_error_in(
+        RUNTIME_PACKAGE,
         r#"
 @external(webassembly, "builtins", "Array")
 type Array
@@ -265,13 +329,14 @@ pub fn main() { Nil }
 
 #[test]
 fn array_function_with_a_wrong_signature() {
-    let error = super::compile_wasm_error(
+    let error = compile_wasm_error_in(
+        RUNTIME_PACKAGE,
         r#"
 @external(webassembly, "builtins", "Array")
 type Array(a)
 
 @external(webassembly, "builtins", "_array_get")
-fn get(array: Array(a), index: Int) -> Result(b, Nil)
+fn get(array: Array(a), index: Int) -> b
 
 pub fn main() { Nil }
 "#,
@@ -310,7 +375,8 @@ pub fn main() {
 /// doesn't turn one into the other.
 #[test]
 fn array_function_with_two_array_types() {
-    let error = super::compile_wasm_error(
+    let error = compile_wasm_error_in(
+        RUNTIME_PACKAGE,
         r#"
 @external(webassembly, "builtins", "Array")
 type Array(a)

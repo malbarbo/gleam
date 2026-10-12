@@ -27,8 +27,8 @@
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
 import builtins/array.{
-  type Array, array_from_list, array_get, array_insert, array_remove,
-  array_set, array_size,
+  type Array, array_from_list, array_get, array_insert, array_remove, array_set,
+  array_size,
 }
 
 pub opaque type Dict(k, v) {
@@ -145,17 +145,18 @@ fn lookup(node: Node(k, v), key: k, hash: Int, shift: Int) -> Result(v, Nil) {
       case bitwise_and(datamap, bit) != 0 {
         True ->
           case array_get(entries, index(datamap, bit)) {
-            Ok(Entry(hash: h, key: k, value: v)) if h == hash && k == key ->
-              Ok(v)
+            Entry(hash: h, key: k, value: v) if h == hash && k == key -> Ok(v)
             _ -> Error(Nil)
           }
         False ->
           case bitwise_and(nodemap, bit) != 0 {
             True ->
-              case array_get(children, index(nodemap, bit)) {
-                Ok(child) -> lookup(child, key, hash, shift + bits_per_level)
-                Error(_) -> Error(Nil)
-              }
+              lookup(
+                array_get(children, index(nodemap, bit)),
+                key,
+                hash,
+                shift + bits_per_level,
+              )
             False -> Error(Nil)
           }
       }
@@ -214,16 +215,13 @@ fn insert_node(
       case bitwise_and(datamap, bit) != 0 {
         True -> {
           let i = index(datamap, bit)
-          case array_get(entries, i) {
-            Ok(existing)
-              if existing.hash == entry.hash && existing.key == entry.key
-            -> #(
+          let existing = array_get(entries, i)
+          case existing.hash == entry.hash && existing.key == entry.key {
+            True -> #(
               Node(datamap, nodemap, array_set(entries, i, entry), children),
               False,
             )
-            // The bitmaps and the arrays agree, so this doesn't happen.
-            Error(_) -> #(node, False)
-            Ok(existing) -> {
+            False -> {
               let child = merge_entries(existing, entry, shift + bits_per_level)
               let node =
                 Node(
@@ -240,22 +238,16 @@ fn insert_node(
           case bitwise_and(nodemap, bit) != 0 {
             True -> {
               let j = index(nodemap, bit)
-              case array_get(children, j) {
-                Ok(child) -> {
-                  let #(child, added) =
-                    insert_node(child, entry, shift + bits_per_level)
-                  #(
-                    Node(
-                      datamap,
-                      nodemap,
-                      entries,
-                      array_set(children, j, child),
-                    ),
-                    added,
-                  )
-                }
-                Error(_) -> #(node, False)
-              }
+              let #(child, added) =
+                insert_node(
+                  array_get(children, j),
+                  entry,
+                  shift + bits_per_level,
+                )
+              #(
+                Node(datamap, nodemap, entries, array_set(children, j, child)),
+                added,
+              )
             }
             False -> {
               let node =
@@ -387,7 +379,7 @@ fn delete_node(
         True -> {
           let i = index(datamap, bit)
           case array_get(entries, i) {
-            Ok(existing) if existing.hash == hash && existing.key == key -> #(
+            existing if existing.hash == hash && existing.key == key -> #(
               Node(
                 bitwise_exclusive_or(datamap, bit),
                 nodemap,
@@ -404,11 +396,13 @@ fn delete_node(
             False -> #(node, False)
             True -> {
               let j = index(nodemap, bit)
-              let #(child, removed) = case array_get(children, j) {
-                Ok(child) ->
-                  delete_node(child, key, hash, shift + bits_per_level)
-                Error(_) -> #(node, False)
-              }
+              let #(child, removed) =
+                delete_node(
+                  array_get(children, j),
+                  key,
+                  hash,
+                  shift + bits_per_level,
+                )
               case removed, singleton(child) {
                 False, _ -> #(node, False)
                 // The sub-node has a single entry left: move it up.
@@ -441,7 +435,7 @@ fn singleton(node: Node(k, v)) -> Result(Entry(k, v), Nil) {
   case node {
     Node(nodemap: 0, entries:, ..) ->
       case array_size(entries) {
-        1 -> array_get(entries, 0)
+        1 -> Ok(array_get(entries, 0))
         _ -> Error(Nil)
       }
     Collision(entries: [entry], ..) -> Ok(entry)
@@ -490,10 +484,12 @@ fn fold_entries(
   acc: acc,
   fun: fn(acc, k, v) -> acc,
 ) -> acc {
-  case array_get(entries, i) {
-    Ok(Entry(key:, value:, ..)) ->
+  case i < array_size(entries) {
+    False -> acc
+    True -> {
+      let Entry(key:, value:, ..) = array_get(entries, i)
       fold_entries(entries, i + 1, fun(acc, key, value), fun)
-    Error(_) -> acc
+    }
   }
 }
 
@@ -503,9 +499,12 @@ fn fold_children(
   acc: acc,
   fun: fn(acc, k, v) -> acc,
 ) -> acc {
-  case array_get(children, i) {
-    Ok(child) -> fold_children(children, i + 1, fold_node(child, acc, fun), fun)
-    Error(_) -> acc
+  case i < array_size(children) {
+    False -> acc
+    True -> {
+      let child = array_get(children, i)
+      fold_children(children, i + 1, fold_node(child, acc, fun), fun)
+    }
   }
 }
 
@@ -540,9 +539,12 @@ fn entries_array(
   i: Int,
   acc: List(Entry(k, v)),
 ) -> List(Entry(k, v)) {
-  case array_get(entries, i) {
-    Ok(entry) -> entries_array(entries, i + 1, [entry, ..acc])
-    Error(_) -> acc
+  case i < array_size(entries) {
+    False -> acc
+    True -> {
+      let entry = array_get(entries, i)
+      entries_array(entries, i + 1, [entry, ..acc])
+    }
   }
 }
 
@@ -551,9 +553,12 @@ fn entries_children(
   i: Int,
   acc: List(Entry(k, v)),
 ) -> List(Entry(k, v)) {
-  case array_get(children, i) {
-    Ok(child) -> entries_children(children, i + 1, entries_node(child, acc))
-    Error(_) -> acc
+  case i < array_size(children) {
+    False -> acc
+    True -> {
+      let child = array_get(children, i)
+      entries_children(children, i + 1, entries_node(child, acc))
+    }
   }
 }
 
@@ -647,13 +652,15 @@ fn map_entries_array(
   fun: fn(k, v) -> a,
   acc: List(Entry(k, a)),
 ) -> List(Entry(k, a)) {
-  case array_get(entries, i) {
-    Ok(Entry(hash:, key:, value:)) ->
+  case i < array_size(entries) {
+    False -> acc
+    True -> {
+      let Entry(hash:, key:, value:) = array_get(entries, i)
       map_entries_array(entries, i + 1, fun, [
         Entry(hash, key, fun(key, value)),
         ..acc
       ])
-    Error(_) -> acc
+    }
   }
 }
 
@@ -664,10 +671,12 @@ fn map_children(
   fun: fn(k, v) -> a,
   acc: List(Node(k, a)),
 ) -> List(Node(k, a)) {
-  case array_get(children, i) {
-    Ok(child) ->
+  case i < array_size(children) {
+    False -> acc
+    True -> {
+      let child = array_get(children, i)
       map_children(children, i + 1, fun, [map_node(child, fun), ..acc])
-    Error(_) -> acc
+    }
   }
 }
 
@@ -801,9 +810,11 @@ fn all_entries_in(
   i: Int,
   other: Dict(k, v),
 ) -> Bool {
-  case array_get(entries, i) {
-    Ok(entry) -> is_in(entry, other) && all_entries_in(entries, i + 1, other)
-    Error(_) -> True
+  case i < array_size(entries) {
+    False -> True
+    True ->
+      is_in(array_get(entries, i), other)
+      && all_entries_in(entries, i + 1, other)
   }
 }
 
@@ -812,9 +823,11 @@ fn all_children_in(
   i: Int,
   other: Dict(k, v),
 ) -> Bool {
-  case array_get(children, i) {
-    Ok(child) -> all_in(child, other) && all_children_in(children, i + 1, other)
-    Error(_) -> True
+  case i < array_size(children) {
+    False -> True
+    True ->
+      all_in(array_get(children, i), other)
+      && all_children_in(children, i + 1, other)
   }
 }
 
@@ -1016,9 +1029,10 @@ fn entries_in_place(
   i: Int,
 ) -> Bool {
   let prefix_mask = bitwise_shift_left(1, shift) - 1
-  case array_get(entries, i) {
-    Error(_) -> True
-    Ok(entry) -> {
+  case i < array_size(entries) {
+    False -> True
+    True -> {
+      let entry = array_get(entries, i)
       let bit = bitpos(entry.hash, shift)
       bitwise_and(entry.hash, prefix_mask) == prefix
       && bitwise_and(datamap, bit) != 0
@@ -1052,10 +1066,11 @@ fn check_children(
   prefix: Int,
   count: Int,
 ) -> Result(Int, Nil) {
-  case array_get(children, i), fragment > fragment_mask {
-    Error(_), _ -> Ok(count)
+  case i < array_size(children), fragment > fragment_mask {
+    False, _ -> Ok(count)
     _, True -> Error(Nil)
-    Ok(child), False -> {
+    True, False -> {
+      let child = array_get(children, i)
       let bit = bitwise_shift_left(1, fragment)
       case bitwise_and(nodemap, bit) != 0 {
         False ->
