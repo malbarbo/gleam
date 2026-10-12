@@ -16,6 +16,14 @@ pub(super) enum BuiltinFunction {
     Hash(ValType, EcoString),
     HashExternal(ValType, EcoString),
     HashMix,
+    /// `_dynamic_cast(T)`, with the representations of `T` and `Dynamic`.
+    DynamicCast(ValType, ValType, EcoString),
+    /// The functions of the table of a boxed `Dynamic` of type `T`: equal,
+    /// hash (with the representation of `Int`) and inspect (with the
+    /// representation of `String`).
+    DynamicEqual(EcoString),
+    DynamicHash(ValType, EcoString),
+    DynamicInspect(ValType, EcoString),
 }
 
 impl BuiltinFunction {
@@ -38,6 +46,10 @@ impl BuiltinFunction {
             BuiltinFunction::Hash(_, name) => format!("_hash({name})").into(),
             BuiltinFunction::HashExternal(_, name) => format!("_hash_int({name})").into(),
             BuiltinFunction::HashMix => "_hash_mix".into(),
+            BuiltinFunction::DynamicCast(_, _, name) => format!("_dynamic_cast({name})").into(),
+            BuiltinFunction::DynamicEqual(name) => format!("_dynamic_equal({name})").into(),
+            BuiltinFunction::DynamicHash(_, name) => format!("_dynamic_hash({name})").into(),
+            BuiltinFunction::DynamicInspect(_, name) => format!("_dynamic_inspect({name})").into(),
         }
     }
 }
@@ -95,7 +107,7 @@ pub fn builtin_function_names() -> Vec<EcoString> {
     BuiltinFunctionExternal::all()
         .iter()
         .map(|b| b.name().into())
-        .chain([INSPECT.into(), HASH.into()])
+        .chain([INSPECT.into(), HASH.into(), DYNAMIC_CAST.into()])
         .collect()
 }
 
@@ -530,7 +542,12 @@ impl<'a> Generator<'a> {
     }
 
     pub(super) fn function_eq(&mut self, type_: &Arc<Type>) -> Eq {
-        if let Some((params, return_)) = type_.fn_types() {
+        if let Some(representation) = self.representation(type_) {
+            return self.function_eq(&representation);
+        } else if let Some((module, hooks)) = self.type_hooks(type_) {
+            let fn_type = type_::fn_(vec![type_.clone(), type_.clone()], type_::bool());
+            return Eq::Call(self.function_hook(&module, hooks.equal, fn_type));
+        } else if let Some((params, return_)) = type_.fn_types() {
             let closure = self.closure_type(params, return_);
             let builtin =
                 BuiltinFunction::Equal(self.val_type(type_), self.type_pretty_name(type_));
@@ -599,7 +616,9 @@ impl<'a> Generator<'a> {
                     let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
                     self.code_union_eq(type_, supertype_index, &custom_type, &args)
                 }
-                CustomType::External { .. } | CustomType::Enum { .. } => {
+                CustomType::External { .. }
+                | CustomType::Runtime { .. }
+                | CustomType::Enum { .. } => {
                     panic!("external/enum types should not reach code generation")
                 }
             }
@@ -952,7 +971,7 @@ impl<'a> Generator<'a> {
             .named_type_information()
             .expect("named type information");
         let (type_index, tag, types) = match &variant.custom_type {
-            CustomType::External { .. } | CustomType::Enum { .. } => {
+            CustomType::External { .. } | CustomType::Runtime { .. } | CustomType::Enum { .. } => {
                 panic!("external/enum types should not reach code generation")
             }
             CustomType::Struct {
@@ -1229,6 +1248,22 @@ impl<'a> Generator<'a> {
     }
 
     pub(super) fn function_repr(&mut self, type_: &Arc<Type>) -> FunctionId {
+        if let Some(representation) = self.representation(type_) {
+            return self.function_repr(&representation);
+        }
+        if let Some((module, hooks)) = self.type_hooks(type_) {
+            let builtin = BuiltinFunction::CustomTypeRepr(
+                self.val_type(type_),
+                self.type_pretty_name(type_),
+                None,
+            );
+            let fn_type = type_::fn_(vec![type_.clone()], type_::string());
+            let type_ = type_.clone();
+            return self.get_function_builtin(builtin, |s| {
+                let inspect = s.function_hook(&module, hooks.inspect, fn_type);
+                s.code_repr_hook(&type_, inspect)
+            });
+        }
         if type_.is_int() {
             return self.get_function_builtin_external(BuiltinFunctionExternal::IntRepr);
         }
@@ -1561,6 +1596,54 @@ impl<'a> Generator<'a> {
             }
         }
 
+        function.finish(self)
+    }
+
+    /// The repr of a type whose text is given by its `inspect` hook, a Gleam
+    /// function of the runtime. The hook can inspect values itself, which
+    /// writes after the top of the arena, so the top is first moved past
+    /// `ptr`, where this repr writes.
+    fn code_repr_hook(&mut self, type_: &Arc<Type>, inspect: FunctionId) -> FunctionId {
+        let arena_mark = self.find_global_expect(ARENA_MARK).func_id();
+        let arena_release = self.find_global_expect(ARENA_RELEASE).func_id();
+        let heap_base = self.find_global_expect(HEAP_BASE).func_id();
+        let cabi_realloc = self.rust_function(CABI_REALLOC);
+        let string_to_memory =
+            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
+        let value_vt = self.val_type(type_);
+        let string_vt = self.string.val_type();
+        // params
+        let value = self.wasm_local(value_vt);
+        let ptr = self.wasm_local(ValType::I32);
+        // locals
+        let mark = self.wasm_local(ValType::I32);
+        let text = self.wasm_local(string_vt);
+        let mut function = Function::new(self, "_repr_hook", &[value, ptr], &[ValType::I32]);
+        #[rustfmt::skip]
+        let _ = function
+            .extend_instructions(self)
+            .call(arena_mark)
+            .local_set(mark)
+            // cabi_realloc(0, 0, 1, ptr - heap_base + 16)
+            .i32_const(0)
+            .i32_const(0)
+            .i32_const(1)
+            .local_get(ptr)
+            .call(heap_base)
+            .i32_sub()
+            .i32_const(16)
+            .i32_add()
+            .call(cabi_realloc)
+            .drop()
+            .local_get(value)
+            .call(inspect)
+            .local_set(text)
+            .local_get(mark)
+            .call(arena_release)
+            .local_get(text)
+            .local_get(ptr)
+            .call(string_to_memory)
+            .end();
         function.finish(self)
     }
 
@@ -1943,7 +2026,11 @@ impl<'a> Generator<'a> {
         let string_to_memory =
             self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
         match custom_type {
+            CustomType::Runtime { .. } => {
+                panic!("runtime types should be replaced by their representation")
+            }
             CustomType::External { to_str, .. } => {
+                let to_str = to_str.expect("external type with a text");
                 let to_str_fn = self.find_global_expect(to_str);
                 let mut function =
                     Function::new(self, "_repr_external", &[value, ptr], &[ValType::I32]);

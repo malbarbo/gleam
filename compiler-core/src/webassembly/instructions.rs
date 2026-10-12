@@ -149,6 +149,11 @@ impl<'a, 'b> Instructions<'a, 'b> {
         self
     }
 
+    pub(super) fn ref_cast(&mut self, nullable: bool, ht: HeapType) -> &mut Self {
+        let _ = self.seq.as_mut().ref_cast(nullable, ht);
+        self
+    }
+
     pub(super) fn ref_test_non_null(&mut self, ht: HeapType) -> &mut Self {
         let _ = self.seq.as_mut().ref_test(false, ht);
         self
@@ -582,6 +587,8 @@ impl<'a, 'b> Instructions<'a, 'b> {
         ref_is_null(),
         ref_as_non_null(),
         ref_eq(),
+        ref_i31(),
+        i31_get_s(),
         call_ref(index: TypeId),
         call(index: FunctionId),
         return_call_ref(index: TypeId),

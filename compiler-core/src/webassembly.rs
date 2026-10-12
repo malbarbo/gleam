@@ -4,10 +4,12 @@
 #![allow(clippy::todo)]
 mod builtins;
 mod captures;
+mod dynamic;
 mod glue;
 mod hash;
 mod instructions;
 mod monomorphize;
+mod runtime;
 mod scope;
 mod specialization;
 mod stdlib;
@@ -17,10 +19,12 @@ mod tests;
 pub use builtins::builtin_function_names;
 use builtins::*;
 use captures::{Capture, Variables};
+use dynamic::*;
 use glue::*;
 use hash::*;
 use instructions::*;
 use monomorphize::*;
+use runtime::{Hooks, RUNTIME_PACKAGE, RuntimeModule};
 use scope::*;
 use specialization::*;
 use stdlib::*;
@@ -116,6 +120,12 @@ pub enum Error {
         location: SrcSpan,
         module: EcoString,
     },
+    WrongExternalTypeArity {
+        location: SrcSpan,
+        name: EcoString,
+        expected: usize,
+        got: usize,
+    },
     UnsupportedFeature {
         location: SrcSpan,
         feature: EcoString,
@@ -161,7 +171,13 @@ pub fn module(
     int: crate::config::WasmInt,
     float: crate::config::WasmFloat,
 ) -> Result<Vec<u8>, Error> {
-    let mut generator = Generator::new(module, line_numbers, all_modules, all_line_numbers);
+    let runtime = runtime::modules();
+    let mut all_modules = all_modules.clone();
+    for runtime_module in &runtime {
+        let _ = all_modules.insert(runtime_module.module.name.clone(), &runtime_module.module);
+    }
+    let mut generator = Generator::new(module, line_numbers, &all_modules, all_line_numbers);
+    generator.runtime = &runtime;
     generator.int = match int {
         crate::config::WasmInt::I32 => IntType::I32,
         crate::config::WasmInt::I64 => IntType::I64,
@@ -425,7 +441,8 @@ enum WasmConst {
 enum CustomType {
     External {
         val_type: ValType,
-        to_str: &'static str,
+        /// The builtin that writes the text of a value, when it has one.
+        to_str: Option<&'static str>,
     },
     Enum {
         values: Vec<EcoString>,
@@ -438,6 +455,12 @@ enum CustomType {
         custom_type: TypedCustomType,
         layout: UnionFieldLayout,
     },
+    /// An external type represented by the public type `name` of the runtime
+    /// module `module`, with the same arguments, see `runtime`.
+    Runtime {
+        module: EcoString,
+        name: EcoString,
+    },
 }
 
 impl CustomType {
@@ -448,6 +471,9 @@ impl CustomType {
                 Generator::null_variant_tag(custom_type).is_none()
             }
             CustomType::External { .. } | CustomType::Enum { .. } => false,
+            CustomType::Runtime { .. } => {
+                panic!("runtime types should be replaced by their representation")
+            }
         }
     }
 }
@@ -677,6 +703,8 @@ struct Generator<'a> {
     /// The functions of every module, by module and function name.
     functions: HashMap<(EcoString, EcoString), &'a TypedFunction>,
     all_line_numbers: &'a HashMap<EcoString, LineNumbers>,
+    /// The modules of the runtime, see `runtime`.
+    runtime: &'a [RuntimeModule],
     /// The module currently being compiled (may differ from self.module for imports).
     current_module_name: EcoString,
 }
@@ -743,6 +771,7 @@ impl<'a> Generator<'a> {
                 })
                 .collect(),
             all_line_numbers,
+            runtime: &[],
             current_module_name: module.name.clone(),
         }
     }
@@ -752,6 +781,15 @@ impl<'a> Generator<'a> {
     fn source_location(&self, start: u32) -> (EcoString, u32) {
         if let Some(ln) = self.all_line_numbers.get(self.current_module_name.as_str()) {
             (self.current_module_name.clone(), ln.line_number(start))
+        } else if let Some(runtime_module) = self
+            .runtime
+            .iter()
+            .find(|m| m.module.name == self.current_module_name)
+        {
+            (
+                self.current_module_name.clone(),
+                runtime_module.line_numbers.line_number(start),
+            )
         } else {
             (
                 self.module.name.clone(),
@@ -862,6 +900,7 @@ impl<'a> Generator<'a> {
         self.types_external()?;
         let builtins = self.functions_external()?;
         self.types_prelude();
+        self.types_runtime();
         self.functions_builtins(builtins);
         self.types();
         self.types_imported();
@@ -1000,6 +1039,10 @@ impl<'a> Generator<'a> {
                 (vec![*val_type], vec![self.int.val_type()])
             }
             BuiltinFunction::HashMix => (vec![ValType::I32], vec![ValType::I32]),
+            BuiltinFunction::DynamicCast(val_type, dynamic, _) => (vec![*val_type], vec![*dynamic]),
+            BuiltinFunction::DynamicEqual(_) => (vec![ANYREF, ANYREF], vec![BOOL_VALTYPE]),
+            BuiltinFunction::DynamicHash(int, _) => (vec![ANYREF], vec![*int]),
+            BuiltinFunction::DynamicInspect(string, _) => (vec![ANYREF], vec![*string]),
         }
     }
 
@@ -1034,53 +1077,204 @@ impl<'a> Generator<'a> {
         type_pretty_name(&self.module.names, type_)
     }
 
+    /// Registers the external types of every module. Only those of the
+    /// module being generated are checked: an invalid external type of
+    /// another module is left out, and fails where it is used.
     fn types_external(&mut self) -> Result<(), Error> {
-        for custom_type in &self.module.definitions.custom_types {
-            let type_ = if let Some((module, name, span)) = &custom_type.external_webassembly {
-                assert!(custom_type.constructors.is_empty());
-                if module != BUILTINS_MODULE {
-                    return Err(Error::UnknownExternalModule {
-                        location: *span,
-                        module: module.clone(),
-                    });
-                }
-                match name.as_str() {
-                    "I32" => CustomType::External {
-                        val_type: ValType::I32,
-                        to_str: I32_TO_STR,
-                    },
-                    "I64" => CustomType::External {
-                        val_type: ValType::I64,
-                        to_str: I64_TO_STR,
-                    },
-                    "F32" => CustomType::External {
-                        val_type: ValType::F32,
-                        to_str: F32_TO_STR,
-                    },
-                    "F64" => CustomType::External {
-                        val_type: ValType::F64,
-                        to_str: F64_TO_STR,
-                    },
-                    _ => {
-                        return Err(Error::UnknownExternalType {
-                            location: *span,
-                            name: name.clone(),
-                        });
+        let modules: Vec<&'a TypedModule> = iter::once(self.module)
+            .chain(self.all_modules.values().copied())
+            .collect();
+        for module in modules {
+            let is_main = module.name == self.module.name;
+            for custom_type in &module.definitions.custom_types {
+                let type_ = if let Some((external_module, name, span)) =
+                    &custom_type.external_webassembly
+                {
+                    assert!(custom_type.constructors.is_empty());
+                    match self.external_type(custom_type, external_module, name, *span) {
+                        Ok(type_) => type_,
+                        Err(error) if is_main => return Err(error),
+                        Err(_) => continue,
                     }
-                }
-            } else if custom_type.name == "I32" {
-                CustomType::External {
-                    val_type: ValType::I32,
-                    to_str: I32_TO_STR,
-                }
-            } else {
-                continue;
-            };
-            let _ = self
-                .types
-                .insert((self.module.name.clone(), custom_type.name.clone()), type_);
+                } else if is_main && custom_type.name == "I32" {
+                    CustomType::External {
+                        val_type: ValType::I32,
+                        to_str: Some(I32_TO_STR),
+                    }
+                } else {
+                    continue;
+                };
+                let _ = self
+                    .types
+                    .insert((module.name.clone(), custom_type.name.clone()), type_);
+            }
         }
         Ok(())
+    }
+
+    /// The representation of the external type `custom_type`, declared as
+    /// `@external(webassembly, module, name)`.
+    fn external_type(
+        &self,
+        custom_type: &TypedCustomType,
+        module: &EcoString,
+        name: &EcoString,
+        location: SrcSpan,
+    ) -> Result<CustomType, Error> {
+        if module != BUILTINS_MODULE {
+            return Err(Error::UnknownExternalModule {
+                location,
+                module: module.clone(),
+            });
+        }
+        let (val_type, to_str) = match name.as_str() {
+            "I32" => (ValType::I32, Some(I32_TO_STR)),
+            "I64" => (ValType::I64, Some(I64_TO_STR)),
+            "F32" => (ValType::F32, Some(F32_TO_STR)),
+            "F64" => (ValType::F64, Some(F64_TO_STR)),
+            "AnyRef" => (ANYREF, None),
+            _ => {
+                let Some((runtime_module, runtime_type)) = self.runtime_type(name) else {
+                    return Err(Error::UnknownExternalType {
+                        location,
+                        name: name.clone(),
+                    });
+                };
+                if runtime_type.parameters.len() != custom_type.parameters.len() {
+                    return Err(Error::WrongExternalTypeArity {
+                        location,
+                        name: name.clone(),
+                        expected: runtime_type.parameters.len(),
+                        got: custom_type.parameters.len(),
+                    });
+                }
+                return Ok(CustomType::Runtime {
+                    module: runtime_module,
+                    name: name.clone(),
+                });
+            }
+        };
+        Ok(CustomType::External { val_type, to_str })
+    }
+
+    /// The public type `name` of the runtime and its module.
+    fn runtime_type(&self, name: &str) -> Option<(EcoString, &'a TypedCustomType)> {
+        self.runtime.iter().find_map(|runtime_module| {
+            let module = &runtime_module.module;
+            module
+                .definitions
+                .custom_types
+                .iter()
+                .find(|t| {
+                    t.name == name
+                        && t.publicity.is_importable()
+                        && t.external_webassembly.is_none()
+                })
+                .map(|t| (module.name.clone(), t))
+        })
+    }
+
+    /// The public function `name` of the runtime and its module.
+    fn runtime_function(&self, name: &str) -> Option<(EcoString, &'a TypedFunction)> {
+        self.runtime.iter().find_map(|runtime_module| {
+            let module = &runtime_module.module;
+            module
+                .definitions
+                .functions
+                .iter()
+                .find(|f| function_name(f) == name && f.publicity.is_importable())
+                .map(|f| (module.name.clone(), f))
+        })
+    }
+
+    /// The type of the runtime that represents `type_`, when `type_` is an
+    /// external type represented by the runtime.
+    fn representation(&self, type_: &Arc<Type>) -> Option<Arc<Type>> {
+        let (CustomType::Runtime { module, name }, arguments) = self.custom_type(type_)? else {
+            return None;
+        };
+        Some(Arc::new(Type::Named {
+            publicity: Publicity::Public,
+            package: RUNTIME_PACKAGE.into(),
+            module,
+            name,
+            arguments,
+            inferred_variant: None,
+        }))
+    }
+
+    /// The module and the hooks of `type_`, when it is a type of the runtime
+    /// with hooks.
+    fn type_hooks(&self, type_: &Arc<Type>) -> Option<(EcoString, &'static Hooks)> {
+        let (module, name, _) = type_.named_type_information()?;
+        runtime::hooks(&module, &name).map(|hooks| (module, hooks))
+    }
+
+    /// The hook `name` of the runtime module `module`, with type `type_`.
+    fn function_hook(&mut self, module: &EcoString, name: &str, type_: Arc<Type>) -> FunctionId {
+        self.function_imported(module, &name.into(), &type_)
+            .func_id()
+    }
+
+    /// `type_` with each external type represented by the runtime replaced
+    /// by its representation, at any depth.
+    fn represent(&self, type_: &Arc<Type>) -> Arc<Type> {
+        match type_.as_ref() {
+            Type::Named {
+                publicity,
+                package,
+                module,
+                name,
+                arguments,
+                inferred_variant,
+            } => {
+                let arguments = arguments.iter().map(|a| self.represent(a)).collect();
+                if let Some((CustomType::Runtime { module, name }, _)) = self.custom_type(type_) {
+                    Arc::new(Type::Named {
+                        publicity: Publicity::Public,
+                        package: RUNTIME_PACKAGE.into(),
+                        module,
+                        name,
+                        arguments,
+                        inferred_variant: None,
+                    })
+                } else {
+                    Arc::new(Type::Named {
+                        publicity: *publicity,
+                        package: package.clone(),
+                        module: module.clone(),
+                        name: name.clone(),
+                        arguments,
+                        inferred_variant: *inferred_variant,
+                    })
+                }
+            }
+            Type::Fn { arguments, return_ } => Arc::new(Type::Fn {
+                arguments: arguments.iter().map(|a| self.represent(a)).collect(),
+                return_: self.represent(return_),
+            }),
+            Type::Tuple { elements } => Arc::new(Type::Tuple {
+                elements: elements.iter().map(|e| self.represent(e)).collect(),
+            }),
+            Type::Var { type_: var } => match &*var.borrow() {
+                TypeVar::Link { type_ } => self.represent(type_),
+                TypeVar::Unbound { .. } | TypeVar::Generic { .. } => type_.clone(),
+            },
+        }
+    }
+
+    /// The external function `name` of the runtime, with type `type_` in the
+    /// types of the program.
+    fn function_runtime(&mut self, module: &EcoString, name: &EcoString, type_: &Arc<Type>) -> Id {
+        let type_ = self.represent(type_);
+        self.function_imported(module, name, &type_)
+    }
+
+    /// Registers the types of the runtime, which programs don't import.
+    fn types_runtime(&mut self) {
+        for runtime_module in self.runtime {
+            self.add_module_types(&runtime_module.module);
+        }
     }
 
     fn functions_external(
@@ -1134,6 +1328,10 @@ impl<'a> Generator<'a> {
                         module: module.clone(),
                     });
                 }
+                if let Some((_, runtime_function)) = self.runtime_function(name) {
+                    self.validate_runtime_external(function, name, runtime_function)?;
+                    continue;
+                }
                 if is_glued(name) {
                     self.validate_rust_external(function, name, available)?;
                     continue;
@@ -1178,6 +1376,23 @@ impl<'a> Generator<'a> {
                             got: self.type_pretty_name(&function_type(function)),
                         });
                     }
+                } else if name == DYNAMIC_CAST {
+                    if !(function.arguments.len() == 1
+                        && function
+                            .arguments
+                            .first()
+                            .is_some_and(|arg| is_generic_type(&arg.type_))
+                        && self
+                            .represent(&function.return_type)
+                            .same_as(&self.runtime_named_type(DYNAMIC_MODULE, "Dynamic", vec![])))
+                    {
+                        return Err(Error::WrongBuiltinFunctionSignature {
+                            location: function.location,
+                            name: name.clone(),
+                            expected: "fn(a) -> Dynamic".into(),
+                            got: self.type_pretty_name(&function_type(function)),
+                        });
+                    }
                 } else if name == INSPECT {
                     if !(function.arguments.len() == 1
                         && function
@@ -1202,6 +1417,30 @@ impl<'a> Generator<'a> {
             }
         }
         Ok(builtins)
+    }
+
+    /// Checks that the type of the external `function` is an instance of
+    /// the type of the function of the runtime that implements it, once its
+    /// external types are replaced by their representation.
+    fn validate_runtime_external(
+        &self,
+        function: &TypedFunction,
+        name: &EcoString,
+        runtime_function: &TypedFunction,
+    ) -> Result<(), Error> {
+        let external = self.represent(&function_type(function));
+        let runtime = function_type(runtime_function);
+        let instance = Monomorphizer::with_bound(&runtime, &external).type_(&runtime);
+        if instance.same_as(&external) {
+            Ok(())
+        } else {
+            Err(Error::WrongBuiltinFunctionSignature {
+                location: function.location,
+                name: name.clone(),
+                expected: self.type_pretty_name(&runtime),
+                got: self.type_pretty_name(&function_type(function)),
+            })
+        }
     }
 
     fn validate_rust_external(
@@ -1617,7 +1856,9 @@ impl<'a> Generator<'a> {
     }
 
     fn type_index(&mut self, type_: &Arc<Type>) -> TypeId {
-        if type_.is_string() {
+        if let Some(representation) = self.representation(type_) {
+            self.type_index(&representation)
+        } else if type_.is_string() {
             self.string.type_index
         } else if let Some(types) = type_.tuple_types() {
             self.tuple_type_index(types)
@@ -1625,7 +1866,9 @@ impl<'a> Generator<'a> {
             self.closure_type(params, return_).type_index
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             match custom_type {
-                CustomType::External { .. } | CustomType::Enum { .. } => {
+                CustomType::External { .. }
+                | CustomType::Runtime { .. }
+                | CustomType::Enum { .. } => {
                     panic!("external/enum types should not reach code generation")
                 }
                 CustomType::Struct {
@@ -2250,7 +2493,10 @@ impl<'a> Generator<'a> {
             .expect("named type information");
         match self.types.get(&(module, name)).expect("union type") {
             CustomType::Union { layout, .. } => layout.clone(),
-            CustomType::External { .. } | CustomType::Enum { .. } | CustomType::Struct { .. } => {
+            CustomType::External { .. }
+            | CustomType::Runtime { .. }
+            | CustomType::Enum { .. }
+            | CustomType::Struct { .. } => {
                 panic!("expected union type")
             }
         }
@@ -2396,6 +2642,10 @@ impl<'a> Generator<'a> {
     ) -> ValType {
         match custom_type {
             CustomType::External { val_type, .. } => *val_type,
+            CustomType::Runtime { .. } => {
+                let representation = self.representation(type_).expect("runtime type");
+                self.val_type(&representation)
+            }
             CustomType::Enum { .. } => ValType::I32,
             CustomType::Struct {
                 custom_type,
@@ -2608,7 +2858,7 @@ impl<'a> Generator<'a> {
                         });
                         id
                     }
-                    CustomType::External { .. } => {
+                    CustomType::External { .. } | CustomType::Runtime { .. } => {
                         panic!("external types should not reach code generation")
                     }
                 }
@@ -2834,6 +3084,9 @@ impl<'a> Generator<'a> {
         for function in &self.module.definitions.functions {
             if function_name(function) == name {
                 if let Some((_, fname, _)) = &function.external_webassembly {
+                    if let Some((module, _)) = self.runtime_function(fname) {
+                        return self.function_runtime(&module, fname, required_type);
+                    }
                     if is_glued(fname) {
                         return self.function_rust(fname, &function_type(function));
                     }
@@ -2842,6 +3095,9 @@ impl<'a> Generator<'a> {
                     }
                     if fname == HASH {
                         return self.function_hash_external(required_type);
+                    }
+                    if fname == DYNAMIC_CAST {
+                        return self.function_dynamic_cast_external(required_type);
                     }
                     if let Some(builtin) = BuiltinFunctionExternal::by_name(fname) {
                         // Created on first use, also for externals declared in
@@ -3342,6 +3598,9 @@ impl<'a> Generator<'a> {
     ) -> Id {
         let function = self.module_function_definition(module_name, fn_name);
         if let Some((_, fname, _)) = &function.external_webassembly {
+            if let Some((module, _)) = self.runtime_function(fname) {
+                return self.function_runtime(&module, fname, required_type);
+            }
             if is_glued(fname) {
                 return self.function_rust(fname, &function_type(function));
             }
@@ -3350,6 +3609,9 @@ impl<'a> Generator<'a> {
             }
             if fname == HASH {
                 return self.function_hash_external(required_type);
+            }
+            if fname == DYNAMIC_CAST {
+                return self.function_dynamic_cast_external(required_type);
             }
             if let Some(builtin) = BuiltinFunctionExternal::by_name(fname) {
                 // Created on first use, also for externals declared in
@@ -3617,7 +3879,9 @@ impl<'a> Generator<'a> {
                                 .struct_get(supertype_index, field_index);
                         }
                     }
-                    CustomType::External { .. } | CustomType::Enum { .. } => {
+                    CustomType::External { .. }
+                    | CustomType::Runtime { .. }
+                    | CustomType::Enum { .. } => {
                         panic!("external/enum types should not reach code generation")
                     }
                 }
@@ -3880,7 +4144,9 @@ impl<'a> Generator<'a> {
                                 .struct_get(supertype_index, field_index);
                         }
                     }
-                    CustomType::External { .. } | CustomType::Enum { .. } => {
+                    CustomType::External { .. }
+                    | CustomType::Runtime { .. }
+                    | CustomType::Enum { .. } => {
                         panic!("external/enum types should not reach code generation")
                     }
                 }
@@ -3917,7 +4183,9 @@ impl<'a> Generator<'a> {
                             )
                             .call(id);
                     }
-                    CustomType::External { .. } | CustomType::Enum { .. } => {
+                    CustomType::External { .. }
+                    | CustomType::Runtime { .. }
+                    | CustomType::Enum { .. } => {
                         panic!("external/enum types should not reach code generation")
                     }
                 }
@@ -4141,6 +4409,9 @@ impl<'a> Generator<'a> {
     }
 
     fn is_ref_non_null(&self, type_: &Arc<Type>) -> bool {
+        if let Some(representation) = self.representation(type_) {
+            return self.is_ref_non_null(&representation);
+        }
         type_.is_string() || type_.tuple_types().is_some() || {
             if let Some((custom_type, _)) = self.custom_type(type_) {
                 custom_type.is_ref_non_null()
@@ -4597,7 +4868,7 @@ impl<'a> Generator<'a> {
                             );
                         }
                     }
-                    CustomType::External { .. } => {
+                    CustomType::External { .. } | CustomType::Runtime { .. } => {
                         panic!("external types should not reach code generation")
                     }
                 };
@@ -4885,7 +5156,9 @@ impl<'a> Generator<'a> {
                 let index = index.expect("FieldAccess index") as u32;
                 let (custom_type, args) = self.custom_type_expect(&type_);
                 match custom_type {
-                    CustomType::External { .. } | CustomType::Enum { .. } => {
+                    CustomType::External { .. }
+                    | CustomType::Runtime { .. }
+                    | CustomType::Enum { .. } => {
                         panic!("external/enum types should not reach code generation")
                     }
                     CustomType::Struct {

@@ -22,6 +22,8 @@ pub(super) enum Hash {
     /// Functions can't be compared, so they all hash the same.
     Constant,
     Call(FunctionId),
+    /// A hook of the runtime, which returns an `Int`.
+    Hook(FunctionId),
 }
 
 const SEED: i32 = 0x2545_F491;
@@ -57,7 +59,11 @@ impl<'a> Generator<'a> {
     }
 
     /// `[value] -> [i32]`.
-    fn hash_instructions(&mut self, instructions: &mut Instructions<'_, '_>, hash: Hash) {
+    pub(super) fn hash_instructions(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        hash: Hash,
+    ) {
         let mix = self.function_hash_mix();
         let _ = match hash {
             Hash::I32 => instructions.call(mix),
@@ -70,11 +76,17 @@ impl<'a> Generator<'a> {
                 .call(mix),
             Hash::Constant => instructions.drop().i32_const(SEED),
             Hash::Call(function) => instructions.call(function),
+            Hash::Hook(function) => instructions.call(function).int_fold_to_i32(),
         };
     }
 
     pub(super) fn function_hash(&mut self, type_: &Arc<Type>) -> Hash {
-        if type_.fn_types().is_some() {
+        if let Some(representation) = self.representation(type_) {
+            return self.function_hash(&representation);
+        } else if let Some((module, hooks)) = self.type_hooks(type_) {
+            let fn_type = type_::fn_(vec![type_.clone()], type_::int());
+            return Hash::Hook(self.function_hook(&module, hooks.hash, fn_type));
+        } else if type_.fn_types().is_some() {
             return Hash::Constant;
         } else if type_.is_int() {
             return Hash::Int;
@@ -144,7 +156,9 @@ impl<'a> Generator<'a> {
                     let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
                     self.code_union_hash(type_, supertype_index, &custom_type, &args)
                 }
-                CustomType::External { .. } | CustomType::Enum { .. } => {
+                CustomType::External { .. }
+                | CustomType::Runtime { .. }
+                | CustomType::Enum { .. } => {
                     panic!("external/enum types should not reach hash code generation")
                 }
             }

@@ -2185,6 +2185,19 @@ Is your editor still running and connected to the language server?"
                         None,
                         *location,
                     ),
+                    crate::webassembly::Error::WrongExternalTypeArity {
+                        location,
+                        name,
+                        expected,
+                        got,
+                    } => (
+                        "Wrong external type arity",
+                        format!(
+                            "The external type \"{name}\" of the WebAssembly target takes {expected} type parameters, but this one has {got}."
+                        ),
+                        None,
+                        *location,
+                    ),
                     crate::webassembly::Error::UnsupportedFeature { location, feature } => (
                         "Unsupported feature",
                         format!("{feature} is not yet supported by the WebAssembly target."),
