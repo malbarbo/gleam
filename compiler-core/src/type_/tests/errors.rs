@@ -3457,6 +3457,18 @@ pub type Dict(key, value) {
 }
 
 #[test]
+fn webassembly_external_annotation_on_custom_type_with_constructors() {
+    assert_module_error!(
+        r#"
+@external(webassembly, "builtins", "Dict")
+pub type Dict(key, value) {
+  Dict(pairs: List(#(key, value)))
+}
+"#
+    );
+}
+
+#[test]
 fn generic_unlabelled_field_in_updated_record_wrong_type() {
     assert_module_error!(
         "

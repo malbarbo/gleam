@@ -1111,7 +1111,10 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
                 });
         }
 
-        if external_erlang.is_some() || external_javascript.is_some() {
+        if external_erlang.is_some()
+            || external_javascript.is_some()
+            || external_webassembly.is_some()
+        {
             self.track_feature_usage(FeatureKind::ExternalCustomType, location);
 
             if !constructors.is_empty() {
