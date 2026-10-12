@@ -75,6 +75,10 @@ pub(super) enum Eq {
     I32,
     Int,
     Float,
+    /// The bits of the external numbers `I64`, `F32` and `F64`.
+    I64,
+    F32,
+    F64,
     Call(FunctionId),
 }
 
@@ -435,6 +439,18 @@ impl<'a, 'b> Instructions<'a, 'b> {
             Eq::I32 => self.i32_eq(),
             Eq::Int => self.int_eq(),
             Eq::Float => self.float_eq(),
+            Eq::I64 => {
+                let _ = self.seq.as_mut().binop(BinaryOp::I64Eq);
+                self
+            }
+            Eq::F32 => {
+                let _ = self.seq.as_mut().binop(BinaryOp::F32Eq);
+                self
+            }
+            Eq::F64 => {
+                let _ = self.seq.as_mut().binop(BinaryOp::F64Eq);
+                self
+            }
             Eq::Call(func) => self.call(func),
         }
     }
@@ -861,36 +877,39 @@ impl<'a, 'b> Instructions<'a, 'b> {
         self
     }
 
-    /// `[Int] -> [i32]`: the two halves of a 64 bit `Int` xored.
-    pub(super) fn int_fold_to_i32(&mut self) -> &mut Self {
-        if let IntType::I64 = self.int {
-            let _ = self.seq.as_mut().unop(UnaryOp::I64Extend32S);
-            return self.fold_i64();
-        }
+    /// `[] -> [i32]`: the two halves of the i64 `value` xored.
+    pub(super) fn fold_i64(&mut self, value: LocalId) -> &mut Self {
+        let _ = self
+            .seq
+            .as_mut()
+            .local_get(value)
+            .local_get(value)
+            .i64_const(32)
+            .binop(BinaryOp::I64ShrU)
+            .binop(BinaryOp::I64Xor)
+            .unop(UnaryOp::I32WrapI64);
         self
     }
 
-    /// `[Float] -> [i32]`: the bits of a `Float`, folded to 32 bits.
-    pub(super) fn float_fold_to_i32(&mut self) -> &mut Self {
-        match self.float {
-            FloatType::F32 => {
-                let _ = self.seq.as_mut().unop(UnaryOp::I32ReinterpretF32);
-                self
-            }
-            FloatType::F64 => {
-                let _ = self.seq.as_mut().unop(UnaryOp::I64ReinterpretF64);
-                self.fold_i64()
-            }
-        }
+    /// `[f32] -> [i32]`: the bits.
+    pub(super) fn f32_reinterpret(&mut self) -> &mut Self {
+        let _ = self.seq.as_mut().unop(UnaryOp::I32ReinterpretF32);
+        self
     }
 
-    /// `[i64] -> [i32]`: `low ^ high`.
-    fn fold_i64(&mut self) -> &mut Self {
-        let seq = self.seq.as_mut();
-        let _ = seq
-            .i64_const(32)
-            .binop(BinaryOp::I64Rotl)
-            .unop(UnaryOp::I32WrapI64);
+    /// `[f64] -> [i64]`: the bits.
+    pub(super) fn f64_reinterpret(&mut self) -> &mut Self {
+        let _ = self.seq.as_mut().unop(UnaryOp::I64ReinterpretF64);
+        self
+    }
+
+    /// `[Float] -> [i32 or i64]`: the bits of a `Float`.
+    pub(super) fn float_reinterpret(&mut self) -> &mut Self {
+        let op = match self.float {
+            FloatType::F32 => UnaryOp::I32ReinterpretF32,
+            FloatType::F64 => UnaryOp::I64ReinterpretF64,
+        };
+        let _ = self.seq.as_mut().unop(op);
         self
     }
 

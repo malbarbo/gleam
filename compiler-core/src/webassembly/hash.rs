@@ -21,6 +21,10 @@ pub(super) enum Hash {
     Float,
     /// Functions can't be compared, so they all hash the same.
     Constant,
+    /// The bits of the external numbers `I64`, `F32` and `F64`.
+    I64,
+    F32,
+    F64,
     Call(FunctionId),
     /// A hook of the runtime, which returns an `Int`.
     Hook(FunctionId),
@@ -65,19 +69,62 @@ impl<'a> Generator<'a> {
         hash: Hash,
     ) {
         let mix = self.function_hash_mix();
+        let fold_int = match self.int {
+            IntType::I32 => None,
+            IntType::I64 => Some(self.function_fold_i64()),
+        };
+        let fold_float = match self.float {
+            FloatType::F32 => None,
+            FloatType::F64 => Some(self.function_fold_i64()),
+        };
+        let fold = |instructions: &mut Instructions<'_, '_>, fold: Option<FunctionId>| {
+            if let Some(fold) = fold {
+                let _ = instructions.call(fold);
+            }
+        };
         let _ = match hash {
             Hash::I32 => instructions.call(mix),
-            Hash::Int => instructions.int_fold_to_i32().call(mix),
-            // `-0.0 + 0.0` is `0.0`, as `0.0 == -0.0`
-            Hash::Float => instructions
-                .float_const("0.0")
-                .float_add()
-                .float_fold_to_i32()
-                .call(mix),
+            Hash::Int => {
+                fold(instructions, fold_int);
+                instructions.call(mix)
+            }
+            Hash::Float => {
+                // `-0.0 + 0.0` is `0.0`, as `0.0 == -0.0`
+                let _ = instructions
+                    .float_const("0.0")
+                    .float_add()
+                    .float_reinterpret();
+                fold(instructions, fold_float);
+                instructions.call(mix)
+            }
             Hash::Constant => instructions.drop().i32_const(SEED),
+            Hash::I64 => {
+                let fold = self.function_fold_i64();
+                instructions.call(fold).call(mix)
+            }
+            Hash::F32 => instructions.f32_reinterpret().call(mix),
+            Hash::F64 => {
+                let fold = self.function_fold_i64();
+                instructions.f64_reinterpret().call(fold).call(mix)
+            }
             Hash::Call(function) => instructions.call(function),
-            Hash::Hook(function) => instructions.call(function).int_fold_to_i32(),
+            Hash::Hook(function) => {
+                let _ = instructions.call(function);
+                fold(instructions, fold_int);
+                instructions
+            }
         };
+    }
+
+    /// `(i64) -> i32`: the two halves xored.
+    fn function_fold_i64(&mut self) -> FunctionId {
+        self.get_function_builtin(BuiltinFunction::FoldI64, |s| {
+            // params
+            let value = s.wasm_local(ValType::I64);
+            let mut function = Function::new(s, "_fold_i64", &[value], &[ValType::I32]);
+            let _ = function.extend_instructions(s).fold_i64(value).end();
+            function.finish(s)
+        })
     }
 
     pub(super) fn function_hash(&mut self, type_: &Arc<Type>) -> Hash {
@@ -94,10 +141,18 @@ impl<'a> Generator<'a> {
             return Hash::Float;
         } else if type_.is_utf_codepoint() {
             return Hash::I32;
-        } else if let Some((CustomType::External { .. } | CustomType::Enum { .. }, _)) =
-            self.custom_type(type_)
-        {
+        } else if let Some((CustomType::Enum { .. }, _)) = self.custom_type(type_) {
             return Hash::I32;
+        } else if let Some((CustomType::External { val_type, .. }, _)) = self.custom_type(type_) {
+            return match val_type {
+                ValType::I32 => Hash::I32,
+                ValType::I64 => Hash::I64,
+                ValType::F32 => Hash::F32,
+                ValType::F64 => Hash::F64,
+                ValType::V128 | ValType::Ref(_) => {
+                    panic!("values of type {val_type:?} can't be hashed")
+                }
+            };
         }
         let builtin = BuiltinFunction::Hash(self.val_type(type_), self.type_pretty_name(type_));
         let type_ = type_.clone();

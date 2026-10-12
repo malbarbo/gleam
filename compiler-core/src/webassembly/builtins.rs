@@ -16,6 +16,7 @@ pub(super) enum BuiltinFunction {
     Hash(ValType, EcoString),
     HashExternal(ValType, EcoString),
     HashMix,
+    FoldI64,
     /// `_dynamic_cast(T)`, with the representations of `T` and `Dynamic`.
     DynamicCast(ValType, ValType, EcoString),
     /// The functions of the table of a boxed `Dynamic` of type `T`: equal,
@@ -46,6 +47,7 @@ impl BuiltinFunction {
             BuiltinFunction::Hash(_, name) => format!("_hash({name})").into(),
             BuiltinFunction::HashExternal(_, name) => format!("_hash_int({name})").into(),
             BuiltinFunction::HashMix => "_hash_mix".into(),
+            BuiltinFunction::FoldI64 => "_fold_i64".into(),
             BuiltinFunction::DynamicCast(_, _, name) => format!("_dynamic_cast({name})").into(),
             BuiltinFunction::DynamicEqual(name) => format!("_dynamic_equal({name})").into(),
             BuiltinFunction::DynamicHash(_, name) => format!("_dynamic_hash({name})").into(),
@@ -559,11 +561,18 @@ impl<'a> Generator<'a> {
             return Eq::Float;
         } else if type_.is_utf_codepoint() {
             return Eq::I32;
-        } else if let Some((CustomType::External { .. } | CustomType::Enum { .. }, _)) =
-            self.custom_type(type_)
-        {
-            // External types and Enums are all i32 at the WASM level
+        } else if let Some((CustomType::Enum { .. }, _)) = self.custom_type(type_) {
             return Eq::I32;
+        } else if let Some((CustomType::External { val_type, .. }, _)) = self.custom_type(type_) {
+            return match val_type {
+                ValType::I32 => Eq::I32,
+                ValType::I64 => Eq::I64,
+                ValType::F32 => Eq::F32,
+                ValType::F64 => Eq::F64,
+                ValType::V128 | ValType::Ref(_) => {
+                    panic!("values of type {val_type:?} can't be compared")
+                }
+            };
         }
 
         let builtin = BuiltinFunction::Equal(self.val_type(type_), self.type_pretty_name(type_));

@@ -339,3 +339,23 @@ pub fn main() {{
 "#
     ));
 }
+
+/// With a 64 bit `Int`, both halves of an `Int` and of a `Float` are hashed.
+#[test]
+fn hash_i64() {
+    run_ok_i64(
+        r#"
+@external(webassembly, "builtins", "_hash")
+fn hash(a: a) -> Int
+
+pub fn main() {
+    let assert False = hash(1) == hash(2)
+    let assert False = hash(1) == hash(7919)
+    let assert False = hash(0) == hash(4294967296)
+    let assert False = hash(-1) == hash(4294967295)
+    let assert False = hash(1.0) == hash(2.0)
+    let assert True = hash(0.0) == hash(-0.0)
+}
+"#,
+    );
+}

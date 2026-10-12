@@ -458,3 +458,25 @@ pub fn main() {
 "#,
     );
 }
+
+/// The hooks return an `Int`, which is folded to 32 bits for the hash of the
+/// values that hold them.
+#[test]
+fn hash_of_nested_dicts_i64() {
+    run_dict_i64(
+        r#"
+@external(webassembly, "builtins", "_hash")
+fn hash(a: a) -> Int
+
+pub fn main() {
+  let a = dict.from_list([#(1, 2)])
+  let b = dict.from_list([#(1, 3)])
+  let c = dict.from_list([#(2, 2)])
+  let assert False = hash([a]) == hash([b])
+  let assert False = hash([a]) == hash([c])
+  let assert False = hash([b]) == hash([c])
+  let assert True = hash([a]) == hash([dict.from_list([#(1, 2)])])
+}
+"#,
+    );
+}

@@ -1039,6 +1039,7 @@ impl<'a> Generator<'a> {
                 (vec![*val_type], vec![self.int.val_type()])
             }
             BuiltinFunction::HashMix => (vec![ValType::I32], vec![ValType::I32]),
+            BuiltinFunction::FoldI64 => (vec![ValType::I64], vec![ValType::I32]),
             BuiltinFunction::DynamicCast(val_type, dynamic, _) => (vec![*val_type], vec![*dynamic]),
             BuiltinFunction::DynamicEqual(_) => (vec![ANYREF, ANYREF], vec![BOOL_VALTYPE]),
             BuiltinFunction::DynamicHash(int, _) => (vec![ANYREF], vec![*int]),
