@@ -15,12 +15,16 @@
 //! list.fold(xs, 0, fn(acc, x) { acc + k }) // fold with f = the literal code
 //! ```
 //!
-//! A call to a function that returns a function literal is also known, as
-//! the code of that literal in the function called:
+//! The code of any expression is its identity, see `Generator::identity`:
+//! each generated function records the identity of the value it returns,
+//! so a call is known as well, and a case is known when all its clauses
+//! have the same identity. A callee whose identity is known is also called
+//! directly:
 //!
 //! ```gleam
 //! list.sort(xs, order.reverse(int.compare)) // sort with the literal code of
 //!                                           // reverse with int.compare
+//! twice(g)(1)                               // the literal code of twice
 //! ```
 //!
 //! The argument is still the same closure value, so equality, storing and
@@ -35,7 +39,9 @@ use crate::ast::{ArgNames, CallArg};
 /// function specialized only by the type.
 const MAX_SPECIALIZATIONS: usize = 32;
 
-/// A function argument whose code is known where the function is called.
+/// The identity of a function value: the code that calling it runs, when a
+/// single one reaches it. Without one, the value is boxed: calling it is a
+/// `call_ref` through the closure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum Known {
     /// A function, called directly, without the closure.
@@ -47,14 +53,26 @@ pub(super) enum Known {
     Code(FunctionId),
 }
 
-/// A variable whose code is known: a specialized parameter or a variable
-/// bound to a known value.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct KnownVariable {
-    pub(super) known: Known,
-    /// Whether the code was made where the variable is bound, and is not a
-    /// function, see `specialized_callee`.
-    fresh: bool,
+impl Known {
+    fn id(self) -> FunctionId {
+        match self {
+            Known::Function(id) | Known::Constructor(id) | Known::Code(id) => id,
+        }
+    }
+}
+
+/// How a call is emitted, see `Generator::call_target`.
+pub(super) enum CallTarget {
+    /// A function literal called directly.
+    Literal,
+    /// A callee whose identity is known.
+    Known(Known),
+    /// A function called directly: a specialization or a static callee.
+    Direct(FunctionId),
+    /// A local function, whose captures are the first arguments.
+    Local(Rc<LocalFunction>, FunctionId),
+    /// A `call_ref` through the closure.
+    Dynamic,
 }
 
 #[derive(PartialEq, Eq, Hash)]
@@ -68,9 +86,13 @@ struct SpecializationKey {
 pub(super) struct Specializations {
     /// The known function arguments of the function being generated, by the
     /// location where the parameter, or a variable bound to it, is defined.
-    pub(super) known_arguments: HashMap<SrcSpan, KnownVariable>,
-    /// The base names of the specializations being generated.
-    generating: Vec<EcoString>,
+    pub(super) known_arguments: HashMap<SrcSpan, Known>,
+    /// The base names of the specializations being generated, with the
+    /// identities of their parameters.
+    generating: Vec<(EcoString, Vec<Known>)>,
+    /// The codes made by the functions: literals and local functions. An
+    /// identity that is not one of them is a module function or constructor.
+    created: HashSet<FunctionId>,
     /// The name of each specialization, registered before its generation, so
     /// a recursive call finds its placeholder.
     names: HashMap<SpecializationKey, EcoString>,
@@ -78,16 +100,9 @@ pub(super) struct Specializations {
     counts: HashMap<(EcoString, EcoString), usize>,
     /// Which parameters of each function are specialized, by base name.
     parameters: HashMap<EcoString, Rc<[bool]>>,
-    /// The specialization number of each generated function, which names
-    /// its function literals.
-    specialization_numbers: HashMap<FunctionId, u32>,
-}
-
-impl Specializations {
-    /// Records that the function `id` is generated with `specialization`.
-    pub(super) fn generated(&mut self, id: FunctionId, specialization: u32) {
-        let _ = self.specialization_numbers.insert(id, specialization);
-    }
+    /// The identity of the value that each generated function returns. A
+    /// function being generated has none yet.
+    pub(super) returns: HashMap<FunctionId, Known>,
 }
 
 /// A function with a body that a call names.
@@ -115,16 +130,20 @@ impl<'a> Generator<'a> {
         // specialization of it, which makes a new code, and so on. The
         // generation is depth first, so every such chain goes through this
         // stack.
-        let recursive = self.specializations.generating.contains(&callee.base_name);
+        let recursive = self
+            .specializations
+            .generating
+            .iter()
+            .any(|(name, _)| *name == callee.base_name);
         let knowns = arguments
             .iter()
             .zip(parameters.iter())
             .map(|(argument, specialized)| {
-                if *specialized {
-                    self.known_argument(scope, &argument.value, recursive)
-                } else {
-                    None
+                if !*specialized {
+                    return None;
                 }
+                let known = self.identity(scope, &argument.value)?;
+                (!recursive || self.stable(&callee.base_name, known)).then_some(known)
             })
             .collect_vec();
         if knowns.iter().all(Option::is_none) {
@@ -250,7 +269,10 @@ impl<'a> Generator<'a> {
             return parameters.clone();
         }
         let function = callee.function;
-        let used = captures::called_or_passed(&function.body);
+        let mut used = captures::called_or_passed(&function.body);
+        if function.return_type.fn_types().is_some() {
+            returned_variables(&function.body, &mut used);
+        }
         let parameters: Rc<[bool]> = function
             .arguments
             .iter()
@@ -266,130 +288,245 @@ impl<'a> Generator<'a> {
         parameters
     }
 
-    /// The known code of the function argument `argument`, if any. With
-    /// `recursive`, a code created by the function being generated is not
-    /// known, see `specialized_callee`.
-    fn known_argument(
-        &mut self,
-        scope: &Scope,
-        argument: &TypedExpr,
-        recursive: bool,
-    ) -> Option<Known> {
-        let type_ = argument.type_();
-        let _ = type_.fn_types()?;
-        if let Some(location) = captures::local_variable_definition(argument) {
-            if let Some(variable) = self.specializations.known_arguments.get(&location) {
-                return (!(variable.fresh && recursive)).then_some(variable.known);
-            }
-            let info = self.local_functions.get(&location)?.clone();
-            if recursive {
-                return None;
-            }
-            let id = self.function_local_generic(&info, &type_).func_id();
-            let captures = self.local_function_captures(&info);
-            return Some(if captures.is_empty() {
-                Known::Function(id)
-            } else {
-                Known::Code(self.closure_adapter(id, &type_, &captures))
-            });
+    /// Whether `known` is stable for a specialization of the function
+    /// `base_name` requested while it is being generated: a module function
+    /// or constructor, or the identity of a parameter of a generation of it.
+    /// Any other is new, and could make a new specialization, which makes a
+    /// new code, and so on.
+    fn stable(&self, base_name: &EcoString, known: Known) -> bool {
+        if !self.specializations.created.contains(&known.id()) {
+            return true;
         }
-        if let TypedExpr::Fn {
-            location,
-            arguments,
-            body,
-            ..
-        } = argument
-        {
-            if recursive {
-                return None;
-            }
-            // The same code that the argument creates its closure with
-            let name = self.function_literal_name(*location, &type_);
-            let captures = self.function_literal_captures(*location, arguments, body);
-            let (params, return_) = type_.fn_types().expect("function type");
-            let closure = self.closure_type(params, return_);
-            let id = self.function_local(name, &type_, arguments, body, Some(closure), &captures);
-            return Some(Known::Code(id.func_id()));
-        }
-        if let TypedExpr::Call { fun, arguments, .. } = argument {
-            if recursive {
-                return None;
-            }
-            return self.returned_literal(scope, fun, arguments, &type_);
-        }
-        // A function named by a variable or a module select
-        let id = self.static_callee(scope, argument)?;
-        Some(if argument.is_record_constructor_function() {
-            Known::Constructor(id)
-        } else {
-            Known::Function(id)
-        })
+        self.specializations
+            .generating
+            .iter()
+            .any(|(name, knowns)| name == base_name && knowns.contains(&known))
     }
 
-    /// The code of the function literal that the call of `fun` with
-    /// `arguments` returns, if its body ends with one. It is the code in the
-    /// function that the call is emitted to, specialized or not.
-    fn returned_literal(
+    /// The identity of the value of `expr`, if a single one reaches it.
+    pub(super) fn identity(&mut self, scope: &Scope, expr: &TypedExpr) -> Option<Known> {
+        let type_ = expr.type_();
+        let _ = type_.fn_types()?;
+        match expr {
+            TypedExpr::Var { .. } | TypedExpr::ModuleSelect { .. } => {
+                if let Some(location) = captures::local_variable_definition(expr) {
+                    if let Some(known) = self.specializations.known_arguments.get(&location) {
+                        return Some(*known);
+                    }
+                    let info = self.local_functions.get(&location)?.clone();
+                    return Some(self.local_function_identity(&info, &type_));
+                }
+                let id = self.static_callee(scope, expr)?;
+                Some(if expr.is_record_constructor_function() {
+                    Known::Constructor(id)
+                } else {
+                    Known::Function(id)
+                })
+            }
+            TypedExpr::Fn {
+                location,
+                arguments,
+                body,
+                ..
+            } => {
+                // The same code that the literal creates its closure with. It
+                // is generated now, but the literal is generated next with the
+                // same state: its identity is only asked where it is a value.
+                let name = self.function_literal_name(*location, &type_);
+                let captures = self.function_literal_captures(*location, arguments, body);
+                let (params, return_) = type_.fn_types().expect("function type");
+                let closure = self.closure_type(params, return_);
+                let id = self
+                    .function_local(name, &type_, arguments, body, Some(closure), &captures)
+                    .func_id();
+                let _ = self.specializations.created.insert(id);
+                Some(Known::Code(id))
+            }
+            TypedExpr::Call { fun, arguments, .. } => {
+                let id = match self.call_target(scope, fun, arguments) {
+                    CallTarget::Known(known) => known.id(),
+                    CallTarget::Direct(id) | CallTarget::Local(_, id) => id,
+                    CallTarget::Literal | CallTarget::Dynamic => return None,
+                };
+                let known = self.specializations.returns.get(&id).copied()?;
+                self.has_signature(known, &type_).then_some(known)
+            }
+            TypedExpr::Block { statements, .. } => self.statements_identity(scope, statements),
+            TypedExpr::Case { clauses, .. } => {
+                // A clause that does not return gives no value to join
+                let knowns = clauses
+                    .iter()
+                    .filter(|clause| {
+                        !matches!(
+                            clause.then,
+                            TypedExpr::Panic { .. } | TypedExpr::Todo { .. }
+                        )
+                    })
+                    .map(|clause| self.identity(scope, &clause.then))
+                    .collect_vec();
+                let first = (*knowns.first()?)?;
+                knowns
+                    .iter()
+                    .all(|known| *known == Some(first))
+                    .then_some(first)
+            }
+            TypedExpr::Pipeline {
+                first_value,
+                assignments,
+                finally,
+                ..
+            } => {
+                self.bind(scope, first_value.value.location(), &first_value.value);
+                for (assignment, _) in assignments {
+                    self.bind(scope, assignment.value.location(), &assignment.value);
+                }
+                self.identity(scope, finally)
+            }
+            TypedExpr::Echo {
+                expression: Some(expression),
+                ..
+            } => self.identity(scope, expression),
+            // Boxed
+            TypedExpr::Int { .. }
+            | TypedExpr::Float { .. }
+            | TypedExpr::String { .. }
+            | TypedExpr::List { .. }
+            | TypedExpr::BinOp { .. }
+            | TypedExpr::RecordAccess { .. }
+            | TypedExpr::PositionalAccess { .. }
+            | TypedExpr::Tuple { .. }
+            | TypedExpr::TupleIndex { .. }
+            | TypedExpr::Todo { .. }
+            | TypedExpr::Panic { .. }
+            | TypedExpr::Echo { .. }
+            | TypedExpr::BitArray { .. }
+            | TypedExpr::RecordUpdate { .. }
+            | TypedExpr::NegateBool { .. }
+            | TypedExpr::NegateInt { .. }
+            | TypedExpr::Invalid { .. } => None,
+        }
+    }
+
+    /// Whether the code of `known` has the wasm signature that calling a value
+    /// of type `type_` requires.
+    fn has_signature(&mut self, known: Known, type_: &Arc<Type>) -> bool {
+        let (params, return_) = type_.fn_types().expect("function type");
+        let closure = match known {
+            Known::Code(_) => {
+                let closure = self.closure_type(params.clone(), return_.clone());
+                Some(self.val_type_ref(closure.type_index))
+            }
+            Known::Function(_) | Known::Constructor(_) => None,
+        };
+        let expected_params = closure
+            .into_iter()
+            .chain(self.val_types(params))
+            .collect_vec();
+        let expected_results = self.val_types(iter::once(return_));
+        let ty = self
+            .wasm_module
+            .types
+            .get(self.wasm_module.funcs.get(known.id()).ty());
+        ty.params() == expected_params && ty.results() == expected_results
+    }
+
+    /// The identity of the value of `statements`, binding their variables.
+    pub(super) fn statements_identity(
+        &mut self,
+        scope: &Scope,
+        statements: &[TypedStatement],
+    ) -> Option<Known> {
+        let (last, rest) = statements.split_last()?;
+        for statement in rest {
+            if let Statement::Assignment(assignment) = statement
+                && let Pattern::Variable { location, .. } = &assignment.pattern
+                && !matches!(assignment.kind, AssignmentKind::Assert { .. })
+                && !self.local_functions.contains_key(location)
+            {
+                self.bind(scope, *location, &assignment.value);
+            }
+        }
+        match last {
+            Statement::Expression(expr) => self.identity(scope, expr),
+            Statement::Assignment(assignment) => {
+                if let Some(info) = self.local_function_definition(assignment).cloned() {
+                    let type_ = assignment.value.type_();
+                    return Some(self.local_function_identity(&info, &type_));
+                }
+                self.identity(scope, &assignment.value)
+            }
+            Statement::Use(_) | Statement::Assert(_) => None,
+        }
+    }
+
+    /// The identity of the local function `info` used with type `type_`.
+    fn local_function_identity(&mut self, info: &LocalFunction, type_: &Arc<Type>) -> Known {
+        let id = self.function_local_generic(info, type_).func_id();
+        let captures = self.local_function_captures(info);
+        let known = if captures.is_empty() {
+            Known::Function(id)
+        } else {
+            Known::Code(self.closure_adapter(id, type_, &captures))
+        };
+        let _ = self.specializations.created.insert(known.id());
+        known
+    }
+
+    /// Binds the variable defined at `location` to the identity of `value`.
+    /// A variable can be bound more than once, as the body of a clause with
+    /// alternative patterns is generated for each, so a boxed value removes
+    /// the identity of a previous binding.
+    pub(super) fn bind(&mut self, scope: &Scope, location: SrcSpan, value: &TypedExpr) {
+        let known = self.identity(scope, value);
+        let known_arguments = &mut self.specializations.known_arguments;
+        let _ = match known {
+            Some(known) => known_arguments.insert(location, known),
+            None => known_arguments.remove(&location),
+        };
+    }
+
+    /// How the call of `fun` with `arguments` is emitted.
+    pub(super) fn call_target(
         &mut self,
         scope: &Scope,
         fun: &TypedExpr,
         arguments: &[CallArg<TypedExpr>],
-        type_: &Arc<Type>,
-    ) -> Option<Known> {
-        let callee = self.callee_definition(fun)?;
-        let Some(Statement::Expression(TypedExpr::Fn { location, .. })) =
-            callee.function.body.last()
-        else {
-            return None;
-        };
-        let id = match self.specialized_callee(scope, fun, arguments) {
-            Some(id) => id,
-            None => self.static_callee(scope, fun)?,
-        };
-        let specialization = *self.specializations.specialization_numbers.get(&id)?;
-        let name = function_literal_name(*location, type_, specialization);
-        // Not generated yet when the function is being generated
-        Some(Known::Code(self.find_global(&name)?.func_id()))
+    ) -> CallTarget {
+        if let TypedExpr::Fn { .. } = fun {
+            return CallTarget::Literal;
+        }
+        if let Some(id) = self.specialized_callee(scope, fun, arguments) {
+            return CallTarget::Direct(id);
+        }
+        if let Some(info) = self.local_function_of(fun).cloned() {
+            let id = self.function_local_generic(&info, &fun.type_()).func_id();
+            return CallTarget::Local(info, id);
+        }
+        if let Some(id) = self.static_callee(scope, fun) {
+            return CallTarget::Direct(id);
+        }
+        match self.identity(scope, fun) {
+            Some(known) => CallTarget::Known(known),
+            None => CallTarget::Dynamic,
+        }
     }
 
-    /// Binds the variable defined at `location` to the known code of
-    /// `value`, if any. A function literal bound by `let` is a local
-    /// function, see `local_functions`, but not one bound by a pipe.
-    pub(super) fn bind_known_value(
+    /// Records the identity of the value that the function `id`, whose body
+    /// is `body` and whose return type is `return_`, returns. It must be
+    /// called before the state of the body is restored.
+    pub(super) fn record_return(
         &mut self,
         scope: &Scope,
-        location: SrcSpan,
-        value: &TypedExpr,
-        pipe: bool,
+        id: FunctionId,
+        return_: &Arc<Type>,
+        body: &[TypedStatement],
     ) {
-        if let Some(variable) = self.known_value(scope, value, pipe) {
-            let _ = self
-                .specializations
-                .known_arguments
-                .insert(location, variable);
+        if return_.fn_types().is_none() {
+            return;
         }
-    }
-
-    /// The known code of `value`, bound to a variable, if it is a known
-    /// variable, a function, a function literal bound by a pipe or a call
-    /// that returns a function literal. A local function is not, as it would
-    /// not be checked for `recursive` in `known_argument`.
-    fn known_value(
-        &mut self,
-        scope: &Scope,
-        value: &TypedExpr,
-        pipe: bool,
-    ) -> Option<KnownVariable> {
-        let _ = value.type_().fn_types()?;
-        if let Some(location) = captures::local_variable_definition(value) {
-            return self.specializations.known_arguments.get(&location).copied();
+        if let Some(known) = self.statements_identity(scope, body) {
+            let _ = self.specializations.returns.insert(id, known);
         }
-        let fresh = matches!(value, TypedExpr::Fn { .. } | TypedExpr::Call { .. });
-        if !pipe && let TypedExpr::Fn { .. } = value {
-            return None;
-        }
-        let known = self.known_argument(scope, value, false)?;
-        Some(KnownVariable { known, fresh })
     }
 
     /// The specialization `name` of `callee` used with type `type_` for the
@@ -417,18 +554,13 @@ impl<'a> Generator<'a> {
             .arguments
             .iter()
             .zip(knowns)
-            .filter_map(|(argument, known)| {
-                let known = KnownVariable {
-                    known: (*known)?,
-                    fresh: false,
-                };
-                Some((parameter_location(argument)?, known))
-            })
+            .filter_map(|(argument, known)| Some((parameter_location(argument)?, (*known)?)))
             .collect();
         let module = std::mem::replace(&mut self.current_module_name, callee.module.clone());
-        self.specializations
-            .generating
-            .push(callee.base_name.clone());
+        self.specializations.generating.push((
+            callee.base_name.clone(),
+            knowns.iter().flatten().copied().collect(),
+        ));
         let id = self._function(
             function,
             name,
@@ -440,6 +572,55 @@ impl<'a> Generator<'a> {
         let _ = self.specializations.generating.pop();
         self.current_module_name = module;
         id
+    }
+}
+
+/// Adds to `definitions` the definitions of the local variables that
+/// `statements` returns.
+fn returned_variables(statements: &[TypedStatement], definitions: &mut HashSet<SrcSpan>) {
+    match statements.last() {
+        Some(Statement::Expression(expr)) => returned_variable(expr, definitions),
+        Some(Statement::Assignment(assignment)) => {
+            returned_variable(&assignment.value, definitions);
+        }
+        Some(Statement::Use(_) | Statement::Assert(_)) | None => {}
+    }
+}
+
+fn returned_variable(expr: &TypedExpr, definitions: &mut HashSet<SrcSpan>) {
+    match expr {
+        TypedExpr::Block { statements, .. } => returned_variables(statements, definitions),
+        TypedExpr::Case { clauses, .. } => {
+            for clause in clauses {
+                returned_variable(&clause.then, definitions);
+            }
+        }
+        TypedExpr::Pipeline { finally, .. } => returned_variable(finally, definitions),
+        TypedExpr::Echo {
+            expression: Some(expression),
+            ..
+        } => returned_variable(expression, definitions),
+        TypedExpr::Var { .. } => definitions.extend(captures::local_variable_definition(expr)),
+        TypedExpr::Int { .. }
+        | TypedExpr::Float { .. }
+        | TypedExpr::String { .. }
+        | TypedExpr::Fn { .. }
+        | TypedExpr::List { .. }
+        | TypedExpr::Call { .. }
+        | TypedExpr::BinOp { .. }
+        | TypedExpr::RecordAccess { .. }
+        | TypedExpr::PositionalAccess { .. }
+        | TypedExpr::ModuleSelect { .. }
+        | TypedExpr::Tuple { .. }
+        | TypedExpr::TupleIndex { .. }
+        | TypedExpr::Todo { .. }
+        | TypedExpr::Panic { .. }
+        | TypedExpr::Echo { .. }
+        | TypedExpr::BitArray { .. }
+        | TypedExpr::RecordUpdate { .. }
+        | TypedExpr::NegateBool { .. }
+        | TypedExpr::NegateInt { .. }
+        | TypedExpr::Invalid { .. } => {}
     }
 }
 

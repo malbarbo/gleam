@@ -1684,6 +1684,9 @@ impl<'a> Generator<'a> {
         let _ = instructions.return_call(function).end();
         let code = adapter.finish(self);
         let _ = self.adapters.insert(function, code);
+        if let Some(known) = self.specializations.returns.get(&function).copied() {
+            let _ = self.specializations.returns.insert(code, known);
+        }
         code
     }
 
@@ -2792,13 +2795,12 @@ impl<'a> Generator<'a> {
         export: bool,
         specialization: u32,
         local_functions: HashMap<SrcSpan, Rc<LocalFunction>>,
-        known_arguments: HashMap<SrcSpan, KnownVariable>,
+        known_arguments: HashMap<SrcSpan, Known>,
     ) -> Id {
         let params = self.val_types(function_params_types(&function));
         let results = self.val_types(iter::once(function.return_type.clone()));
         let index = self.allocate_placeholder_function(&name, &params, &results);
         let id = self.add_function_to_globals(name.clone(), index);
-        self.specializations.generated(index, specialization);
         let saved_local_functions = std::mem::replace(&mut self.local_functions, local_functions);
         let saved_specialization = std::mem::replace(&mut self.specialization, specialization);
         let saved_known_arguments =
@@ -2807,17 +2809,19 @@ impl<'a> Generator<'a> {
         let param_ids = locals.param_ids();
         let mut code = Function::new(self, &name, &param_ids, &results);
         let mut instructions = code.extend_instructions(self);
+        let scope = Scope::with_params(
+            Scope::Global(self.globals.clone()),
+            &function.arguments,
+            &param_ids,
+        );
         self.statements(
             &mut instructions,
-            Scope::with_params(
-                Scope::Global(self.globals.clone()),
-                &function.arguments,
-                &param_ids,
-            ),
+            scope.clone(),
             &locals,
             &function.body,
             true,
         );
+        self.record_return(&scope, index, &function.return_type, &function.body);
         self.local_functions = saved_local_functions;
         self.specialization = saved_specialization;
         self.specializations.known_arguments = saved_known_arguments;
@@ -2910,7 +2914,7 @@ impl<'a> Generator<'a> {
             .chain(captures_params)
             .chain(self.val_types(gleam_params))
             .collect_vec();
-        let results = self.val_types(iter::once(return_));
+        let results = self.val_types(iter::once(return_.clone()));
         let index = self.allocate_placeholder_function(&name, &params, &results);
         let id = self.add_function_to_globals(name.clone(), index);
         let locals = Locals::new(self, arguments, body);
@@ -2945,13 +2949,9 @@ impl<'a> Generator<'a> {
             scope = scope.insert_local(capture.name.clone(), local);
             self.wasm_module.locals.get_mut(local).name = Some(capture.name.to_string());
         }
-        self.statements(
-            &mut instructions,
-            Scope::with_params(scope, arguments, &param_ids),
-            &locals,
-            body,
-            true,
-        );
+        let scope = Scope::with_params(scope, arguments, &param_ids);
+        self.statements(&mut instructions, scope.clone(), &locals, body, true);
+        self.record_return(&scope, index, &return_, body);
         let _ = instructions.end();
 
         for (local_id, lname) in locals.names() {
@@ -3520,24 +3520,14 @@ impl<'a> Generator<'a> {
             } => {
                 let mut scope = scope;
                 // The references to a pipe variable are defined at its value
-                self.bind_known_value(
-                    &scope,
-                    first_value.value.location(),
-                    &first_value.value,
-                    true,
-                );
+                self.bind(&scope, first_value.value.location(), &first_value.value);
                 let first_index = locals.for_pipeline_assignment(first_value);
                 let _ = instructions
                     .expression(self, locals, scope.clone(), &first_value.value)
                     .local_set(first_index);
                 scope = scope.insert_local(first_value.name.clone(), first_index);
                 for (assignment, _) in assignments {
-                    self.bind_known_value(
-                        &scope,
-                        assignment.value.location(),
-                        &assignment.value,
-                        true,
-                    );
+                    self.bind(&scope, assignment.value.location(), &assignment.value);
                     let assign_index = locals.for_pipeline_assignment(assignment);
                     let _ = instructions
                         .expression(self, locals, scope.clone(), &assignment.value)
@@ -3577,50 +3567,40 @@ impl<'a> Generator<'a> {
                 // stack, so a tail call gains nothing there.
                 let tail = tail && !fun.is_record_constructor_function();
                 let args = arguments.iter().map(|arg| &arg.value);
-                let known = captures::local_variable_definition(fun).and_then(|location| {
-                    let variable = self.specializations.known_arguments.get(&location)?;
-                    Some(variable.known)
-                });
-                if let TypedExpr::Fn { .. } = fun.as_ref() {
-                    self.function_literal_call(instructions, locals, scope, fun, args, tail);
-                } else if let Some(known) = known {
-                    // A parameter specialized for its argument, see
-                    // `specialization`
-                    let (id, tail) = match known {
-                        Known::Function(id) => (id, tail),
-                        Known::Constructor(id) => (id, false),
-                        Known::Code(id) => {
-                            // The closure is the first argument
-                            let _ = instructions.expression(self, locals, scope.clone(), fun);
-                            (id, tail)
-                        }
-                    };
-                    let _ = instructions.expressions(self, locals, scope, args);
-                    let _ = if tail {
-                        instructions.return_call(id)
-                    } else {
-                        instructions.call(id)
-                    };
-                } else if let Some(id) = self.specialized_callee(&scope, fun, arguments) {
-                    let _ = instructions.expressions(self, locals, scope, args);
-                    let _ = if tail {
-                        instructions.return_call(id)
-                    } else {
-                        instructions.call(id)
-                    };
-                } else if let Some(info) = self.local_function_of(fun).cloned() {
-                    // The captures are the first arguments
-                    let id = self.function_local_generic(&info, &fun.type_());
-                    for local in self.local_function_captures_locals(&scope, &info) {
-                        let _ = instructions.local_get(local);
+                let target = self.call_target(&scope, fun, arguments);
+                let direct = match target {
+                    CallTarget::Literal => {
+                        self.function_literal_call(instructions, locals, scope, fun, args, tail);
+                        return;
                     }
-                    let _ = instructions.expressions(self, locals, scope, args);
-                    let _ = if tail {
-                        instructions.return_call(id.func_id())
-                    } else {
-                        instructions.call(id.func_id())
-                    };
-                } else if let Some(id) = self.static_callee(&scope, fun) {
+                    // A callee whose identity is known, see `specialization`
+                    CallTarget::Known(Known::Code(id)) => {
+                        // The closure is the first argument
+                        let _ = instructions.expression(self, locals, scope.clone(), fun);
+                        Some((id, tail))
+                    }
+                    CallTarget::Known(Known::Function(id) | Known::Constructor(id)) => {
+                        if !fun.is_var() {
+                            // Evaluated for its effects
+                            let _ = instructions
+                                .expression(self, locals, scope.clone(), fun)
+                                .drop();
+                        }
+                        let constructor =
+                            matches!(target, CallTarget::Known(Known::Constructor(_)));
+                        Some((id, tail && !constructor))
+                    }
+                    CallTarget::Direct(id) => Some((id, tail)),
+                    CallTarget::Local(ref info, id) => {
+                        // The captures are the first arguments
+                        for local in self.local_function_captures_locals(&scope, info) {
+                            let _ = instructions.local_get(local);
+                        }
+                        Some((id, tail))
+                    }
+                    CallTarget::Dynamic => None,
+                };
+                if let Some((id, tail)) = direct {
                     let _ = instructions.expressions(self, locals, scope, args);
                     let _ = if tail {
                         instructions.return_call(id)
@@ -4212,7 +4192,7 @@ impl<'a> Generator<'a> {
         assignment: &TypedAssignment,
     ) -> Scope {
         if let Pattern::Variable { location, .. } = &assignment.pattern {
-            self.bind_known_value(&scope, *location, &assignment.value, false);
+            self.bind(&scope, *location, &assignment.value);
         }
         let right = locals.for_assigment(assignment);
         let body_id = instructions.id();

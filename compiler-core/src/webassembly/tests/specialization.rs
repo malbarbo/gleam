@@ -4,7 +4,9 @@
 // Specialization of the functions with function parameters by the code of
 // their arguments
 
-use super::{compile_wasm, count_ref_calls, run_ok, run_wasm, wasm_function_names};
+use super::{
+    compile_wasm, count_ref_calls, for_each_operator, run_ok, run_wasm, wasm_function_names,
+};
 
 const FOLD: &str = r#"
 fn fold(list: List(a), acc: b, f: fn(b, a) -> b) -> b {
@@ -227,8 +229,8 @@ pub fn main() {
   assert twice(fn(x) { x + k })(1) == 21
 }
 "#,
-        // The closure that `twice` returns is called dynamically
-        1,
+        // The closure that `twice` returns has the identity of its literal
+        0,
     );
 }
 
@@ -503,4 +505,431 @@ pub fn main() {
         // not specialized
         1,
     );
+}
+
+#[test]
+fn called_results_of_calls() {
+    run(
+        r#"
+fn inc(x: Int) -> Int {
+  x + 1
+}
+
+fn twice(g: fn(Int) -> Int) -> fn(Int) -> Int {
+  fn(x) { g(g(x)) }
+}
+
+pub fn main() {
+  let k = 10
+  assert twice(inc)(1) == 3
+  assert twice(fn(x) { x + k })(1) == 21
+}
+"#,
+        0,
+    );
+}
+
+#[test]
+fn returned_parameters() {
+    run(
+        r#"
+fn add(a: Int, b: Int) -> Int {
+  a + b
+}
+
+fn id(f: fn(Int, Int) -> Int) -> fn(Int, Int) -> Int {
+  f
+}
+
+pub fn main() {
+  let k = 2
+  assert fold([1, 2, 3], 0, id(add)) == 6
+  assert fold([1, 2, 3], 0, id(fn(acc, x) { acc + x * k })) == 12
+  assert id(add)(1, 2) == 3
+}
+"#,
+        0,
+    );
+}
+
+#[test]
+fn returned_cases_with_the_same_identity() {
+    run(
+        r#"
+fn add(a: Int, b: Int) -> Int {
+  a + b
+}
+
+fn pick(b: Bool) -> fn(Int, Int) -> Int {
+  case b {
+    True -> add
+    False -> add
+  }
+}
+
+pub fn main() {
+  assert fold([1, 2, 3], 0, pick(True)) == 6
+  assert pick(False)(1, 2) == 3
+}
+"#,
+        0,
+    );
+}
+
+#[test]
+fn returned_cases_with_different_identities_are_boxed() {
+    run(
+        r#"
+fn add(a: Int, b: Int) -> Int {
+  a + b
+}
+
+fn mul(a: Int, b: Int) -> Int {
+  a * b
+}
+
+fn pick(b: Bool) -> fn(Int, Int) -> Int {
+  case b {
+    True -> add
+    False -> mul
+  }
+}
+
+pub fn main() {
+  assert fold([1, 2, 3], 0, pick(True)) == 6
+  assert fold([1, 2, 3], 1, pick(False)) == 6
+  assert pick(False)(2, 3) == 6
+  assert fold([1, 2, 3], 0, add) == 6
+}
+"#,
+        // `fold` with a boxed function, and the call of `pick(False)`
+        2,
+    );
+}
+
+#[test]
+fn returned_local_functions() {
+    run(
+        r#"
+fn apply(f: fn(Int) -> Int, x: Int) -> Int {
+  f(x)
+}
+
+fn adder(k: Int) -> fn(Int) -> Int {
+  let h = fn(x) { x + k }
+  h
+}
+
+fn doubler() -> fn(Int) -> Int {
+  let h = fn(x) { x * 2 }
+  h
+}
+
+pub fn main() {
+  assert apply(adder(1), 2) == 3
+  assert adder(2)(3) == 5
+  assert apply(doubler(), 2) == 4
+  assert doubler()(3) == 6
+  let a = adder(1)
+  assert a == a
+}
+"#,
+        0,
+    );
+}
+
+#[test]
+fn let_cases() {
+    run(
+        r#"
+fn add(a: Int, b: Int) -> Int {
+  a + b
+}
+
+fn sum(b: Bool) -> Int {
+  let f = case b {
+    True -> add
+    False -> add
+  }
+  fold([1, 2, 3], 0, f) + f(1, 2)
+}
+
+pub fn main() {
+  assert sum(True) == 9
+}
+"#,
+        0,
+    );
+}
+
+#[test]
+fn callees_with_effects_are_evaluated_once() {
+    let src = r#"
+fn inc(x: Int) -> Int {
+  x + 1
+}
+
+fn make() -> fn(Int) -> Int {
+  echo "one"
+  inc
+}
+
+fn make_adder(k: Int) -> fn(Int) -> Int {
+  echo "two"
+  fn(x) { x + k }
+}
+
+pub fn main() {
+  assert make()(1) == 2
+  assert make_adder(1)(1) == 2
+}
+"#;
+    let src = format!("{FOLD}\n{src}");
+    let output = run_wasm(&src, vec![]);
+    assert!(output.status.success(), "{}", output.stderr);
+    assert_eq!(
+        output.stderr.matches("\"one\"").count(),
+        1,
+        "{}",
+        output.stderr
+    );
+    assert_eq!(
+        output.stderr.matches("\"two\"").count(),
+        1,
+        "{}",
+        output.stderr
+    );
+    assert_eq!(count_ref_calls(&compile_wasm(&src, vec![])), 0);
+}
+
+#[test]
+fn constructors_as_callees_are_not_tail_calls() {
+    let src = r#"
+type Box {
+  Box(Int)
+}
+
+fn wrap() -> fn(Int) -> Box {
+  Box
+}
+
+fn boxed(x: Int) -> Box {
+  wrap()(x)
+}
+
+pub fn main() {
+  assert boxed(1) == Box(1)
+}
+"#;
+    run(src, 0);
+    let mut return_calls = 0;
+    for_each_operator(
+        &compile_wasm(&format!("{FOLD}\n{src}"), vec![]),
+        |name, op| {
+            if name == "boxed" && matches!(op, wasmparser::Operator::ReturnCall { .. }) {
+                return_calls += 1;
+            }
+        },
+    );
+    assert_eq!(return_calls, 0);
+}
+
+#[test]
+fn recursive_functions_returning_functions_are_boxed() {
+    run(
+        r#"
+fn inc(x: Int) -> Int {
+  x + 1
+}
+
+fn nth(n: Int) -> fn(Int) -> Int {
+  case n {
+    0 -> inc
+    _ -> nth(n - 1)
+  }
+}
+
+pub fn main() {
+  assert nth(3)(1) == 2
+}
+"#,
+        // `nth` has no identity while it is generated
+        1,
+    );
+}
+
+#[test]
+fn returned_parameters_passed_to_the_same_function_terminate() {
+    let src = r#"
+fn id(f: fn(Int) -> Int) -> fn(Int) -> Int {
+  f
+}
+
+fn f(g: fn(Int) -> Int, n: Int) -> Int {
+  case n {
+    0 -> g(0)
+    _ -> f(id(g), n - 1)
+  }
+}
+
+pub fn main() {
+  assert f(fn(x) { x + 1 }, 10) == 1
+}
+"#;
+    run(src, 0);
+    assert_eq!(specializations(src, "f$").len(), 1);
+}
+
+#[test]
+fn new_codes_through_intermediate_functions_terminate() {
+    let src = r#"
+fn k(g: fn(Int) -> Int) -> fn(Int) -> Int {
+  fn(x) { g(x) + 1 }
+}
+
+fn h(g: fn(Int) -> Int, n: Int) -> Int {
+  f(g, n)
+}
+
+fn f(g: fn(Int) -> Int, n: Int) -> Int {
+  case n {
+    0 -> g(0)
+    _ -> h(k(g), n - 1)
+  }
+}
+
+pub fn main() {
+  assert f(fn(x) { x }, 10) == 10
+}
+"#;
+    // The code that `k` returns is not a parameter of `f`, so `f` is not
+    // specialized by it
+    run(src, 2);
+    assert_eq!(specializations(src, "f$").len(), 1);
+    assert_eq!(specializations(src, "k$").len(), 1);
+}
+
+#[test]
+fn blocks_bind_their_variables() {
+    run(
+        r#"
+fn add(a: Int, b: Int) -> Int {
+  a + b
+}
+
+fn inc(x: Int) -> Int {
+  x + 1
+}
+
+fn apply(f: fn(Int) -> Int, x: Int) -> Int {
+  f(x)
+}
+
+pub fn main() {
+  assert fold([1, 2, 3], 0, { let f = add f }) == 6
+  assert apply({ let h = inc fn(x) { h(x) } }, 1) == 2
+}
+"#,
+        0,
+    );
+}
+
+#[test]
+fn piped_returned_parameters() {
+    run(
+        r#"
+fn add(a: Int, b: Int) -> Int {
+  a + b
+}
+
+fn id(f: fn(Int, Int) -> Int) -> fn(Int, Int) -> Int {
+  f
+}
+
+pub fn main() {
+  assert fold([1, 2, 3], 0, add |> id) == 6
+}
+"#,
+        0,
+    );
+}
+
+#[test]
+fn calls_of_known_parameters_returning_functions() {
+    run(
+        r#"
+fn adder(k: Int) -> fn(Int) -> Int {
+  fn(x) { x + k }
+}
+
+fn call(make: fn(Int) -> fn(Int) -> Int, k: Int) -> Int {
+  make(k)(1)
+}
+
+pub fn main() {
+  assert call(adder, 10) == 11
+}
+"#,
+        0,
+    );
+}
+
+#[test]
+fn curried_functions() {
+    run(
+        r#"
+fn add(a: Int) -> fn(Int) -> fn(Int) -> Int {
+  fn(b) { fn(c) { a + b + c } }
+}
+
+pub fn main() {
+  assert add(1)(2)(3) == 6
+}
+"#,
+        0,
+    );
+}
+
+#[test]
+fn clauses_that_do_not_return_are_neutral() {
+    run(
+        r#"
+fn add(a: Int, b: Int) -> Int {
+  a + b
+}
+
+fn pick(b: Bool) -> fn(Int, Int) -> Int {
+  case b {
+    True -> add
+    False -> panic
+  }
+}
+
+pub fn main() {
+  assert pick(True)(1, 2) == 3
+}
+"#,
+        0,
+    );
+}
+
+#[test]
+fn local_functions_passed_to_the_same_function_terminate() {
+    let src = r#"
+fn f(g: fn(Int) -> Int, n: Int) -> Int {
+  let inc = fn(x) { g(x) + 1 }
+  case n {
+    0 -> g(0)
+    _ -> f(inc, n - 1)
+  }
+}
+
+pub fn main() {
+  assert f(fn(x) { x }, 10) == 10
+}
+"#;
+    // `inc` is a new code, so the recursive call uses the generic `f`, which
+    // calls `g` through the closure, in its body and in `inc`
+    run(src, 2);
+    assert_eq!(specializations(src, "f$").len(), 1);
 }
