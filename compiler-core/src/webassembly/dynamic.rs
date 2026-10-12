@@ -5,8 +5,8 @@
 //! runtime (`runtime/dynamic.gleam`), which the standard library declares as
 //! `@external(webassembly, "builtins", "_dynamic_cast") fn cast(a: t) -> Dynamic`.
 //!
-//! Ints, floats, strings, booleans, `Nil`, lists, tuples and dicts become
-//! their variant of `Dynamic`, with their items cast too. A `StringTree` is
+//! Ints, floats, strings, booleans, `Nil`, lists, tuples, arrays and dicts
+//! become their variant of `Dynamic`, with their items cast too. A `StringTree` is
 //! a string and a `UtfCodepoint` an int, as on JavaScript. Any other value is
 //! boxed in an `anyref`, with a table of functions generated for its type
 //! that cast it back to compare, hash and inspect it.
@@ -46,6 +46,15 @@ enum Cast {
     Tuple {
         type_index: TypeId,
         casts: Vec<FunctionId>,
+        empty: FunctionId,
+        prepend: FunctionId,
+        array: FunctionId,
+    },
+    /// Prepends the cast elements of an `Array` to an empty list, from the
+    /// last.
+    Array {
+        type_index: TypeId,
+        cast: FunctionId,
         empty: FunctionId,
         prepend: FunctionId,
         array: FunctionId,
@@ -93,6 +102,7 @@ impl<'a> Generator<'a> {
         // locals
         let list_vt = self.val_type(&type_::list(dynamic.clone()));
         let list = self.wasm_local(list_vt);
+        let i = self.wasm_local(ValType::I32);
         let mut function = Function::new(self, DYNAMIC_CAST, &[value], &[dynamic_vt]);
         let mut instructions = function.extend_instructions(self);
         let _ = match cast {
@@ -132,6 +142,44 @@ impl<'a> Generator<'a> {
                         .call(prepend)
                         .local_set(list);
                 }
+                instructions.local_get(list).call(array)
+            }
+            Cast::Array {
+                type_index,
+                cast,
+                empty,
+                prepend,
+                array,
+            } => {
+                #[rustfmt::skip]
+                let _ = instructions
+                    .call(empty)
+                    .local_set(list)
+                    .local_get(value)
+                    .array_len()
+                    .local_set(i)
+                    .block_(InstrSeqType::Simple(None), |block_s| {
+                        let block_id = block_s.id();
+                        let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
+                            let loop_id = loop_s.id();
+                            let _ = loop_s
+                                .local_get(i)
+                                .i32_eqz()
+                                .br_if(block_id)
+                                .local_get(i)
+                                .i32_const(1)
+                                .i32_sub()
+                                .local_set(i)
+                                .local_get(list)
+                                .local_get(value)
+                                .local_get(i)
+                                .array_get(type_index)
+                                .call(cast)
+                                .call(prepend)
+                                .local_set(list)
+                                .br(loop_id);
+                        });
+                    });
                 instructions.local_get(list).call(array)
             }
             Cast::Other {
@@ -216,6 +264,26 @@ impl<'a> Generator<'a> {
                     function,
                     closures: vec![closure],
                 }
+            }
+        } else if let Some(element) = self.array_element(type_) {
+            let type_index = self.array_type_index(&element);
+            let cast = self.function_dynamic_cast(&element);
+            let dynamics = type_::list(dynamic.clone());
+            let empty =
+                self.runtime_function_id(DYNAMIC_MODULE, "dynamic_empty", vec![], dynamics.clone());
+            let prepend = self.runtime_function_id(
+                DYNAMIC_MODULE,
+                "dynamic_prepend",
+                vec![dynamics.clone(), dynamic.clone()],
+                dynamics.clone(),
+            );
+            let array = to_dynamic(self, "dynamic_array", dynamics);
+            Cast::Array {
+                type_index,
+                cast,
+                empty,
+                prepend,
+                array,
             }
         } else if let Some(elements) = type_.tuple_types() {
             let type_index = self.tuple_type_index(elements.clone());

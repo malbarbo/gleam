@@ -57,6 +57,41 @@ pub fn main() {
     );
 }
 
+/// `map_values` calls the function on the entries in the order of `fold`.
+#[test]
+fn dict_map_values_in_fold_order() {
+    let stderr = run_dict(
+        r#"
+import dict.{type Dict}
+
+@external(webassembly, "builtins", "dict_fold")
+fn fold(dict: Dict(k, v), initial: acc, fun: fn(acc, k, v) -> acc) -> acc
+
+@external(webassembly, "builtins", "dict_map_values")
+fn map_values(dict: Dict(k, v), fun: fn(k, v) -> a) -> Dict(k, a)
+
+pub fn main() {
+  let d =
+    dict.from_list([#(40, 0), #(4, 0), #(2, 0), #(3, 0), #(1, 0), #(77, 0)])
+  let _ = map_values(d, fn(k, _) { echo #("map", k) })
+  fold(d, Nil, fn(_, k, _) {
+    echo #("fold", k)
+    Nil
+  })
+}
+"#,
+    );
+    let keys = |prefix: &str| {
+        stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix(prefix))
+            .collect::<Vec<_>>()
+    };
+    let mapped = keys("#(\"map\", ");
+    assert_eq!(mapped.len(), 6, "{stderr}");
+    assert_eq!(mapped, keys("#(\"fold\", "), "{stderr}");
+}
+
 #[test]
 fn dict_equality_ignores_insertion_order() {
     let _ = run_dict(
@@ -198,6 +233,42 @@ pub fn main() {
   let assert Ok(7) = dynamic.int(v)
   let assert Ok(Error(Nil)) = dynamic.index(dynamic.cast(d), dynamic.cast("x"))
   let assert Error("Indexable") = dynamic.index(dynamic.cast(1), dynamic.cast(0))
+}
+"#,
+    );
+}
+
+/// An `Array` is an array, as a tuple, with its elements cast too.
+#[test]
+fn dynamic_of_arrays() {
+    let _ = run_dynamic(
+        r#"
+import dynamic
+
+@external(webassembly, "builtins", "Array")
+type Array(a)
+
+@external(webassembly, "builtins", "_array_from_list")
+fn from_list(list: List(a)) -> Array(a)
+
+pub fn main() {
+  let assert "Array" = dynamic.classify(dynamic.cast(from_list([1, 2])))
+  let assert Ok([a, b]) = dynamic.list_items(dynamic.cast(from_list(["a", "b"])))
+  let assert Ok("a") = dynamic.string(a)
+  let assert Ok("b") = dynamic.string(b)
+  let assert Ok([]) = dynamic.list_items(dynamic.cast(from_list([])))
+  let assert True = dynamic.cast(from_list([1, 2])) == dynamic.cast(#(1, 2))
+  // The items of a big array are compared without growing the stack.
+  let big = from_list(range(100_000, []))
+  let assert True = dynamic.cast(big) == dynamic.cast(from_list(range(100_000, [])))
+  let assert False = dynamic.cast(big) == dynamic.cast(from_list(range(100_000, [0])))
+}
+
+fn range(i: Int, acc: List(Int)) -> List(Int) {
+  case i {
+    0 -> acc
+    _ -> range(i - 1, [i, ..acc])
+  }
 }
 "#,
     );

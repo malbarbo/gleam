@@ -30,8 +30,8 @@ pub(super) enum Hash {
     Hook(FunctionId),
 }
 
-const SEED: i32 = 0x2545_F491;
-const MULTIPLIER: i32 = 0x0100_0193;
+pub(super) const SEED: i32 = 0x2545_F491;
+pub(super) const MULTIPLIER: i32 = 0x0100_0193;
 
 impl<'a> Generator<'a> {
     /// The `_hash` external with the type `fn(T) -> Int`.
@@ -171,7 +171,7 @@ impl<'a> Generator<'a> {
     }
 
     /// The finalizer of MurmurHash3, `(i32) -> i32`.
-    fn function_hash_mix(&mut self) -> FunctionId {
+    pub(super) fn function_hash_mix(&mut self) -> FunctionId {
         self.get_function_builtin(BuiltinFunction::HashMix, |s| s.code_hash_mix())
     }
 
@@ -220,6 +220,10 @@ impl<'a> Generator<'a> {
                 CustomType::Union { custom_type, .. } => {
                     let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
                     self.code_union_hash(type_, supertype_index, &custom_type, &args)
+                }
+                CustomType::Array => {
+                    let element = args.first().expect("array element type");
+                    self.code_array_hash(element)
                 }
                 CustomType::External { .. }
                 | CustomType::Runtime { .. }

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025 The Gleam contributors
 
 #![allow(clippy::todo)]
+mod array;
 mod builtins;
 mod captures;
 mod dynamic;
@@ -16,6 +17,7 @@ mod stdlib;
 #[cfg(test)]
 mod tests;
 
+use array::*;
 pub use builtins::builtin_function_names;
 use builtins::*;
 use captures::{Capture, Variables};
@@ -471,12 +473,14 @@ enum CustomType {
         module: EcoString,
         name: EcoString,
     },
+    /// The external type `Array(a)`, see `array`.
+    Array,
 }
 
 impl CustomType {
     fn is_ref_non_null(&self) -> bool {
         match self {
-            CustomType::Struct { .. } => true,
+            CustomType::Struct { .. } | CustomType::Array => true,
             CustomType::Union { custom_type, .. } => {
                 Generator::null_variant_tag(custom_type).is_none()
             }
@@ -1054,6 +1058,7 @@ impl<'a> Generator<'a> {
             BuiltinFunction::DynamicEqual(_) => (vec![ANYREF, ANYREF], vec![BOOL_VALTYPE]),
             BuiltinFunction::DynamicHash(int, _) => (vec![ANYREF], vec![*int]),
             BuiltinFunction::DynamicInspect(string, _) => (vec![ANYREF], vec![*string]),
+            BuiltinFunction::Array { params, result, .. } => (params.clone(), vec![*result]),
         }
     }
 
@@ -1144,6 +1149,17 @@ impl<'a> Generator<'a> {
             "F32" => (ValType::F32, Some(F32_TO_STR)),
             "F64" => (ValType::F64, Some(F64_TO_STR)),
             "AnyRef" => (ANYREF, None),
+            "Array" => {
+                if custom_type.parameters.len() != 1 {
+                    return Err(Error::WrongExternalTypeArity {
+                        location,
+                        name: name.clone(),
+                        expected: 1,
+                        got: custom_type.parameters.len(),
+                    });
+                }
+                return Ok(CustomType::Array);
+            }
             _ => {
                 let Some((runtime_module, runtime_type)) = self.runtime_type(name) else {
                     return Err(Error::UnknownExternalType {
@@ -1372,6 +1388,8 @@ impl<'a> Generator<'a> {
                     }
                 } else if let Some(builtin) = BuiltinFunctionExternal::by_name(name) {
                     builtins.push((builtin, name.clone(), function_type(function)));
+                } else if let Some(array_function) = ArrayFunction::by_name(name) {
+                    self.validate_array_external(function, name, array_function)?;
                 } else if name == HASH {
                     if !(function.arguments.len() == 1
                         && function
@@ -1880,6 +1898,10 @@ impl<'a> Generator<'a> {
                 | CustomType::Runtime { .. }
                 | CustomType::Enum { .. } => {
                     panic!("external/enum types should not reach code generation")
+                }
+                CustomType::Array => {
+                    let element = args.first().expect("array element type");
+                    self.array_type_index(element)
                 }
                 CustomType::Struct {
                     custom_type,
@@ -2505,6 +2527,7 @@ impl<'a> Generator<'a> {
             CustomType::Union { layout, .. } => layout.clone(),
             CustomType::External { .. }
             | CustomType::Runtime { .. }
+            | CustomType::Array
             | CustomType::Enum { .. }
             | CustomType::Struct { .. } => {
                 panic!("expected union type")
@@ -2657,6 +2680,11 @@ impl<'a> Generator<'a> {
                 self.val_type(&representation)
             }
             CustomType::Enum { .. } => ValType::I32,
+            CustomType::Array => {
+                let element = args.first().expect("array element type");
+                let type_index = self.array_type_index(element);
+                self.val_type_ref(type_index)
+            }
             CustomType::Struct {
                 custom_type,
                 constructor,
@@ -2868,7 +2896,9 @@ impl<'a> Generator<'a> {
                         });
                         id
                     }
-                    CustomType::External { .. } | CustomType::Runtime { .. } => {
+                    CustomType::External { .. }
+                    | CustomType::Runtime { .. }
+                    | CustomType::Array => {
                         panic!("external types should not reach code generation")
                     }
                 }
@@ -3108,6 +3138,9 @@ impl<'a> Generator<'a> {
                     }
                     if fname == DYNAMIC_CAST {
                         return self.function_dynamic_cast_external(required_type);
+                    }
+                    if let Some(array_function) = ArrayFunction::by_name(fname) {
+                        return self.function_array_external(array_function, required_type);
                     }
                     if let Some(builtin) = BuiltinFunctionExternal::by_name(fname) {
                         // Created on first use, also for externals declared in
@@ -3623,6 +3656,9 @@ impl<'a> Generator<'a> {
             if fname == DYNAMIC_CAST {
                 return self.function_dynamic_cast_external(required_type);
             }
+            if let Some(array_function) = ArrayFunction::by_name(fname) {
+                return self.function_array_external(array_function, required_type);
+            }
             if let Some(builtin) = BuiltinFunctionExternal::by_name(fname) {
                 // Created on first use, also for externals declared in
                 // imported modules.
@@ -3891,6 +3927,7 @@ impl<'a> Generator<'a> {
                     }
                     CustomType::External { .. }
                     | CustomType::Runtime { .. }
+                    | CustomType::Array
                     | CustomType::Enum { .. } => {
                         panic!("external/enum types should not reach code generation")
                     }
@@ -4156,6 +4193,7 @@ impl<'a> Generator<'a> {
                     }
                     CustomType::External { .. }
                     | CustomType::Runtime { .. }
+                    | CustomType::Array
                     | CustomType::Enum { .. } => {
                         panic!("external/enum types should not reach code generation")
                     }
@@ -4195,6 +4233,7 @@ impl<'a> Generator<'a> {
                     }
                     CustomType::External { .. }
                     | CustomType::Runtime { .. }
+                    | CustomType::Array
                     | CustomType::Enum { .. } => {
                         panic!("external/enum types should not reach code generation")
                     }
@@ -4878,7 +4917,9 @@ impl<'a> Generator<'a> {
                             );
                         }
                     }
-                    CustomType::External { .. } | CustomType::Runtime { .. } => {
+                    CustomType::External { .. }
+                    | CustomType::Runtime { .. }
+                    | CustomType::Array => {
                         panic!("external types should not reach code generation")
                     }
                 };
@@ -5168,6 +5209,7 @@ impl<'a> Generator<'a> {
                 match custom_type {
                     CustomType::External { .. }
                     | CustomType::Runtime { .. }
+                    | CustomType::Array
                     | CustomType::Enum { .. } => {
                         panic!("external/enum types should not reach code generation")
                     }

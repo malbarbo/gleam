@@ -27,7 +27,8 @@ The standard library does not depend on the choice: a builtin can move between
 Rust, Gleam and generated code without changing its name.
 
 The external types are `I32`, `I64`, `F32` and `F64` (numbers), `AnyRef` (a
-value of any type) and the types of the runtime written in Gleam.
+value of any type), `Array(a)` (an immutable array, section *Array*) and the
+types of the runtime written in Gleam.
 
 ## Glue (names without `_`)
 
@@ -263,7 +264,24 @@ comes from, is copied; a bigger one shares the array.
 | `_int_to_utf_codepoint` | `fn(Int) -> Result(UtfCodepoint, Nil)` | existing |
 | `_inspect` | `fn(a) -> String` | existing |
 | `_hash` | `fn(a) -> Int` | structural hash generated for each type, consistent with `==`: string views hash like copies, `-0.0` like `0.0`, functions all hash the same |
-| `_dynamic_cast` | `fn(a) -> Dynamic` | generated for each type: ints, floats, strings, booleans, `Nil`, lists, tuples (as arrays) and dicts go to their variant of `Dynamic`, with their items cast too; a `StringTree` is a string and a `UtfCodepoint` an int, as on JavaScript; any other value is boxed in `DOther` with a table of functions generated for its type |
+| `_dynamic_cast` | `fn(a) -> Dynamic` | generated for each type: ints, floats, strings, booleans, `Nil`, lists, tuples and arrays (as arrays) and dicts go to their variant of `Dynamic`, with their items cast too; a `StringTree` is a string and a `UtfCodepoint` an int, as on JavaScript; any other value is boxed in `DOther` with a table of functions generated for its type |
+
+**Array** (`@external(webassembly, "builtins", "Array") type Array(a)`, a wasm
+GC array of the representation of `a`)
+
+The functions that change an array return a copy, or the same array when the
+index is out of range. Arrays are compared, hashed and inspected like tuples (`#(1, 2)`), as
+tuples on Erlang and arrays on JavaScript. The runtime uses them for the
+nodes of `Dict`.
+
+| Name | Gleam type | Semantics |
+|---|---|---|
+| `_array_size` | `fn(Array(a)) -> Int` | `array.len` |
+| `_array_get` | `fn(Array(a), Int) -> Result(a, Nil)` | `array.get`; an error when the index is out of range |
+| `_array_set` | `fn(Array(a), Int, a) -> Array(a)` | a copy with the element replaced |
+| `_array_insert` | `fn(Array(a), Int, a) -> Array(a)` | a copy with the element inserted at the index, which may be the size |
+| `_array_remove` | `fn(Array(a), Int) -> Array(a)` | a copy without the element |
+| `_array_from_list` | `fn(List(a)) -> Array(a)` | |
 
 ### Planned builtins (not implemented yet)
 
@@ -292,7 +310,7 @@ function once the external types are replaced by their representation.
 
 | Type | Module | Representation |
 |---|---|---|
-| `Dict(k, v)` | `builtins/dict` | a CHAMP (hash trie), with the hash of `_hash` |
+| `Dict(k, v)` | `builtins/dict` | a CHAMP (hash trie) with `Array` nodes, with the hash of `_hash` |
 | `StringTree` | `builtins/string_tree` | a rope that stores the size of each node |
 | `Dynamic` | `builtins/dynamic` | a closed sum: `DInt`, `DFloat`, `DString`, `DBool`, `DNil`, `DList`, `DArray`, `DDict` and `DOther(AnyRef, VTable)` |
 

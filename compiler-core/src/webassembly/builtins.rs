@@ -25,6 +25,13 @@ pub(super) enum BuiltinFunction {
     DynamicEqual(EcoString),
     DynamicHash(ValType, EcoString),
     DynamicInspect(ValType, EcoString),
+    /// A function of `Array`, with its params, result and element type.
+    Array {
+        function: ArrayFunction,
+        params: Vec<ValType>,
+        result: ValType,
+        element: EcoString,
+    },
 }
 
 impl BuiltinFunction {
@@ -52,6 +59,9 @@ impl BuiltinFunction {
             BuiltinFunction::DynamicEqual(name) => format!("_dynamic_equal({name})").into(),
             BuiltinFunction::DynamicHash(_, name) => format!("_dynamic_hash({name})").into(),
             BuiltinFunction::DynamicInspect(_, name) => format!("_dynamic_inspect({name})").into(),
+            BuiltinFunction::Array {
+                function, element, ..
+            } => format!("{}({element})", function.name()).into(),
         }
     }
 }
@@ -110,6 +120,7 @@ pub fn builtin_function_names() -> Vec<EcoString> {
         .iter()
         .map(|b| b.name().into())
         .chain([INSPECT.into(), HASH.into(), DYNAMIC_CAST.into()])
+        .chain(ArrayFunction::all().iter().map(|f| f.name().into()))
         .collect()
 }
 
@@ -625,6 +636,10 @@ impl<'a> Generator<'a> {
                     let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
                     self.code_union_eq(type_, supertype_index, &custom_type, &args)
                 }
+                CustomType::Array => {
+                    let element = args.first().expect("array element type");
+                    self.code_array_eq(element)
+                }
                 CustomType::External { .. }
                 | CustomType::Runtime { .. }
                 | CustomType::Enum { .. } => {
@@ -990,7 +1005,10 @@ impl<'a> Generator<'a> {
             .named_type_information()
             .expect("named type information");
         let (type_index, tag, types) = match &variant.custom_type {
-            CustomType::External { .. } | CustomType::Runtime { .. } | CustomType::Enum { .. } => {
+            CustomType::External { .. }
+            | CustomType::Runtime { .. }
+            | CustomType::Array
+            | CustomType::Enum { .. } => {
                 panic!("external/enum types should not reach code generation")
             }
             CustomType::Struct {
@@ -2030,6 +2048,10 @@ impl<'a> Generator<'a> {
         match custom_type {
             CustomType::Runtime { .. } => {
                 panic!("runtime types should be replaced by their representation")
+            }
+            CustomType::Array => {
+                let element = args.first().expect("array element type");
+                self.code_array_repr(element)
             }
             CustomType::External { to_str, .. } => {
                 let to_str = to_str.expect("external type with a text");

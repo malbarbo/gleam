@@ -11,9 +11,10 @@
 //// at most 7 levels of bitmap nodes. Keys whose 32 bit hashes are equal end up
 //// in a collision node below the last level.
 ////
-//// Each bitmap node keeps its entries and its children in two lists, ordered
+//// Each bitmap node keeps its entries and its children in two arrays, ordered
 //// by hash fragment. A position is found with a popcount of the bitmap, as in
-//// the paper; the lists hold at most 32 elements. Sub-nodes are always kept
+//// the paper; the arrays hold at most 32 elements and are copied on change.
+//// Collision nodes keep their entries in a list. Sub-nodes are always kept
 //// with at least two entries below them (deletion inlines singletons), which
 //// makes the shape of the trie canonical for a given set of keys, except for
 //// the order of the entries inside collision nodes. That is why equality is
@@ -34,8 +35,8 @@ type Node(k, v) {
   Node(
     datamap: Int,
     nodemap: Int,
-    entries: List(Entry(k, v)),
-    children: List(Node(k, v)),
+    entries: Array(Entry(k, v)),
+    children: Array(Node(k, v)),
   )
   /// Entries whose 32 bit hashes are all equal to `hash`.
   Collision(hash: Int, entries: List(Entry(k, v)))
@@ -97,7 +98,7 @@ pub fn dict_new() -> Dict(k, v) {
 }
 
 fn empty_node() -> Node(k, v) {
-  Node(0, 0, [], [])
+  Node(0, 0, array_from_list([]), array_from_list([]))
 }
 
 /// Returns the argument. Used for the transient operations of `Dict`, which
@@ -137,19 +138,18 @@ fn lookup(node: Node(k, v), key: k, hash: Int, shift: Int) -> Result(v, Nil) {
       let bit = bitpos(hash, shift)
       case bitwise_and(datamap, bit) != 0 {
         True ->
-          case at(entries, index(datamap, bit)) {
-            Entry(hash: h, key: k, value: v) if h == hash && k == key -> Ok(v)
+          case array_get(entries, index(datamap, bit)) {
+            Ok(Entry(hash: h, key: k, value: v)) if h == hash && k == key ->
+              Ok(v)
             _ -> Error(Nil)
           }
         False ->
           case bitwise_and(nodemap, bit) != 0 {
             True ->
-              lookup(
-                at(children, index(nodemap, bit)),
-                key,
-                hash,
-                shift + bits_per_level,
-              )
+              case array_get(children, index(nodemap, bit)) {
+                Ok(child) -> lookup(child, key, hash, shift + bits_per_level)
+                Error(_) -> Error(Nil)
+              }
             False -> Error(Nil)
           }
       }
@@ -208,20 +208,23 @@ fn insert_node(
       case bitwise_and(datamap, bit) != 0 {
         True -> {
           let i = index(datamap, bit)
-          let existing = at(entries, i)
-          case existing.hash == entry.hash && existing.key == entry.key {
-            True -> #(
-              Node(datamap, nodemap, replace_at(entries, i, entry), children),
+          case array_get(entries, i) {
+            Ok(existing)
+              if existing.hash == entry.hash && existing.key == entry.key
+            -> #(
+              Node(datamap, nodemap, array_set(entries, i, entry), children),
               False,
             )
-            False -> {
+            // The bitmaps and the arrays agree, so this doesn't happen.
+            Error(_) -> #(node, False)
+            Ok(existing) -> {
               let child = merge_entries(existing, entry, shift + bits_per_level)
               let node =
                 Node(
                   bitwise_exclusive_or(datamap, bit),
                   bitwise_or(nodemap, bit),
-                  remove_at(entries, i),
-                  insert_at(children, index(nodemap, bit), child),
+                  array_remove(entries, i),
+                  array_insert(children, index(nodemap, bit), child),
                 )
               #(node, True)
             }
@@ -231,19 +234,29 @@ fn insert_node(
           case bitwise_and(nodemap, bit) != 0 {
             True -> {
               let j = index(nodemap, bit)
-              let #(child, added) =
-                insert_node(at(children, j), entry, shift + bits_per_level)
-              #(
-                Node(datamap, nodemap, entries, replace_at(children, j, child)),
-                added,
-              )
+              case array_get(children, j) {
+                Ok(child) -> {
+                  let #(child, added) =
+                    insert_node(child, entry, shift + bits_per_level)
+                  #(
+                    Node(
+                      datamap,
+                      nodemap,
+                      entries,
+                      array_set(children, j, child),
+                    ),
+                    added,
+                  )
+                }
+                Error(_) -> #(node, False)
+              }
             }
             False -> {
               let node =
                 Node(
                   bitwise_or(datamap, bit),
                   nodemap,
-                  insert_at(entries, index(datamap, bit), entry),
+                  array_insert(entries, index(datamap, bit), entry),
                   children,
                 )
               #(node, True)
@@ -268,15 +281,20 @@ fn merge_entries(a: Entry(k, v), b: Entry(k, v), shift: Int) -> Node(k, v) {
       let fb = fragment(b.hash, shift)
       case fa == fb {
         True ->
-          Node(0, bitwise_shift_left(1, fa), [], [
-            merge_entries(a, b, shift + bits_per_level),
-          ])
+          Node(
+            0,
+            bitwise_shift_left(1, fa),
+            array_from_list([]),
+            array_from_list([merge_entries(a, b, shift + bits_per_level)]),
+          )
         False -> {
           let datamap =
             bitwise_or(bitwise_shift_left(1, fa), bitwise_shift_left(1, fb))
           case fa < fb {
-            True -> Node(datamap, 0, [a, b], [])
-            False -> Node(datamap, 0, [b, a], [])
+            True ->
+              Node(datamap, 0, array_from_list([a, b]), array_from_list([]))
+            False ->
+              Node(datamap, 0, array_from_list([b, a]), array_from_list([]))
           }
         }
       }
@@ -362,18 +380,17 @@ fn delete_node(
       case bitwise_and(datamap, bit) != 0 {
         True -> {
           let i = index(datamap, bit)
-          let existing = at(entries, i)
-          case existing.hash == hash && existing.key == key {
-            True -> #(
+          case array_get(entries, i) {
+            Ok(existing) if existing.hash == hash && existing.key == key -> #(
               Node(
                 bitwise_exclusive_or(datamap, bit),
                 nodemap,
-                remove_at(entries, i),
+                array_remove(entries, i),
                 children,
               ),
               True,
             )
-            False -> #(node, False)
+            _ -> #(node, False)
           }
         }
         False ->
@@ -381,8 +398,11 @@ fn delete_node(
             False -> #(node, False)
             True -> {
               let j = index(nodemap, bit)
-              let #(child, removed) =
-                delete_node(at(children, j), key, hash, shift + bits_per_level)
+              let #(child, removed) = case array_get(children, j) {
+                Ok(child) ->
+                  delete_node(child, key, hash, shift + bits_per_level)
+                Error(_) -> #(node, False)
+              }
               case removed, singleton(child) {
                 False, _ -> #(node, False)
                 // The sub-node has a single entry left: move it up.
@@ -390,18 +410,13 @@ fn delete_node(
                   Node(
                     bitwise_or(datamap, bit),
                     bitwise_exclusive_or(nodemap, bit),
-                    insert_at(entries, index(datamap, bit), entry),
-                    remove_at(children, j),
+                    array_insert(entries, index(datamap, bit), entry),
+                    array_remove(children, j),
                   ),
                   True,
                 )
                 True, Error(_) -> #(
-                  Node(
-                    datamap,
-                    nodemap,
-                    entries,
-                    replace_at(children, j, child),
-                  ),
+                  Node(datamap, nodemap, entries, array_set(children, j, child)),
                   True,
                 )
               }
@@ -418,7 +433,11 @@ fn delete_node(
 
 fn singleton(node: Node(k, v)) -> Result(Entry(k, v), Nil) {
   case node {
-    Node(nodemap: 0, entries: [entry], ..) -> Ok(entry)
+    Node(nodemap: 0, entries:, ..) ->
+      case array_size(entries) {
+        1 -> array_get(entries, 0)
+        _ -> Error(Nil)
+      }
     Collision(entries: [entry], ..) -> Ok(entry)
     _ -> Error(Nil)
   }
@@ -441,56 +460,94 @@ fn collision_delete(
 
 // -- Traversal ----------------------------------------------------------------
 
-/// Folds over the entries in trie order. Tail recursive: the nodes still to
-/// visit are kept in an explicit stack.
+/// Folds over the entries in trie order. The recursion over the children is
+/// at most as deep as the trie, 8 levels.
 pub fn dict_fold(
   over champ: Dict(k, v),
   from initial: acc,
   with fun: fn(acc, k, v) -> acc,
 ) -> acc {
-  fold_loop([], [champ.root], [], initial, fun)
+  fold_node(champ.root, initial, fun)
 }
 
-fn fold_loop(
-  entries: List(Entry(k, v)),
-  nodes: List(Node(k, v)),
-  stack: List(List(Node(k, v))),
-  acc: acc,
-  fun: fn(acc, k, v) -> acc,
-) -> acc {
-  case entries, nodes, stack {
-    [Entry(key:, value:, ..), ..entries], _, _ ->
-      fold_loop(entries, nodes, stack, fun(acc, key, value), fun)
-    [], [Node(entries:, children:, ..), ..nodes], _ ->
-      fold_loop(entries, children, [nodes, ..stack], acc, fun)
-    [], [Collision(entries:, ..), ..nodes], _ ->
-      fold_loop(entries, nodes, stack, acc, fun)
-    [], [], [nodes, ..stack] -> fold_loop([], nodes, stack, acc, fun)
-    [], [], [] -> acc
+fn fold_node(node: Node(k, v), acc: acc, fun: fn(acc, k, v) -> acc) -> acc {
+  case node {
+    Node(entries:, children:, ..) ->
+      fold_children(children, 0, fold_entries(entries, 0, acc, fun), fun)
+    Collision(entries:, ..) -> fold_list(entries, acc, fun)
   }
 }
 
-/// All the entries, in reverse trie order. Tail recursive and without
-/// closures, so the other traversals are simple loops over this list.
-fn entries_of(champ: Dict(k, v)) -> List(Entry(k, v)) {
-  entries_loop([], [champ.root], [], [])
+fn fold_entries(
+  entries: Array(Entry(k, v)),
+  i: Int,
+  acc: acc,
+  fun: fn(acc, k, v) -> acc,
+) -> acc {
+  case array_get(entries, i) {
+    Ok(Entry(key:, value:, ..)) ->
+      fold_entries(entries, i + 1, fun(acc, key, value), fun)
+    Error(_) -> acc
+  }
 }
 
-fn entries_loop(
+fn fold_children(
+  children: Array(Node(k, v)),
+  i: Int,
+  acc: acc,
+  fun: fn(acc, k, v) -> acc,
+) -> acc {
+  case array_get(children, i) {
+    Ok(child) -> fold_children(children, i + 1, fold_node(child, acc, fun), fun)
+    Error(_) -> acc
+  }
+}
+
+fn fold_list(
   entries: List(Entry(k, v)),
-  nodes: List(Node(k, v)),
-  stack: List(List(Node(k, v))),
+  acc: acc,
+  fun: fn(acc, k, v) -> acc,
+) -> acc {
+  case entries {
+    [] -> acc
+    [Entry(key:, value:, ..), ..rest] ->
+      fold_list(rest, fun(acc, key, value), fun)
+  }
+}
+
+/// All the entries, in reverse trie order. Without closures, so the other
+/// traversals are simple loops over this list.
+fn entries_of(champ: Dict(k, v)) -> List(Entry(k, v)) {
+  entries_node(champ.root, [])
+}
+
+fn entries_node(node: Node(k, v), acc: List(Entry(k, v))) -> List(Entry(k, v)) {
+  case node {
+    Node(entries:, children:, ..) ->
+      entries_children(children, 0, entries_array(entries, 0, acc))
+    Collision(entries:, ..) -> reverse_and_prepend(entries, acc)
+  }
+}
+
+fn entries_array(
+  entries: Array(Entry(k, v)),
+  i: Int,
   acc: List(Entry(k, v)),
 ) -> List(Entry(k, v)) {
-  case entries, nodes, stack {
-    [entry, ..entries], _, _ ->
-      entries_loop(entries, nodes, stack, [entry, ..acc])
-    [], [Node(entries:, children:, ..), ..nodes], _ ->
-      entries_loop(entries, children, [nodes, ..stack], acc)
-    [], [Collision(entries:, ..), ..nodes], _ ->
-      entries_loop(entries, nodes, stack, acc)
-    [], [], [nodes, ..stack] -> entries_loop([], nodes, stack, acc)
-    [], [], [] -> acc
+  case array_get(entries, i) {
+    Ok(entry) -> entries_array(entries, i + 1, [entry, ..acc])
+    Error(_) -> acc
+  }
+}
+
+fn entries_children(
+  children: Array(Node(k, v)),
+  i: Int,
+  acc: List(Entry(k, v)),
+) -> List(Entry(k, v)) {
+  case array_get(children, i) {
+    Ok(child) -> entries_children(children, i + 1, entries_node(child, acc))
+    Error(_) -> acc
   }
 }
 
@@ -550,13 +607,17 @@ pub fn dict_map_values(champ: Dict(k, v), fun: fn(k, v) -> a) -> Dict(k, a) {
 
 fn map_node(node: Node(k, v), fun: fn(k, v) -> a) -> Node(k, a) {
   case node {
-    Node(datamap:, nodemap:, entries:, children:) ->
+    Node(datamap:, nodemap:, entries:, children:) -> {
+      // In trie order, as the other traversals call `fun`.
+      let entries = map_entries_array(entries, 0, fun, [])
+      let children = map_children(children, 0, fun, [])
       Node(
         datamap,
         nodemap,
-        map_entries(entries, fun, []),
-        map_children(children, fun, []),
+        array_from_list(reverse_and_prepend(entries, [])),
+        array_from_list(reverse_and_prepend(children, [])),
       )
+    }
     Collision(hash:, entries:) -> Collision(hash, map_entries(entries, fun, []))
   }
 }
@@ -573,14 +634,34 @@ fn map_entries(
   }
 }
 
+/// The mapped entries, in reverse order.
+fn map_entries_array(
+  entries: Array(Entry(k, v)),
+  i: Int,
+  fun: fn(k, v) -> a,
+  acc: List(Entry(k, a)),
+) -> List(Entry(k, a)) {
+  case array_get(entries, i) {
+    Ok(Entry(hash:, key:, value:)) ->
+      map_entries_array(entries, i + 1, fun, [
+        Entry(hash, key, fun(key, value)),
+        ..acc
+      ])
+    Error(_) -> acc
+  }
+}
+
+/// The mapped children, in reverse order.
 fn map_children(
-  children: List(Node(k, v)),
+  children: Array(Node(k, v)),
+  i: Int,
   fun: fn(k, v) -> a,
   acc: List(Node(k, a)),
 ) -> List(Node(k, a)) {
-  case children {
-    [] -> reverse_and_prepend(acc, [])
-    [child, ..rest] -> map_children(rest, fun, [map_node(child, fun), ..acc])
+  case array_get(children, i) {
+    Ok(child) ->
+      map_children(children, i + 1, fun, [map_node(child, fun), ..acc])
+    Error(_) -> acc
   }
 }
 
@@ -691,27 +772,50 @@ fn combine_loop(
 /// equal value. The structure is not compared, because the order inside
 /// collision nodes depends on the order of insertion.
 pub fn dict_equal(a: Dict(k, v), b: Dict(k, v)) -> Bool {
-  a.size == b.size && all_in([], [a.root], [], b)
+  a.size == b.size && all_in(a.root, b)
 }
 
-fn all_in(
-  entries: List(Entry(k, v)),
-  nodes: List(Node(k, v)),
-  stack: List(List(Node(k, v))),
+fn all_in(node: Node(k, v), other: Dict(k, v)) -> Bool {
+  case node {
+    Node(entries:, children:, ..) ->
+      all_entries_in(entries, 0, other) && all_children_in(children, 0, other)
+    Collision(entries:, ..) -> all_list_in(entries, other)
+  }
+}
+
+fn is_in(entry: Entry(k, v), other: Dict(k, v)) -> Bool {
+  case lookup(other.root, entry.key, entry.hash, 0) {
+    Ok(value) -> value == entry.value
+    Error(_) -> False
+  }
+}
+
+fn all_entries_in(
+  entries: Array(Entry(k, v)),
+  i: Int,
   other: Dict(k, v),
 ) -> Bool {
-  case entries, nodes, stack {
-    [Entry(hash:, key:, value:), ..entries], _, _ ->
-      case lookup(other.root, key, hash, 0) {
-        Ok(v) if v == value -> all_in(entries, nodes, stack, other)
-        _ -> False
-      }
-    [], [Node(entries:, children:, ..), ..nodes], _ ->
-      all_in(entries, children, [nodes, ..stack], other)
-    [], [Collision(entries:, ..), ..nodes], _ ->
-      all_in(entries, nodes, stack, other)
-    [], [], [nodes, ..stack] -> all_in([], nodes, stack, other)
-    [], [], [] -> True
+  case array_get(entries, i) {
+    Ok(entry) -> is_in(entry, other) && all_entries_in(entries, i + 1, other)
+    Error(_) -> True
+  }
+}
+
+fn all_children_in(
+  children: Array(Node(k, v)),
+  i: Int,
+  other: Dict(k, v),
+) -> Bool {
+  case array_get(children, i) {
+    Ok(child) -> all_in(child, other) && all_children_in(children, i + 1, other)
+    Error(_) -> True
+  }
+}
+
+fn all_list_in(entries: List(Entry(k, v)), other: Dict(k, v)) -> Bool {
+  case entries {
+    [] -> True
+    [entry, ..rest] -> is_in(entry, other) && all_list_in(rest, other)
   }
 }
 
@@ -841,7 +945,8 @@ fn concat_strings(strings: List(String)) -> String
 /// Checks the structural invariants of the trie: the stored size, bitmaps
 /// that match the lists, entries placed at the fragment of their hash,
 /// sub-nodes with at least two entries below them and collision nodes only
-/// below the last level, with equal hashes.
+/// below the last level, with equal hashes that have the prefix of their
+/// position.
 @internal
 pub fn dict_check_invariants(champ: Dict(k, v)) -> Bool {
   case check_node(champ.root, 0, 0, True) {
@@ -863,6 +968,7 @@ fn check_node(
       case
         shift > max_shift
         && count >= 2
+        && bitwise_and(hash, bitwise_shift_left(1, shift) - 1) == prefix
         && same_hash(entries, hash)
         && distinct_keys(entries)
       {
@@ -871,17 +977,17 @@ fn check_node(
       }
     }
     Node(datamap:, nodemap:, entries:, children:) -> {
-      let count = list_length(entries, 0)
+      let count = array_size(entries)
       let ok =
         shift <= max_shift
         && bitwise_and(datamap, nodemap) == 0
         && popcount(datamap) == count
-        && popcount(nodemap) == list_length(children, 0)
+        && popcount(nodemap) == array_size(children)
         && entries_in_place(entries, datamap, shift, prefix, 0)
       case ok {
         False -> Error(Nil)
         True ->
-          case check_children(children, nodemap, 0, shift, prefix, count) {
+          case check_children(children, 0, nodemap, 0, shift, prefix, count) {
             Ok(total) ->
               case is_root || total >= 2 && singleton(node) == Error(Nil) {
                 True -> Ok(total)
@@ -897,21 +1003,21 @@ fn check_node(
 /// Each entry has the prefix of its node and is at the position of its
 /// fragment, in increasing fragment order.
 fn entries_in_place(
-  entries: List(Entry(k, v)),
+  entries: Array(Entry(k, v)),
   datamap: Int,
   shift: Int,
   prefix: Int,
   i: Int,
 ) -> Bool {
   let prefix_mask = bitwise_shift_left(1, shift) - 1
-  case entries {
-    [] -> True
-    [entry, ..rest] -> {
+  case array_get(entries, i) {
+    Error(_) -> True
+    Ok(entry) -> {
       let bit = bitpos(entry.hash, shift)
       bitwise_and(entry.hash, prefix_mask) == prefix
       && bitwise_and(datamap, bit) != 0
       && index(datamap, bit) == i
-      && entries_in_place(rest, datamap, shift, prefix, i + 1)
+      && entries_in_place(entries, datamap, shift, prefix, i + 1)
     }
   }
 }
@@ -932,28 +1038,38 @@ fn distinct_keys(entries: List(Entry(k, v))) -> Bool {
 }
 
 fn check_children(
-  children: List(Node(k, v)),
+  children: Array(Node(k, v)),
+  i: Int,
   nodemap: Int,
   fragment: Int,
   shift: Int,
   prefix: Int,
   count: Int,
 ) -> Result(Int, Nil) {
-  case children, fragment > fragment_mask {
-    [], _ -> Ok(count)
+  case array_get(children, i), fragment > fragment_mask {
+    Error(_), _ -> Ok(count)
     _, True -> Error(Nil)
-    [child, ..rest], False -> {
+    Ok(child), False -> {
       let bit = bitwise_shift_left(1, fragment)
       case bitwise_and(nodemap, bit) != 0 {
         False ->
-          check_children(children, nodemap, fragment + 1, shift, prefix, count)
+          check_children(
+            children,
+            i,
+            nodemap,
+            fragment + 1,
+            shift,
+            prefix,
+            count,
+          )
         True -> {
           let child_prefix =
             bitwise_or(prefix, bitwise_shift_left(fragment, shift))
           case check_node(child, shift + bits_per_level, child_prefix, False) {
             Ok(n) ->
               check_children(
-                rest,
+                children,
+                i + 1,
                 nodemap,
                 fragment + 1,
                 shift,
@@ -1001,51 +1117,68 @@ fn list_length(list: List(a), acc: Int) -> Int {
   }
 }
 
-/// The element at `i`. The callers only use positions computed from the
-/// bitmaps, which are always in range.
-fn at(list: List(a), i: Int) -> a {
-  case list, i {
-    [first, ..], 0 -> first
-    [_, ..rest], _ -> at(rest, i - 1)
-    [], _ -> panic as "champ: index out of range"
+// -- Arrays -------------------------------------------------------------------
+
+/// An immutable array. On Erlang it is a tuple, so this module can be tested
+/// there. An index out of range gives an error, or the same array.
+@external(webassembly, "builtins", "Array")
+type Array(a)
+
+@external(erlang, "erlang", "tuple_size")
+@external(webassembly, "builtins", "_array_size")
+fn array_size(array: Array(a)) -> Int
+
+@external(webassembly, "builtins", "_array_get")
+fn array_get(array: Array(a), index: Int) -> Result(a, Nil) {
+  case is_index(array, index) {
+    True -> Ok(element(index + 1, array))
+    False -> Error(Nil)
   }
 }
 
-fn replace_at(list: List(a), i: Int, value: a) -> List(a) {
-  replace_at_loop(list, i, value, [])
-}
-
-fn replace_at_loop(list: List(a), i: Int, value: a, acc: List(a)) -> List(a) {
-  case list, i {
-    [_, ..rest], 0 -> reverse_and_prepend(acc, [value, ..rest])
-    [first, ..rest], _ -> replace_at_loop(rest, i - 1, value, [first, ..acc])
-    [], _ -> panic as "champ: index out of range"
+@external(webassembly, "builtins", "_array_set")
+fn array_set(array: Array(a), index: Int, value: a) -> Array(a) {
+  case is_index(array, index) {
+    True -> set_element(index + 1, array, value)
+    False -> array
   }
 }
 
-fn insert_at(list: List(a), i: Int, value: a) -> List(a) {
-  insert_at_loop(list, i, value, [])
-}
-
-fn insert_at_loop(list: List(a), i: Int, value: a, acc: List(a)) -> List(a) {
-  case list, i {
-    _, 0 -> reverse_and_prepend(acc, [value, ..list])
-    [first, ..rest], _ -> insert_at_loop(rest, i - 1, value, [first, ..acc])
-    [], _ -> panic as "champ: index out of range"
+@external(webassembly, "builtins", "_array_insert")
+fn array_insert(array: Array(a), index: Int, value: a) -> Array(a) {
+  case index == array_size(array) || is_index(array, index) {
+    True -> insert_element(index + 1, array, value)
+    False -> array
   }
 }
 
-fn remove_at(list: List(a), i: Int) -> List(a) {
-  remove_at_loop(list, i, [])
-}
-
-fn remove_at_loop(list: List(a), i: Int, acc: List(a)) -> List(a) {
-  case list, i {
-    [_, ..rest], 0 -> reverse_and_prepend(acc, rest)
-    [first, ..rest], _ -> remove_at_loop(rest, i - 1, [first, ..acc])
-    [], _ -> panic as "champ: index out of range"
+@external(webassembly, "builtins", "_array_remove")
+fn array_remove(array: Array(a), index: Int) -> Array(a) {
+  case is_index(array, index) {
+    True -> delete_element(index + 1, array)
+    False -> array
   }
 }
+
+fn is_index(array: Array(a), index: Int) -> Bool {
+  index >= 0 && index < array_size(array)
+}
+
+@external(erlang, "erlang", "list_to_tuple")
+@external(webassembly, "builtins", "_array_from_list")
+fn array_from_list(list: List(a)) -> Array(a)
+
+@external(erlang, "erlang", "element")
+fn element(index: Int, array: Array(a)) -> a
+
+@external(erlang, "erlang", "setelement")
+fn set_element(index: Int, array: Array(a), value: a) -> Array(a)
+
+@external(erlang, "erlang", "insert_element")
+fn insert_element(index: Int, array: Array(a), value: a) -> Array(a)
+
+@external(erlang, "erlang", "delete_element")
+fn delete_element(index: Int, array: Array(a)) -> Array(a)
 
 fn reverse_and_prepend(list: List(a), to suffix: List(a)) -> List(a) {
   case list {
