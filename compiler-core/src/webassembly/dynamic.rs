@@ -52,7 +52,8 @@ enum Cast {
     },
     /// Boxes the value with a table of functions for its type.
     Other {
-        boxed: bool,
+        /// The struct that holds the value, when it is not a reference.
+        boxed: Option<TypeId>,
         name: GlobalId,
         classify: GlobalId,
         equal: GlobalId,
@@ -143,8 +144,8 @@ impl<'a> Generator<'a> {
                 other,
             } => {
                 let _ = instructions.local_get(value);
-                if boxed {
-                    let _ = instructions.ref_i31();
+                if let Some(box_) = boxed {
+                    let _ = instructions.struct_new(box_);
                 }
                 instructions
                     .global_as_non_null(name)
@@ -291,13 +292,7 @@ impl<'a> Generator<'a> {
 
     /// Boxes a value of another type, with its table of functions.
     fn dynamic_cast_other(&mut self, type_: &Arc<Type>, dynamic: &Arc<Type>) -> Cast {
-        let boxed = match self.val_type(type_) {
-            ValType::Ref(_) => false,
-            ValType::I32 => true,
-            val_type @ (ValType::I64 | ValType::F32 | ValType::F64 | ValType::V128) => {
-                panic!("values of type {val_type:?} can't be dynamic yet")
-            }
-        };
+        let boxed = self.dynamic_box(type_);
         let any_ref = self.runtime_named_type(DYNAMIC_MODULE, "AnyRef", vec![]);
         let name = self.string_index(&qualified_type_name(type_));
         let classify = self.string_index(&EcoString::from(if type_.fn_types().is_some() {
@@ -359,19 +354,36 @@ impl<'a> Generator<'a> {
         self.closure_of(cast, &type_::fn_(vec![type_.clone()], dynamic.clone()))
     }
 
+    /// The struct that boxes the values of `type_` in an `anyref`, when they
+    /// are not references.
+    fn dynamic_box(&mut self, type_: &Arc<Type>) -> Option<TypeId> {
+        match self.val_type(type_) {
+            ValType::Ref(_) => None,
+            val_type @ (ValType::I32
+            | ValType::I64
+            | ValType::F32
+            | ValType::F64
+            | ValType::V128) => Some(self.struct_type_index(
+                format!("Box({val_type})").into(),
+                vec![("value".into(), val_type)],
+            )),
+        }
+    }
+
     /// `[anyref] -> [T]`, the inverse of the boxing of `dynamic_cast_other`.
     fn unbox_instructions(&mut self, instructions: &mut Instructions<'_, '_>, type_: &Arc<Type>) {
-        let _ = match self.val_type(type_) {
-            ValType::Ref(RefType {
-                nullable,
-                heap_type,
-            }) => instructions.ref_cast(nullable, heap_type),
-            ValType::I32 => instructions
-                .ref_cast(false, HeapType::Abstract(walrus::AbstractHeapType::I31))
-                .i31_get_s(),
-            val_type @ (ValType::I64 | ValType::F32 | ValType::F64 | ValType::V128) => {
-                panic!("values of type {val_type:?} can't be dynamic yet")
-            }
+        let _ = match (self.val_type(type_), self.dynamic_box(type_)) {
+            (_, Some(box_)) => instructions
+                .ref_cast(false, HeapType::Concrete(box_))
+                .struct_get(box_, 0),
+            (
+                ValType::Ref(RefType {
+                    nullable,
+                    heap_type,
+                }),
+                None,
+            ) => instructions.ref_cast(nullable, heap_type),
+            (val_type, None) => panic!("{val_type:?} to be a reference"),
         };
     }
 

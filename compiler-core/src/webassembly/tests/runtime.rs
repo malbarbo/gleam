@@ -480,3 +480,105 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn module_with_the_name_of_a_runtime_module() {
+    let src = "import builtins/dict as d\npub fn main() { d.hello() }";
+    let (main_module, dep_modules) = super::compile(
+        src,
+        vec![("thepackage", "builtins/dict", "pub fn hello() { 1 }")],
+    );
+    let line_numbers = src_span::LineNumbers::new(src);
+    let mut all_modules: std::collections::HashMap<_, _> = dep_modules
+        .iter()
+        .map(|(name, module)| (name.clone(), module))
+        .collect();
+    let _ = all_modules.insert(main_module.name.clone(), &main_module);
+    let error = crate::webassembly::module(
+        &main_module,
+        &line_numbers,
+        &all_modules,
+        &std::collections::HashMap::new(),
+        crate::config::WasmInt::I32,
+        crate::config::WasmFloat::F64,
+    )
+    .expect_err("a reserved module name");
+    assert_eq!(
+        error,
+        crate::webassembly::Error::ReservedModuleName {
+            name: "builtins/dict".into()
+        }
+    );
+}
+
+#[test]
+fn runtime_external_with_a_wrong_signature() {
+    let error = super::compile_wasm_error(
+        r#"
+@external(webassembly, "builtins", "dict_size")
+fn size(dict: a) -> Int
+
+pub fn main() { size(1) }
+"#,
+    );
+    assert!(
+        matches!(
+            error,
+            crate::webassembly::Error::WrongBuiltinFunctionSignature { ref name, .. }
+                if name == "dict_size"
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn runtime_external_with_a_specific_signature() {
+    let _ = run_dict(
+        r#"
+@external(webassembly, "builtins", "Dict")
+type Dict(k, v)
+
+@external(webassembly, "builtins", "dict_from_list")
+fn from_list(list: List(#(Int, String))) -> Dict(Int, String)
+
+@external(webassembly, "builtins", "dict_size")
+fn size(dict: Dict(Int, String)) -> Int
+
+pub fn main() {
+  let assert 2 = size(from_list([#(1, "a"), #(2, "b")]))
+}
+"#,
+    );
+}
+
+/// Values that are not references, like the external numbers, are boxed in
+/// a struct, without losing bits.
+#[test]
+fn dynamic_of_external_numbers() {
+    let _ = run_dynamic(
+        r#"
+import dynamic
+
+@external(webassembly, "builtins", "I32")
+pub type I32
+
+@external(webassembly, "builtins", "F64")
+pub type F64
+
+@external(webassembly, "builtins", "_int_to_i32")
+fn to_i32(a: Int) -> I32
+
+@external(webassembly, "builtins", "_float_to_f64")
+fn to_f64(a: Float) -> F64
+
+pub fn main() {
+  let big = dynamic.cast(to_i32(2_147_483_647))
+  let assert True = big == dynamic.cast(to_i32(2_147_483_647))
+  let assert False = big == dynamic.cast(to_i32(1_073_741_823))
+  let assert True = dynamic.cast(to_f64(1.5)) == dynamic.cast(to_f64(1.5))
+  let assert False = dynamic.cast(to_f64(1.5)) == dynamic.cast(to_f64(2.5))
+  let assert False = big == dynamic.cast(to_f64(1.5))
+}
+"#,
+    );
+}

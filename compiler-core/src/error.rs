@@ -2185,6 +2185,15 @@ Is your editor still running and connected to the language server?"
                         None,
                         *location,
                     ),
+                    crate::webassembly::Error::ReservedModuleName { name } => (
+                        "Reserved module name",
+                        format!(
+                            "The module name \"{name}\" is reserved by the WebAssembly target, \
+which provides a module with this name."
+                        ),
+                        Some("Rename the module.".into()),
+                        SrcSpan::default(),
+                    ),
                     crate::webassembly::Error::WrongExternalTypeArity {
                         location,
                         name,

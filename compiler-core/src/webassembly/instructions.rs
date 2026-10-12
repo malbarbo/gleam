@@ -622,8 +622,6 @@ impl<'a, 'b> Instructions<'a, 'b> {
         ref_is_null(),
         ref_as_non_null(),
         ref_eq(),
-        ref_i31(),
-        i31_get_s(),
         call_ref(index: TypeId),
         call(index: FunctionId),
         return_call_ref(index: TypeId),

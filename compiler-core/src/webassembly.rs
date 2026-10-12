@@ -120,6 +120,10 @@ pub enum Error {
         location: SrcSpan,
         module: EcoString,
     },
+    /// A module of the program has the name of a module of the runtime.
+    ReservedModuleName {
+        name: EcoString,
+    },
     WrongExternalTypeArity {
         location: SrcSpan,
         name: EcoString,
@@ -174,7 +178,13 @@ pub fn module(
     let runtime = runtime::modules();
     let mut all_modules = all_modules.clone();
     for runtime_module in &runtime {
-        let _ = all_modules.insert(runtime_module.module.name.clone(), &runtime_module.module);
+        let name = &runtime_module.module.name;
+        if all_modules
+            .insert(name.clone(), &runtime_module.module)
+            .is_some()
+        {
+            return Err(Error::ReservedModuleName { name: name.clone() });
+        }
     }
     let mut generator = Generator::new(module, line_numbers, &all_modules, all_line_numbers);
     generator.runtime = &runtime;
@@ -1431,8 +1441,7 @@ impl<'a> Generator<'a> {
     ) -> Result<(), Error> {
         let external = self.represent(&function_type(function));
         let runtime = function_type(runtime_function);
-        let instance = Monomorphizer::with_bound(&runtime, &external).type_(&runtime);
-        if instance.same_as(&external) {
+        if is_instance(&runtime, &external, &mut HashMap::new()) {
             Ok(())
         } else {
             Err(Error::WrongBuiltinFunctionSignature {
@@ -5346,6 +5355,78 @@ fn function_literal_name(location: SrcSpan, type_: &Arc<Type>, specialization: u
 
 /// The name of `type_` with the types qualified by their module, except
 /// the prelude ones, so different types have different names.
+/// Whether `specific` is `general` with its type variables replaced by some
+/// types, given the replacements already made in `bound`.
+fn is_instance(
+    general: &Arc<Type>,
+    specific: &Arc<Type>,
+    bound: &mut HashMap<u64, Arc<Type>>,
+) -> bool {
+    if let Type::Var { type_ } = specific.as_ref()
+        && let TypeVar::Link { type_ } = &*type_.borrow()
+    {
+        return is_instance(general, type_, bound);
+    }
+    match general.as_ref() {
+        Type::Var { type_ } => match &*type_.borrow() {
+            TypeVar::Link { type_ } => is_instance(type_, specific, bound),
+            TypeVar::Unbound { id } | TypeVar::Generic { id } => match bound.get(id) {
+                Some(type_) => type_.same_as(specific),
+                None => {
+                    let _ = bound.insert(*id, specific.clone());
+                    true
+                }
+            },
+        },
+        Type::Named {
+            module,
+            name,
+            arguments,
+            ..
+        } => match specific.as_ref() {
+            Type::Named {
+                module: specific_module,
+                name: specific_name,
+                arguments: specific_arguments,
+                ..
+            } => {
+                module == specific_module
+                    && name == specific_name
+                    && are_instances(arguments, specific_arguments, bound)
+            }
+            Type::Fn { .. } | Type::Tuple { .. } | Type::Var { .. } => false,
+        },
+        Type::Fn { arguments, return_ } => match specific.as_ref() {
+            Type::Fn {
+                arguments: specific_arguments,
+                return_: specific_return,
+            } => {
+                are_instances(arguments, specific_arguments, bound)
+                    && is_instance(return_, specific_return, bound)
+            }
+            Type::Named { .. } | Type::Tuple { .. } | Type::Var { .. } => false,
+        },
+        Type::Tuple { elements } => match specific.as_ref() {
+            Type::Tuple {
+                elements: specific_elements,
+            } => are_instances(elements, specific_elements, bound),
+            Type::Named { .. } | Type::Fn { .. } | Type::Var { .. } => false,
+        },
+    }
+}
+
+fn are_instances(
+    general: &[Arc<Type>],
+    specific: &[Arc<Type>],
+    bound: &mut HashMap<u64, Arc<Type>>,
+) -> bool {
+    general.len() == specific.len()
+        && general
+            .iter()
+            .zip(specific)
+            .all(|(general, specific)| is_instance(general, specific, bound))
+}
+
 fn qualified_type_name(type_: &Arc<Type>) -> EcoString {
     let mut name = EcoString::new();
     write_qualified_type_name(&mut name, &mut vec![], type_);
