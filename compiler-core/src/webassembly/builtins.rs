@@ -2016,20 +2016,27 @@ impl<'a> Generator<'a> {
 
     pub(super) fn code_utf_codepoint_repr(&mut self) -> FunctionId {
         // params
-        let _func = self.wasm_local(ValType::I32); // Function
-        let ptr = self.wasm_local(ValType::I32); // I32
-        // return I32 - number of written bytes
-        let repr = "//utfcodepoint()";
-        let string_index = self.string_index(&repr.into());
-        let string_to_memory =
-            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
-        let mut function =
-            Function::new(self, "_repr_utf_code_point", &[_func, ptr], &[ValType::I32]);
+        let codepoint = self.wasm_local(ValType::I32);
+        let ptr = self.wasm_local(ValType::I32);
+        // locals
+        let needed = self.wasm_local(ValType::I32);
+        let repr = self.find_global_expect(UTF_CODEPOINT_REPR);
+        let mut function = Function::new(
+            self,
+            "_repr_utf_code_point",
+            &[codepoint, ptr],
+            &[ValType::I32],
+        );
         let _ = function
             .extend_instructions(self)
-            .global_as_non_null(string_index)
+            // `//utfcodepoint(c)` has at most 20 bytes
             .local_get(ptr)
-            .call(string_to_memory)
+            .i32_const(20)
+            .i32_add()
+            .ensure_memory(needed)
+            .local_get(codepoint)
+            .local_get(ptr)
+            .call(repr.func_id())
             .end();
         function.finish(self)
     }

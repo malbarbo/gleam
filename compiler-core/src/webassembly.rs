@@ -94,6 +94,8 @@ const F32_PARSE: &str = "_f32_parse";
 const F64_TO_STR: &str = "_f64_to_str";
 const F64_PARSE: &str = "_f64_parse";
 
+const UTF_CODEPOINT_REPR: &str = "_utf_codepoint_repr";
+
 const STDERR: i32 = 2;
 
 const BOOL_VALTYPE: ValType = ValType::I32;

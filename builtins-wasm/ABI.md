@@ -202,6 +202,7 @@ Not callable from Gleam; the compiler calls them from generated code.
 |---|---|---|
 | `_grapheme_prefix_len` | `(ptr: i32, len: i32, complete: i32) -> i32` | byte length of the first grapheme of the window; `-1` when `complete == 0` and the grapheme reaches the end of the window (it may continue past it), the window cuts a UTF-8 sequence before the first grapheme ends, or the window is empty; with `complete != 0` the window is the whole string and `""` gives `0` |
 | `_float_repr` | `(f: f64, ptr: i32) -> i32` | writes `float_to_string(f)` at `ptr`, returns the length (used by `_inspect`) |
+| `_utf_codepoint_repr` | `(codepoint: i32, ptr: i32) -> i32` | writes `//utfcodepoint(c)` at `ptr`, as on JavaScript, returns the length (used by `_inspect`) |
 
 The older exports (`_print`, `_exit`, `_i32_to_str`, `_i64_to_str`, `_f32_to_str`,
 `_f64_to_str`, `_i32_parse`, `_i64_parse`, `_f32_parse`, `_f64_parse`,

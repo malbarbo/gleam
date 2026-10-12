@@ -22,6 +22,33 @@ pub fn main() {
     );
 }
 
+/// As on JavaScript.
+#[test]
+fn inspect_utf_codepoint() {
+    run_ok(
+        r##"
+@external(webassembly, "builtins", "_int_to_utf_codepoint")
+fn utf_codepoint(a: Int) -> Result(UtfCodepoint, Nil)
+
+@external(webassembly, "builtins", "_inspect")
+fn inspect(value: a) -> String
+
+pub fn main() {
+    let assert Ok(a) = utf_codepoint(65)
+    let assert Ok(e) = utf_codepoint(0xE9)
+    let assert Ok(smile) = utf_codepoint(0x1F600)
+    let assert Ok(nul) = utf_codepoint(0)
+    let assert "//utfcodepoint(A)" = inspect(a)
+    let assert "//utfcodepoint(é)" = inspect(e)
+    let assert "//utfcodepoint(😀)" = inspect(smile)
+    let assert "//utfcodepoint(\u{0000})" = inspect(nul)
+    let assert "[//utfcodepoint(A), //utfcodepoint(é)]" = inspect([a, e])
+    let assert "#(//utfcodepoint(😀), 1)" = inspect(#(smile, 1))
+}
+"##,
+    );
+}
+
 #[test]
 fn int_to_utf_codepoint_i64() {
     run_ok_i64(

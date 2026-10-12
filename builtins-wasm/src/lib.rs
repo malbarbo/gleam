@@ -157,6 +157,18 @@ mod exports {
         unsafe { write_to(ptr, num::format_float(f, false, &mut buf)) }
     }
 
+    /// Writes `//utfcodepoint(c)`, as on JavaScript, at most 20 bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn _utf_codepoint_repr(codepoint: u32, ptr: i32) -> i32 {
+        let c = char::from_u32(codepoint).unwrap_or(char::REPLACEMENT_CHARACTER);
+        let mut buf = [0; 4];
+        let ptr = ptr as usize as *mut u8;
+        let prefix = unsafe { write_to(ptr, "//utfcodepoint(") };
+        let c = unsafe { write_to(ptr.add(prefix as usize), c.encode_utf8(&mut buf)) };
+        let suffix = unsafe { write_to(ptr.add((prefix + c) as usize), ")") };
+        (prefix + c + suffix) as i32
+    }
+
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn _float_repr(f: f64, ptr: i32) -> i32 {
         let mut buf = [0; FLOAT_BUF_LEN];
