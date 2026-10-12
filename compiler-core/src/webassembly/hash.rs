@@ -165,11 +165,13 @@ impl<'a> Generator<'a> {
             };
         }
         let builtin = BuiltinFunction::Hash(self.val_type(type_), self.type_pretty_name(type_));
-        if let Some((CustomType::Struct { .. }, _)) = self.custom_type(type_) {
-            return Hash::Call(self.get_function_derived(builtin, type_, DerivedKind::Hash));
-        }
-        let type_ = type_.clone();
-        let index = self.get_function_builtin(builtin, |s| s.code_hash(&type_));
+        let index = if self.is_struct(type_) {
+            let struct_type = type_.clone();
+            self.get_function_constructor(builtin, type_, 0, move |s| s.code_hash(&struct_type))
+        } else {
+            let type_ = type_.clone();
+            self.get_function_builtin(builtin, |s| s.code_hash(&type_))
+        };
         Hash::Call(index)
     }
 
@@ -204,7 +206,7 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    pub(super) fn code_hash(&mut self, type_: &Arc<Type>) -> FunctionId {
+    fn code_hash(&mut self, type_: &Arc<Type>) -> FunctionId {
         if type_.is_string() {
             self.code_string_hash()
         } else if let Some(types) = type_.tuple_types() {
@@ -349,12 +351,13 @@ impl<'a> Generator<'a> {
     /// value into `h`.
     fn function_union_hash_into(&mut self, type_: &Arc<Type>) -> FunctionId {
         let builtin = BuiltinFunction::HashInto(self.val_type(type_), self.type_pretty_name(type_));
-        self.get_function_derived(builtin, type_, DerivedKind::HashInto)
+        let type_ = type_.clone();
+        self.get_function_builtin(builtin, |s| s.code_union_hash_into(&type_))
     }
 
     /// Dispatches on the tag to the `_hash_into` of the variant, with a tail
     /// call.
-    pub(super) fn code_union_hash_into(&mut self, type_: &Arc<Type>) -> FunctionId {
+    fn code_union_hash_into(&mut self, type_: &Arc<Type>) -> FunctionId {
         let Some((CustomType::Union { custom_type, .. }, args)) = self.custom_type(type_) else {
             panic!("union type expected")
         };
@@ -370,16 +373,17 @@ impl<'a> Generator<'a> {
         let mut variant_hashes: Vec<Option<(TypeId, FunctionId)>> =
             Vec::with_capacity(custom_type.constructors.len());
         for (i, constructor) in custom_type.constructors.iter().enumerate() {
-            if null_tag == Some(i) || !self.is_constructed(type_, i) {
+            if null_tag == Some(i) {
                 variant_hashes.push(None);
             } else {
                 let (_, type_index, types) =
-                    self.mono_union_subtype_index(type_, &custom_type, constructor, &args);
+                    self.union_subtype_index(type_, &custom_type, constructor, &args);
                 let mapping = layout.fields(i).to_vec();
                 let name = self.type_pretty_name(type_) + "." + constructor.name.clone();
                 let builtin = BuiltinFunction::HashInto(self.val_type_ref(type_index), name);
-                let hash_index = self.get_function_builtin(builtin, |s| {
-                    s.code_variant_hash_into(type_index, &mapping, i as i32, types, type_)
+                let union_type = type_.clone();
+                let hash_index = self.get_function_constructor(builtin, type_, i, move |s| {
+                    s.code_variant_hash_into(type_index, &mapping, i as i32, types, &union_type)
                 });
                 variant_hashes.push(Some((type_index, hash_index)));
             }

@@ -784,6 +784,14 @@ const b = [P(1), Q(2)]
 
 const c = [P(1), P(2)]
 
+pub type S {
+  S(Int)
+}
+
+const s = [S(1)]
+
+const t = [S(1)]
+
 @external(webassembly, "builtins", "_inspect")
 fn inspect(value: a) -> String
 
@@ -798,6 +806,8 @@ pub fn main() {
   let assert True = a == b
   let assert False = a == c
   let assert "[P(1), Q(2)]" = inspect(a)
+  let assert True = s == t
+  let assert "[S(1)]" = inspect(s)
   let assert [False, False] = [is_r(P(1)), is_r(Q(2))]
 }
 "#,
