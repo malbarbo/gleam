@@ -3053,7 +3053,10 @@ impl<'a> Generator<'a> {
                 ..
             } => {
                 let name = record_constant_name(name, record_constructor);
-                if let Some((CustomType::Enum { values }, _)) = self.custom_type(type_) {
+                if let Some(function) = self.constant_function(const_, type_) {
+                    let closure = self.closure_of(function, type_);
+                    let _ = instructions.global_get(closure);
+                } else if let Some((CustomType::Enum { values }, _)) = self.custom_type(type_) {
                     let value = Self::enum_value_index(&values, name);
                     let _ = instructions.i32_const(value as i32);
                 } else {

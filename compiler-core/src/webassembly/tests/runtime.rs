@@ -803,3 +803,37 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn constructors_in_constants() {
+    let _ = run_dynamic(
+        r#"
+pub type T {
+  A
+  B(String)
+  C(String, Int)
+}
+
+pub type W {
+  W(fn(String) -> T)
+}
+
+const fs = [B, B]
+
+const t = #(C, 1)
+
+const w = W(B)
+
+pub fn main() {
+  let assert [f, g] = fs
+  let assert True = f("x") == B("x")
+  let assert True = g("y") == B("y")
+  let assert #(h, n) = t
+  let assert True = h("z", n) == C("z", 1)
+  let assert W(k) = w
+  let assert True = k("w") == B("w")
+  let assert True = A != B("a")
+}
+"#,
+    );
+}
