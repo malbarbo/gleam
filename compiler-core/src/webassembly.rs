@@ -4969,7 +4969,9 @@ impl<'a> Generator<'a> {
                 let (rest_field, first_field) = self.list_cons_fields(type_);
                 let right = locals.for_pattern(pattern);
                 let _ = instructions.local_set(right);
-                for element in elements {
+                // The rest after the last element is needed only to check or bind it.
+                let rest = tail.as_ref().is_none_or(|tail| !tail.pattern.is_discard());
+                for (i, element) in elements.iter().enumerate() {
                     let _ = instructions
                         .local_get(right)
                         .ref_is_null()
@@ -4981,11 +4983,13 @@ impl<'a> Generator<'a> {
                             .struct_get(cons_index, first_field);
                         scope = self._pattern(locals, scope, instructions, element, fail_target);
                     }
-                    let _ = instructions
-                        .local_get(right)
-                        .ref_cast_non_null(HeapType::Concrete(cons_index))
-                        .struct_get(cons_index, rest_field)
-                        .local_set(right);
+                    if rest || i + 1 < elements.len() {
+                        let _ = instructions
+                            .local_get(right)
+                            .ref_cast_non_null(HeapType::Concrete(cons_index))
+                            .struct_get(cons_index, rest_field)
+                            .local_set(right);
+                    }
                 }
                 if let Some(tail) = tail {
                     if !tail.pattern.is_discard() {
