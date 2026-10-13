@@ -24,7 +24,10 @@ use walrus::ir::{
     BrIf, BrOnCast, BrOnCastFail, BrOnNonNull, BrOnNull, Instr, InstrLocId, InstrSeqId, Local,
     LocalSet, LocalTee, RefAsNonNull, RefNull,
 };
-use walrus::{FunctionId, LocalFunction, LocalId, ModuleLocals, RefType, ValType};
+use walrus::{
+    AbstractHeapType, CompositeType, FunctionId, HeapType, LocalFunction, LocalId, ModuleLocals,
+    ModuleTypes, RefType, StorageType, ValType,
+};
 
 pub(super) fn clear_dead_locals(module: &mut walrus::Module) {
     let mut widened = HashSet::new();
@@ -37,6 +40,7 @@ pub(super) fn clear_dead_locals(module: &mut walrus::Module) {
         .map(|(id, _)| id)
         .collect();
     let locals = &module.locals;
+    let types = &module.types;
     for (_, function) in module.funcs.iter_local_mut() {
         // Gleam functions have no loops, so a single backward walk is enough.
         if has_loop(function, function.entry_block()) {
@@ -44,6 +48,7 @@ pub(super) fn clear_dead_locals(module: &mut walrus::Module) {
         }
         let mut analysis = Analysis {
             locals,
+            types,
             args: function.args.iter().copied().collect(),
             leaves: &leaves,
             labels: HashMap::new(),
@@ -123,6 +128,36 @@ fn accepts_null(instrs: &[(Instr, InstrLocId)]) -> bool {
     }
 }
 
+/// Whether a value of the heap type is always small. Clearing a local with
+/// such a value frees only the value itself, as it references nothing.
+fn is_small(types: &ModuleTypes, heap_type: HeapType) -> bool {
+    let (id, subtypes) = match heap_type {
+        HeapType::Abstract(
+            AbstractHeapType::Func
+            | AbstractHeapType::NoFunc
+            | AbstractHeapType::I31
+            | AbstractHeapType::None
+            | AbstractHeapType::NoExtern
+            | AbstractHeapType::NoExn,
+        ) => return true,
+        HeapType::Concrete(id) => (id, !types.get(id).is_final),
+        HeapType::Exact(id) => (id, false),
+        _ => return false,
+    };
+    match types.get(id).kind() {
+        CompositeType::Function(_) => true,
+        CompositeType::Array(_) => false,
+        // A subtype can have more fields.
+        CompositeType::Struct(struct_) => {
+            !subtypes
+                && struct_
+                    .fields
+                    .iter()
+                    .all(|field| !matches!(field.element_type, StorageType::Val(ValType::Ref(_))))
+        }
+    }
+}
+
 fn is_leaf(function: &LocalFunction, seq: InstrSeqId) -> bool {
     function
         .block(seq)
@@ -178,6 +213,7 @@ impl State {
 
 struct Analysis<'a> {
     locals: &'a ModuleLocals,
+    types: &'a ModuleTypes,
     args: HashSet<LocalId>,
     leaves: &'a HashSet<FunctionId>,
     /// The state after a branch to each label.
@@ -192,7 +228,10 @@ impl Analysis<'_> {
         match self.locals.get(local).ty() {
             // The type of a parameter is in the signature, so only a nullable
             // one can be cleared.
-            ValType::Ref(ty) if ty.nullable || !self.args.contains(&local) => {
+            ValType::Ref(ty)
+                if (ty.nullable || !self.args.contains(&local))
+                    && !is_small(self.types, ty.heap_type) =>
+            {
                 if !ty.nullable {
                     let _ = self.widened.insert(local);
                 }
