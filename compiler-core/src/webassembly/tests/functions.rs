@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
 use super::{
-    compile_wasm, count_ref_calls, run_ok, run_wasm, wasm_function_names, wasm_type_names,
+    compile_wasm, count_ref_calls, run_ok, run_ok_i64, run_wasm, wasm_function_names,
+    wasm_type_names,
 };
 
 #[test]
@@ -1547,9 +1548,12 @@ pub fn main() {
     run_ok(src);
 }
 
+/// The type of `g` is generic, its variable is bound to the type of its uses.
+/// With `I64` the default type of an unbound variable, `Nil`, has a different
+/// representation than `Int`.
 #[test]
 fn local_function_definition_as_block_result() {
-    run_ok(
+    run_ok_i64(
         r#"
 fn make() -> fn(Int) -> Int {
     let f = fn(x: Int) -> Int { x + 1 }

@@ -494,7 +494,7 @@ impl<'a> Generator<'a> {
             Monomorphizer::new()
         };
         let variables = Variables::of(&function.arguments, &function.body);
-        mono.bind_local_functions(&variables);
+        mono.bind_lets(&variables);
         let local_functions = collect_local_functions(&variables, specialization, &mono);
         let mut function = mono.function(function);
         set_function_name(&mut function, name.clone());

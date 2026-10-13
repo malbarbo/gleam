@@ -100,21 +100,22 @@ impl Monomorphizer {
         self
     }
 
-    /// Binds the type variables of each local function of `variables` used
-    /// with a single type. A variable not typed where it is bound can be
+    /// Binds the type variables of each variable bound by `let` in
+    /// `variables` used with a single type, like a local function, or a block
+    /// that results in one. A variable not typed where it is bound can be
     /// unified with them, and then it gets that type.
-    pub(super) fn bind_local_functions(&mut self, variables: &Variables<'_>) {
+    pub(super) fn bind_lets(&mut self, variables: &Variables<'_>) {
         let mut uses: HashMap<SrcSpan, Vec<&Arc<Type>>> = HashMap::new();
         for reference in &variables.references {
             uses.entry(reference.definition)
                 .or_default()
                 .push(&reference.type_);
         }
-        for function in &variables.let_functions {
-            let Pattern::Variable { location, .. } = &function.assignment.pattern else {
+        for assignment in &variables.lets {
+            let Pattern::Variable { location, .. } = &assignment.pattern else {
                 continue;
             };
-            let type_ = function.assignment.value.type_();
+            let type_ = assignment.value.type_();
             if !self.has_free_variables(&type_) {
                 continue;
             }

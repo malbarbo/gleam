@@ -73,6 +73,8 @@ pub(super) struct Variables<'a> {
     pub references: Vec<Reference>,
     /// The functions bound by `let`, in source order.
     pub let_functions: Vec<LetFunction<'a>>,
+    /// The assignments of `let` to a variable, in source order.
+    pub lets: Vec<&'a TypedAssignment>,
     /// How many functions bound by `let` contain the visit.
     depth: usize,
 }
@@ -270,6 +272,9 @@ impl<'ast> Visit<'ast> for Variables<'ast> {
     }
 
     fn visit_typed_assignment(&mut self, assignment: &'ast TypedAssignment) {
+        if matches!(assignment.pattern, Pattern::Variable { .. }) {
+            self.lets.push(assignment);
+        }
         let is_function = matches!(assignment.value, TypedExpr::Fn { .. })
             && matches!(assignment.pattern, Pattern::Variable { .. });
         if is_function {

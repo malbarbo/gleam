@@ -3591,7 +3591,7 @@ impl<'a> Generator<'a> {
         let specialization = self.allocate_specialization();
         let mut mono = Monomorphizer::new();
         let variables = Variables::of(&function.arguments, &function.body);
-        mono.bind_local_functions(&variables);
+        mono.bind_lets(&variables);
         let local_functions = collect_local_functions(&variables, specialization, &mono);
         // Resolve Generic type vars (from inner lambdas) to Nil for valid WASM types.
         let function = mono.function(function);
@@ -3619,7 +3619,7 @@ impl<'a> Generator<'a> {
         let specialization = self.allocate_specialization();
         let mut mono = Monomorphizer::with_bound(&function_type(function), required_type);
         let variables = Variables::of(&function.arguments, &function.body);
-        mono.bind_local_functions(&variables);
+        mono.bind_lets(&variables);
         let local_functions = collect_local_functions(&variables, specialization, &mono);
         let mut function = mono.function(function);
         set_function_name(&mut function, name.clone());
@@ -3884,7 +3884,7 @@ impl<'a> Generator<'a> {
         let specialization = self.allocate_specialization();
         let mut mono = Monomorphizer::for_local_function(info, required_type);
         let variables = Variables::of(&info.arguments, &info.body);
-        mono.bind_local_functions(&variables);
+        mono.bind_lets(&variables);
         let nested = collect_local_functions(&variables, specialization, &mono);
         let (args, body) = mono.function_local(info);
         // A variable whose type is not known yet where it is bound can be
