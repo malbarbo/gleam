@@ -126,7 +126,8 @@ pub fn dynamic_other(
 
 // -- Queries ------------------------------------------------------------------
 
-/// The names used on Erlang.
+/// The names used on Erlang and JavaScript, and for a value of another type,
+/// the name used on JavaScript.
 pub fn dynamic_classify(data: Dynamic) -> String {
   case data {
     DInt(_) -> "Int"

@@ -6,10 +6,11 @@
 //! `@external(webassembly, "builtins", "_dynamic_cast") fn cast(a: t) -> Dynamic`.
 //!
 //! Ints, floats, strings, booleans, `Nil`, lists, tuples, arrays and dicts
-//! become their variant of `Dynamic`, with their items cast too. A `StringTree` is
-//! a string and a `UtfCodepoint` an int, as on JavaScript. Any other value is
-//! boxed in an `anyref`, with a table of functions generated for its type
-//! that cast it back to compare, hash and inspect it.
+//! become their variant of `Dynamic`, with their items cast too. A
+//! `StringTree` is a string, as on JavaScript, and a `UtfCodepoint` an int,
+//! as on Erlang. Any other value is boxed in an `anyref`, with a table of
+//! functions generated for its type that cast it back to compare, hash and
+//! inspect it.
 
 use super::*;
 
