@@ -2713,6 +2713,10 @@ impl<'a> Generator<'a> {
         type_: &Arc<Type>,
         custom_type: &TypedCustomType,
     ) -> TypeId {
+        let custom_type_key = qualified_type_name(type_);
+        if let Some(id) = self.custom_type_begin(&custom_type_key) {
+            return id;
+        }
         let layout = self.union_layout(type_);
         let first = custom_type
             .constructors
@@ -2723,10 +2727,6 @@ impl<'a> Generator<'a> {
             .map(|(_, _, a)| a)
             .unwrap_or_default();
         let types = Monomorphizer::variant_constructor(custom_type, first, &args);
-        let custom_type_key = qualified_type_name(type_);
-        if let Some(id) = self.custom_type_begin(&custom_type_key) {
-            return id;
-        }
 
         // Build shared fields (those with wasm index <= shared_count, i.e. in supertype)
         let field_indices = layout.fields(0);
