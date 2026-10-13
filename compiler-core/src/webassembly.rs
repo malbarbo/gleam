@@ -4608,7 +4608,11 @@ impl<'a> Generator<'a> {
                 // block alt — _pattern branches here on failure
                 let _ = case_b.block_(InstrSeqType::Simple(None), |alt_b| {
                     let alt_id = alt_b.id();
-                    for (pattern, subject_local) in patterns.iter().zip(subjects_locals) {
+                    for (pattern, subject_local) in patterns
+                        .iter()
+                        .zip(subjects_locals)
+                        .filter(|(pattern, _)| !pattern.is_discard())
+                    {
                         let _ = alt_b.local_get(*subject_local);
                         scope = self._pattern(locals, scope.clone(), alt_b, pattern, alt_id);
                     }
@@ -4970,11 +4974,13 @@ impl<'a> Generator<'a> {
                         .br_if(fail_target);
                 }
                 for element in elements {
-                    let _ = instructions
-                        .local_get(right)
-                        .ref_cast_non_null(HeapType::Concrete(cons_index))
-                        .struct_get(cons_index, first_field);
-                    scope = self._pattern(locals, scope, instructions, element, fail_target);
+                    if !element.is_discard() {
+                        let _ = instructions
+                            .local_get(right)
+                            .ref_cast_non_null(HeapType::Concrete(cons_index))
+                            .struct_get(cons_index, first_field);
+                        scope = self._pattern(locals, scope, instructions, element, fail_target);
+                    }
                     let _ = instructions
                         .local_get(right)
                         .ref_cast_non_null(HeapType::Concrete(cons_index))
@@ -4982,8 +4988,11 @@ impl<'a> Generator<'a> {
                         .local_set(right);
                 }
                 if let Some(tail) = tail {
-                    let _ = instructions.local_get(right);
-                    scope = self._pattern(locals, scope, instructions, &tail.pattern, fail_target);
+                    if !tail.pattern.is_discard() {
+                        let _ = instructions.local_get(right);
+                        scope =
+                            self._pattern(locals, scope, instructions, &tail.pattern, fail_target);
+                    }
                 } else {
                     let _ = instructions
                         .local_get(right)
@@ -5178,7 +5187,11 @@ impl<'a> Generator<'a> {
         elements: impl IntoIterator<Item = &'b Pattern<Arc<Type>>>,
         fail_target: InstrSeqId,
     ) {
-        for (index, element) in elements.into_iter().enumerate() {
+        for (index, element) in elements
+            .into_iter()
+            .enumerate()
+            .filter(|(_, element)| !element.is_discard())
+        {
             let _ = match fields {
                 Fields::Struct { value, type_index } => instructions
                     .local_get(value)
