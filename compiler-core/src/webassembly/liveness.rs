@@ -10,8 +10,9 @@
 //!
 //! The analysis walks each sequence of instructions backwards, keeping the
 //! locals that are read later (live). A `local.get` of a local that is not live
-//! is its last use, and is followed by a `local.set` of null. The local is
-//! cleared only when a call can happen after its last use, as the frame is
+//! is its last use, and is followed by a `local.set` of null. A local that is
+//! read only when a branch is taken is also cleared after the branch. A local
+//! is cleared only when a call can happen after its last use, as the frame is
 //! short lived otherwise.
 
 // The matches on instructions only care about a few of them.
@@ -181,6 +182,24 @@ impl Analysis<'_> {
         }
     }
 
+    /// The instructions that clear the `dead` locals, when a call can happen
+    /// in `state`.
+    fn clear(&mut self, state: &State, mut dead: Vec<LocalId>) -> Vec<(Instr, InstrLocId)> {
+        if !state.call {
+            return vec![];
+        }
+        // Sorted to generate the same code every time.
+        dead.sort();
+        let mut instrs = vec![];
+        for local in dead {
+            if let Some(ty) = self.clearable(local) {
+                instrs.push((Instr::RefNull(RefNull { ty }), InstrLocId::default()));
+                instrs.push((Instr::LocalSet(LocalSet { local }), InstrLocId::default()));
+            }
+        }
+        instrs
+    }
+
     fn label(&self, id: InstrSeqId) -> &State {
         self.labels
             .get(&id)
@@ -197,15 +216,8 @@ impl Analysis<'_> {
         for (instr, loc) in instrs.into_iter().rev() {
             match &instr {
                 Instr::LocalGet(get) => {
-                    if !state.live.contains(&get.local)
-                        && state.call
-                        && let Some(ty) = self.clearable(get.local)
-                    {
-                        result.push((
-                            Instr::LocalSet(LocalSet { local: get.local }),
-                            InstrLocId::default(),
-                        ));
-                        result.push((Instr::RefNull(RefNull { ty }), InstrLocId::default()));
+                    if !state.live.contains(&get.local) {
+                        result.extend(self.clear(&state, vec![get.local]).into_iter().rev());
                     }
                     let _ = state.live.insert(get.local);
                 }
@@ -227,6 +239,11 @@ impl Analysis<'_> {
                 | Instr::BrOnNonNull(BrOnNonNull { block })
                 | Instr::BrOnCast(BrOnCast { block, .. })
                 | Instr::BrOnCastFail(BrOnCastFail { block, .. }) => {
+                    // The locals read only after the branch is taken are dead
+                    // when it is not.
+                    let dead = self.label(*block).live.difference(&state.live);
+                    let dead = dead.copied().collect();
+                    result.extend(self.clear(&state, dead).into_iter().rev());
                     state = state.union(self.label(*block))
                 }
                 Instr::BrTable(br) => {
