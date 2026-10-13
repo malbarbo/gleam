@@ -79,6 +79,7 @@ pub(super) enum Eq {
     I64,
     F32,
     F64,
+    Ref,
     Call(FunctionId),
 }
 
@@ -155,11 +156,6 @@ impl<'a, 'b> Instructions<'a, 'b> {
 
     pub(super) fn ref_cast(&mut self, nullable: bool, ht: HeapType) -> &mut Self {
         let _ = self.seq.as_mut().ref_cast(nullable, ht);
-        self
-    }
-
-    pub(super) fn ref_test_non_null(&mut self, ht: HeapType) -> &mut Self {
-        let _ = self.seq.as_mut().ref_test(false, ht);
         self
     }
 
@@ -439,6 +435,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
             Eq::I32 => self.i32_eq(),
             Eq::Int => self.int_eq(),
             Eq::Float => self.float_eq(),
+            Eq::Ref => self.ref_eq(),
             Eq::I64 => {
                 let _ = self.seq.as_mut().binop(BinaryOp::I64Eq);
                 self
@@ -460,7 +457,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
     pub(super) fn eq_tail(&mut self, eq: Eq) -> &mut Self {
         match eq {
             Eq::Call(func) => self.return_call(func),
-            Eq::I32 | Eq::Int | Eq::Float | Eq::I64 | Eq::F32 | Eq::F64 => self.eq(eq),
+            Eq::I32 | Eq::Int | Eq::Float | Eq::I64 | Eq::F32 | Eq::F64 | Eq::Ref => self.eq(eq),
         }
     }
 

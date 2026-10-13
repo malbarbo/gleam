@@ -262,7 +262,7 @@ impl<'a> Generator<'a> {
                         return Some(*known);
                     }
                     let info = self.local_functions.get(&location)?.clone();
-                    return Some(self.local_function_identity(&info, &type_));
+                    return Some(self.local_function_identity(&info));
                 }
                 let id = self.static_callee(scope, expr)?;
                 Some(if expr.is_record_constructor_function() {
@@ -398,8 +398,7 @@ impl<'a> Generator<'a> {
             Statement::Expression(expr) => self.identity(scope, expr),
             Statement::Assignment(assignment) => {
                 if let Some(info) = self.local_function_definition(assignment).cloned() {
-                    let type_ = assignment.value.type_();
-                    return Some(self.local_function_identity(&info, &type_));
+                    return Some(self.local_function_identity(&info));
                 }
                 self.identity(scope, &assignment.value)
             }
@@ -407,14 +406,14 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// The identity of the local function `info` used with type `type_`.
-    fn local_function_identity(&mut self, info: &LocalFunction, type_: &Arc<Type>) -> Known {
-        let id = self.function_local_generic(info, type_).func_id();
+    /// The identity of the local function `info`.
+    fn local_function_identity(&mut self, info: &LocalFunction) -> Known {
+        let id = self.local_function_code(info);
         let captures = self.local_function_captures(info);
         let known = if captures.is_empty() {
             Known::Function(id)
         } else {
-            Known::Code(self.closure_adapter(id, type_, &captures))
+            Known::Code(self.closure_adapter(id, &info.type_(), &captures))
         };
         let _ = self.specializations.created.insert(known.id());
         known
@@ -447,7 +446,7 @@ impl<'a> Generator<'a> {
             return CallTarget::Direct(id);
         }
         if let Some(info) = self.local_function_of(fun).cloned() {
-            let id = self.function_local_generic(&info, &fun.type_()).func_id();
+            let id = self.local_function_code(&info);
             return CallTarget::Local(info, id);
         }
         if let Some(id) = self.static_callee(scope, fun) {

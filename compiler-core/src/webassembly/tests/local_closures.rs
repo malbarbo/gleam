@@ -887,8 +887,8 @@ pub fn main() {
     });
 }
 
-// The definition allocates the identity, and each use as a value its
-// closure, all in the enclosing function. The adapter reads the environment.
+// The definition allocates the closure, used by every use as a value, in the
+// enclosing function. The adapter reads the environment.
 #[test]
 fn values_allocate_in_the_enclosing_function() {
     let wasm = super::compile_wasm(
@@ -914,7 +914,7 @@ pub fn main() {
             casts.push(function.to_string());
         }
     });
-    assert_eq!(allocations, ["main", "main", "main"]);
+    assert_eq!(allocations, ["main"]);
     assert!(
         matches!(casts.as_slice(), [cast] if cast.ends_with("@closure")),
         "{casts:?}"

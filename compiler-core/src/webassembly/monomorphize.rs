@@ -106,7 +106,9 @@ impl Monomorphizer {
     /// Binds the type variables of each variable bound by `let` in
     /// `variables` used with a single type, like a local function, or a block
     /// that results in one. A variable not typed where it is bound can be
-    /// unified with them, and then it gets that type.
+    /// unified with them, and then it gets that type. The type of a use can
+    /// depend on the type variables of another variable, like a call in the
+    /// body of a local function, so the variables are bound until none is.
     pub(super) fn bind_lets(&mut self, variables: &Variables<'_>) {
         let mut uses: HashMap<SrcSpan, Vec<&Arc<Type>>> = HashMap::new();
         for reference in &variables.references {
@@ -114,22 +116,36 @@ impl Monomorphizer {
                 .or_default()
                 .push(&reference.type_);
         }
-        for assignment in &variables.lets {
-            let Pattern::Variable { location, .. } = &assignment.pattern else {
-                continue;
-            };
-            let type_ = assignment.value.type_();
-            if !self.has_free_variables(&type_) {
-                continue;
-            }
-            let uses = uses.remove(location).unwrap_or_default();
-            if let [first, rest @ ..] = uses.as_slice()
-                && !self.has_free_variables(first)
-            {
-                let first = self.type_(first);
-                if rest.iter().all(|other| self.type_(other).same_as(&first)) {
-                    let _ = self.bound(&type_, &first);
+        let mut lets: Vec<_> = variables
+            .lets
+            .iter()
+            .filter_map(|assignment| {
+                let Pattern::Variable { location, .. } = &assignment.pattern else {
+                    return None;
+                };
+                Some((*location, assignment.value.type_()))
+            })
+            .collect();
+        loop {
+            let count = lets.len();
+            lets.retain(|(location, type_)| {
+                if !self.has_free_variables(type_) {
+                    return false;
                 }
+                let uses = uses.get(location).map_or(&[][..], Vec::as_slice);
+                if let [first, rest @ ..] = uses
+                    && !self.has_free_variables(first)
+                {
+                    let first = self.type_(first);
+                    if rest.iter().all(|other| self.type_(other).same_as(&first)) {
+                        let _ = self.bound(type_, &first);
+                        return false;
+                    }
+                }
+                true
+            });
+            if lets.len() == count {
+                break;
             }
         }
     }
@@ -179,12 +195,6 @@ impl Monomorphizer {
                 .iter()
                 .any(|element| self.has_free_variables(element)),
         }
-    }
-
-    pub(super) fn for_local_function(from: &LocalFunction, to: &Arc<Type>) -> Monomorphizer {
-        let mut mono = from.enclosing.clone();
-        let _ = mono.bound(&from.type_, to);
-        mono
     }
 
     pub(super) fn function_local(

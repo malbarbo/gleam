@@ -575,12 +575,9 @@ impl<'a> Generator<'a> {
         } else if let Some((module, hooks)) = self.type_hooks(type_) {
             let fn_type = type_::fn_(vec![type_.clone(), type_.clone()], type_::bool());
             return Eq::Call(self.function_hook(&module, hooks.equal, fn_type));
-        } else if let Some((params, return_)) = type_.fn_types() {
-            let closure = self.closure_type(params, return_);
-            let builtin =
-                BuiltinFunction::Equal(self.val_type(type_), self.type_pretty_name(type_));
-            let index = self.get_function_builtin(builtin, |s| s.code_closure_eq(&closure));
-            return Eq::Call(index);
+        } else if type_.fn_types().is_some() {
+            // Functions are equal when they are the same closure
+            return Eq::Ref;
         } else if type_.is_int() {
             return Eq::Int;
         } else if type_.is_float() {
@@ -813,49 +810,6 @@ impl<'a> Generator<'a> {
                     .br(loop_id);
             })
             .bool_const(true)
-            .end();
-        function.finish(self)
-    }
-
-    /// Functions are equal when they are the same closure, or closures of the
-    /// same evaluation of a local function definition, which have the same
-    /// identity (see `closure_identity_type`).
-    fn code_closure_eq(&mut self, closure: &ClosureType) -> FunctionId {
-        let identity = self.closure_identity_type(closure);
-        let closure_vt = self.val_type_ref(closure.type_index);
-        let a = self.wasm_local(closure_vt);
-        let b = self.wasm_local(closure_vt);
-        let mut function = Function::new(self, "_equal_closure", &[a, b], &[BOOL_VALTYPE]);
-        let mut instructions = function.extend_instructions(self);
-        let identity_heap = HeapType::Concrete(identity);
-        #[rustfmt::skip]
-        let _ = instructions
-            .local_get(a)
-            .local_get(b)
-            .ref_eq()
-            .if_(InstrSeqType::Simple(None), |body| {
-                let _ = body
-                    .bool_const(true)
-                    .return_();
-            })
-            .local_get(a)
-            .ref_test_non_null(identity_heap)
-            .local_get(b)
-            .ref_test_non_null(identity_heap)
-            .i32_and()
-            .bool_not()
-            .if_(InstrSeqType::Simple(None), |body| {
-                let _ = body
-                    .bool_const(false)
-                    .return_();
-            })
-            .local_get(a)
-            .ref_cast_non_null(identity_heap)
-            .struct_get(identity, 1)
-            .local_get(b)
-            .ref_cast_non_null(identity_heap)
-            .struct_get(identity, 1)
-            .ref_eq()
             .end();
         function.finish(self)
     }
