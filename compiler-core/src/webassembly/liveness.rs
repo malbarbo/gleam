@@ -11,12 +11,13 @@
 //! The analysis walks each sequence of instructions backwards, keeping the
 //! locals that are read later (live). A `local.get` of a local that is not live
 //! is its last use, and is followed by a `local.set` of null. A local that is
-//! read only when a branch is taken is also cleared after the branch. A local
-//! is cleared only when a call that can allocate happens after its last use,
-//! as the frame is short lived otherwise, and a collection starts only on an
-//! allocation. A local whose value is referenced by a param (like the captures
-//! of a closure), moved to another local, or replaced before such a call is not
-//! cleared, as that frees nothing.
+//! read only when a branch is taken, or only in one arm of an `if`, is also
+//! cleared at the start of the other path. A local is cleared only when a call
+//! that can allocate happens after its last use, as the frame is short lived
+//! otherwise, and a collection starts only on an allocation. A local whose
+//! value is referenced by a param (like the captures of a closure), moved to
+//! another local, or replaced before such a call is not cleared, as that frees
+//! nothing.
 
 // The matches on instructions only care about a few of them.
 #![allow(clippy::wildcard_enum_match_arm)]
@@ -480,6 +481,15 @@ impl Analysis<'_> {
                 Instr::IfElse(if_else) => {
                     let consequent = self.seq(function, if_else.consequent, state.clone());
                     let alternative = self.seq(function, if_else.alternative, state);
+                    // The locals read only in one arm are dead in the other.
+                    for (seq, arm, other) in [
+                        (if_else.consequent, &consequent, &alternative),
+                        (if_else.alternative, &alternative, &consequent),
+                    ] {
+                        let dead = other.live.difference(&arm.live).copied().collect();
+                        let clear = self.clear(arm, dead);
+                        let _ = function.block_mut(seq).instrs.splice(0..0, clear);
+                    }
                     state = consequent.union(&alternative);
                 }
                 _ => {}
