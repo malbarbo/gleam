@@ -271,6 +271,9 @@ impl<'a> Generator<'a> {
                 let mut function = Function::new(self, name, &[array, index], &[element_vt]);
                 let _ = function
                     .extend_instructions(self)
+                    .array_out_of_range(array, index, false, |then_s| {
+                        let _ = then_s.unreachable();
+                    })
                     .local_get(array)
                     .local_get(index)
                     .int_to_i32()
@@ -654,8 +657,8 @@ impl<'a> Generator<'a> {
 }
 
 impl<'a, 'b> Instructions<'a, 'b> {
-    /// Runs `then`, which returns, unless the `Int` in `index` is an index
-    /// of `array`, or its size when `may_be_size`.
+    /// Runs `then`, which leaves the function, unless the `Int` in `index`
+    /// is an index of `array`, or its size when `may_be_size`.
     fn array_out_of_range(
         &mut self,
         array: LocalId,

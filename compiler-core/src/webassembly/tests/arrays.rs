@@ -246,23 +246,36 @@ pub fn main() {
 }
 
 /// Reading an index out of range is a bug of the runtime, and traps.
-#[test]
-fn array_get_out_of_range_traps() {
+#[track_caller]
+fn assert_get_traps(index: &str, int: WasmInt) {
     let result = run_wasm_in(
         RUNTIME_PACKAGE,
-        r#"
+        &format!(
+            r#"
 import array
 
-pub fn main() {
-  array.get(array.from_list([1, 2]), 2)
-}
-"#,
+pub fn main() {{
+  array.get(array.from_list([1, 2]), {index})
+}}
+"#
+        ),
         vec![(RUNTIME_PACKAGE, "array", ARRAY)],
-        WasmInt::I32,
+        int,
         WasmFloat::F64,
     );
     assert!(!result.status.success(), "{}", result.stderr);
-    assert!(result.stderr.contains("out of bounds"), "{}", result.stderr);
+    assert!(result.stderr.contains("unreachable"), "{}", result.stderr);
+}
+
+#[test]
+fn array_get_out_of_range_traps() {
+    assert_get_traps("2", WasmInt::I32);
+    assert_get_traps("-1", WasmInt::I32);
+}
+
+#[test]
+fn array_get_wider_than_32_bits_traps() {
+    assert_get_traps("4_294_967_296", WasmInt::I64);
 }
 
 /// Outside the runtime, `Array` is not an external type, not even in the
