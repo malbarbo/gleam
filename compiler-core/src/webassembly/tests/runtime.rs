@@ -237,6 +237,10 @@ pub fn main() {
   let assert Ok(7) = dynamic.int(v)
   let assert Ok(Error(Nil)) = dynamic.index(dynamic.cast(d), dynamic.cast("x"))
   let assert Error("Indexable") = dynamic.index(dynamic.cast(1), dynamic.cast(0))
+  let assert Ok(Ok(v)) = dynamic.index(dynamic.cast([5, 6]), dynamic.cast(1))
+  let assert Ok(6) = dynamic.int(v)
+  let assert Error("Indexable") =
+    dynamic.index(dynamic.cast([5, 6]), dynamic.cast(2))
 }
 "#,
     );

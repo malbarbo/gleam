@@ -196,7 +196,11 @@ pub fn dynamic_index(
 ) -> Result(Result(Dynamic, Nil), String) {
   case data, key {
     DDict(dict), _ -> Ok(dict.dict_get(dict, key))
-    DList(items), DInt(index) if index >= 0 && index < 8 -> Ok(at(items, index))
+    DList(items), DInt(index) if index >= 0 && index < 8 ->
+      case at(items, index) {
+        Ok(item) -> Ok(Ok(item))
+        Error(Nil) -> Error("Indexable")
+      }
     DArray(items), DInt(index) ->
       case index >= 0 && index < array_size(items) {
         True -> Ok(Ok(array_get(items, index)))
