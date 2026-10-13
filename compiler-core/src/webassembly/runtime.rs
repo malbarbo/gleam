@@ -45,6 +45,7 @@ pub(super) const RUNTIME_PACKAGE: &str = "gleam_wasm_runtime";
 /// The modules of the runtime, in an order where a module comes after the
 /// modules it imports.
 const SOURCES: &[(&str, &str)] = &[
+    ("builtins/base", include_str!("runtime/base.gleam")),
     ("builtins/array", include_str!("runtime/array.gleam")),
     ("builtins/dict", include_str!("runtime/dict.gleam")),
     (

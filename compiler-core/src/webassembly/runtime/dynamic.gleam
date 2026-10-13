@@ -20,6 +20,9 @@
 import builtins/array.{
   type Array, array_from_list, array_get, array_size, array_to_list,
 }
+import builtins/base.{
+  bitwise_exclusive_or, hash, inspect, low_32_bits, reverse_and_prepend,
+}
 import builtins/dict.{type Dict}
 
 pub type Dynamic {
@@ -257,7 +260,7 @@ pub fn dynamic_hash(value: Dynamic) -> Int {
 
 /// Combines two hashes, keeping the result in 32 bits.
 fn mix(a: Int, b: Int) -> Int {
-  bitwise_and(bitwise_exclusive_or(a * 31, b), bitwise_shift_left(1, 32) - 1)
+  low_32_bits(bitwise_exclusive_or(a * 31, b))
 }
 
 /// The text of the value inside, as `string.inspect` shows it.
@@ -279,45 +282,7 @@ pub fn dynamic_inspect(value: Dynamic) -> String {
 
 fn map(list: List(a), fun: fn(a) -> b, acc: List(b)) -> List(b) {
   case list {
-    [] -> reverse(acc, [])
+    [] -> reverse_and_prepend(acc, [])
     [item, ..rest] -> map(rest, fun, [fun(item), ..acc])
   }
 }
-
-fn reverse(list: List(a), acc: List(a)) -> List(a) {
-  case list {
-    [] -> acc
-    [item, ..rest] -> reverse(rest, [item, ..acc])
-  }
-}
-
-// -- Builtins -----------------------------------------------------------------
-
-@external(erlang, "erlang", "phash2")
-@external(webassembly, "builtins", "_hash")
-fn hash(value: a) -> Int
-
-@external(webassembly, "builtins", "_inspect")
-fn inspect(value: a) -> String {
-  repr_to_string(do_inspect(value))
-}
-
-type Repr
-
-@external(erlang, "gleam_stdlib", "inspect")
-fn do_inspect(value: a) -> Repr
-
-@external(erlang, "unicode", "characters_to_binary")
-fn repr_to_string(repr: Repr) -> String
-
-@external(erlang, "erlang", "band")
-@external(webassembly, "builtins", "_int_bitwise_and")
-fn bitwise_and(a: Int, b: Int) -> Int
-
-@external(erlang, "erlang", "bxor")
-@external(webassembly, "builtins", "_int_bitwise_exclusive_or")
-fn bitwise_exclusive_or(a: Int, b: Int) -> Int
-
-@external(erlang, "erlang", "bsl")
-@external(webassembly, "builtins", "_int_bitwise_shift_left")
-fn bitwise_shift_left(a: Int, b: Int) -> Int

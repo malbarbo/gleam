@@ -16,11 +16,13 @@
 //// Equality, hash and inspect are those of the content: `append("a", "b")`
 //// and `"ab"` are the same text, as on JavaScript.
 ////
-//// It is plain Gleam that imports nothing, so it also compiles (and can be
-//// tested) on Erlang.
+//// It is plain Gleam that imports only `builtins/base`, so it also compiles
+//// (and can be tested) on Erlang.
 
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
+
+import builtins/base.{concat_strings, hash, inspect, reverse_and_prepend}
 
 pub opaque type StringTree {
   Leaf(size: Int, string: String)
@@ -152,30 +154,9 @@ pub fn string_tree_inspect(rope: StringTree) -> String {
 
 // -- Builtins -----------------------------------------------------------------
 
-@external(erlang, "erlang", "phash2")
-@external(webassembly, "builtins", "_hash")
-fn hash(value: a) -> Int
-
-@external(webassembly, "builtins", "_inspect")
-fn inspect(value: a) -> String {
-  repr_to_string(do_inspect(value))
-}
-
-type Repr
-
-@external(erlang, "gleam_stdlib", "inspect")
-fn do_inspect(value: a) -> Repr
-
-@external(erlang, "unicode", "characters_to_binary")
-fn repr_to_string(repr: Repr) -> String
-
 @external(erlang, "erlang", "byte_size")
 @external(webassembly, "builtins", "_string_byte_size")
 fn string_byte_size(string: String) -> Int
-
-@external(erlang, "erlang", "list_to_binary")
-@external(webassembly, "builtins", "_string_concat_list")
-fn concat_strings(strings: List(String)) -> String
 
 @external(erlang, "string", "lowercase")
 @external(webassembly, "builtins", "string_lowercase")
@@ -239,10 +220,3 @@ fn split_all(
   pattern: String,
   direction: Direction,
 ) -> List(String)
-
-fn reverse_and_prepend(list: List(a), to suffix: List(a)) -> List(a) {
-  case list {
-    [] -> suffix
-    [first, ..rest] -> reverse_and_prepend(rest, [first, ..suffix])
-  }
-}
