@@ -15,7 +15,8 @@
 //! is cleared only when a call that can allocate happens after its last use,
 //! as the frame is short lived otherwise, and a collection starts only on an
 //! allocation. A local whose value is referenced by a param (like the captures
-//! of a closure) is not cleared, as that frees nothing.
+//! of a closure), moved to another local, or replaced before such a call is not
+//! cleared, as that frees nothing.
 
 // The matches on instructions only care about a few of them.
 #![allow(clippy::wildcard_enum_match_arm)]
@@ -342,13 +343,22 @@ struct State {
     live: HashSet<LocalId>,
     /// Whether a call can happen before the function returns.
     call: bool,
+    /// The locals that are set before a call can happen, which replaces their
+    /// values in time.
+    set: HashSet<LocalId>,
 }
 
 impl State {
     fn union(mut self, other: &State) -> State {
         self.live.extend(other.live.iter().copied());
         self.call |= other.call;
+        self.set.retain(|local| other.set.contains(local));
         self
+    }
+
+    fn calls(&mut self) {
+        self.call = true;
+        self.set.clear();
     }
 }
 
@@ -397,7 +407,7 @@ impl Analysis<'_> {
         // Sorted to generate the same code every time.
         dead.sort();
         let mut instrs = vec![];
-        for local in dead {
+        for local in dead.into_iter().filter(|local| !state.set.contains(local)) {
             if let Some(ty) = self.clearable(local) {
                 instrs.push((Instr::RefNull(RefNull { ty }), InstrLocId::default()));
                 instrs.push((Instr::LocalSet(LocalSet { local }), InstrLocId::default()));
@@ -422,16 +432,22 @@ impl Analysis<'_> {
         for (instr, loc) in instrs.into_iter().rev() {
             match &instr {
                 Instr::LocalGet(get) => {
-                    if !state.live.contains(&get.local) {
+                    // A value moved to another local is cleared with it.
+                    let moved = matches!(
+                        result.last(),
+                        Some((Instr::LocalSet(_) | Instr::LocalTee(_), _))
+                    );
+                    if !state.live.contains(&get.local) && !moved {
                         result.extend(self.clear(&state, vec![get.local]).into_iter().rev());
                     }
                     let _ = state.live.insert(get.local);
                 }
                 Instr::LocalSet(LocalSet { local }) | Instr::LocalTee(LocalTee { local }) => {
                     let _ = state.live.remove(local);
+                    let _ = state.set.insert(*local);
                 }
-                Instr::Call(call) => state.call |= !self.leaves.contains(&call.func),
-                Instr::CallRef(_) | Instr::CallIndirect(_) => state.call = true,
+                Instr::Call(call) if !self.leaves.contains(&call.func) => state.calls(),
+                Instr::CallRef(_) | Instr::CallIndirect(_) => state.calls(),
                 Instr::Return(_)
                 | Instr::ReturnCall(_)
                 | Instr::ReturnCallRef(_)
