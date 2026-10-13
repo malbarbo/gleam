@@ -172,3 +172,27 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn list_pattern_longer_than_the_list() {
+    run_ok(
+        r#"
+fn f(list: List(Int)) -> Int {
+    case list {
+        [a, b, c] -> a + b + c
+        [_, _] -> 2
+        [_, ..] -> 1
+        _ -> 0
+    }
+}
+
+pub fn main() {
+    let assert 0 = f([])
+    let assert 1 = f([1])
+    let assert 2 = f([1, 2])
+    let assert 6 = f([1, 2, 3])
+    let assert 1 = f([1, 2, 3, 4])
+}
+"#,
+    );
+}

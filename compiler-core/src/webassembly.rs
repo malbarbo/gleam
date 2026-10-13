@@ -4967,13 +4967,11 @@ impl<'a> Generator<'a> {
                 let (rest_field, first_field) = self.list_cons_fields(type_);
                 let right = locals.for_pattern(pattern);
                 let _ = instructions.local_set(right);
-                if !elements.is_empty() {
+                for element in elements {
                     let _ = instructions
                         .local_get(right)
                         .ref_is_null()
                         .br_if(fail_target);
-                }
-                for element in elements {
                     if !element.is_discard() {
                         let _ = instructions
                             .local_get(right)
