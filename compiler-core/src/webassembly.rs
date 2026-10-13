@@ -9,6 +9,7 @@ mod dynamic;
 mod glue;
 mod hash;
 mod instructions;
+mod liveness;
 mod monomorphize;
 mod runtime;
 mod scope;
@@ -965,6 +966,7 @@ impl<'a> Generator<'a> {
             &self.builtin_exports,
             &self.builtin_names,
         );
+        liveness::clear_dead_locals(&mut self.wasm_module);
         Ok(self.wasm_module.emit_wasm())
     }
 
