@@ -1198,3 +1198,33 @@ fn string_inspect(value: a) -> String
 "#,
     );
 }
+
+/// The shared fields of a union come first in its structs, so the fields of a
+/// constant record go in a different order than its arguments.
+#[test]
+fn union_constant_with_shared_field_after_specific_field() {
+    run_ok(
+        r#"
+pub type T {
+    A(Int, name: String)
+    B(Float, name: String)
+}
+
+const a = A(1, "x")
+
+const b = B(2.0, "y")
+
+pub fn main() {
+    let assert A(1, "x") = a
+    let assert B(2.0, "y") = b
+    let assert "x" = a.name
+    let assert "y" = b.name
+    let assert True = a == A(1, "x")
+    let assert "A(1, \"x\")" = string_inspect(a)
+}
+
+@external(webassembly, "builtins", "_inspect")
+fn string_inspect(value: a) -> String
+"#,
+    );
+}

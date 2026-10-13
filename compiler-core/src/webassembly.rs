@@ -3043,17 +3043,21 @@ impl<'a> Generator<'a> {
                             export,
                             true,
                         );
-                        let tagged = self.union_layout(type_).tagged;
+                        let layout = self.union_layout(type_);
+                        // The elements go in the order of the struct fields,
+                        // where the shared fields come first.
+                        let elements = arguments
+                            .iter()
+                            .flatten()
+                            .zip(layout.fields(index as usize))
+                            .sorted_by_key(|(_, field)| **field)
+                            .map(|(e, _)| e.value.clone())
+                            .collect();
                         self.consts.push(WasmConst::Struct {
                             global_index: id.global_id(),
                             type_index,
-                            tag: tagged.then_some(index.into()),
-                            elements: arguments
-                                .iter()
-                                .flatten()
-                                .map(|e| &e.value)
-                                .cloned()
-                                .collect(),
+                            tag: layout.tagged.then_some(index.into()),
+                            elements,
                         });
                         id
                     }
