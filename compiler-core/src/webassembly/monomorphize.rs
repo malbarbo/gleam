@@ -155,17 +155,26 @@ impl Monomorphizer {
     /// variable whose type has a type variable of an annotation, like a local
     /// function `fn(x: a) -> a { x }`, is instantiated at each reference. The
     /// code of a value is generated once, so it can be used with only one
-    /// type. A reference whose type depends on the type variables of a local
-    /// function is not considered.
+    /// type. A reference whose type depends on the type variables of a
+    /// variable not bound by `bind_lets`, like a call in the body of a local
+    /// function, is not considered.
     pub(super) fn conflicting_reference<'v>(
         &self,
         variables: &'v Variables<'_>,
     ) -> Option<&'v Reference> {
+        let mut unbound = HashSet::new();
+        for assignment in &variables.lets {
+            self.free_variables(&assignment.value.type_(), &mut unbound);
+        }
         let mut types: HashMap<SrcSpan, Arc<Type>> = HashMap::new();
         variables
             .references
             .iter()
-            .filter(|reference| !self.has_free_variables(&reference.type_))
+            .filter(|reference| {
+                let mut free = HashSet::new();
+                self.free_variables(&reference.type_, &mut free);
+                free.is_disjoint(&unbound)
+            })
             .find(|reference| {
                 let type_ = self.type_(&reference.type_);
                 !types
@@ -175,26 +184,42 @@ impl Monomorphizer {
             })
     }
 
-    /// Whether `type_` has type variables not bound by this monomorphizer.
-    pub(super) fn has_free_variables(&self, type_: &Arc<Type>) -> bool {
+    /// Adds to `ids` the type variables of `type_` not bound by this
+    /// monomorphizer.
+    fn free_variables(&self, type_: &Arc<Type>, ids: &mut HashSet<u64>) {
         match type_.as_ref() {
             Type::Var { type_ } => match &*type_.borrow() {
-                TypeVar::Unbound { id } | TypeVar::Generic { id } => !self.map.contains_key(id),
-                TypeVar::Link { type_ } => self.has_free_variables(type_),
+                TypeVar::Unbound { id } | TypeVar::Generic { id } => {
+                    if !self.map.contains_key(id) {
+                        let _ = ids.insert(*id);
+                    }
+                }
+                TypeVar::Link { type_ } => self.free_variables(type_, ids),
             },
-            Type::Named { arguments, .. } => arguments
-                .iter()
-                .any(|argument| self.has_free_variables(argument)),
-            Type::Fn { arguments, return_ } => {
-                self.has_free_variables(return_)
-                    || arguments
-                        .iter()
-                        .any(|argument| self.has_free_variables(argument))
+            Type::Named { arguments, .. } => {
+                for argument in arguments {
+                    self.free_variables(argument, ids);
+                }
             }
-            Type::Tuple { elements } => elements
-                .iter()
-                .any(|element| self.has_free_variables(element)),
+            Type::Fn { arguments, return_ } => {
+                for argument in arguments {
+                    self.free_variables(argument, ids);
+                }
+                self.free_variables(return_, ids);
+            }
+            Type::Tuple { elements } => {
+                for element in elements {
+                    self.free_variables(element, ids);
+                }
+            }
         }
+    }
+
+    /// Whether `type_` has type variables not bound by this monomorphizer.
+    pub(super) fn has_free_variables(&self, type_: &Arc<Type>) -> bool {
+        let mut ids = HashSet::new();
+        self.free_variables(type_, &mut ids);
+        !ids.is_empty()
     }
 
     pub(super) fn function_local(

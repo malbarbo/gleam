@@ -171,6 +171,20 @@ pub fn main() {
 }
 
 #[test]
+fn local_function_used_with_an_unresolved_type_and_another_type() {
+    assert_used_with_different_types(
+        r#"
+pub fn main() {
+  let id = fn(x: a) { x }
+  let _ = id([])
+  assert id(1) == 1
+}
+"#,
+        "id",
+    );
+}
+
+#[test]
 fn captured_functions_unified_with_type_variables_of_inline_functions() {
     run(r#"
 pub fn main() {
