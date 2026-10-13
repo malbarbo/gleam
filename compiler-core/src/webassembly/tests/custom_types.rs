@@ -1103,3 +1103,98 @@ pub fn value(t: x.T) { let x.T(v) = t v }",
         result.stderr
     );
 }
+
+/// The number of fields of the struct type named `name` in `wasm`.
+fn struct_field_count(wasm: &[u8], name: &str) -> usize {
+    let module = walrus::Module::from_buffer(wasm).expect("valid wasm");
+    let type_ = module
+        .types
+        .iter()
+        .find(|type_| type_.name.as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("type {name}"));
+    let walrus::CompositeType::Struct(struct_) = type_.kind() else {
+        panic!("{name} to be a struct")
+    };
+    struct_.fields.len()
+}
+
+/// A union whose variants are a null one and one other has no tag, since a
+/// value that is not null can only be of the other variant.
+#[test]
+fn union_with_null_and_one_other_variant_has_no_tag() {
+    let wasm = compile_wasm(
+        r#"
+pub type Option(a) {
+    None
+    Some(a)
+}
+
+pub type Shape {
+    Empty
+    Circle(Float)
+    Rect(Int, Int)
+}
+
+pub fn main() {
+    let _ = [Some(1)]
+    let _ = Circle(1.0)
+}
+"#,
+        vec![],
+    );
+    assert_eq!(struct_field_count(&wasm, "Option(Int).Some"), 1);
+    assert_eq!(struct_field_count(&wasm, "List(Option(Int)).Cons"), 2);
+    assert_eq!(struct_field_count(&wasm, "Shape.Circle"), 2);
+}
+
+#[test]
+fn union_with_null_and_one_other_variant() {
+    run_ok(
+        r#"
+pub type Option(a) {
+    None
+    Some(a)
+}
+
+pub type Box {
+    Nothing
+    Full(value: Int, name: String)
+}
+
+const some = Some(1)
+
+const full_constant = Full(2, "b")
+
+@external(webassembly, "builtins", "_hash")
+fn hash(value: a) -> Int
+
+fn get(option: Option(a), default: a) -> a {
+    case option {
+        Some(x) -> x
+        None -> default
+    }
+}
+
+pub fn main() {
+    let assert 1 = get(some, 0)
+    let assert 0 = get(None, 0)
+    let assert True = Some([1, 2]) == Some([1, 2])
+    let assert False = Some(1) == Some(2)
+    let assert False = Some(1) == None
+    let assert False = None == Some(1)
+    let assert True = hash(Some("a")) == hash(Some("a"))
+    let assert False = hash(Some(1)) == hash(None)
+    let assert False = hash(Some(1)) == hash(Some(2))
+    let assert "Some(1)" = string_inspect(Some(1))
+    let assert "Full(2, \"b\")" = string_inspect(full_constant)
+    let full = Full(2, "b")
+    let assert 2 = full.value
+    let assert Full(3, "b") = Full(..full, value: 3)
+    let assert [Some(1), None] = [some, None]
+}
+
+@external(webassembly, "builtins", "_inspect")
+fn string_inspect(value: a) -> String
+"#,
+    );
+}

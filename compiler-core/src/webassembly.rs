@@ -594,9 +594,14 @@ fn is_identity_type(type_: &Type) -> bool {
 }
 
 /// Maps Gleam field positions to wasm struct field indices for a union type.
-/// Shared fields come first (after the tag), then variant-specific fields.
+/// Shared fields come first (after the tag, when there is one), then
+/// variant-specific fields.
 #[derive(Debug, Clone)]
 struct UnionFieldLayout {
+    /// Whether the structs start with a field with the index of the variant.
+    /// A union whose variants are a null one and one other has no tag, since
+    /// a value that is not null can only be of the other variant.
+    tagged: bool,
     shared_count: usize,
     field_indices: Vec<Vec<u32>>,
 }
@@ -648,15 +653,18 @@ impl UnionFieldLayout {
         }
 
         let shared_count = shared_positions.len();
+        let tagged =
+            !(Generator::null_variant_tag(custom_type).is_some() && constructors.len() == 2);
+        let first_field = u32::from(tagged);
 
         let field_indices = constructors
             .iter()
             .map(|c| {
                 let mut indices = vec![0u32; c.arguments.len()];
-                let mut next_specific = shared_count as u32 + 1; // after tag + shared
+                let mut next_specific = first_field + shared_count as u32;
                 for (pos, slot) in indices.iter_mut().enumerate() {
                     if let Some(shared_idx) = shared_positions.iter().position(|&p| p == pos) {
-                        *slot = shared_idx as u32 + 1; // after tag
+                        *slot = first_field + shared_idx as u32;
                     } else {
                         *slot = next_specific;
                         next_specific += 1;
@@ -667,8 +675,21 @@ impl UnionFieldLayout {
             .collect();
 
         UnionFieldLayout {
+            tagged,
             shared_count,
             field_indices,
+        }
+    }
+
+    /// The tag field, followed by `fields`, the fields of a struct of the
+    /// union.
+    fn with_tag(&self, fields: Vec<(EcoString, ValType)>) -> Vec<(EcoString, ValType)> {
+        if self.tagged {
+            iter::once(("tag".into(), ValType::I32))
+                .chain(fields)
+                .collect()
+        } else {
+            fields
         }
     }
 
@@ -1872,6 +1893,16 @@ impl<'a> Generator<'a> {
         (custom_type, cons, item_type, args)
     }
 
+    /// The indices of the fields `rest` and `first` in the struct of the
+    /// `Cons` of `list_type`.
+    fn list_cons_fields(&self, list_type: &Arc<Type>) -> (u32, u32) {
+        let layout = self.union_layout(list_type);
+        let [rest, first] = layout.fields(1) else {
+            panic!("Cons to have two fields")
+        };
+        (*rest, *first)
+    }
+
     fn variant_expect(&self, module: EcoString, name: EcoString) -> Variant {
         self.variants
             .get(&(module, name))
@@ -2661,7 +2692,8 @@ impl<'a> Generator<'a> {
         let field_indices = layout.fields(0);
         let mut shared_fields = Vec::with_capacity(layout.shared_count);
         for (pos, (arg, type_)) in first.arguments.iter().zip(types.iter()).enumerate() {
-            if field_indices.get(pos).copied().expect("field index") > layout.shared_count as u32 {
+            let field_index = field_indices.get(pos).copied().expect("field index");
+            if field_index >= u32::from(layout.tagged) + layout.shared_count as u32 {
                 continue;
             }
             let label = if let Some((_, label)) = &arg.label {
@@ -2672,6 +2704,7 @@ impl<'a> Generator<'a> {
             shared_fields.push((label, self.val_type(type_)));
         }
 
+        let shared_fields = layout.with_tag(shared_fields);
         let name = custom_type.name.clone();
         self.custom_type_end(custom_type_key, |this, reserved| {
             let key = WasmType::union(name.clone(), shared_fields.clone(), None);
@@ -2744,10 +2777,12 @@ impl<'a> Generator<'a> {
             })
             .collect();
         fields.sort_by_key(|(idx, _, _)| *idx);
-        let fields: Vec<(EcoString, ValType)> = fields
-            .into_iter()
-            .map(|(_, label, val_type)| (label, val_type))
-            .collect();
+        let fields = layout.with_tag(
+            fields
+                .into_iter()
+                .map(|(_, label, val_type)| (label, val_type))
+                .collect(),
+        );
 
         let mut name = self.type_pretty_name(type_);
         name += ".";
@@ -2771,9 +2806,8 @@ impl<'a> Generator<'a> {
         supertype: Option<TypeId>,
         reserved: Option<TypeId>,
     ) -> TypeId {
-        let tag_field: (EcoString, ValType) = ("tag".into(), ValType::I32);
-        let walrus_fields: Vec<FieldType> = iter::once(&tag_field)
-            .chain(fields)
+        let walrus_fields: Vec<FieldType> = fields
+            .iter()
             .map(|(_, vt)| FieldType {
                 element_type: StorageType::Val(*vt),
                 mutable: false,
@@ -3009,10 +3043,11 @@ impl<'a> Generator<'a> {
                             export,
                             true,
                         );
+                        let tagged = self.union_layout(type_).tagged;
                         self.consts.push(WasmConst::Struct {
                             global_index: id.global_id(),
                             type_index,
-                            tag: Some(index.into()),
+                            tag: tagged.then_some(index.into()),
                             elements: arguments
                                 .iter()
                                 .flatten()
@@ -4915,6 +4950,7 @@ impl<'a> Generator<'a> {
                 let (custom_type, cons, _, args) = self.list_type_cons(type_);
                 let (_, cons_index, _) =
                     self.mono_union_subtype_index(type_, &custom_type, &cons, &args);
+                let (rest_field, first_field) = self.list_cons_fields(type_);
                 let right = locals.for_pattern(pattern);
                 let _ = instructions.local_set(right);
                 if !elements.is_empty() {
@@ -4924,16 +4960,15 @@ impl<'a> Generator<'a> {
                         .br_if(fail_target);
                 }
                 for element in elements {
-                    // Cons struct: {tag: 0, rest: 1, first: 2}
                     let _ = instructions
                         .local_get(right)
                         .ref_cast_non_null(HeapType::Concrete(cons_index))
-                        .struct_get(cons_index, 2); // first
+                        .struct_get(cons_index, first_field);
                     scope = self._pattern(locals, scope, instructions, element, fail_target);
                     let _ = instructions
                         .local_get(right)
                         .ref_cast_non_null(HeapType::Concrete(cons_index))
-                        .struct_get(cons_index, 1) // rest
+                        .struct_get(cons_index, rest_field)
                         .local_set(right);
                 }
                 if let Some(tail) = tail {
@@ -5019,23 +5054,21 @@ impl<'a> Generator<'a> {
                                 constructor,
                                 &args,
                             );
+                            let layout = self.union_layout(type_);
                             let _ = instructions.local_tee(right);
                             if null_tag.is_some() {
                                 let _ = instructions.ref_is_null().br_if(fail_target);
-                                let _ = instructions
-                                    .local_get(right)
-                                    .struct_get(supertype_index, 0)
-                                    .i32_const(tag as i32)
-                                    .i32_ne()
-                                    .br_if(fail_target);
-                            } else {
+                                if layout.tagged {
+                                    let _ = instructions.local_get(right);
+                                }
+                            }
+                            if layout.tagged {
                                 let _ = instructions
                                     .struct_get(supertype_index, 0)
                                     .i32_const(tag as i32)
                                     .i32_ne()
                                     .br_if(fail_target);
                             }
-                            let layout = self.union_layout(type_);
                             let fields = Fields::Variant {
                                 value: right,
                                 type_index,

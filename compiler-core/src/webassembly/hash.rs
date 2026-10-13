@@ -405,6 +405,21 @@ impl<'a> Generator<'a> {
                 },
             );
         }
+        if !layout.tagged {
+            // The value is of the only variant that is not null.
+            let (type_index, hash_index) = variant_hashes
+                .into_iter()
+                .flatten()
+                .exactly_one()
+                .expect("one variant that is not null");
+            let _ = instructions
+                .local_get(value)
+                .ref_cast_non_null(HeapType::Concrete(type_index))
+                .local_get(h)
+                .return_call(hash_index)
+                .end();
+            return function.finish(self);
+        }
         let _ = instructions
             .local_get(value)
             .ref_as_non_null()

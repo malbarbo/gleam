@@ -490,6 +490,7 @@ impl<'a> Generator<'a> {
         let (custom_type, cons, _, args) = self.list_type_cons(&list_type);
         let (_, cons_index, _) =
             self.mono_union_subtype_index(&list_type, &custom_type, &cons, &args);
+        let (rest_field, first_field) = self.list_cons_fields(&list_type);
         // params
         let strings = self.wasm_local(list_vt); // List(String)
         let separator = self.wasm_local(string_vt); // String
@@ -522,13 +523,13 @@ impl<'a> Generator<'a> {
                                 .br_if(block_id)
                                 .local_get(l)
                                 .ref_cast_non_null(HeapType::Concrete(cons_index))
-                                .struct_get(cons_index, 2) // first
+                                .struct_get(cons_index, first_field)
                                 .local_set(item);
                             body(loop_s);
                             let _ = loop_s
                                 .local_get(l)
                                 .ref_cast_non_null(HeapType::Concrete(cons_index))
-                                .struct_get(cons_index, 1) // rest
+                                .struct_get(cons_index, rest_field)
                                 .local_set(l)
                                 .br(loop_id);
                         });

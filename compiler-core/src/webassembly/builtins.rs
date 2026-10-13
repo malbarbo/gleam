@@ -944,6 +944,7 @@ impl<'a> Generator<'a> {
         let tag = self.wasm_local(ValType::I32);
         // return Bool
         let null_tag = Self::null_variant_tag(custom_type);
+        let tagged = self.union_layout(type_).tagged;
 
         // Pre-compute variant eq pairs for non-null constructors
         let mut variant_eqs: Vec<Option<(TypeId, FunctionId)>> =
@@ -978,6 +979,23 @@ impl<'a> Generator<'a> {
                 .if_(InstrSeqType::Simple(None), |body| {
                     let _ = body.bool_const(false).return_();
                 });
+        }
+
+        if !tagged {
+            // The values are of the only variant that is not null.
+            let (type_index, eq_index) = variant_eqs
+                .into_iter()
+                .flatten()
+                .exactly_one()
+                .expect("one variant that is not null");
+            let _ = instructions
+                .local_get(a)
+                .ref_cast_non_null(HeapType::Concrete(type_index))
+                .local_get(b)
+                .ref_cast_non_null(HeapType::Concrete(type_index))
+                .return_call(eq_index)
+                .end();
+            return function.finish(self);
         }
 
         let _ = instructions
@@ -1048,7 +1066,8 @@ impl<'a> Generator<'a> {
                     &variant.constructor,
                     &args,
                 );
-                (type_index, variant.tag, types)
+                let tag = variant.tag.filter(|_| self.union_layout(&return_).tagged);
+                (type_index, tag, types)
             }
         };
         let null_supertype = if num_fields == 0 {
@@ -1740,6 +1759,7 @@ impl<'a> Generator<'a> {
         let list_type = type_::list(type_::int());
         let (custom_type, cons, _, args) = self.list_type_cons(&list_type);
         let (_, struct_index, _) = self.union_subtype_index(&list_type, &custom_type, &cons, &args);
+        let (rest_field, first_field) = self.list_cons_fields(&list_type);
         let list_repr = self.code_list_repr(&type_::int());
         let list_vt = self.val_type(&list_type);
         let int_vt = self.int.val_type();
@@ -1760,13 +1780,13 @@ impl<'a> Generator<'a> {
             let _ = s
                 .local_get(list)
                 .ref_cast_non_null(HeapType::Concrete(struct_index))
-                .struct_get(struct_index, 2);
+                .struct_get(struct_index, first_field);
         };
         let rest = |s: &mut Instructions<'_, '_>, list: LocalId| {
             let _ = s
                 .local_get(list)
                 .ref_cast_non_null(HeapType::Concrete(struct_index))
-                .struct_get(struct_index, 1);
+                .struct_get(struct_index, rest_field);
         };
         #[rustfmt::skip]
         let _ = instructions
@@ -1855,6 +1875,7 @@ impl<'a> Generator<'a> {
         let list_type = type_::list(item_type.clone());
         let (custom_type, cons, _, args) = self.list_type_cons(&list_type);
         let (_, struct_index, _) = self.union_subtype_index(&list_type, &custom_type, &cons, &args);
+        let (rest_field, first_field) = self.list_cons_fields(&list_type);
         let item_repr = self.function_repr(item_type);
         let list_vt = self.val_type(&list_type);
         // params
@@ -1881,7 +1902,7 @@ impl<'a> Generator<'a> {
                     let _ = else_s
                         .local_get(lst)
                         .ref_cast_non_null(HeapType::Concrete(struct_index))
-                        .struct_get(struct_index, 2) // first
+                        .struct_get(struct_index, first_field)
                         .local_get(dest)
                         .call(item_repr)
                         .local_get(dest)
@@ -1894,7 +1915,7 @@ impl<'a> Generator<'a> {
                 let _ = loop_s
                     .local_get(lst)
                     .ref_cast_non_null(HeapType::Concrete(struct_index))
-                    .struct_get(struct_index, 1) // rest
+                    .struct_get(struct_index, rest_field)
                     .local_tee(lst)
                     .ref_is_null()
                     .if_else(
@@ -1909,7 +1930,7 @@ impl<'a> Generator<'a> {
                                 .write_byte(dest, b' ')
                                 .local_get(lst)
                                 .ref_cast_non_null(HeapType::Concrete(struct_index))
-                                .struct_get(struct_index, 2) // first
+                                .struct_get(struct_index, first_field)
                                 .local_get(dest)
                                 .call(item_repr)
                                 .local_get(dest)
@@ -2172,6 +2193,7 @@ impl<'a> Generator<'a> {
                     }
                 }
 
+                let tagged = self.union_layout(type_).tagged;
                 let tag_local = self.wasm_local(ValType::I32);
                 let mut function =
                     Function::new(self, "_repr_union", &[value, ptr], &[ValType::I32]);
@@ -2187,6 +2209,21 @@ impl<'a> Generator<'a> {
                                 .return_();
                         },
                     );
+                }
+                if !tagged {
+                    // The value is of the only variant that is not null.
+                    let (type_index, repr_index) = variant_reprs
+                        .into_iter()
+                        .flatten()
+                        .exactly_one()
+                        .expect("one variant that is not null");
+                    let _ = instructions
+                        .local_get(value)
+                        .ref_cast_non_null(HeapType::Concrete(type_index))
+                        .local_get(ptr)
+                        .return_call(repr_index)
+                        .end();
+                    return function.finish(self);
                 }
                 let _ = instructions
                     .local_get(value)

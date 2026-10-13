@@ -417,6 +417,7 @@ impl<'a> Generator<'a> {
         let (custom_type, cons, _, args) = self.list_type_cons(&list_type);
         let (_, cons_index, _) =
             self.mono_union_subtype_index(&list_type, &custom_type, &cons, &args);
+        let (rest_field, first_field) = self.list_cons_fields(&list_type);
         let list_vt = self.val_type(&list_type);
         let array_vt = self.val_type_ref(array_index);
         // params
@@ -430,13 +431,13 @@ impl<'a> Generator<'a> {
             let _ = instructions
                 .local_get(list)
                 .ref_cast_non_null(HeapType::Concrete(cons_index))
-                .struct_get(cons_index, 2);
+                .struct_get(cons_index, first_field);
         };
         let rest = |instructions: &mut Instructions<'_, '_>, list: LocalId| {
             let _ = instructions
                 .local_get(list)
                 .ref_cast_non_null(HeapType::Concrete(cons_index))
-                .struct_get(cons_index, 1)
+                .struct_get(cons_index, rest_field)
                 .local_set(list);
         };
         let mut function = Function::new(self, "_array_from_list", &[list], &[array_vt]);
