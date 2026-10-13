@@ -78,8 +78,8 @@ pub(super) fn clear_dead_locals(module: &mut walrus::Module) {
 fn assert_non_null(function: &mut LocalFunction, seq: InstrSeqId, widened: &HashSet<LocalId>) {
     let instrs = std::mem::take(&mut function.block_mut(seq).instrs);
     let mut result = Vec::with_capacity(instrs.len());
-    for (instr, loc) in instrs {
-        match &instr {
+    for (i, (instr, loc)) in instrs.iter().enumerate() {
+        match instr {
             Instr::Block(b) => assert_non_null(function, b.seq, widened),
             Instr::IfElse(i) => {
                 assert_non_null(function, i.consequent, widened);
@@ -87,17 +87,40 @@ fn assert_non_null(function: &mut LocalFunction, seq: InstrSeqId, widened: &Hash
             }
             _ => {}
         }
-        let get = match &instr {
+        let get = match instr {
             Instr::LocalGet(get) => widened.contains(&get.local),
             Instr::LocalTee(tee) => widened.contains(&tee.local),
             _ => false,
         };
-        result.push((instr, loc));
-        if get {
+        result.push((instr.clone(), *loc));
+        if get && !accepts_null(instrs.get(i + 1..).unwrap_or_default()) {
             result.push((Instr::RefAsNonNull(RefAsNonNull {}), InstrLocId::default()));
         }
     }
     function.block_mut(seq).instrs = result;
+}
+
+/// Whether the next value consumed by `instrs` can be null. The value of a
+/// cleared local is never null where it is read, so it needs to be asserted
+/// only where its type matters.
+fn accepts_null(instrs: &[(Instr, InstrLocId)]) -> bool {
+    match instrs {
+        // Skips the clearing of the local after its last use.
+        [(Instr::RefNull(_), _), (Instr::LocalSet(_), _), rest @ ..] => accepts_null(rest),
+        [(instr, _), ..] => matches!(
+            instr,
+            Instr::StructGet(_)
+                | Instr::StructGetS(_)
+                | Instr::StructGetU(_)
+                | Instr::ArrayGet(_)
+                | Instr::ArrayGetS(_)
+                | Instr::ArrayGetU(_)
+                | Instr::ArrayLen(_)
+                | Instr::RefCast(_)
+                | Instr::RefTest(_)
+        ),
+        [] => false,
+    }
 }
 
 fn is_leaf(function: &LocalFunction, seq: InstrSeqId) -> bool {
