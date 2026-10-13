@@ -19,11 +19,15 @@ use src_span::LineNumbers;
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// The package of the module of a test: the standard library, which reaches
+/// the builtins, so the tests can declare them.
+pub const TEST_PACKAGE: &str = crate::STDLIB_PACKAGE_NAME;
+
 pub fn compile(
     src: &str,
     deps: Vec<(&str, &str, &str)>,
 ) -> (TypedModule, HashMap<EcoString, TypedModule>) {
-    compile_in("thepackage", src, deps)
+    compile_in(TEST_PACKAGE, src, deps)
 }
 
 /// Like `compile`, with the module in `package`.
@@ -117,7 +121,7 @@ pub fn compile_wasm_with_config(
     int: crate::config::WasmInt,
     float: crate::config::WasmFloat,
 ) -> Vec<u8> {
-    compile_wasm_in("thepackage", src, deps, int, float)
+    compile_wasm_in(TEST_PACKAGE, src, deps, int, float)
 }
 
 /// Like `compile_wasm_with_config`, with the module in `package`.
@@ -268,7 +272,7 @@ pub fn for_each_operator(wasm_bytes: &[u8], mut f: impl FnMut(&str, wasmparser::
 }
 
 pub fn compile_wasm_error(src: &str) -> crate::webassembly::Error {
-    compile_wasm_error_in("thepackage", src)
+    compile_wasm_error_in(TEST_PACKAGE, src)
 }
 
 /// Like `compile_wasm_error`, with the module in `package`.
@@ -311,7 +315,7 @@ pub fn run_wasm_with_config(
     int: crate::config::WasmInt,
     float: crate::config::WasmFloat,
 ) -> WasmOutput {
-    run_wasm_in("thepackage", src, deps, int, float)
+    run_wasm_in(TEST_PACKAGE, src, deps, int, float)
 }
 
 /// Like `run_wasm_with_config`, with the module in `package`.

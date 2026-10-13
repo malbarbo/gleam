@@ -32,7 +32,7 @@ pub fn delete(dict: Dict(k, v), key: k) -> Dict(k, v)
 
 #[track_caller]
 fn run_dict(src: &str) -> String {
-    let result = run_wasm(src, vec![("thepackage", "dict", DICT)]);
+    let result = run_wasm(src, vec![(super::TEST_PACKAGE, "dict", DICT)]);
     assert!(
         result.status.success(),
         "WASM execution failed:\n{}",
@@ -191,8 +191,8 @@ fn run_dynamic(src: &str) -> String {
     let result = run_wasm(
         src,
         vec![
-            ("thepackage", "dict", DICT),
-            ("thepackage", "dynamic", DYNAMIC),
+            (super::TEST_PACKAGE, "dict", DICT),
+            (super::TEST_PACKAGE, "dynamic", DYNAMIC),
         ],
     );
     assert!(
@@ -456,7 +456,7 @@ fn delete_with_hash(dict: Dict(k, v), key: k, hash: Int) -> Dict(k, v)
 fn run_dict_i64(src: &str) {
     let result = super::run_wasm_with_config(
         &format!("{DICT_INTERNALS}\n{src}"),
-        vec![("thepackage", "dict", DICT)],
+        vec![(super::TEST_PACKAGE, "dict", DICT)],
         crate::config::WasmInt::I64,
         crate::config::WasmFloat::F64,
     );
@@ -615,7 +615,7 @@ fn module_with_the_name_of_a_runtime_module() {
     let src = "import builtins/dict as d\npub fn main() { d.hello() }";
     let (main_module, dep_modules) = super::compile(
         src,
-        vec![("thepackage", "builtins/dict", "pub fn hello() { 1 }")],
+        vec![(super::TEST_PACKAGE, "builtins/dict", "pub fn hello() { 1 }")],
     );
     let line_numbers = src_span::LineNumbers::new(src);
     let mut all_modules: std::collections::HashMap<_, _> = dep_modules

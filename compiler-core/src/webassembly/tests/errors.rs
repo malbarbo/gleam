@@ -253,3 +253,44 @@ pub fn main() {
 // Module imports are not yet supported but the test infrastructure
 // doesn't support multi-module compilation, so we can't test this
 // error here yet.
+
+/// Outside the standard library, a program can't declare the builtins.
+#[test]
+fn external_function_outside_the_stdlib() {
+    let error = super::compile_wasm_error_in(
+        "thepackage",
+        r#"
+@external(webassembly, "builtins", "_int_bitwise_and")
+fn and(a: Int, b: Int) -> Int
+
+pub fn main() { and(1, 2) }
+"#,
+    );
+    assert!(
+        matches!(
+            error,
+            crate::webassembly::Error::ExternalOutsideStdlib { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn external_type_outside_the_stdlib() {
+    let error = super::compile_wasm_error_in(
+        "thepackage",
+        r#"
+@external(webassembly, "builtins", "Dict")
+pub type Dict(k, v)
+
+pub fn main() { Nil }
+"#,
+    );
+    assert!(
+        matches!(
+            error,
+            crate::webassembly::Error::ExternalOutsideStdlib { .. }
+        ),
+        "{error:?}"
+    );
+}

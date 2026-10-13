@@ -2185,6 +2185,12 @@ Is your editor still running and connected to the language server?"
                         None,
                         Some(*location),
                     ),
+                    crate::webassembly::Error::ExternalOutsideStdlib { location } => (
+                        "Unsupported external",
+                        "The WebAssembly target supports external functions and types only in the standard library.".into(),
+                        None,
+                        Some(*location),
+                    ),
                     crate::webassembly::Error::ReservedModuleName { name } => (
                         "Reserved module name",
                         format!(

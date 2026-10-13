@@ -54,6 +54,7 @@ use walrus::{
 };
 
 use crate::{
+    STDLIB_PACKAGE_NAME,
     ast::{
         AssignName, AssignmentKind, BinOp, ClauseGuard, Constant, PIPE_VARIABLE, Pattern,
         Publicity, Statement, StringPrefixLeftSideAssignment, TypeAst, TypeAstVar, TypedArg,
@@ -123,6 +124,11 @@ pub enum Error {
     UnknownExternalModule {
         location: SrcSpan,
         module: EcoString,
+    },
+    /// An external function or type outside the standard library, which
+    /// alone reaches the builtins.
+    ExternalOutsideStdlib {
+        location: SrcSpan,
     },
     /// A module of the program has the name of a module of the runtime.
     ReservedModuleName {
@@ -1188,6 +1194,9 @@ impl<'a> Generator<'a> {
         name: &EcoString,
         location: SrcSpan,
     ) -> Result<CustomType, Error> {
+        if !reaches_builtins(package) {
+            return Err(Error::ExternalOutsideStdlib { location });
+        }
         if module != BUILTINS_MODULE {
             return Err(Error::UnknownExternalModule {
                 location,
@@ -1401,6 +1410,11 @@ impl<'a> Generator<'a> {
         let functions: Vec<_> = self.module.definitions.functions.iter().collect();
         for function in functions {
             if let Some((module, name, _)) = &function.external_webassembly {
+                if !reaches_builtins(&self.module.type_info.package) {
+                    return Err(Error::ExternalOutsideStdlib {
+                        location: function.location,
+                    });
+                }
                 if module != BUILTINS_MODULE {
                     return Err(Error::UnknownExternalModule {
                         location: function.location,
@@ -5981,4 +5995,11 @@ fn string_unescape() {
         unescape(r#"sure \\ \n \"its\" \t works! \u{263A}, \r or \f not..."#),
         "sure \\ \n \"its\" \t works! ☺, \r or \x0C not..."
     );
+}
+
+/// Whether the modules of `package` may declare external functions and types
+/// of the builtins: the standard library and the runtime, which build on them
+/// the API of programs.
+fn reaches_builtins(package: &str) -> bool {
+    package == STDLIB_PACKAGE_NAME || package == RUNTIME_PACKAGE
 }

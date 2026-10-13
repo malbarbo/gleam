@@ -265,7 +265,8 @@ pub fn main() {
     assert!(result.stderr.contains("out of bounds"), "{}", result.stderr);
 }
 
-/// Outside the runtime, `Array` is not an external type.
+/// Outside the runtime, `Array` is not an external type, not even in the
+/// standard library.
 #[test]
 fn array_outside_the_runtime() {
     let error = super::compile_wasm_error(

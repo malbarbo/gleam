@@ -1071,7 +1071,11 @@ pub fn main() {
 }
 "#,
         vec![
-            ("thepackage", "thepackage/a/x", "pub type T { T(Int) }"),
+            (
+                super::TEST_PACKAGE,
+                "thepackage/a/x",
+                "pub type T { T(Int) }",
+            ),
             (
                 "thepackage",
                 "thepackage/a/y",
@@ -1079,7 +1083,11 @@ pub fn main() {
 pub fn new() { x.T(3) }
 pub fn value(t: x.T) { let x.T(v) = t v }",
             ),
-            ("thepackage", "thepackage/b/x", "pub type T { T(Float) }"),
+            (
+                super::TEST_PACKAGE,
+                "thepackage/b/x",
+                "pub type T { T(Float) }",
+            ),
             (
                 "thepackage",
                 "thepackage/b/y",
