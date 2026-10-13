@@ -2252,6 +2252,20 @@ function that returns the same custom type with a larger type."
                         None,
                         definition.as_ref().map(|(_, location)| *location),
                     ),
+                    crate::webassembly::Error::GenericLocalVariable { name, location, .. } => (
+                        "Local variable used with different types",
+                        format!(
+                            "The variable \"{name}\" is used here with a different type than \
+in another use.
+
+Gleam does not generalise `let`, but a value whose type has a type variable \
+of an annotation, like the local function `fn(x: a) -> a {{ x }}`, can be used \
+with different types. The WebAssembly target generates the code of a value \
+once, so it can be used with only one type."
+                        ),
+                        Some("Define the function at the top level of the module.".into()),
+                        Some(*location),
+                    ),
                 };
                 vec![Diagnostic {
                     title: title.into(),

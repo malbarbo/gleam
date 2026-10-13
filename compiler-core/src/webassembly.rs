@@ -161,20 +161,39 @@ pub enum Error {
         type_: EcoString,
         definition: Option<(EcoString, SrcSpan)>,
     },
+    /// A local variable used with different types, see
+    /// `Monomorphizer::conflicting_reference`. `location` is a reference in
+    /// `module`.
+    GenericLocalVariable {
+        module: EcoString,
+        location: SrcSpan,
+        name: EcoString,
+    },
 }
 
 impl Error {
     /// The module of the location of the error, when it may not be the
     /// module being generated.
     pub fn module(&self) -> Option<&EcoString> {
-        if let Error::TypeTooLarge {
-            definition: Some((module, _)),
-            ..
-        } = self
-        {
-            Some(module)
-        } else {
-            None
+        match self {
+            Error::TypeTooLarge {
+                definition: Some((module, _)),
+                ..
+            }
+            | Error::GenericLocalVariable { module, .. } => Some(module),
+            Error::UnknownExternalType { .. }
+            | Error::UnknownBuiltinFunction { .. }
+            | Error::WrongBuiltinFunctionSignature { .. }
+            | Error::UnknownExternalModule { .. }
+            | Error::ExternalOutsideStdlib { .. }
+            | Error::ReservedModuleName { .. }
+            | Error::WrongExternalTypeArity { .. }
+            | Error::UnsupportedFeature { .. }
+            | Error::IntLiteralOutOfRange { .. }
+            | Error::FloatLiteralOutOfRange { .. }
+            | Error::TypeTooLarge {
+                definition: None, ..
+            } => None,
         }
     }
 }
@@ -3591,7 +3610,8 @@ impl<'a> Generator<'a> {
         let specialization = self.allocate_specialization();
         let mut mono = Monomorphizer::new();
         let variables = Variables::of(&function.arguments, &function.body);
-        mono.bind_lets(&variables);
+        let module = self.current_module_name.clone();
+        self.bind_lets(&mut mono, &variables, &module);
         let local_functions = collect_local_functions(&variables, specialization, &mono);
         // Resolve Generic type vars (from inner lambdas) to Nil for valid WASM types.
         let function = mono.function(function);
@@ -3619,7 +3639,8 @@ impl<'a> Generator<'a> {
         let specialization = self.allocate_specialization();
         let mut mono = Monomorphizer::with_bound(&function_type(function), required_type);
         let variables = Variables::of(&function.arguments, &function.body);
-        mono.bind_lets(&variables);
+        let module = self.current_module_name.clone();
+        self.bind_lets(&mut mono, &variables, &module);
         let local_functions = collect_local_functions(&variables, specialization, &mono);
         let mut function = mono.function(function);
         set_function_name(&mut function, name.clone());
@@ -3884,7 +3905,8 @@ impl<'a> Generator<'a> {
         let specialization = self.allocate_specialization();
         let mut mono = Monomorphizer::for_local_function(info, required_type);
         let variables = Variables::of(&info.arguments, &info.body);
-        mono.bind_lets(&variables);
+        let module = self.current_module_name.clone();
+        self.bind_lets(&mut mono, &variables, &module);
         let nested = collect_local_functions(&variables, specialization, &mono);
         let (args, body) = mono.function_local(info);
         // A variable whose type is not known yet where it is bound can be
@@ -3910,6 +3932,28 @@ impl<'a> Generator<'a> {
         }
         self.specialization = saved_specialization;
         id
+    }
+
+    /// Binds the type variables of the variables of a function used with a
+    /// single type (see `Monomorphizer::bind_lets`), and records an error for
+    /// a variable used with different types. `module` is the module of the
+    /// function.
+    fn bind_lets(
+        &mut self,
+        mono: &mut Monomorphizer,
+        variables: &Variables<'_>,
+        module: &EcoString,
+    ) {
+        mono.bind_lets(variables);
+        if self.error.is_none()
+            && let Some(reference) = mono.conflicting_reference(variables)
+        {
+            self.error = Some(Error::GenericLocalVariable {
+                module: module.clone(),
+                location: reference.location,
+                name: reference.name.clone(),
+            });
+        }
     }
 
     fn function_imported(

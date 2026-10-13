@@ -15,7 +15,10 @@ use crate::{
         TypedRecordConstructor, TypedStatement,
     },
     type_::{self, Type, TypeVar},
-    webassembly::{LocalFunction, captures::Variables},
+    webassembly::{
+        LocalFunction,
+        captures::{Reference, Variables},
+    },
 };
 use src_span::SrcSpan;
 
@@ -129,6 +132,31 @@ impl Monomorphizer {
                 }
             }
         }
+    }
+
+    /// A reference of `variables` to a variable that has a different type than
+    /// another reference to it. Gleam does not generalise `let`, but a
+    /// variable whose type has a type variable of an annotation, like a local
+    /// function `fn(x: a) -> a { x }`, is instantiated at each reference. The
+    /// code of a value is generated once, so it can be used with only one
+    /// type. A reference whose type depends on the type variables of a local
+    /// function is not considered.
+    pub(super) fn conflicting_reference<'v>(
+        &self,
+        variables: &'v Variables<'_>,
+    ) -> Option<&'v Reference> {
+        let mut types: HashMap<SrcSpan, Arc<Type>> = HashMap::new();
+        variables
+            .references
+            .iter()
+            .filter(|reference| !self.has_free_variables(&reference.type_))
+            .find(|reference| {
+                let type_ = self.type_(&reference.type_);
+                !types
+                    .entry(reference.definition)
+                    .or_insert_with(|| type_.clone())
+                    .same_as(&type_)
+            })
     }
 
     /// Whether `type_` has type variables not bound by this monomorphizer.

@@ -25,6 +25,20 @@ fn run(src: &str) {
     super::run_ok(&format!("{MAP}\n{src}"));
 }
 
+/// Asserts that the local variable `variable` is used with different types,
+/// which the WebAssembly target does not support.
+#[track_caller]
+fn assert_used_with_different_types(src: &str, variable: &str) {
+    let error = super::compile_wasm_error(&format!("{MAP}\n{src}"));
+    assert!(
+        matches!(
+            error,
+            crate::webassembly::Error::GenericLocalVariable { ref name, .. } if name == variable
+        ),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn captures_unified_with_type_variables() {
     run(r#"
@@ -32,18 +46,6 @@ pub fn main() {
   let l = []
   let f = fn(x: a) { [x, ..l] }
   assert f("s") == ["s"]
-}
-"#);
-}
-
-#[test]
-fn captures_unified_with_type_variables_in_two_specializations() {
-    run(r#"
-pub fn main() {
-  let l = []
-  let f = fn(x: a) { [x, ..l] }
-  assert f("s") == ["s"]
-  assert f(1) == [1]
 }
 "#);
 }
@@ -91,17 +93,81 @@ pub fn main() {
 "#);
 }
 
+/// Gleam does not generalise `let`, but a value whose type has a type
+/// variable of an annotation is instantiated at each use, see
+/// `Monomorphizer::conflicting_reference`.
 #[test]
-#[should_panic(expected = "depends on the type variables of the local function")]
-fn captured_functions_unified_with_type_variables_of_two_types_are_not_supported() {
-    run(r#"
+fn local_function_used_with_two_types() {
+    assert_used_with_different_types(
+        r#"
+pub fn main() {
+  let n = 10
+  let f = fn(x: a) { #(x, n) }
+  assert f(1) == #(1, 10)
+  assert f("a") == #("a", 10)
+}
+"#,
+        "f",
+    );
+}
+
+#[test]
+fn local_function_captured_used_with_two_types() {
+    assert_used_with_different_types(
+        r#"
 pub fn main() {
   let k = id(fn(y) { y })
   let f = fn(x: a) { k(x) }
   assert f("s") == "s"
   assert f(1) == 1
 }
-"#);
+"#,
+        "f",
+    );
+}
+
+#[test]
+fn block_result_used_with_two_types() {
+    assert_used_with_different_types(
+        r#"
+pub fn main() {
+  let g = {
+    let id = fn(x: a) -> a { x }
+  }
+  assert g(3) == 3
+  assert g("s") == "s"
+}
+"#,
+        "g",
+    );
+}
+
+#[test]
+fn call_result_used_with_two_types() {
+    assert_used_with_different_types(
+        r#"
+pub fn main() {
+  let g = id(fn(x: a) -> a { x })
+  assert g(3) == 3
+  assert g("s") == "s"
+}
+"#,
+        "g",
+    );
+}
+
+#[test]
+fn pattern_variable_used_with_two_types() {
+    assert_used_with_different_types(
+        r#"
+pub fn main() {
+  let assert [f] = [fn(x: a) -> a { x }]
+  assert f(3) == 3
+  assert f("s") == "s"
+}
+"#,
+        "f",
+    );
 }
 
 #[test]
@@ -142,13 +208,10 @@ pub fn main() {
     h
   }
   assert g(1) == g(2)
-  assert g("a") == g("b")
   let k = fn(z: c) { g(z) }
   assert k(1) == k(2)
-  assert k("a") == k("b")
   let l = fn(z: c) { g(z) == g(z) }
   assert l(1)
-  assert l("a")
 }
 "#);
 }
@@ -223,7 +286,6 @@ pub fn main() {
   let o = Error(Nil)
   let f = fn(x: a) { case o { Ok(y) -> y  Error(_) -> x } }
   assert f("s") == "s"
-  assert f(1.0) == 1.0
 }
 "#);
 }
@@ -235,11 +297,10 @@ pub fn main() {
   let n = 1
   let f = fn(x: a) {
     let g = fn(y: b) { #(x, y, n) }
-    #(g(1), g("s"))
+    #(g(1), g(2))
   }
-  assert f(1.0) == #(#(1.0, 1, 1), #(1.0, "s", 1))
-  assert f(True) == #(#(True, 1, 1), #(True, "s", 1))
-  assert map([2.0], f) == [#(#(2.0, 1, 1), #(2.0, "s", 1))]
+  assert f(1.0) == #(#(1.0, 1, 1), #(1.0, 2, 1))
+  assert map([2.0], f) == [#(#(2.0, 1, 1), #(2.0, 2, 1))]
 }
 "#);
 }
@@ -411,7 +472,6 @@ pub fn main() {
   let n = 10
   let f = fn(x: a) { #(x, n) }
   assert f(1) == #(1, 10)
-  assert f("a") == #("a", 10)
 }
 "#);
 }
@@ -439,7 +499,6 @@ pub fn main() {
   assert map([1, 2], f) == [11, 12]
   let g = fn(x: a) { #(x, n) }
   assert map([1, 2], g) == [#(1, 10), #(2, 10)]
-  assert map(["a"], g) == [#("a", 10)]
 }
 "#);
 }
@@ -528,9 +587,9 @@ fn wrap2(x: a) -> fn(Int) -> #(a, Int) {
   f
 }
 
-fn wrap3(x: a) -> #(#(a, Int), #(a, String)) {
+fn wrap3(x: a) -> #(#(a, Int), #(a, Int)) {
   let f = fn(k: b) { #(x, k) }
-  #(f(1), f("s"))
+  #(f(1), f(2))
 }
 
 pub fn main() {
@@ -538,7 +597,7 @@ pub fn main() {
   assert wrap("a") == #("a", 4)
   assert wrap2(1)(2) == #(1, 2)
   assert wrap2("b")(2) == #("b", 2)
-  assert wrap3(1.0) == #(#(1.0, 1), #(1.0, "s"))
+  assert wrap3(1.0) == #(#(1.0, 1), #(1.0, 2))
 }
 "#);
 }
@@ -677,11 +736,8 @@ pub fn main() {
   let n = 3
   let f = fn(x: a) { #(x, n) }
   let i: fn(Int) -> #(Int, Int) = f
-  let s: fn(String) -> #(String, Int) = f
   assert i == f
-  assert s == f
   assert i(1) == #(1, 3)
-  assert s("a") == #("a", 3)
 }
 "#);
 }

@@ -49,6 +49,8 @@ pub(super) fn captures(
 pub(super) struct Reference {
     pub name: EcoString,
     pub type_: Arc<Type>,
+    /// Where the variable is referenced.
+    pub location: SrcSpan,
     /// Where the variable is bound.
     pub definition: SrcSpan,
     /// Whether the reference is the function of a call, see
@@ -143,12 +145,14 @@ impl<'a> Variables<'a> {
         &mut self,
         name: &EcoString,
         type_: &Arc<Type>,
+        location: SrcSpan,
         definition: SrcSpan,
         called: bool,
     ) {
         self.references.push(Reference {
             name: name.clone(),
             type_: type_.clone(),
+            location,
             definition,
             called,
         });
@@ -309,7 +313,7 @@ impl<'ast> Visit<'ast> for Variables<'ast> {
         if let (Some(definition), TypedExpr::Var { name, .. }) =
             (local_variable_definition(fun), fun)
         {
-            self.reference(name, &fun.type_(), definition, true);
+            self.reference(name, &fun.type_(), fun.location(), definition, true);
             for argument in arguments {
                 self.visit_typed_call_arg(argument);
             }
@@ -320,37 +324,44 @@ impl<'ast> Visit<'ast> for Variables<'ast> {
 
     fn visit_typed_expr_var(
         &mut self,
-        _location: &'ast SrcSpan,
+        location: &'ast SrcSpan,
         constructor: &'ast ValueConstructor,
         name: &'ast EcoString,
     ) {
-        if let ValueConstructorVariant::LocalVariable { location, .. } = &constructor.variant {
-            self.reference(name, &constructor.type_, *location, false);
+        if let ValueConstructorVariant::LocalVariable {
+            location: definition,
+            ..
+        } = &constructor.variant
+        {
+            self.reference(name, &constructor.type_, *location, *definition, false);
         }
     }
 
     fn visit_typed_clause_guard_var(
         &mut self,
-        _location: &'ast SrcSpan,
+        location: &'ast SrcSpan,
         name: &'ast EcoString,
         type_: &'ast Arc<Type>,
         definition_location: &'ast SrcSpan,
         _origin: &'ast VariableOrigin,
     ) {
-        self.reference(name, type_, *definition_location, false);
+        self.reference(name, type_, *location, *definition_location, false);
     }
 
     fn visit_typed_bit_array_size_variable(
         &mut self,
-        _location: &'ast SrcSpan,
+        location: &'ast SrcSpan,
         name: &'ast EcoString,
         constructor: &'ast Option<Box<ValueConstructor>>,
         type_: &'ast Arc<Type>,
     ) {
         if let Some(constructor) = constructor
-            && let ValueConstructorVariant::LocalVariable { location, .. } = &constructor.variant
+            && let ValueConstructorVariant::LocalVariable {
+                location: definition,
+                ..
+            } = &constructor.variant
         {
-            self.reference(name, type_, *location, false);
+            self.reference(name, type_, *location, *definition, false);
         }
     }
 
