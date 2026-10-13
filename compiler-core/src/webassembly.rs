@@ -27,7 +27,8 @@ use glue::*;
 use hash::*;
 use instructions::*;
 use monomorphize::*;
-use runtime::{Hooks, RUNTIME_PACKAGE, RuntimeModule};
+use runtime::{Hooks, RUNTIME_PACKAGE};
+pub use runtime::{RuntimeModule, modules as runtime_modules};
 use scope::*;
 use specialization::*;
 use stdlib::*;
@@ -224,12 +225,12 @@ pub fn module(
     line_numbers: &LineNumbers,
     all_modules: &HashMap<EcoString, &TypedModule>,
     all_line_numbers: &HashMap<EcoString, LineNumbers>,
+    runtime: &[RuntimeModule],
     int: crate::config::WasmInt,
     float: crate::config::WasmFloat,
 ) -> Result<Vec<u8>, Error> {
-    let runtime = runtime::modules();
     let mut all_modules = all_modules.clone();
-    for runtime_module in &runtime {
+    for runtime_module in runtime {
         let name = &runtime_module.module.name;
         if all_modules
             .insert(name.clone(), &runtime_module.module)
@@ -239,7 +240,7 @@ pub fn module(
         }
     }
     let mut generator = Generator::new(module, line_numbers, &all_modules, all_line_numbers);
-    generator.runtime = &runtime;
+    generator.runtime = runtime;
     generator.int = match int {
         crate::config::WasmInt::I32 => IntType::I32,
         crate::config::WasmInt::I64 => IntType::I64,

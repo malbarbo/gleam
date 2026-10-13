@@ -401,14 +401,14 @@ impl<'a> WebAssembly<'a> {
             .chain(modules)
             .map(|m| (m.name.clone(), m))
             .collect();
+        let runtime = webassembly::runtime_modules();
         for module in modules {
-            let wasm_name = module.name.clone();
             self.wasm_module(
                 writer,
                 module,
-                &wasm_name,
                 &all_modules,
                 &all_line_numbers,
+                &runtime,
                 &sources,
             )?
         }
@@ -419,12 +419,12 @@ impl<'a> WebAssembly<'a> {
         &self,
         writer: &Writer,
         module: &Module,
-        wasm_name: &str,
         all_modules: &HashMap<EcoString, &TypedModule>,
         all_line_numbers: &HashMap<EcoString, LineNumbers>,
+        runtime: &[webassembly::RuntimeModule],
         sources: &HashMap<EcoString, &Module>,
     ) -> Result<()> {
-        let name = format!("{wasm_name}.wasm");
+        let name = format!("{}.wasm", module.name);
         println!("Generating {name}");
         let path = self.output_directory.join(&name);
         let line_numbers = LineNumbers::new(&module.code);
@@ -433,6 +433,7 @@ impl<'a> WebAssembly<'a> {
             &line_numbers,
             all_modules,
             all_line_numbers,
+            runtime,
             self.int,
             self.float,
         )

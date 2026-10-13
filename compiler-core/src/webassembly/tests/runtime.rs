@@ -632,6 +632,7 @@ fn module_with_the_name_of_a_runtime_module() {
         &line_numbers,
         &all_modules,
         &std::collections::HashMap::new(),
+        &crate::webassembly::runtime_modules(),
         crate::config::WasmInt::I32,
         crate::config::WasmFloat::F64,
     )

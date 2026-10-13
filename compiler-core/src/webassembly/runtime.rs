@@ -106,15 +106,17 @@ pub(super) fn hooks(module: &str, name: &str) -> Option<&'static Hooks> {
 }
 
 /// A module of the runtime, analysed.
-pub(super) struct RuntimeModule {
+#[derive(Debug)]
+pub struct RuntimeModule {
     pub(super) module: TypedModule,
     pub(super) line_numbers: LineNumbers,
 }
 
-/// Analyses the modules of the runtime.
+/// Analyses the modules of the runtime, once for all the modules compiled
+/// with them, see `module`.
 ///
 /// Panics when they don't type check, which is a bug of the compiler.
-pub(super) fn modules() -> Vec<RuntimeModule> {
+pub fn modules() -> Vec<RuntimeModule> {
     let ids = UniqueIdGenerator::new();
     let mut importable = imbl::HashMap::new();
     let _ = importable.insert(PRELUDE_MODULE_NAME.into(), type_::build_prelude(&ids));

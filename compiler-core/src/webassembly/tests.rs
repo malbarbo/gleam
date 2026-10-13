@@ -149,6 +149,7 @@ pub fn compile_wasm_in(
         &line_numbers,
         &all_modules,
         &all_line_numbers,
+        &crate::webassembly::runtime_modules(),
         int,
         float,
     )
@@ -327,6 +328,7 @@ pub fn compile_wasm_error_in(package: &str, src: &str) -> crate::webassembly::Er
         &line_numbers,
         &all_modules,
         &all_line_numbers,
+        &crate::webassembly::runtime_modules(),
         crate::config::WasmInt::I32,
         crate::config::WasmFloat::F64,
     )
