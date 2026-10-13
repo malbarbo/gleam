@@ -12,14 +12,17 @@
 //! locals that are read later (live). A `local.get` of a local that is not live
 //! is its last use, and is followed by a `local.set` of null. A local that is
 //! read only when a branch is taken is also cleared after the branch. A local
-//! is cleared only when a call can happen after its last use, as the frame is
-//! short lived otherwise. A local whose value is referenced by a param (like
-//! the captures of a closure) is not cleared, as that frees nothing.
+//! is cleared only when a call that can allocate happens after its last use,
+//! as the frame is short lived otherwise, and a collection starts only on an
+//! allocation. A local whose value is referenced by a param (like the captures
+//! of a closure) is not cleared, as that frees nothing.
 
 // The matches on instructions only care about a few of them.
 #![allow(clippy::wildcard_enum_match_arm)]
 
 use std::collections::{HashMap, HashSet};
+
+use itertools::Itertools;
 
 use walrus::ir::{
     BrIf, BrOnCast, BrOnCastFail, BrOnNonNull, BrOnNull, Instr, InstrLocId, InstrSeqId, Local,
@@ -34,12 +37,15 @@ pub(super) fn clear_dead_locals(module: &mut walrus::Module) {
     let mut widened = HashSet::new();
     // A call to a function that calls nothing and has no loops is short, so
     // it is not a reason to clear a local.
-    let leaves: HashSet<FunctionId> = module
+    let mut leaves: HashSet<FunctionId> = module
         .funcs
         .iter_local()
         .filter(|(_, f)| is_leaf(f, f.entry_block()))
         .map(|(id, _)| id)
         .collect();
+    // A call to a function that does not allocate cannot start a collection,
+    // so it is not a reason to clear a local either.
+    leaves.extend(not_allocating(module));
     let locals = &module.locals;
     let types = &module.types;
     for (_, function) in module.funcs.iter_local_mut() {
@@ -222,6 +228,75 @@ fn count_sets(function: &LocalFunction, seq: InstrSeqId, sets: &mut HashMap<Loca
             _ => {}
         }
     }
+}
+
+/// The functions that do not allocate, and call only functions that do not
+/// allocate.
+fn not_allocating(module: &walrus::Module) -> HashSet<FunctionId> {
+    let mut callees = HashMap::new();
+    for (id, function) in module.funcs.iter_local() {
+        let mut calls = vec![];
+        if !allocates(function, function.entry_block(), &mut calls) {
+            let _ = callees.insert(id, calls);
+        }
+    }
+    // Removes the functions that call one that allocates until none is left.
+    loop {
+        let allocating = callees
+            .iter()
+            .filter(|(_, calls)| calls.iter().any(|call| !callees.contains_key(call)))
+            .map(|(id, _)| *id)
+            .collect_vec();
+        if allocating.is_empty() {
+            return callees.into_keys().collect();
+        }
+        for id in allocating {
+            let _ = callees.remove(&id);
+        }
+    }
+}
+
+/// Whether the sequence allocates or calls an unknown function. The known
+/// functions it calls are pushed to `calls`.
+fn allocates(function: &LocalFunction, seq: InstrSeqId, calls: &mut Vec<FunctionId>) -> bool {
+    function
+        .block(seq)
+        .instrs
+        .iter()
+        .any(|(instr, _)| match instr {
+            Instr::Call(call) => {
+                calls.push(call.func);
+                false
+            }
+            Instr::ReturnCall(call) => {
+                calls.push(call.func);
+                false
+            }
+            Instr::CallRef(_)
+            | Instr::CallIndirect(_)
+            | Instr::ReturnCallRef(_)
+            | Instr::ReturnCallIndirect(_)
+            | Instr::StructNew(_)
+            | Instr::StructNewDefault(_)
+            | Instr::ArrayNew(_)
+            | Instr::ArrayNewDefault(_)
+            | Instr::ArrayNewFixed(_)
+            | Instr::ArrayNewData(_)
+            | Instr::ArrayNewElem(_)
+            | Instr::AnyConvertExtern(_)
+            | Instr::ExternConvertAny(_)
+            | Instr::MemoryGrow(_)
+            | Instr::TableGrow(_)
+            | Instr::Try(_)
+            | Instr::TryTable(_) => true,
+            Instr::Loop(l) => allocates(function, l.seq, calls),
+            Instr::Block(b) => allocates(function, b.seq, calls),
+            Instr::IfElse(i) => {
+                allocates(function, i.consequent, calls)
+                    || allocates(function, i.alternative, calls)
+            }
+            _ => false,
+        })
 }
 
 fn is_leaf(function: &LocalFunction, seq: InstrSeqId) -> bool {
