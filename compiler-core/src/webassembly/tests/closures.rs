@@ -31,6 +31,7 @@ fn capture(name: &str, type_: Arc<Type>) -> Capture {
         name: name.into(),
         type_,
         definition: SrcSpan::default(),
+        is_value: true,
     }
 }
 

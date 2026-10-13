@@ -934,3 +934,31 @@ pub fn main() {
         "{casts:?}"
     );
 }
+
+// `g` only calls `f`, so its environment has the captures of `f`, but not the
+// closure of `f`, and both closures have the same type.
+#[test]
+fn closure_of_a_function_only_called_is_not_captured() {
+    let wasm = super::compile_wasm(
+        r#"
+fn apply(f: fn(Int) -> Int) -> Int {
+  f(1)
+}
+
+pub fn main() {
+  let n = 1
+  let f = fn(x) { x + n }
+  let g = fn(x) { f(x) }
+  apply(f) + apply(g)
+}
+"#,
+        vec![],
+    );
+    let mut types = vec![];
+    super::for_each_operator(&wasm, |_, op| {
+        if let wasmparser::Operator::StructNew { struct_type_index } = op {
+            types.push(struct_type_index);
+        }
+    });
+    assert!(matches!(types.as_slice(), [f, g] if f == g), "{types:?}");
+}

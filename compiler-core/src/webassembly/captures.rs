@@ -3,7 +3,11 @@
 
 use ecow::EcoString;
 use itertools::Itertools;
-use std::{collections::HashSet, iter, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    iter,
+    sync::Arc,
+};
 
 use crate::{
     ast::{
@@ -27,6 +31,8 @@ pub(super) struct Capture {
     pub type_: Arc<Type>,
     /// Where the variable is bound, outside the function.
     pub definition: SrcSpan,
+    /// Whether a reference to it is not the function of a call.
+    pub is_value: bool,
 }
 
 /// The local variables captured by the function `location` with these
@@ -95,25 +101,30 @@ impl<'a> Variables<'a> {
 
     /// The variables referenced but not bound, see `captures`.
     fn captures(&self, location: SrcSpan) -> Vec<Capture> {
-        let mut captured = HashSet::new();
-        let mut captures = vec![];
+        let mut captured: HashMap<_, usize> = HashMap::new();
+        let mut captures: Vec<Capture> = vec![];
         for reference in &self.references {
             let key = (reference.definition, reference.name.clone());
-            if is_generated(&reference.name)
-                || self.bindings.contains(&key)
-                || captured.contains(&key)
+            if is_generated(&reference.name) || self.bindings.contains(&key) {
+                continue;
+            }
+            if let Some(capture) = captured
+                .get(&key)
+                .and_then(|&index| captures.get_mut(index))
             {
+                capture.is_value |= !reference.called;
                 continue;
             }
             let (definition, name) = key;
             if location.start <= definition.start && definition.end <= location.end {
                 panic!("binding of variable {name} at {definition:?} not found in the function");
             }
-            let _ = captured.insert((definition, name.clone()));
+            let _ = captured.insert((definition, name.clone()), captures.len());
             captures.push(Capture {
                 name,
                 type_: reference.type_.clone(),
                 definition,
+                is_value: !reference.called,
             });
         }
         debug_assert!(

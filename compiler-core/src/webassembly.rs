@@ -3701,10 +3701,11 @@ impl<'a> Generator<'a> {
         for capture in captures {
             let captures = if let Some(info) = self.local_functions.get(&capture.definition) {
                 let captures = self.local_function_captures(info);
-                let closure = (info.is_value && !captures.is_empty()).then(|| Capture {
+                let closure = (capture.is_value && !captures.is_empty()).then(|| Capture {
                     name: closure_name(info),
                     type_: info.type_(),
                     definition: info.definition,
+                    is_value: true,
                 });
                 captures
                     .iter()
