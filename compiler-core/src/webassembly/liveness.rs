@@ -13,7 +13,8 @@
 //! is its last use, and is followed by a `local.set` of null. A local that is
 //! read only when a branch is taken is also cleared after the branch. A local
 //! is cleared only when a call can happen after its last use, as the frame is
-//! short lived otherwise.
+//! short lived otherwise. A local whose value is referenced by a param (like
+//! the captures of a closure) is not cleared, as that frees nothing.
 
 // The matches on instructions only care about a few of them.
 #![allow(clippy::wildcard_enum_match_arm)]
@@ -50,6 +51,7 @@ pub(super) fn clear_dead_locals(module: &mut walrus::Module) {
             locals,
             types,
             args: function.args.iter().copied().collect(),
+            pinned: pinned(function, locals, types),
             leaves: &leaves,
             labels: HashMap::new(),
             widened: HashSet::new(),
@@ -158,6 +160,70 @@ fn is_small(types: &ModuleTypes, heap_type: HeapType) -> bool {
     }
 }
 
+/// The params that are not cleared and the locals set at the start of the
+/// function with values they reference (like the environment and the
+/// captures of a closure). Clearing them frees nothing.
+fn pinned(
+    function: &LocalFunction,
+    locals: &ModuleLocals,
+    types: &ModuleTypes,
+) -> HashSet<LocalId> {
+    let mut sets = HashMap::new();
+    count_sets(function, function.entry_block(), &mut sets);
+    let mut pinned: HashSet<LocalId> = function
+        .args
+        .iter()
+        .copied()
+        .filter(|arg| {
+            !sets.contains_key(arg)
+                && matches!(locals.get(*arg).ty(), ValType::Ref(ty) if !ty.nullable)
+        })
+        .collect();
+    // Whether each value on the stack is referenced by a pinned local.
+    let mut stack = vec![];
+    for (instr, _) in &function.block(function.entry_block()).instrs {
+        match instr {
+            Instr::LocalGet(get) => stack.push(pinned.contains(&get.local)),
+            Instr::RefCast(_) => {}
+            Instr::StructGet(get) => {
+                let mutable = match types.get(get.ty).kind() {
+                    CompositeType::Struct(struct_) => struct_
+                        .fields
+                        .get(get.field as usize)
+                        .is_none_or(|field| field.mutable),
+                    _ => true,
+                };
+                let value = stack.pop().unwrap_or_default();
+                stack.push(value && !mutable);
+            }
+            Instr::LocalSet(set) => {
+                if stack.pop().unwrap_or_default() && sets.get(&set.local) == Some(&1) {
+                    let _ = pinned.insert(set.local);
+                }
+            }
+            _ => break,
+        }
+    }
+    pinned
+}
+
+/// Counts the `local.set` and `local.tee` of each local.
+fn count_sets(function: &LocalFunction, seq: InstrSeqId, sets: &mut HashMap<LocalId, usize>) {
+    for (instr, _) in &function.block(seq).instrs {
+        match instr {
+            Instr::LocalSet(LocalSet { local }) | Instr::LocalTee(LocalTee { local }) => {
+                *sets.entry(*local).or_default() += 1
+            }
+            Instr::Block(b) => count_sets(function, b.seq, sets),
+            Instr::IfElse(i) => {
+                count_sets(function, i.consequent, sets);
+                count_sets(function, i.alternative, sets);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn is_leaf(function: &LocalFunction, seq: InstrSeqId) -> bool {
     function
         .block(seq)
@@ -215,6 +281,8 @@ struct Analysis<'a> {
     locals: &'a ModuleLocals,
     types: &'a ModuleTypes,
     args: HashSet<LocalId>,
+    /// The locals that are not cleared.
+    pinned: HashSet<LocalId>,
     leaves: &'a HashSet<FunctionId>,
     /// The state after a branch to each label.
     labels: HashMap<InstrSeqId, State>,
@@ -230,6 +298,7 @@ impl Analysis<'_> {
             // one can be cleared.
             ValType::Ref(ty)
                 if (ty.nullable || !self.args.contains(&local))
+                    && !self.pinned.contains(&local)
                     && !is_small(self.types, ty.heap_type) =>
             {
                 if !ty.nullable {
