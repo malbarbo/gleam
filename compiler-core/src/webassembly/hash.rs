@@ -305,19 +305,21 @@ impl<'a> Generator<'a> {
         let value = self.wasm_local(composite_vt);
         // locals
         let h = self.wasm_local(ValType::I32);
+        let types = types.into_iter().collect_vec();
+        let field_indices = self.field_indices(&types);
         let hashes = types
-            .into_iter()
-            .map(|type_| self.function_hash(&type_))
+            .iter()
+            .map(|type_| self.function_hash(type_))
             .collect_vec();
         let mut function = Function::new(self, "_hash_composite", &[value], &[ValType::I32]);
         let mut instructions = function.extend_instructions(self);
         let _ = instructions.i32_const(SEED).local_set(h);
-        for (field_index, hash) in hashes.into_iter().enumerate() {
+        for (field_index, hash) in field_indices.into_iter().zip(hashes) {
             // h = (h ^ hash(field)) * MULTIPLIER
             let _ = instructions
                 .local_get(h)
                 .local_get(value)
-                .struct_get(type_index, field_index as u32);
+                .field_get(type_index, field_index);
             self.hash_instructions(&mut instructions, hash);
             let _ = instructions
                 .i32_xor()
@@ -451,7 +453,7 @@ impl<'a> Generator<'a> {
     fn code_variant_hash_into(
         &mut self,
         type_index: TypeId,
-        field_mapping: &[u32],
+        field_mapping: &[Option<u32>],
         tag: i32,
         types: Vec<Arc<Type>>,
         parent: &Arc<Type>,
@@ -481,14 +483,14 @@ impl<'a> Generator<'a> {
             field_mapping
                 .get(gleam_index)
                 .copied()
-                .unwrap_or(gleam_index as u32)
+                .expect("field index")
         };
         for (gleam_index, hash) in fields {
             // h = (h ^ hash(field)) * MULTIPLIER
             let _ = instructions
                 .local_get(h)
                 .local_get(value)
-                .struct_get(type_index, field_index(gleam_index));
+                .field_get(type_index, field_index(gleam_index));
             self.hash_instructions(&mut instructions, hash);
             let _ = instructions
                 .i32_xor()
@@ -500,7 +502,7 @@ impl<'a> Generator<'a> {
             let hash_into = self.function_union_hash_into(parent);
             let _ = instructions
                 .local_get(value)
-                .struct_get(type_index, field_index(last))
+                .field_get(type_index, field_index(last))
                 .local_get(h)
                 .return_call(hash_into)
                 .end();

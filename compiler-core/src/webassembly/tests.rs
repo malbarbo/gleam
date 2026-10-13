@@ -175,6 +175,46 @@ pub fn wasm_type_names(wasm_bytes: &[u8]) -> Vec<String> {
     names
 }
 
+/// The number of fields of each named struct type of the wasm binary.
+pub fn wasm_struct_fields(wasm_bytes: &[u8]) -> HashMap<String, usize> {
+    let mut types = vec![];
+    let mut names = vec![];
+    for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
+        let payload = payload.expect("valid wasm");
+        if let wasmparser::Payload::TypeSection(reader) = &payload {
+            for group in reader.clone() {
+                for type_ in group.expect("valid wasm").types() {
+                    let fields = match &type_.composite_type.inner {
+                        wasmparser::CompositeInnerType::Struct(struct_) => {
+                            Some(struct_.fields.len())
+                        }
+                        wasmparser::CompositeInnerType::Func(_)
+                        | wasmparser::CompositeInnerType::Array(_)
+                        | wasmparser::CompositeInnerType::Cont(_) => None,
+                    };
+                    types.push(fields);
+                }
+            }
+        }
+        if let wasmparser::Payload::CustomSection(section) = &payload
+            && let wasmparser::KnownCustom::Name(name_section) = section.as_known()
+        {
+            for subsection in name_section {
+                if let wasmparser::Name::Type(type_names) = subsection.expect("valid wasm") {
+                    for naming in type_names {
+                        let naming = naming.expect("valid wasm");
+                        names.push((naming.index, naming.name.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    names
+        .into_iter()
+        .filter_map(|(index, name)| Some((name, (*types.get(index as usize)?)?)))
+        .collect()
+}
+
 /// Extract function names from the wasm binary's name section.
 pub fn wasm_function_names(wasm_bytes: &[u8]) -> Vec<String> {
     let mut names = vec![];
@@ -470,3 +510,4 @@ mod stdlib;
 mod strings;
 mod tail_calls;
 mod tuples;
+mod units;

@@ -868,10 +868,17 @@ impl<'a> Generator<'a> {
     fn code_composite_or_union_eq(
         &mut self,
         type_index: TypeId,
-        field_mapping: Option<&[u32]>,
+        field_mapping: Option<&[Option<u32>]>,
         types: Vec<Arc<Type>>,
         parent: Option<&Arc<Type>>,
     ) -> FunctionId {
+        // The fields of unit types are not stored, and are always equal.
+        let field_indices = field_mapping.map_or_else(|| self.field_indices(&types), <[_]>::to_vec);
+        let fields = types
+            .iter()
+            .zip(field_indices)
+            .filter_map(|(type_, field)| Some((type_, field?)))
+            .collect_vec();
         let composite_vt = self.val_type_ref(type_index);
         // params
         let a = self.wasm_local(composite_vt); // composite
@@ -890,24 +897,22 @@ impl<'a> Generator<'a> {
                     .return_();
             });
         let last = parent
-            .and_then(|parent| types.iter().rposition(|type_| type_.same_as(parent)))
-            .or(types.len().checked_sub(1));
-        let order = types
+            .and_then(|parent| fields.iter().rposition(|(type_, _)| type_.same_as(parent)))
+            .or(fields.len().checked_sub(1));
+        let order = fields
             .iter()
             .enumerate()
             .filter(|(index, _)| Some(*index) != last)
-            .chain(last.and_then(|last| types.get(last).map(|type_| (last, type_))));
-        for (gleam_index, type_) in order {
-            let field_index = field_mapping
-                .and_then(|m| m.get(gleam_index).copied())
-                .unwrap_or(gleam_index as u32);
+            .chain(last.and_then(|last| fields.get(last).map(|field| (last, field))));
+        for (index, (type_, field_index)) in order {
+            let field_index = *field_index;
             let eq = self.function_eq(type_);
             let _ = instructions
                 .local_get(a)
                 .struct_get(type_index, field_index)
                 .local_get(b)
                 .struct_get(type_index, field_index);
-            if Some(gleam_index) == last {
+            if Some(index) == last {
                 let _ = instructions.eq_tail(eq).end();
                 return function.finish(self);
             }
@@ -1090,9 +1095,9 @@ impl<'a> Generator<'a> {
                 .iter()
                 .position(|c| c.name == variant.constructor.name)
                 .expect("constructor in union");
-            Some(layout.fields(variant_index).to_vec())
+            layout.fields(variant_index).to_vec()
         } else {
-            None
+            self.field_indices(&types)
         };
         let result_type = self.val_type(&return_);
         // Params in Gleam (declaration) order — this is the function signature.
@@ -1101,7 +1106,7 @@ impl<'a> Generator<'a> {
             type_index,
             tag,
             null_supertype,
-            field_mapping.as_deref(),
+            &field_mapping,
             result_type,
             &param_vts,
         )
@@ -1112,7 +1117,7 @@ impl<'a> Generator<'a> {
         struct_index: TypeId,
         tag: Option<i32>,
         null_supertype: Option<TypeId>,
-        field_mapping: Option<&[u32]>,
+        field_mapping: &[Option<u32>],
         result_type: ValType,
         param_vts: &[ValType],
     ) -> FunctionId {
@@ -1129,21 +1134,15 @@ impl<'a> Generator<'a> {
         if let Some(tag) = tag {
             let _ = instructions.i32_const(tag);
         }
-        if let Some(mapping) = field_mapping {
-            // Emit local_get in wasm struct field order (shared first, then specific)
-            let mut wasm_to_gleam: Vec<(u32, u32)> = mapping
-                .iter()
-                .enumerate()
-                .map(|(gleam_pos, &field_index)| (field_index, gleam_pos as u32))
-                .collect();
-            wasm_to_gleam.sort_by_key(|(field_index, _)| *field_index);
-            for (_, gleam_pos) in wasm_to_gleam {
-                let _ = instructions.local_get(*param_ids.get(gleam_pos as usize).expect("param"));
-            }
-        } else {
-            for param_id in &param_ids {
-                let _ = instructions.local_get(*param_id);
-            }
+        // The params in the order of the struct fields (shared first, then
+        // specific), without the ones of unit types, which are not stored.
+        let params = field_mapping
+            .iter()
+            .zip(&param_ids)
+            .filter_map(|(field_index, param)| Some((field_index.as_ref()?, param)))
+            .sorted_by_key(|(field_index, _)| **field_index);
+        for (_, param) in params {
+            let _ = instructions.local_get(*param);
         }
         let _ = instructions.struct_new(struct_index).end();
         function.finish(self)
@@ -1779,8 +1778,7 @@ impl<'a> Generator<'a> {
         let first = |s: &mut Instructions<'_, '_>, list: LocalId| {
             let _ = s
                 .local_get(list)
-                .ref_cast_non_null(HeapType::Concrete(struct_index))
-                .struct_get(struct_index, first_field);
+                .variant_field_get(struct_index, first_field);
         };
         let rest = |s: &mut Instructions<'_, '_>, list: LocalId| {
             let _ = s
@@ -1901,8 +1899,7 @@ impl<'a> Generator<'a> {
                 |else_s| {
                     let _ = else_s
                         .local_get(lst)
-                        .ref_cast_non_null(HeapType::Concrete(struct_index))
-                        .struct_get(struct_index, first_field)
+                        .variant_field_get(struct_index, first_field)
                         .local_get(dest)
                         .call(item_repr)
                         .local_get(dest)
@@ -1929,8 +1926,7 @@ impl<'a> Generator<'a> {
                                 .write_byte(dest, b',')
                                 .write_byte(dest, b' ')
                                 .local_get(lst)
-                                .ref_cast_non_null(HeapType::Concrete(struct_index))
-                                .struct_get(struct_index, first_field)
+                                .variant_field_get(struct_index, first_field)
                                 .local_get(dest)
                                 .call(item_repr)
                                 .local_get(dest)
@@ -1978,10 +1974,11 @@ impl<'a> Generator<'a> {
     fn code_composite_repr(
         &mut self,
         name: &EcoString,
-        field_mapping: Option<&[u32]>,
+        field_mapping: Option<&[Option<u32>]>,
         type_index: TypeId,
         types: &[Arc<Type>],
     ) -> FunctionId {
+        let wasm_indices = field_mapping.map_or_else(|| self.field_indices(types), <[_]>::to_vec);
         let value_vt = self.val_type_ref(type_index);
         // params
         let value = self.wasm_local(value_vt);
@@ -2003,20 +2000,13 @@ impl<'a> Generator<'a> {
             .i32_add()
             .local_set(dest);
 
-        let wasm_indices: Vec<u32> = (0..types.len())
-            .map(|i| {
-                field_mapping
-                    .and_then(|m| m.get(i).copied())
-                    .unwrap_or(i as u32)
-            })
-            .collect();
         let mut fields_iter = types.iter().zip(wasm_indices.iter());
         if let Some((first_type, &first_idx)) = fields_iter.next() {
             let first_repr = self.function_repr(first_type);
             let _ = instructions
                 .write_byte(dest, b'(')
                 .local_get(value)
-                .struct_get(type_index, first_idx)
+                .field_get(type_index, first_idx)
                 .local_get(dest)
                 .call(first_repr)
                 .local_get(dest)
@@ -2029,7 +2019,7 @@ impl<'a> Generator<'a> {
                     .write_byte(dest, b',')
                     .write_byte(dest, b' ')
                     .local_get(value)
-                    .struct_get(type_index, field_index)
+                    .field_get(type_index, field_index)
                     .local_get(dest)
                     .call(repr)
                     .local_get(dest)

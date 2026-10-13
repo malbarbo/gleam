@@ -430,8 +430,7 @@ impl<'a> Generator<'a> {
         let first = |instructions: &mut Instructions<'_, '_>, list: LocalId| {
             let _ = instructions
                 .local_get(list)
-                .ref_cast_non_null(HeapType::Concrete(cons_index))
-                .struct_get(cons_index, first_field);
+                .variant_field_get(cons_index, first_field);
         };
         let rest = |instructions: &mut Instructions<'_, '_>, list: LocalId| {
             let _ = instructions

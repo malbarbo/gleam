@@ -619,6 +619,31 @@ impl<'a, 'b> Instructions<'a, 'b> {
         self
     }
 
+    /// Replaces the struct of type `type_index` on the stack by its field
+    /// `field`, or by `0` when the field is of a unit type and not stored
+    /// (see `Generator::is_unit`).
+    pub(super) fn field_get(&mut self, type_index: TypeId, field: Option<u32>) -> &mut Self {
+        match field {
+            Some(field) => self.struct_get(type_index, field),
+            None => self.drop().i32_const(0),
+        }
+    }
+
+    /// Like `field_get`, for a struct of type `type_index` referenced by a
+    /// supertype.
+    pub(super) fn variant_field_get(
+        &mut self,
+        type_index: TypeId,
+        field: Option<u32>,
+    ) -> &mut Self {
+        match field {
+            Some(field) => self
+                .ref_cast_non_null(HeapType::Concrete(type_index))
+                .struct_get(type_index, field),
+            None => self.drop().i32_const(0),
+        }
+    }
+
     delegate! {
         local_set(index: LocalId),
         local_get(index: LocalId),

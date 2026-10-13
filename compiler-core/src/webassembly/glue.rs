@@ -356,8 +356,7 @@ impl<'a> Generator<'a> {
                             .ref_is_null()
                             .br_if(block_id)
                             .local_get(rest)
-                            .ref_cast_non_null(HeapType::Concrete(cons_index))
-                            .struct_get(cons_index, first_field)
+                            .variant_field_get(cons_index, first_field)
                             .local_set(value);
                         body(loop_s);
                         let _ = loop_s
@@ -594,6 +593,7 @@ impl<'a> Generator<'a> {
         match abi_expect(type_) {
             Abi::Tuple(types) => {
                 let type_index = self.tuple_type_index(types.iter().cloned());
+                let field_indices = self.field_indices(&types);
                 let lifts = types
                     .iter()
                     .map(|t| (self.lift_item(t), size(&abi_expect(t))))
@@ -601,13 +601,16 @@ impl<'a> Generator<'a> {
                 let mut function = Function::new(self, &name, &[addr], &[value_vt]);
                 let mut instructions = function.extend_instructions(self);
                 let mut offset = 0;
-                for (lift, field_size) in lifts {
+                for ((lift, field_size), field_index) in lifts.into_iter().zip(field_indices) {
                     let _ = instructions
                         .local_get(addr)
                         .i32_const(offset as i32)
                         .i32_add()
                         .local_set(field);
                     lift(&mut instructions, field);
+                    if field_index.is_none() {
+                        let _ = instructions.drop();
+                    }
                     offset += field_size;
                 }
                 let _ = instructions.struct_new(type_index).end();

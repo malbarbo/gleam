@@ -43,10 +43,11 @@ enum Cast {
         function: FunctionId,
         closures: Vec<GlobalId>,
     },
-    /// Puts the cast fields of a tuple in an array of `Dynamic`.
+    /// Puts the cast elements of a tuple in an array of `Dynamic`. Each
+    /// element has its field and its cast.
     Tuple {
         type_index: TypeId,
-        casts: Vec<FunctionId>,
+        casts: Vec<(Option<u32>, FunctionId)>,
         dynamics_index: TypeId,
         from_array: FunctionId,
     },
@@ -132,10 +133,10 @@ impl<'a> Generator<'a> {
                 from_array,
             } => {
                 let size = casts.len() as u32;
-                for (index, cast) in casts.into_iter().enumerate() {
+                for (field, cast) in casts {
                     let _ = instructions
                         .local_get(value)
-                        .struct_get(type_index, index as u32)
+                        .field_get(type_index, field)
                         .call(cast);
                 }
                 instructions
@@ -285,9 +286,11 @@ impl<'a> Generator<'a> {
             }
         } else if let Some(elements) = type_.tuple_types() {
             let type_index = self.tuple_type_index(elements.clone());
-            let casts = elements
-                .iter()
-                .map(|element| self.function_dynamic_cast(element))
+            let casts = self
+                .field_indices(&elements)
+                .into_iter()
+                .zip(&elements)
+                .map(|(field, element)| (field, self.function_dynamic_cast(element)))
                 .collect();
             Cast::Tuple {
                 type_index,

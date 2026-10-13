@@ -522,8 +522,7 @@ impl<'a> Generator<'a> {
                                 .ref_is_null()
                                 .br_if(block_id)
                                 .local_get(l)
-                                .ref_cast_non_null(HeapType::Concrete(cons_index))
-                                .struct_get(cons_index, first_field)
+                                .variant_field_get(cons_index, first_field)
                                 .local_set(item);
                             body(loop_s);
                             let _ = loop_s
