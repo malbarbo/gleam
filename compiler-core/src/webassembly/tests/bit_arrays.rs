@@ -73,14 +73,21 @@ pub fn hash(value: a) -> Int
 /// stderr with 32 bits.
 #[track_caller]
 fn run(src: &str) -> String {
+    run_with(src, vec![])
+}
+
+/// Like `run`, with the modules `modules` of the test package.
+#[track_caller]
+fn run_with(src: &str, modules: Vec<(&str, &str)>) -> String {
     let mut stderr = vec![];
     for int in [WasmInt::I32, WasmInt::I64] {
-        let result = run_wasm_with_config(
-            src,
-            vec![(TEST_PACKAGE, "bit_array", BIT_ARRAY)],
-            int,
-            WasmFloat::F64,
+        let mut deps = vec![(TEST_PACKAGE, "bit_array", BIT_ARRAY)];
+        deps.extend(
+            modules
+                .iter()
+                .map(|(name, src)| (TEST_PACKAGE, *name, *src)),
         );
+        let result = run_wasm_with_config(src, deps, int, WasmFloat::F64);
         assert!(
             result.status.success(),
             "WASM execution failed ({int:?}):\n{}",
@@ -142,6 +149,80 @@ pub fn main() {
   Nil
 }
 "#);
+}
+
+/// A constant bit array whose segments are not literals is created by the
+/// start function.
+#[test]
+fn constants_with_values() {
+    let _ = run(r#"
+import bit_array
+
+const greeting = "hi, " <> "you"
+
+const header = <<1, greeting:utf8>>
+
+const nested = <<header:bits, 2:4>>
+
+const later = <<before:bits, 4>>
+
+const before = <<nested:bits-size(12), 3:4>>
+
+const coded = <<greeting:utf16-little>>
+
+const sized = <<greeting:utf8, 5:size(4)>>
+
+const joined = <<"a" <> "b":utf8, header:bits-size(8)>>
+
+const all = [header, nested, later]
+
+fn get_nested() -> BitArray {
+  nested
+}
+
+pub fn main() {
+  let assert "<<1, 104, 105, 44, 32, 121, 111, 117>>" = bit_array.inspect(header)
+  let assert "<<1, 104, 105, 44, 32, 121, 111, 117, 2:size(4)>>" = bit_array.inspect(nested)
+  let assert "<<1, 99>>" = bit_array.inspect(before)
+  let assert "<<1, 99, 4>>" = bit_array.inspect(later)
+  let assert 14 = bit_array.byte_size(coded)
+  let assert "<<104, 0, 105, 0>>" = bit_array.inspect(<<coded:bits-size(32)>>)
+  let assert 60 = bit_array.bit_size(sized)
+  let assert "<<97, 98, 1>>" = bit_array.inspect(joined)
+  let assert [h, n, l] = all
+  let assert True = h == header && n == get_nested() && l == later
+  let assert True = <<nested:bits>> == <<header:bits, 2:4>>
+  Nil
+}
+"#);
+}
+
+/// A constant bit array with values of another module is created where it
+/// is used.
+#[test]
+fn constants_with_values_of_other_modules() {
+    let _ = run_with(
+        r#"
+import bit_array
+import other
+
+pub fn main() {
+  let assert "<<1, 104, 105, 2:size(4)>>" = bit_array.inspect(other.nested)
+  let assert "<<1, 104, 105, 35>>" = bit_array.inspect(<<other.nested:bits, 3:4>>)
+  Nil
+}
+"#,
+        vec![(
+            "other",
+            r#"
+const greeting = "h" <> "i"
+
+const header = <<1, greeting:utf8>>
+
+pub const nested = <<header:bits, 2:4>>
+"#,
+        )],
+    );
 }
 
 /// Equal bit arrays are equal and have the same hash whatever the position

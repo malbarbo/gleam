@@ -12,7 +12,7 @@
 use super::*;
 use crate::ast::{
     BitArraySegment, BitArraySize, Endianness, IntOperator, TypedBitArraySize,
-    TypedExprBitArraySegment, TypedPatternBitArraySegment,
+    TypedConstantBitArraySegment, TypedExprBitArraySegment, TypedPatternBitArraySegment,
 };
 use num_traits::ToPrimitive;
 
@@ -314,7 +314,7 @@ enum Write {
 }
 
 impl Write {
-    fn of(segment: &TypedExprBitArraySegment) -> Self {
+    fn of<V>(segment: &BitArraySegment<V, Arc<Type>>) -> Self {
         let little = segment.endianness() == Endianness::Little;
         let type_ = &segment.type_;
         if type_.is_int() {
@@ -391,6 +391,39 @@ impl Generator<'_> {
         instructions: &mut Instructions<'_, '_>,
         segments: &[TypedExprBitArraySegment],
     ) {
+        self.bit_array(
+            instructions,
+            segments,
+            &mut |generator, instructions, value| {
+                let _ = instructions.expression(generator, locals, scope.clone(), value);
+            },
+        );
+    }
+
+    /// Creates the bit array of the constant `segments`, as
+    /// `expression_bit_array` does.
+    pub(super) fn constant_bit_array(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        segments: &[TypedConstantBitArraySegment],
+    ) {
+        self.bit_array(
+            instructions,
+            segments,
+            &mut |generator, instructions, value| {
+                let _ = instructions.constant(generator, value);
+            },
+        );
+    }
+
+    /// Creates the bit array of `segments`, whose values and sizes are pushed
+    /// by `evaluate`.
+    fn bit_array<V: Literal>(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        segments: &[BitArraySegment<V, Arc<Type>>],
+        evaluate: &mut impl FnMut(&mut Generator<'_>, &mut Instructions<'_, '_>, &V),
+    ) {
         if let Some(bits) = Bits::of_literal(segments) {
             let index = self.bit_array_global(bits);
             let _ = instructions.global_as_non_null(index);
@@ -400,7 +433,7 @@ impl Generator<'_> {
             && segment.type_.is_bit_array()
             && segment.size().is_none()
         {
-            let _ = instructions.expression(self, locals, scope, &segment.value);
+            evaluate(self, instructions, &segment.value);
             return;
         }
         let bits_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]);
@@ -411,9 +444,8 @@ impl Generator<'_> {
                 first.type_.is_bit_array().then(|| {
                     let val_type = self.val_type(&bits_type);
                     let local = self.wasm_local(val_type);
-                    let _ = instructions
-                        .expression(self, locals, scope.clone(), &first.value)
-                        .local_set(local);
+                    evaluate(self, instructions, &first.value);
+                    let _ = instructions.local_set(local);
                     local
                 })
             }
@@ -428,7 +460,7 @@ impl Generator<'_> {
             if literal.size > 0 {
                 parts.push(self.literal_segment(std::mem::take(&mut literal)));
             }
-            if let Some(part) = self.segment(locals, &scope, instructions, segment) {
+            if let Some(part) = self.segment(instructions, segment, evaluate) {
                 parts.push(part);
             }
         }
@@ -575,18 +607,16 @@ impl Generator<'_> {
     /// Evaluates the value and the size of `segment` to locals, and its size
     /// in bits when it is not constant, which fails when the segment cannot
     /// be created. None for an empty segment.
-    fn segment(
+    fn segment<V: Literal>(
         &mut self,
-        locals: &Locals,
-        scope: &Scope,
         instructions: &mut Instructions<'_, '_>,
-        segment: &TypedExprBitArraySegment,
+        segment: &BitArraySegment<V, Arc<Type>>,
+        evaluate: &mut impl FnMut(&mut Generator<'_>, &mut Instructions<'_, '_>, &V),
     ) -> Option<Segment> {
         let val_type = self.val_type(&segment.type_);
         let value = self.wasm_local(val_type);
-        let _ = instructions
-            .expression(self, locals, scope.clone(), &segment.value)
-            .local_set(value);
+        evaluate(self, instructions, &segment.value);
+        let _ = instructions.local_set(value);
         let unit = BigInt::from(segment.unit());
         let size = match segment.size() {
             None => None,
@@ -594,7 +624,7 @@ impl Generator<'_> {
                 Some(LiteralValue::Int(size)) => Some(SizeOption::Literal(size * &unit)),
                 _ => {
                     let local = self.wasm_local(self.int.val_type());
-                    let _ = instructions.expression(self, locals, scope.clone(), size);
+                    evaluate(self, instructions, size);
                     if unit != BigInt::from(1) {
                         let _ = instructions.int_const(&unit).int_mul();
                     }

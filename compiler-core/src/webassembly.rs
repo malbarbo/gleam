@@ -3236,10 +3236,6 @@ impl<'a> Generator<'a> {
                 id
             }
             Constant::BitArray { segments, .. } => {
-                let Some(bits) = Bits::of_literal(segments) else {
-                    todo!("BitArray constants with values are not yet supported")
-                };
-                let src = self.bit_array_global(bits);
                 let type_index = self.type_index(&type_::bit_array());
                 let id = self.add_const(
                     const_name,
@@ -3248,10 +3244,19 @@ impl<'a> Generator<'a> {
                     export,
                     true,
                 );
-                self.consts.push(WasmConst::Global {
-                    dest: id.global_id(),
-                    src,
-                });
+                // A literal one is the global of its bits, and any other one
+                // is created by the start function.
+                let const_ = match Bits::of_literal(segments) {
+                    Some(bits) => WasmConst::Global {
+                        dest: id.global_id(),
+                        src: self.bit_array_global(bits),
+                    },
+                    None => WasmConst::Constant {
+                        global_index: id.global_id(),
+                        value: Box::new(module_constant.value.as_ref().clone()),
+                    },
+                };
+                self.consts.push(const_);
                 id
             }
             Constant::RecordUpdate { .. } => {
@@ -3299,7 +3304,15 @@ impl<'a> Generator<'a> {
                     self.register_string_const(&arg.value)
                 }
             }
-            Constant::Var { .. } | Constant::BitArray { .. } => {}
+            Constant::BitArray { segments, .. } => {
+                for segment in segments {
+                    self.register_string_const(&segment.value);
+                    if let Some(size) = segment.size() {
+                        self.register_string_const(size);
+                    }
+                }
+            }
+            Constant::Var { .. } => {}
             Constant::RecordUpdate { .. } => {
                 panic!("record update constants should not reach code generation")
             }
@@ -3413,11 +3426,7 @@ impl<'a> Generator<'a> {
                 }
             }
             Constant::BitArray { segments, .. } => {
-                let Some(bits) = Bits::of_literal(segments) else {
-                    todo!("BitArray constants with values are not yet supported")
-                };
-                let index = self.bit_array_global(bits);
-                let _ = instructions.global_as_non_null(index);
+                self.constant_bit_array(instructions, segments);
             }
             Constant::RecordUpdate { .. } => {
                 panic!("record update constants should not reach code generation")
