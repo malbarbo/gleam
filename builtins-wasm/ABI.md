@@ -69,17 +69,13 @@ All sizes are multiples of 8 and every value is 8-aligned. Little endian.
 | `UtfCodepoint` | 8 | `u32` at +0 |
 | `Nil` | 0 | — |
 | `String` | 8 | `ptr: u32` at +0, `len: u32` at +4 (bytes, valid UTF-8) |
-| `BitArray` | 16 | `ptr: u32` at +0, `byte_len: u32` at +4, `bit_len: u32` at +8 |
 | `List(T)` | 8 | `ptr: u32` at +0, `count: u32` at +4; `count` elements of `size(T)` each |
 | `#(A, B, ...)` | `Σ size` | fields in order |
 | `Result(T, E)` | `8 + max(size T, size E)` | `u32` tag at +0 (0 = Ok, 1 = Error), payload at +8 |
 
 A pointer returned by Rust may point anywhere in the arena, including into the
 argument bytes (for example `string_trim` may return a sub-slice of its input).
-The pointer of an empty `String`, `BitArray` or `List` may be any value.
-A `BitArray` returned by Rust always has `bit_len == 8 * byte_len`. In a
-`BitArray` argument a partial last byte holds its bits in the most significant
-positions; the unused low bits may be anything and are ignored.
+The pointer of an empty `String` or `List` may be any value.
 
 ### Parameters and results
 
@@ -92,7 +88,6 @@ Parameters are flattened into wasm values:
 | `Bool`, `UtfCodepoint` | `i32` |
 | `Nil` | none |
 | `String` | `ptr: i32, len: i32` |
-| `BitArray` | `ptr: i32, byte_len: i32, bit_len: i32` |
 | `List(T)` | `ptr: i32, count: i32` (elements laid out as above) |
 
 Any other parameter type is a compile error.
@@ -160,18 +155,6 @@ configured width (`_config`).
 | `string_to_utf_codepoints` | `fn(String) -> List(UtfCodepoint)` | |
 | `string_from_utf_codepoints` | `fn(List(UtfCodepoint)) -> String` | invalid code point panics |
 | `string_inspect` | `fn(String) -> String` | Gleam source repr with quotes and escapes, as `string.inspect` on Erlang/JS (both agree): `\\`, `\"`, `\n`, `\r`, `\t`, `\f`, and the other code points below U+0020 or in U+007F..U+009F as `\u{XXXX}` (4 upper case hex digits) |
-
-**bit_array** (the other functions of `gleam/bit_array` are in the runtime,
-see `builtins/bit_array`)
-
-| Export | Gleam type | Notes |
-|---|---|---|
-| `bit_array_base64_encode` | `fn(BitArray, Bool) -> String` | standard alphabet; `Bool` = padding; trailing bits padded with zeros |
-| `bit_array_base64_decode` | `fn(String) -> Result(BitArray, Nil)` | padding optional; non canonical trailing bits accepted |
-| `bit_array_base64_url_encode` | `fn(BitArray, Bool) -> String` | URL-safe alphabet |
-| `bit_array_base64_url_decode` | `fn(String) -> Result(BitArray, Nil)` | |
-| `bit_array_base16_encode` | `fn(BitArray) -> String` | upper case |
-| `bit_array_base16_decode` | `fn(String) -> Result(BitArray, Nil)` | both cases |
 
 **uri**
 

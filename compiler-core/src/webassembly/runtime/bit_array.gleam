@@ -1098,6 +1098,315 @@ fn utf8_continuation(
   }
 }
 
+// -- Base 64 and base 16 ------------------------------------------------------
+//
+// As on Erlang: the bits of the last byte are padded with zeros, decoding
+// skips spaces, tabs and line breaks, a base 64 string whose size is not a
+// multiple of 4 is completed with `=`, and the bits after the last byte of a
+// group with `=` are ignored.
+
+pub fn bit_array_base64_encode(bits: Bits, padding: Bool) -> String {
+  base64_encode(bits, padding, False)
+}
+
+pub fn bit_array_base64_url_encode(bits: Bits, padding: Bool) -> String {
+  base64_encode(bits, padding, True)
+}
+
+fn base64_encode(bits: Bits, padding: Bool, url: Bool) -> String {
+  let bits = aligned(bit_array_pad_to_bytes(bits))
+  let start = bitwise_shift_right(bits.start, 3)
+  let size = bitwise_shift_right(bits.end - bits.start, 3)
+  let length = case size % 3, padding {
+    0, _ -> size / 3 * 4
+    _, True -> size / 3 * 4 + 4
+    rest, False -> size / 3 * 4 + rest + 1
+  }
+  let out = bytes_new(length)
+  let encoder = Base64Encoder(bits.bytes, start + size, out, length, url)
+  let _ = base64_encode_loop(encoder, start, 0)
+  bytes_to_string(out, 0, length)
+}
+
+/// The bytes to encode, which end at `end`, and the `length` bytes of the
+/// encoded string.
+type Base64Encoder {
+  Base64Encoder(bytes: Bytes, end: Int, out: Bytes, length: Int, url: Bool)
+}
+
+/// Encodes the groups of 3 bytes from `index`, the last one with the `=`
+/// that fit in the encoded string.
+fn base64_encode_loop(encoder: Base64Encoder, index: Int, at: Int) -> Nil {
+  let Base64Encoder(bytes:, end:, ..) = encoder
+  case index < end {
+    False -> Nil
+    True -> {
+      let digits = min(end - index, 3) + 1
+      let group =
+        bitwise_or(
+          bitwise_or(
+            bitwise_shift_left(bytes_get(bytes, index), 16),
+            bitwise_shift_left(byte_or_zero(bytes, index + 1, end), 8),
+          ),
+          byte_or_zero(bytes, index + 2, end),
+        )
+      let _ = put_base64(encoder, at, group, 0, digits)
+      let _ = put_base64(encoder, at, group, 1, digits)
+      let _ = put_base64(encoder, at, group, 2, digits)
+      let _ = put_base64(encoder, at, group, 3, digits)
+      base64_encode_loop(encoder, index + 3, at + 4)
+    }
+  }
+}
+
+fn byte_or_zero(bytes: Bytes, index: Int, end: Int) -> Int {
+  case index < end {
+    True -> bytes_get(bytes, index)
+    False -> 0
+  }
+}
+
+/// Writes the digit `i` of the 4 of `group` at `at`, or `=` when it is not
+/// one of the first `digits` and the encoded string has room for it.
+fn put_base64(
+  encoder: Base64Encoder,
+  at: Int,
+  group: Int,
+  i: Int,
+  digits: Int,
+) -> Nil {
+  case i < digits, at + i < encoder.length {
+    True, _ -> {
+      let value = bitwise_and(bitwise_shift_right(group, 18 - 6 * i), 63)
+      bytes_set(encoder.out, at + i, base64_digit(value, encoder.url))
+    }
+    False, True -> bytes_set(encoder.out, at + i, 61)
+    False, False -> Nil
+  }
+}
+
+fn base64_digit(value: Int, url: Bool) -> Int {
+  case value {
+    _ if value < 26 -> value + 65
+    _ if value < 52 -> value + 71
+    _ if value < 62 -> value - 4
+    62 if url -> 45
+    62 -> 43
+    _ if url -> 95
+    _ -> 47
+  }
+}
+
+pub fn bit_array_base64_decode(encoded: String) -> Result(Bits, Nil) {
+  base64_decode(encoded, False)
+}
+
+/// Accepts both alphabets, as `gleam/bit_array` does.
+pub fn bit_array_base64_url_decode(encoded: String) -> Result(Bits, Nil) {
+  base64_decode(encoded, True)
+}
+
+fn base64_decode(encoded: String, url: Bool) -> Result(Bits, Nil) {
+  let start = string_offset(encoded)
+  let size = string_byte_size(encoded)
+  let missing = case size % 4 {
+    0 -> 0
+    rest -> 4 - rest
+  }
+  let out = bytes_new({ size + missing } / 4 * 3)
+  let decoder = Base64Decoder(string_bytes(encoded), start + size, out, url)
+  case base64_decode_loop(decoder, start, start + size + missing, 0, 0, 0, 0) {
+    Ok(at) -> Ok(Bits(out, 0, at * 8))
+    Error(Nil) -> Error(Nil)
+  }
+}
+
+/// The bytes of the string to decode, which end at `last`, and the bytes
+/// to which they are decoded.
+type Base64Decoder {
+  Base64Decoder(bytes: Bytes, last: Int, out: Bytes, url: Bool)
+}
+
+/// Decodes the characters from `index` to `end`, which are `=` after
+/// `last`. `group` has the `count` digits of the current group, followed by
+/// `pads` `=`. Returns the number of bytes written.
+fn base64_decode_loop(
+  decoder: Base64Decoder,
+  index: Int,
+  end: Int,
+  at: Int,
+  group: Int,
+  count: Int,
+  pads: Int,
+) -> Result(Int, Nil) {
+  let next = index + 1
+  case index < end {
+    False ->
+      case pads {
+        0 if count == 0 -> Ok(at)
+        0 -> Error(Nil)
+        _ if count + pads == 4 -> {
+          // 2 digits have 1 byte and 4 bits more, 3 digits 2 bytes and 2
+          // bits more.
+          let value = bitwise_shift_right(group, 2 * { 4 - count })
+          Ok(put_big(decoder.out, at, value, count - 1))
+        }
+        _ -> Error(Nil)
+      }
+    True -> {
+      let char = case index < decoder.last {
+        True -> bytes_get(decoder.bytes, index)
+        False -> 61
+      }
+      case char {
+        32 | 9 | 10 | 13 ->
+          base64_decode_loop(decoder, next, end, at, group, count, pads)
+        61 if count >= 2 && count + pads < 4 ->
+          base64_decode_loop(decoder, next, end, at, group, count, pads + 1)
+        61 -> Error(Nil)
+        _ ->
+          case base64_value(char, decoder.url) {
+            -1 -> Error(Nil)
+            _ if pads > 0 -> Error(Nil)
+            value -> {
+              let group = bitwise_or(bitwise_shift_left(group, 6), value)
+              case count {
+                3 -> {
+                  let at = put_big(decoder.out, at, group, 3)
+                  base64_decode_loop(decoder, next, end, at, 0, 0, 0)
+                }
+                _ ->
+                  base64_decode_loop(
+                    decoder,
+                    next,
+                    end,
+                    at,
+                    group,
+                    count + 1,
+                    0,
+                  )
+              }
+            }
+          }
+      }
+    }
+  }
+}
+
+/// The value of a base 64 digit, or -1. `url` also accepts `-` and `_`.
+fn base64_value(char: Int, url: Bool) -> Int {
+  case char {
+    _ if char >= 65 && char <= 90 -> char - 65
+    _ if char >= 97 && char <= 122 -> char - 71
+    _ if char >= 48 && char <= 57 -> char + 4
+    43 -> 62
+    47 -> 63
+    45 if url -> 62
+    95 if url -> 63
+    _ -> -1
+  }
+}
+
+/// Writes the `count` low bytes of `value` at `at`, the most significant
+/// first, and returns the index after them.
+fn put_big(out: Bytes, at: Int, value: Int, count: Int) -> Int {
+  case count {
+    0 -> at
+    _ -> {
+      let shift = 8 * { count - 1 }
+      let byte = bitwise_and(bitwise_shift_right(value, shift), 0xFF)
+      let _ = bytes_set(out, at, byte)
+      put_big(out, at + 1, value, count - 1)
+    }
+  }
+}
+
+/// The digits are uppercase.
+pub fn bit_array_base16_encode(bits: Bits) -> String {
+  let bits = aligned(bit_array_pad_to_bytes(bits))
+  let start = bitwise_shift_right(bits.start, 3)
+  let size = bitwise_shift_right(bits.end - bits.start, 3)
+  let out = bytes_new(2 * size)
+  let _ = base16_encode_loop(bits.bytes, start, out, 0, 2 * size)
+  bytes_to_string(out, 0, 2 * size)
+}
+
+fn base16_encode_loop(
+  bytes: Bytes,
+  index: Int,
+  out: Bytes,
+  at: Int,
+  end: Int,
+) -> Nil {
+  case at < end {
+    False -> Nil
+    True -> {
+      let byte = bytes_get(bytes, index)
+      let _ = bytes_set(out, at, hex_digit(bitwise_shift_right(byte, 4)))
+      let _ = bytes_set(out, at + 1, hex_digit(bitwise_and(byte, 15)))
+      base16_encode_loop(bytes, index + 1, out, at + 2, end)
+    }
+  }
+}
+
+fn hex_digit(value: Int) -> Int {
+  case value < 10 {
+    True -> value + 48
+    False -> value + 55
+  }
+}
+
+/// Accepts uppercase and lowercase digits.
+pub fn bit_array_base16_decode(encoded: String) -> Result(Bits, Nil) {
+  let size = string_byte_size(encoded)
+  case bitwise_and(size, 1) {
+    0 -> {
+      let start = string_offset(encoded)
+      let out = bytes_new(size / 2)
+      let bytes = string_bytes(encoded)
+      case base16_decode_loop(bytes, start, start + size, out, 0) {
+        True -> Ok(Bits(out, 0, size * 4))
+        False -> Error(Nil)
+      }
+    }
+    _ -> Error(Nil)
+  }
+}
+
+fn base16_decode_loop(
+  bytes: Bytes,
+  index: Int,
+  end: Int,
+  out: Bytes,
+  at: Int,
+) -> Bool {
+  case index < end {
+    False -> True
+    True -> {
+      let high = hex_value(bytes_get(bytes, index))
+      let low = hex_value(bytes_get(bytes, index + 1))
+      case high >= 0 && low >= 0 {
+        True -> {
+          let _ =
+            bytes_set(out, at, bitwise_or(bitwise_shift_left(high, 4), low))
+          base16_decode_loop(bytes, index + 2, end, out, at + 1)
+        }
+        False -> False
+      }
+    }
+  }
+}
+
+/// The value of a base 16 digit, or -1.
+fn hex_value(char: Int) -> Int {
+  case char {
+    _ if char >= 48 && char <= 57 -> char - 48
+    _ if char >= 65 && char <= 70 -> char - 55
+    _ if char >= 97 && char <= 102 -> char - 87
+    _ -> -1
+  }
+}
+
 // -- Equality, hash and inspect -----------------------------------------------
 
 pub fn bit_array_equal(a: Bits, b: Bits) -> Bool {

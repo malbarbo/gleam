@@ -23,7 +23,7 @@ mod io;
 
 #[cfg(target_arch = "wasm32")]
 mod exports {
-    use crate::abi::{Out, bits_arg, bytes_arg, list_arg, str_arg};
+    use crate::abi::{Out, bytes_arg, list_arg, str_arg};
     use crate::codec;
     use crate::io::{self, STDERR, STDOUT};
     use crate::num::{self, FLOAT_BUF_LEN, Xoshiro256};
@@ -439,59 +439,6 @@ mod exports {
     pub unsafe extern "C" fn string_from_utf_codepoints(ptr: i32, count: i32, ret: i32) {
         let codepoints = unsafe { list_arg(ptr, count, 8) }.map(|p| unsafe { *(p as *const u32) });
         Out::new(ret).string(text::from_utf_codepoints(codepoints))
-    }
-
-    // bit_array
-
-    unsafe fn base64_encode(ptr: i32, len: i32, bits: i32, padding: i32, url: bool, ret: i32) {
-        let b = unsafe { bits_arg(ptr, len, bits) };
-        Out::new(ret).string(codec::base64_encode(b, padding != 0, url))
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bit_array_base64_encode(
-        ptr: i32,
-        len: i32,
-        bits: i32,
-        padding: i32,
-        ret: i32,
-    ) {
-        unsafe { base64_encode(ptr, len, bits, padding, false, ret) }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bit_array_base64_url_encode(
-        ptr: i32,
-        len: i32,
-        bits: i32,
-        padding: i32,
-        ret: i32,
-    ) {
-        unsafe { base64_encode(ptr, len, bits, padding, true, ret) }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bit_array_base64_decode(ptr: i32, len: i32, ret: i32) {
-        let s = unsafe { str_arg(ptr, len) };
-        Out::new(ret).result(codec::base64_decode(s, false), Out::bit_array)
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bit_array_base64_url_decode(ptr: i32, len: i32, ret: i32) {
-        let s = unsafe { str_arg(ptr, len) };
-        Out::new(ret).result(codec::base64_decode(s, true), Out::bit_array)
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bit_array_base16_encode(ptr: i32, len: i32, bits: i32, ret: i32) {
-        let b = unsafe { bits_arg(ptr, len, bits) };
-        Out::new(ret).string(codec::base16_encode(b))
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bit_array_base16_decode(ptr: i32, len: i32, ret: i32) {
-        let s = unsafe { str_arg(ptr, len) };
-        Out::new(ret).result(codec::base16_decode(s), Out::bit_array)
     }
 
     // uri

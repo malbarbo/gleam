@@ -5,7 +5,6 @@
 //! the layout in `ABI.md`. Every value is 8-aligned and its size is a
 //! multiple of 8; pointers and lengths are `u32`.
 
-use crate::codec::Bits;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::alloc::Layout;
@@ -24,13 +23,6 @@ pub unsafe fn bytes_arg<'a>(ptr: i32, len: i32) -> &'a [u8] {
         return &[];
     }
     unsafe { slice::from_raw_parts(ptr as usize as *const u8, len as u32 as usize) }
-}
-
-/// # Safety
-/// `ptr` and `byte_len` must describe bytes in linear memory holding at least
-/// `bit_len` bits.
-pub unsafe fn bits_arg<'a>(ptr: i32, byte_len: i32, bit_len: i32) -> Bits<'a> {
-    Bits::new(unsafe { bytes_arg(ptr, byte_len) }, bit_len as u32 as usize)
 }
 
 /// The elements of a list, each `size` bytes.
@@ -79,12 +71,6 @@ impl Out {
     /// A `String` owning `s`; its bytes stay in the arena until released.
     pub fn string(self, s: String) {
         self.str(s.leak());
-    }
-
-    pub fn bit_array(self, bytes: Vec<u8>) {
-        let len = bytes.len();
-        self.ptr_len(bytes.leak().as_ptr(), len);
-        self.at(8).u32((len * 8) as u32);
     }
 
     /// A `List` of `items`, each written by `write` into `size` bytes.

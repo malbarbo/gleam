@@ -44,6 +44,24 @@ pub fn starts_with(x: BitArray, prefix: BitArray) -> Bool
 @external(webassembly, "builtins", "bit_array_to_int_and_size")
 pub fn to_int_and_size(x: BitArray) -> #(Int, Int)
 
+@external(webassembly, "builtins", "bit_array_base64_encode")
+pub fn base64_encode(x: BitArray, padding: Bool) -> String
+
+@external(webassembly, "builtins", "bit_array_base64_decode")
+pub fn base64_decode(encoded: String) -> Result(BitArray, Nil)
+
+@external(webassembly, "builtins", "bit_array_base64_url_encode")
+pub fn base64_url_encode(x: BitArray, padding: Bool) -> String
+
+@external(webassembly, "builtins", "bit_array_base64_url_decode")
+pub fn base64_url_decode(encoded: String) -> Result(BitArray, Nil)
+
+@external(webassembly, "builtins", "bit_array_base16_encode")
+pub fn base16_encode(x: BitArray) -> String
+
+@external(webassembly, "builtins", "bit_array_base16_decode")
+pub fn base16_decode(encoded: String) -> Result(BitArray, Nil)
+
 @external(webassembly, "builtins", "_inspect")
 pub fn show(value: a) -> String
 
@@ -278,6 +296,77 @@ pub fn main() {
   let assert False = bit_array.starts_with(<<1, 2>>, <<1:7>>)
   let assert #(258, 16) = bit_array.to_int_and_size(<<1, 2>>)
   let assert #(5, 3) = bit_array.to_int_and_size(<<5:3>>)
+  Nil
+}
+"#);
+}
+
+/// The results of Erlang and JavaScript.
+#[test]
+fn base64_and_base16() {
+    let _ = run(r#"
+import bit_array
+
+pub fn main() {
+  let assert "" = bit_array.base64_encode(<<>>, True)
+  let assert "QQ==" = bit_array.base64_encode(<<"A">>, True)
+  let assert "QQ" = bit_array.base64_encode(<<"A">>, False)
+  let assert "QUI=" = bit_array.base64_encode(<<"AB">>, True)
+  let assert "QUI" = bit_array.base64_encode(<<"AB">>, False)
+  let assert "QUJD" = bit_array.base64_encode(<<"ABC">>, False)
+  let assert "QUJDRA==" = bit_array.base64_encode(<<"ABCD">>, True)
+  let assert "//79/Ps=" = bit_array.base64_encode(<<255, 254, 253, 252, 251>>, True)
+  let assert "__79_Ps" = bit_array.base64_url_encode(<<255, 254, 253, 252, 251>>, False)
+  let assert "-_8=" = bit_array.base64_url_encode(<<251, 255>>, True)
+  // The last byte is padded with zeros.
+  let assert "gA==" = bit_array.base64_encode(<<1:1>>, True)
+  let assert "v+g=" = bit_array.base64_encode(<<5:3, 255, 1:2>>, True)
+  let assert <<_:3, rest:bits>> = <<1:3, "hello", 0:5>>
+  let assert "aGVsbG8A" = bit_array.base64_encode(rest, True)
+  let assert "68656C6C6F00" = bit_array.base16_encode(rest)
+  let assert "" = bit_array.base16_encode(<<>>)
+  let assert "FBFF" = bit_array.base16_encode(<<251, 255>>)
+  let assert "FFE0" = bit_array.base16_encode(<<255, 7:3>>)
+
+  let assert Ok(<<>>) = bit_array.base64_decode("")
+  let assert Ok(<<"A">>) = bit_array.base64_decode("QQ==")
+  let assert Ok(<<"A">>) = bit_array.base64_decode("QR==")
+  let assert Ok(<<"AB">>) = bit_array.base64_decode("QUJ=")
+  let assert Ok(<<"ABC">>) = bit_array.base64_decode("QUJD")
+  let assert Ok(<<"AB">>) = bit_array.base64_decode("QUJ")
+  let assert Ok(<<"hello world">>) = bit_array.base64_decode("aGVsbG8gd29ybGQ")
+  let assert Ok(<<251>>) = bit_array.base64_decode("+/==")
+  let assert Error(Nil) = bit_array.base64_decode("-_==")
+  let assert Ok(<<251>>) = bit_array.base64_url_decode("-_==")
+  let assert Ok(<<251>>) = bit_array.base64_url_decode("+/==")
+  let assert Ok(<<255, 254, 253, 252, 251>>) =
+    bit_array.base64_url_decode("__79/Ps")
+  // Spaces, tabs and line breaks are skipped, but the missing `=` are
+  // counted with them.
+  let assert Ok(<<"ABC">>) = bit_array.base64_decode("QU JD\n\n\n")
+  let assert Ok(<<"A">>) = bit_array.base64_decode("QQ=  =\r\n")
+  let assert Ok(<<"ABCA">>) = bit_array.base64_decode("QUJD\nQQ==\n\n\n")
+  let assert Error(Nil) = bit_array.base64_decode("QQ== ")
+  let assert Error(Nil) = bit_array.base64_decode("Q Q")
+  let assert Error(Nil) = bit_array.base64_decode("QQ =")
+  let assert Error(Nil) = bit_array.base64_decode("QQ\u{C}==")
+  let assert Error(Nil) = bit_array.base64_decode("Q")
+  let assert Error(Nil) = bit_array.base64_decode("Q===")
+  let assert Error(Nil) = bit_array.base64_decode("====")
+  let assert Error(Nil) = bit_array.base64_decode("=QQ=")
+  let assert Error(Nil) = bit_array.base64_decode("QQ=A")
+  let assert Error(Nil) = bit_array.base64_decode("QQ==QQ==")
+  let assert Error(Nil) = bit_array.base64_decode("ab$d")
+  let assert Error(Nil) = bit_array.base64_decode("é===")
+
+  let assert Ok(<<>>) = bit_array.base16_decode("")
+  let assert Ok(<<10>>) = bit_array.base16_decode("0a")
+  let assert Ok(<<0, 255, 16>>) = bit_array.base16_decode("00ff10")
+  let assert Ok(<<171, 205, 239>>) = bit_array.base16_decode("ABCDEF")
+  let assert Error(Nil) = bit_array.base16_decode("a")
+  let assert Error(Nil) = bit_array.base16_decode("0g")
+  let assert Error(Nil) = bit_array.base16_decode(" 0")
+  let assert Error(Nil) = bit_array.base16_decode("é0")
   Nil
 }
 "#);
