@@ -14,10 +14,11 @@ use crate::{
         TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr, TypedFunction, TypedPattern,
         TypedRecordConstructor, TypedStatement,
     },
-    type_::{self, Type, TypeVar},
+    type_::{Type, TypeVar},
     webassembly::{
         LocalFunction,
         captures::{Reference, Variables},
+        never_type,
     },
 };
 use src_span::SrcSpan;
@@ -338,7 +339,7 @@ impl Monomorphizer {
             if let Some(to) = self.map.get(&id) {
                 to.clone()
             } else {
-                Monomorphizer::with_bound(old, &type_::nil()).type_(old)
+                Monomorphizer::with_bound(old, &never_type()).type_(old)
             }
         } else if let Some(type_) = old.list_type() {
             Type::list(self.type_(&type_)).into()

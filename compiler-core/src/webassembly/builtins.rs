@@ -412,9 +412,8 @@ impl<'a> Generator<'a> {
             constructor_name.clone(),
         );
 
-        let num_fields = params.len() as u32;
         self.get_function_builtin(builtin, |s| {
-            s.code_variant_constructor_for(return_, variant, num_fields)
+            s.code_variant_constructor_for(return_, variant)
         })
     }
 
@@ -640,6 +639,9 @@ impl<'a> Generator<'a> {
         } else if let Some(types) = type_.tuple_types() {
             let type_index = self.tuple_type_index(types.clone());
             self.code_composite_or_union_eq(type_index, None, types, None)
+        } else if is_never_type(type_) {
+            let val_type = self.val_type(type_);
+            self.code_never(&[val_type, val_type], &[BOOL_VALTYPE])
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             match custom_type {
                 CustomType::Struct {
@@ -667,6 +669,17 @@ impl<'a> Generator<'a> {
         } else {
             panic!("unexpected type should not reach equality code generation")
         }
+    }
+
+    /// A function on values of `never_type`, which do not exist.
+    pub(super) fn code_never(&mut self, params: &[ValType], results: &[ValType]) -> FunctionId {
+        let params = params
+            .iter()
+            .map(|val_type| self.wasm_local(*val_type))
+            .collect_vec();
+        let mut function = Function::new(self, "_never", &params, results);
+        let _ = function.extend_instructions(self).unreachable().end();
+        function.finish(self)
     }
 
     fn code_string_eq(&mut self) -> FunctionId {
@@ -891,7 +904,10 @@ impl<'a> Generator<'a> {
         custom_type: &TypedCustomType,
         args: &[Arc<Type>],
     ) -> FunctionId {
-        let composite_vt = if Self::null_variant_tag(custom_type).is_some() {
+        let layout = self.union_layout(type_);
+        let null_tag = layout.null_tag;
+        let tagged = layout.tagged;
+        let composite_vt = if null_tag.is_some() {
             self.val_type_ref_nullable(supertype_index)
         } else {
             self.val_type_ref(supertype_index)
@@ -902,8 +918,6 @@ impl<'a> Generator<'a> {
         // locals
         let tag = self.wasm_local(ValType::I32);
         // return Bool
-        let null_tag = Self::null_variant_tag(custom_type);
-        let tagged = self.union_layout(type_).tagged;
 
         // Pre-compute variant eq pairs for non-null constructors
         let mut variant_eqs: Vec<Option<(TypeId, FunctionId)>> =
@@ -993,12 +1007,7 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    fn code_variant_constructor_for(
-        &mut self,
-        return_: Arc<Type>,
-        variant: Variant,
-        num_fields: u32,
-    ) -> FunctionId {
+    fn code_variant_constructor_for(&mut self, return_: Arc<Type>, variant: Variant) -> FunctionId {
         let (_, _, args) = return_
             .named_type_information()
             .expect("named type information");
@@ -1029,30 +1038,20 @@ impl<'a> Generator<'a> {
                 (type_index, tag, types)
             }
         };
-        let null_supertype = if num_fields == 0 {
+        let (null_supertype, field_mapping) =
             if let CustomType::Union { custom_type, .. } = &variant.custom_type {
-                if Self::null_variant_tag(custom_type).is_some() {
-                    Some(self.mono_union_supertype_index(&return_, custom_type))
-                } else {
-                    None
-                }
+                let layout = self.union_layout(&return_);
+                let variant_index = custom_type
+                    .constructors
+                    .iter()
+                    .position(|c| c.name == variant.constructor.name)
+                    .expect("constructor in union");
+                let null_supertype = (layout.null_tag == Some(variant_index))
+                    .then(|| self.mono_union_supertype_index(&return_, custom_type));
+                (null_supertype, layout.fields(variant_index).to_vec())
             } else {
-                None
-            }
-        } else {
-            None
-        };
-        let field_mapping = if let CustomType::Union { custom_type, .. } = &variant.custom_type {
-            let layout = self.union_layout(&return_);
-            let variant_index = custom_type
-                .constructors
-                .iter()
-                .position(|c| c.name == variant.constructor.name)
-                .expect("constructor in union");
-            layout.fields(variant_index).to_vec()
-        } else {
-            self.field_indices(&types)
-        };
+                (None, self.field_indices(&types))
+            };
         let result_type = self.val_type(&return_);
         // Params in Gleam (declaration) order — this is the function signature.
         let param_vts = self.val_types(types);
@@ -1316,7 +1315,7 @@ impl<'a> Generator<'a> {
             )
         } else if type_.fn_types().is_some() {
             BuiltinFunction::FunctionRepr(self.val_type(type_), self.type_pretty_name(type_))
-        } else if self.custom_type(type_).is_some() {
+        } else if is_never_type(type_) || self.custom_type(type_).is_some() {
             BuiltinFunction::CustomTypeRepr(
                 self.val_type(type_),
                 self.type_pretty_name(type_),
@@ -1697,6 +1696,9 @@ impl<'a> Generator<'a> {
             self.code_tuple_repr(&types)
         } else if type_.fn_types().is_some() {
             self.code_function_repr(type_)
+        } else if is_never_type(type_) {
+            let val_type = self.val_type(type_);
+            self.code_never(&[val_type, ValType::I32], &[ValType::I32])
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             self.code_custom_type_repr(type_, &custom_type, &args)
         } else if type_.is_bit_array() {
@@ -2110,20 +2112,33 @@ impl<'a> Generator<'a> {
             CustomType::Union { custom_type, .. } => {
                 let custom_type = custom_type.clone();
                 let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
-                let null_tag = Self::null_variant_tag(&custom_type);
+                let layout = self.union_layout(type_);
+                let null_tag = layout.null_tag;
+                let tagged = layout.tagged;
 
-                let null_name_and_index = if let Some(null_idx) = null_tag {
-                    let null_name = custom_type
+                // The text of the null variant, whose fields have unit types,
+                // is a constant.
+                let null_name_and_index = null_tag.map(|null_tag| {
+                    let constructor = custom_type
                         .constructors
-                        .get(null_idx)
-                        .expect("null variant for union type")
-                        .name
-                        .clone();
-                    let _ = null_idx;
-                    Some(self.string_index(&null_name))
-                } else {
-                    None
-                };
+                        .get(null_tag)
+                        .expect("null variant for union type");
+                    let mut text = constructor.name.clone();
+                    let types = Monomorphizer::variant_constructor(&custom_type, constructor, args);
+                    if !types.is_empty() {
+                        let mut values = types.iter().map(|type_| {
+                            let Some((CustomType::Enum { values }, _)) = self.custom_type(type_)
+                            else {
+                                panic!("unit type expected")
+                            };
+                            values.first().expect("unit value").clone()
+                        });
+                        text += "(";
+                        text += values.join(", ").as_str();
+                        text += ")";
+                    }
+                    self.string_index(&text)
+                });
 
                 let mut variant_reprs: Vec<Option<(TypeId, FunctionId)>> =
                     Vec::with_capacity(custom_type.constructors.len());
@@ -2137,7 +2152,6 @@ impl<'a> Generator<'a> {
                     }
                 }
 
-                let tagged = self.union_layout(type_).tagged;
                 let tag_local = self.wasm_local(ValType::I32);
                 let mut function =
                     Function::new(self, "_repr_union", &[value, ptr], &[ValType::I32]);

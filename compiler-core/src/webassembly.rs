@@ -525,21 +525,6 @@ enum CustomType {
     Array,
 }
 
-impl CustomType {
-    fn is_ref_non_null(&self) -> bool {
-        match self {
-            CustomType::Struct { .. } | CustomType::Array => true,
-            CustomType::Union { custom_type, .. } => {
-                Generator::null_variant_tag(custom_type).is_none()
-            }
-            CustomType::External { .. } | CustomType::Enum { .. } => false,
-            CustomType::Runtime { .. } => {
-                panic!("runtime types should be replaced by their representation")
-            }
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 struct Variant {
     custom_type: CustomType,
@@ -597,6 +582,19 @@ fn closure_name(info: &LocalFunction) -> EcoString {
     hidden_name(info, "#closure")
 }
 
+/// The type of the type variables that are not bound to a type, which has no
+/// values. It is not a unit type, so the representation of a type with such a
+/// variable is the one of the types where it is bound (see
+/// `UnionFieldLayout`): a value of `Result(a, Nil)`, which can only be an
+/// `Error(Nil)`, can be used where `a` is bound.
+fn never_type() -> Arc<Type> {
+    type_::named("", "gleam@webassembly", "Never", Publicity::Public, vec![])
+}
+
+fn is_never_type(type_: &Type) -> bool {
+    matches!(type_, Type::Named { module, name, .. } if module == "gleam@webassembly" && name == "Never")
+}
+
 /// Maps Gleam field positions to wasm struct field indices for an
 /// instantiation of a union type. Shared fields come first (after the tag,
 /// when there is one), then variant-specific fields. A field of a unit type is
@@ -607,6 +605,9 @@ struct UnionFieldLayout {
     /// A union whose variants are a null one and one other has no tag, since
     /// a value that is not null can only be of the other variant.
     tagged: bool,
+    /// The index of the variant represented by null, the only one without
+    /// stored fields, when there is one.
+    null_tag: Option<usize>,
     shared_count: usize,
     field_indices: Vec<Vec<Option<u32>>>,
 }
@@ -665,8 +666,12 @@ impl UnionFieldLayout {
         }
 
         let shared_count = shared_positions.len();
-        let tagged =
-            !(Generator::null_variant_tag(custom_type).is_some() && constructors.len() == 2);
+        let null_tag = units
+            .iter()
+            .positions(|units| units.iter().all(|unit| *unit))
+            .exactly_one()
+            .ok();
+        let tagged = !(null_tag.is_some() && constructors.len() == 2);
         let first_field = u32::from(tagged);
 
         let field_indices = units
@@ -694,6 +699,7 @@ impl UnionFieldLayout {
 
         UnionFieldLayout {
             tagged,
+            null_tag,
             shared_count,
             field_indices,
         }
@@ -1177,22 +1183,6 @@ impl<'a> Generator<'a> {
             BuiltinFunction::DynamicHash(int, _) => (vec![ANYREF], vec![*int]),
             BuiltinFunction::DynamicInspect(string, _) => (vec![ANYREF], vec![*string]),
             BuiltinFunction::Array { params, result, .. } => (params.clone(), vec![*result]),
-        }
-    }
-
-    fn null_variant_tag(custom_type: &TypedCustomType) -> Option<usize> {
-        let zero_arg_count = custom_type
-            .constructors
-            .iter()
-            .filter(|c| c.arguments.is_empty())
-            .count();
-        if zero_arg_count == 1 {
-            custom_type
-                .constructors
-                .iter()
-                .position(|c| c.arguments.is_empty())
-        } else {
-            None
         }
     }
 
@@ -2059,7 +2049,10 @@ impl<'a> Generator<'a> {
             }
             return ANYREF;
         }
-        if type_.is_utf_codepoint() {
+        if is_never_type(type_) {
+            let type_index = self.struct_type_index("Never".into(), vec![]);
+            self.val_type_ref(type_index)
+        } else if type_.is_utf_codepoint() {
             ValType::I32
         } else if type_.is_int() {
             self.int.val_type()
@@ -2938,7 +2931,7 @@ impl<'a> Generator<'a> {
             }
             CustomType::Union { custom_type, .. } => {
                 let struct_index = self.mono_union_supertype_index(type_, custom_type);
-                if Self::null_variant_tag(custom_type).is_some() {
+                if self.union_layout(type_).null_tag.is_some() {
                     self.val_type_ref_nullable(struct_index)
                 } else {
                     self.composite_val_type(struct_index)
@@ -3124,6 +3117,18 @@ impl<'a> Generator<'a> {
                             .constructors
                             .get(index as usize)
                             .expect("constructor at index");
+                        let layout = self.union_layout(type_);
+                        if layout.null_tag == Some(index as usize) {
+                            let supertype_index =
+                                self.mono_union_supertype_index(type_, &custom_type);
+                            return self.add_const(
+                                const_name,
+                                self.val_type_ref_nullable(supertype_index),
+                                const_expr_ref_null(supertype_index),
+                                export,
+                                false,
+                            );
+                        }
                         let (_, type_index, _) =
                             self.mono_union_subtype_index(type_, &custom_type, constructor, &args);
                         let val_type = self.val_type_ref_nullable(type_index);
@@ -3134,7 +3139,6 @@ impl<'a> Generator<'a> {
                             export,
                             true,
                         );
-                        let layout = self.union_layout(type_);
                         // The elements go in the order of the struct fields,
                         // where the shared fields come first.
                         let elements = arguments
@@ -4736,13 +4740,16 @@ impl<'a> Generator<'a> {
         if let Some(representation) = self.representation(type_) {
             return self.is_ref_non_null(&representation);
         }
-        type_.is_string() || type_.tuple_types().is_some() || {
-            if let Some((custom_type, _)) = self.custom_type(type_) {
-                custom_type.is_ref_non_null()
-            } else {
-                false
+        type_.is_string()
+            || type_.tuple_types().is_some()
+            || match self.custom_type(type_) {
+                Some((CustomType::Struct { .. } | CustomType::Array, _)) => true,
+                Some((CustomType::Union { .. }, _)) => self.union_layout(type_).null_tag.is_none(),
+                Some((CustomType::External { .. } | CustomType::Enum { .. }, _)) | None => false,
+                Some((CustomType::Runtime { .. }, _)) => {
+                    panic!("runtime types should be replaced by their representation")
+                }
             }
-        }
     }
 
     fn local_function_definition(
@@ -5161,21 +5168,23 @@ impl<'a> Generator<'a> {
                     }
                     CustomType::Union { custom_type, .. } => {
                         let custom_type = custom_type;
-                        let null_tag = Self::null_variant_tag(&custom_type);
                         let (tag, constructor) = custom_type
                             .constructors
                             .iter()
                             .enumerate()
                             .find(|(_, c)| &c.name == name)
                             .expect("constructor at index");
+                        let layout = self.union_layout(type_);
                         let right = locals.for_pattern(pattern);
-                        if null_tag == Some(tag) {
-                            // Null-optimized variant: check ref_is_null
+                        let type_index = if layout.null_tag == Some(tag) {
+                            // The variant is null, its fields, of unit types,
+                            // are not stored.
                             let _ = instructions
                                 .local_tee(right)
                                 .ref_is_null()
                                 .bool_not()
                                 .br_if(fail_target);
+                            self.mono_union_supertype_index(type_, &custom_type)
                         } else {
                             let (supertype_index, type_index, _) = self.mono_union_subtype_index(
                                 type_,
@@ -5183,9 +5192,8 @@ impl<'a> Generator<'a> {
                                 constructor,
                                 &args,
                             );
-                            let layout = self.union_layout(type_);
                             let _ = instructions.local_tee(right);
-                            if null_tag.is_some() {
+                            if layout.null_tag.is_some() {
                                 let _ = instructions.ref_is_null().br_if(fail_target);
                                 if layout.tagged {
                                     let _ = instructions.local_get(right);
@@ -5198,20 +5206,21 @@ impl<'a> Generator<'a> {
                                     .i32_ne()
                                     .br_if(fail_target);
                             }
-                            let fields = Fields::Variant {
-                                value: right,
-                                type_index,
-                                field_indices: layout.fields(tag),
-                            };
-                            let _ = instructions.patterns(
-                                self,
-                                locals,
-                                &mut scope,
-                                fields,
-                                arguments.iter().map(|arg| &arg.value),
-                                fail_target,
-                            );
-                        }
+                            type_index
+                        };
+                        let fields = Fields::Variant {
+                            value: right,
+                            type_index,
+                            field_indices: layout.fields(tag),
+                        };
+                        let _ = instructions.patterns(
+                            self,
+                            locals,
+                            &mut scope,
+                            fields,
+                            arguments.iter().map(|arg| &arg.value),
+                            fail_target,
+                        );
                     }
                     CustomType::External { .. }
                     | CustomType::Runtime { .. }

@@ -43,6 +43,8 @@ pub fn main() {{
     assert inspect([Nil]) != ""
     let e: Result(Int, Nil) = Error(Nil)
     assert inspect(e) != ""
+    let o: Result(Int, Nil) = Ok(8)
+    assert inspect(o) != ""
 }}
 "#
     );
@@ -58,7 +60,9 @@ pub fn main() {{
     // Only the tag, as the shared field `u` is of a unit type.
     assert_eq!(field("Shared"), 1);
     assert_eq!(field("List(Nil).Cons"), 1);
-    assert_eq!(field("Result(Int, Nil).Error"), 1);
+    // `Error(Nil)` is null, and `Ok` has no tag.
+    assert!(!fields.contains_key("Result(Int, Nil).Error"));
+    assert_eq!(field("Result(Int, Nil).Ok"), 1);
 }
 
 #[test]
@@ -158,4 +162,64 @@ fn fail() -> Nil {
 }
 "#,
     );
+}
+
+/// A variant whose fields all have unit types is represented by null when it
+/// is the only one without stored fields.
+#[test]
+fn null_variant_with_unit_fields() {
+    run_ok(&format!(
+        r##"{TYPES}
+@external(webassembly, "builtins", "_hash")
+fn hash(value: a) -> Int
+
+pub type Three(a) {{
+    Empty(x: a, y: Unit)
+    Number(x: a, n: Int)
+    Text(x: a, s: String)
+}}
+
+pub const error: Result(Int, Nil) = Error(Nil)
+
+pub const empty: Three(Nil) = Empty(Nil, Unit)
+
+fn unwrap(result: Result(a, e), default: a) -> a {{
+    case result {{
+        Ok(x) -> x
+        Error(_) -> default
+    }}
+}}
+
+pub fn main() {{
+    let e: Result(Int, Nil) = Error(Nil)
+    let o: Result(Int, Nil) = Ok(1)
+    assert e == error && e != o && o == Ok(1) && o != Ok(2)
+    let assert Error(x) = e
+    assert x == Nil
+    let assert Ok(1) = o
+    assert unwrap(e, 2) == 2 && unwrap(o, 2) == 1
+    assert inspect(e) == "Error(Nil)" && inspect(o) == "Ok(1)"
+    // The same hash as a stored `Error(Nil)`, of a type with two variants
+    // without stored fields, where none is null.
+    let both: Result(Nil, Nil) = Error(Nil)
+    assert hash(e) == hash(both) && hash(e) != hash(o)
+    assert both != Ok(Nil) && inspect(both) == "Error(Nil)"
+
+    let three: List(Three(Nil)) = [Empty(Nil, Unit), Number(Nil, 3), Text(Nil, "t")]
+    assert three == [empty, Number(Nil, 3), Text(Nil, "t")]
+    let assert [Empty(x: a, y: b), Number(n: n, ..), Text(s: s, ..)] = three
+    assert a == Nil && b == Unit && n == 3 && s == "t"
+    let assert [first, ..] = three
+    assert first.x == Nil
+    case first {{
+        Empty(..) as em -> {{
+            assert em.y == Unit
+        }}
+        Number(..) | Text(..) -> panic
+    }}
+    assert inspect(three) == "[Empty(Nil, Unit), Number(Nil, 3), Text(Nil, \"t\")]"
+    assert hash(empty) == hash(Empty(Nil, Unit))
+}}
+"##
+    ));
 }

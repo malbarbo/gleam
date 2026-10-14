@@ -212,6 +212,9 @@ impl<'a> Generator<'a> {
         } else if let Some(types) = type_.tuple_types() {
             let type_index = self.tuple_type_index(types.clone());
             self.code_composite_hash(type_index, types)
+        } else if is_never_type(type_) {
+            let val_type = self.val_type(type_);
+            self.code_never(&[val_type], &[ValType::I32])
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             match custom_type {
                 CustomType::Struct {
@@ -363,7 +366,8 @@ impl<'a> Generator<'a> {
         let Some((CustomType::Union { custom_type, .. }, args)) = self.custom_type(type_) else {
             panic!("union type expected")
         };
-        let null_tag = Self::null_variant_tag(&custom_type);
+        let layout = self.union_layout(type_);
+        let null_tag = layout.null_tag;
         let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
         let union_vt = self.val_type(type_);
         // params
@@ -371,7 +375,6 @@ impl<'a> Generator<'a> {
         let h = self.wasm_local(ValType::I32);
         // locals
         let tag = self.wasm_local(ValType::I32);
-        let layout = self.union_layout(type_);
         let mut variant_hashes: Vec<Option<(TypeId, FunctionId)>> =
             Vec::with_capacity(custom_type.constructors.len());
         for (i, constructor) in custom_type.constructors.iter().enumerate() {
@@ -393,17 +396,33 @@ impl<'a> Generator<'a> {
         let mut function = Function::new(self, "_hash_into_union", &[value, h], &[ValType::I32]);
         let mut instructions = function.extend_instructions(self);
         if let Some(null_tag) = null_tag {
+            // The fields of the null variant, of unit types, have the value 0.
+            let constructor = custom_type
+                .constructors
+                .get(null_tag)
+                .expect("null variant for union type");
+            let hashes = Monomorphizer::variant_constructor(&custom_type, constructor, &args)
+                .iter()
+                .map(|type_| self.function_hash(type_))
+                .collect_vec();
             let _ = instructions.local_get(value).ref_is_null().if_(
                 InstrSeqType::Simple(None),
                 |body| {
-                    // (h ^ (SEED ^ tag)) * MULTIPLIER
+                    // h = (h ^ (SEED ^ tag)) * MULTIPLIER
                     let _ = body
                         .local_get(h)
                         .i32_const(SEED ^ null_tag as i32)
                         .i32_xor()
                         .i32_const(MULTIPLIER)
                         .i32_mul()
-                        .return_();
+                        .local_set(h);
+                    for hash in hashes {
+                        // h = (h ^ hash(0)) * MULTIPLIER
+                        let _ = body.local_get(h).i32_const(0);
+                        self.hash_instructions(body, hash);
+                        let _ = body.i32_xor().i32_const(MULTIPLIER).i32_mul().local_set(h);
+                    }
+                    let _ = body.local_get(h).return_();
                 },
             );
         }
