@@ -64,10 +64,8 @@ pub fn bit_array_extend(bits: Bits, size: Int) -> Bits {
       Bits(bits.bytes, bits.start, end, bits.written)
     }
     False -> {
-      let length = bits.end - bits.start
-      let bytes = bytes_new(byte_count(length + size) * 2)
-      let _ = copy_bits(bytes, 0, bits.bytes, bits.start, length)
-      bit_array_from_bytes(bytes, length + size)
+      let size = bits.end - bits.start + size
+      copy(bits, size, byte_count(size) * 2)
     }
   }
 }
@@ -109,9 +107,7 @@ pub fn bit_array_pad_to_bytes(bits: Bits) -> Bits {
     0 -> bits
     _ -> {
       let count = byte_count(size)
-      let bytes = bytes_new(count)
-      let _ = copy_bits(bytes, 0, bits.bytes, bits.start, size)
-      bit_array_from_bytes(bytes, count * 8)
+      copy(bits, count * 8, count)
     }
   }
 }
@@ -122,11 +118,17 @@ fn aligned(bits: Bits) -> Bits {
     0 -> bits
     _ -> {
       let size = bits.end - bits.start
-      let bytes = bytes_new(byte_count(size))
-      let _ = copy_bits(bytes, 0, bits.bytes, bits.start, size)
-      bit_array_from_bytes(bytes, size)
+      copy(bits, size, byte_count(size))
     }
   }
+}
+
+/// The bits of `bits` in new bytes of `capacity` bytes, followed by zeros
+/// up to `size` bits.
+fn copy(bits: Bits, size: Int, capacity: Int) -> Bits {
+  let bytes = bytes_new(capacity)
+  let _ = copy_bits(bytes, 0, bits.bytes, bits.start, bits.end - bits.start)
+  bit_array_from_bytes(bytes, size)
 }
 
 // -- Construction from values -------------------------------------------------
@@ -163,30 +165,23 @@ pub fn bit_array_utf8_size(string: String) -> Int {
 }
 
 pub fn bit_array_utf16_size(string: String) -> Int {
-  let start = string_offset(string)
-  unicode_size(
-    string_bytes(string),
-    start,
-    start + string_byte_size(string),
-    16,
-    0,
-  )
+  unicode_size(string, 16)
 }
 
 pub fn bit_array_utf32_size(string: String) -> Int {
-  let start = string_offset(string)
-  unicode_size(
-    string_bytes(string),
-    start,
-    start + string_byte_size(string),
-    32,
-    0,
-  )
+  unicode_size(string, 32)
 }
 
-/// The size of the UTF-16 or UTF-32 (`unit` 16 or 32) code units of the
-/// UTF-8 bytes from `index` to `end`.
-fn unicode_size(
+/// The size of the UTF-16 or UTF-32 (`unit` 16 or 32) code units of
+/// `string`.
+fn unicode_size(string: String, unit: Int) -> Int {
+  let start = string_offset(string)
+  let end = start + string_byte_size(string)
+  unicode_size_loop(string_bytes(string), start, end, unit, 0)
+}
+
+/// The size of the code units of the UTF-8 bytes from `index` to `end`.
+fn unicode_size_loop(
   bytes: Bytes,
   index: Int,
   end: Int,
@@ -201,7 +196,7 @@ fn unicode_size(
         True -> 32
         False -> unit
       }
-      unicode_size(bytes, index + utf8_length(byte), end, unit, acc + size)
+      unicode_size_loop(bytes, index + utf8_length(byte), end, unit, acc + size)
     }
   }
 }
@@ -428,9 +423,7 @@ pub fn bit_array_write_utf16(
   string: String,
   little: Bool,
 ) -> Int {
-  let start = string_offset(string)
-  let end = start + string_byte_size(string)
-  write_unicode(bytes, at, string_bytes(string), start, end, 16, little)
+  write_unicode(bytes, at, string, 16, little)
 }
 
 pub fn bit_array_write_utf32(
@@ -439,14 +432,26 @@ pub fn bit_array_write_utf32(
   string: String,
   little: Bool,
 ) -> Int {
+  write_unicode(bytes, at, string, 32, little)
+}
+
+/// Writes the code points of `string` in UTF-16 or UTF-32 (`unit` 16 or
+/// 32).
+fn write_unicode(
+  bytes: Bytes,
+  at: Int,
+  string: String,
+  unit: Int,
+  little: Bool,
+) -> Int {
   let start = string_offset(string)
   let end = start + string_byte_size(string)
-  write_unicode(bytes, at, string_bytes(string), start, end, 32, little)
+  write_unicode_loop(bytes, at, string_bytes(string), start, end, unit, little)
 }
 
 /// Writes the code points of the UTF-8 bytes of `string` from `index` to
-/// `end` in UTF-16 or UTF-32 (`unit` 16 or 32).
-fn write_unicode(
+/// `end`.
+fn write_unicode_loop(
   bytes: Bytes,
   at: Int,
   string: Bytes,
@@ -465,7 +470,7 @@ fn write_unicode(
         16 -> write_utf16(bytes, at, codepoint, little)
         _ -> bit_array_write_int(bytes, at, codepoint, 32, little)
       }
-      write_unicode(bytes, at, string, index + length, end, unit, little)
+      write_unicode_loop(bytes, at, string, index + length, end, unit, little)
     }
   }
 }
@@ -946,9 +951,8 @@ pub fn bit_array_slice(
 }
 
 pub fn bit_array_starts_with(bits: Bits, prefix: Bits) -> Bool {
-  let size = prefix.end - prefix.start
-  size <= bits.end - bits.start
-  && equal_loop(bits.bytes, bits.start, prefix.bytes, prefix.start, size)
+  prefix.end - prefix.start <= bits.end - bits.start
+  && bit_array_match(bits, 0, prefix)
 }
 
 /// The order of `a` and `b` as `-1`, `0` or `1`: byte by byte, and then by
@@ -1020,12 +1024,6 @@ fn bit_or_zero(bytes: Bytes, position: Int, offset: Int) -> Int {
     True -> 0
     False -> bits_at(bytes, position + offset, 1)
   }
-}
-
-/// The integer of the bits of `bits`, unsigned, and their number.
-pub fn bit_array_to_int_and_size(bits: Bits) -> #(Int, Int) {
-  let size = bits.end - bits.start
-  #(to_int_loop(bits.bytes, bits.start, size, 0), size)
 }
 
 fn to_int_loop(bytes: Bytes, position: Int, remaining: Int, acc: Int) -> Int {
@@ -1444,9 +1442,7 @@ fn hex_value(char: Int) -> Int {
 // -- Equality, hash and inspect -----------------------------------------------
 
 pub fn bit_array_equal(a: Bits, b: Bits) -> Bool {
-  let size = a.end - a.start
-  size == b.end - b.start
-  && equal_loop(a.bytes, a.start, b.bytes, b.start, size)
+  a.end - a.start == b.end - b.start && bit_array_match(a, 0, b)
 }
 
 /// Whether the `size` bits of `a` at `i` and of `b` at `j` are equal.

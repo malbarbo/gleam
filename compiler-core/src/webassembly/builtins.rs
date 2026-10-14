@@ -417,7 +417,8 @@ impl<'a> Generator<'a> {
     }
 
     /// Creates the constants of the module. It is generated before the start
-    /// function, which creates the strings and then calls it, because the
+    /// function, which creates the strings and the literal bit arrays and then
+    /// calls it, because the
     /// values it constructs may generate functions that use new strings (see
     /// `get_function_constructor`).
     pub(super) fn function_constants(&mut self) -> FunctionId {

@@ -1001,28 +1001,21 @@ impl FloatType {
         }
     }
 
-    fn to_f32(self, value: &str) -> f32 {
-        value.parse().expect("float literal to fit in f32")
-    }
-
-    fn to_f64(self, value: &str) -> f64 {
-        value.parse().expect("float literal to fit in f64")
-    }
-
-    /// The value of the float literal `value` in this type, as an `f64`.
+    /// The value of the float literal `value` in this type, as an `f64`,
+    /// which is exact for `F32`.
     pub(super) fn literal_value(self, value: &str) -> f64 {
         let value = value.replace("_", "");
         match self {
-            FloatType::F32 => f64::from(self.to_f32(&value)),
-            FloatType::F64 => self.to_f64(&value),
+            FloatType::F32 => f64::from(value.parse::<f32>().expect("float literal to fit in f32")),
+            FloatType::F64 => value.parse().expect("float literal to fit in f64"),
         }
     }
 
     pub(super) fn float_const(&self, value: &str) -> ConstExpr {
-        let value = value.replace("_", "");
+        let value = self.literal_value(value);
         match self {
-            FloatType::F32 => ConstExpr::Value(Value::F32(self.to_f32(&value))),
-            FloatType::F64 => ConstExpr::Value(Value::F64(self.to_f64(&value))),
+            FloatType::F32 => ConstExpr::Value(Value::F32(value as f32)),
+            FloatType::F64 => ConstExpr::Value(Value::F64(value)),
         }
     }
 }
@@ -1055,11 +1048,10 @@ macro_rules! float_unop {
 
 impl<'a, 'b> Instructions<'a, 'b> {
     pub(super) fn float_const(&mut self, value: &str) -> &mut Self {
-        let value = value.replace("_", "");
-        let float = self.float;
-        let _ = match float {
-            FloatType::F32 => self.seq.as_mut().f32_const(float.to_f32(&value)).id(),
-            FloatType::F64 => self.seq.as_mut().f64_const(float.to_f64(&value)).id(),
+        let value = self.float.literal_value(value);
+        let _ = match self.float {
+            FloatType::F32 => self.seq.as_mut().f32_const(value as f32).id(),
+            FloatType::F64 => self.seq.as_mut().f64_const(value).id(),
         };
         self
     }

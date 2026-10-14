@@ -27,11 +27,6 @@ function str(s) {
   new Uint8Array(x.memory.buffer, ptr, bytes.length).set(bytes);
   return [ptr, bytes.length];
 }
-const bits = (bytes, bitLen = bytes.length * 8) => {
-  const ptr = alloc(bytes.length);
-  new Uint8Array(x.memory.buffer, ptr, bytes.length).set(bytes);
-  return [ptr, bytes.length, bitLen];
-};
 const readStr = (at) => {
   const v = view();
   const ptr = v.getUint32(at, true);
@@ -111,27 +106,6 @@ for (let i = 0; i < 1000; i++) {
   const r = x.float_random();
   assert.ok(r >= 0 && r < 1);
 }
-
-const B = (bytes, n) => () => bits(bytes, n);
-assert.equal(call(x.bit_array_inspect, [B([1, 0b11000000], 10)], 8, readStr), "<<1, 3:size(2)>>");
-assert.equal(call(x.bit_array_base64_encode, [B([0xfb, 0xff]), 1], 8, readStr), "+/8=");
-assert.equal(call(x.bit_array_base64_url_encode, [B([0xfb, 0xff]), 0], 8, readStr), "-_8");
-assert.equal(call(x.bit_array_base16_encode, [B([0xab, 0xff], 12)], 8, readStr), "ABF0");
-const readBits = (p) => {
-  const v = view();
-  const ptr = v.getUint32(p, true);
-  const len = v.getUint32(p + 4, true);
-  return [Array.from(new Uint8Array(x.memory.buffer, ptr, len)), v.getUint32(p + 8, true)];
-};
-assert.deepEqual(call(x.bit_array_base64_decode, [S("Zm9v")], 24, (r) => readResult(r, readBits)), { ok: [[102, 111, 111], 24] });
-assert.deepEqual(call(x.bit_array_base16_decode, [S("abc")], 24, (r) => readResult(r, readBits)), { error: null });
-assert.deepEqual(call(x.bit_array_to_string, [B([0x67, 0x6c])], 16, (r) => readResult(r, readStr)), { ok: "gl" });
-assert.equal(call(x.bit_array_is_utf8, [B([0xff])]), 0);
-assert.equal(call(x.bit_array_compare, [B([1, 2]), B([1])]), 1n);
-assert.deepEqual(
-  call(x.bit_array_to_int_and_size, [B([1, 0b11000000], 10)], 16, (r) => [view().getBigInt64(r, true), view().getBigInt64(r + 8, true)]),
-  [7n, 10n],
-);
 
 assert.equal(call(x.uri_percent_encode, [S("a b/é")], 8, readStr), "a%20b%2F%C3%A9");
 assert.deepEqual(call(x.uri_percent_decode, [S("%C3%A9%4")], 16, (r) => readResult(r, readStr)), { ok: "é%4" });

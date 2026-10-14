@@ -326,7 +326,7 @@ enum SegmentSize {
 
 /// The function of the runtime that writes a segment, with whether it is
 /// little endian when it takes it.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Write {
     Int(bool),
     Float(bool),
@@ -382,6 +382,19 @@ impl Write {
             Write::CodepointUtf8 => ("bit_array_write_codepoint_utf8", false),
             Write::CodepointUtf16(_) => ("bit_array_write_codepoint_utf16", false),
             Write::CodepointUtf32(_) => ("bit_array_write_codepoint_utf32", false),
+        }
+    }
+
+    /// The type of the value that it writes, with `bits` for a bit array.
+    fn value_type(self, bits: &Arc<Type>) -> Arc<Type> {
+        match self {
+            Write::Int(_) => type_::int(),
+            Write::Float(_) => type_::float(),
+            Write::Bits => bits.clone(),
+            Write::Utf8 | Write::Utf16(_) | Write::Utf32(_) => type_::string(),
+            Write::CodepointUtf8 | Write::CodepointUtf16(_) | Write::CodepointUtf32(_) => {
+                type_::utf_codepoint()
+            }
         }
     }
 
@@ -462,7 +475,7 @@ impl Generator<'_> {
             evaluate(self, instructions, &segment.value);
             return;
         }
-        let bits_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]);
+        let bits_type = self.bits_type();
         // A first segment that is a whole bit array is extended (see
         // `bit_array_extend`).
         let extended = match segments {
@@ -558,15 +571,7 @@ impl Generator<'_> {
         }
         for part in parts {
             let (name, takes_size) = part.write.function();
-            let value_type = match part.write {
-                Write::Int(_) => type_::int(),
-                Write::Float(_) => type_::float(),
-                Write::Bits => bits_type.clone(),
-                Write::Utf8 | Write::Utf16(_) | Write::Utf32(_) => type_::string(),
-                Write::CodepointUtf8 | Write::CodepointUtf16(_) | Write::CodepointUtf32(_) => {
-                    type_::utf_codepoint()
-                }
-            };
+            let value_type = part.write.value_type(&bits_type);
             let mut arguments = vec![bytes_type.clone(), type_::int(), value_type];
             let _ = match part.value {
                 SegmentValue::Local(local) => instructions.local_get(local),
@@ -574,10 +579,7 @@ impl Generator<'_> {
             };
             if takes_size {
                 arguments.push(type_::int());
-                let _ = match part.size {
-                    SegmentSize::Constant(size) => instructions.int_const(&size.into()),
-                    SegmentSize::Local(local) => instructions.local_get(local),
-                };
+                push_size(instructions, &part.size);
             }
             if let Some(little) = part.write.little() {
                 arguments.push(type_::bool());
@@ -588,12 +590,7 @@ impl Generator<'_> {
         }
         match start {
             None => {
-                let from_bytes = self.runtime_function_id(
-                    BIT_ARRAY_MODULE,
-                    "bit_array_from_bytes",
-                    vec![bytes_type, type_::int()],
-                    bits_type,
-                );
+                let from_bytes = self.bit_array_from_bytes_id();
                 let _ = instructions.call(from_bytes);
             }
             Some((_, result)) => {
@@ -602,9 +599,31 @@ impl Generator<'_> {
         }
     }
 
+    /// The type `Bits` of the runtime, which represents `BitArray`.
+    fn bits_type(&mut self) -> Arc<Type> {
+        self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![])
+    }
+
+    /// The `bit_array_from_bytes` of the runtime.
+    fn bit_array_from_bytes_id(&mut self) -> FunctionId {
+        if let Some(id) = self.bit_array_from_bytes {
+            return id;
+        }
+        let bytes_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bytes", vec![]);
+        let bits_type = self.bits_type();
+        let id = self.runtime_function_id(
+            BIT_ARRAY_MODULE,
+            "bit_array_from_bytes",
+            vec![bytes_type, type_::int()],
+            bits_type,
+        );
+        self.bit_array_from_bytes = Some(id);
+        id
+    }
+
     /// Replaces the `Bits` of the runtime on the stack by its field `index`.
     fn bits_field(&mut self, instructions: &mut Instructions<'_, '_>, index: u64) {
-        let bits_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]);
+        let bits_type = self.bits_type();
         let (
             CustomType::Struct {
                 custom_type,
@@ -660,7 +679,6 @@ impl Generator<'_> {
             },
         };
         let write = Write::of(segment);
-        let bits_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]);
         // The function of the runtime that computes the size from the value
         // and the size option, if any.
         let (name, with_value) = match (write, &size) {
@@ -694,12 +712,8 @@ impl Generator<'_> {
         };
         let mut arguments = vec![];
         if with_value {
-            let value_type = if segment.type_.is_bit_array() {
-                bits_type
-            } else {
-                segment.type_.clone()
-            };
-            arguments.push(value_type);
+            let bits_type = self.bits_type();
+            arguments.push(write.value_type(&bits_type));
             let _ = instructions.local_get(value);
         }
         match size {
@@ -729,16 +743,9 @@ impl Generator<'_> {
         if let Some(id) = self.bit_arrays.get(&bits) {
             return *id;
         }
-        if self.bit_array_from_bytes.is_none() {
-            let bytes = self.runtime_named_type(BIT_ARRAY_MODULE, "Bytes", vec![]);
-            let from_bytes = self.runtime_function_id(
-                BIT_ARRAY_MODULE,
-                "bit_array_from_bytes",
-                vec![bytes, type_::int()],
-                self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]),
-            );
-            self.bit_array_from_bytes = Some(from_bytes);
-        }
+        // Asked now, as the start function is generated after the
+        // functions.
+        let _ = self.bit_array_from_bytes_id();
         let type_index = self.type_index(&type_::bit_array());
         let id = self.wasm_module.globals.add_local(
             self.val_type_ref_nullable(type_index),
@@ -815,7 +822,7 @@ impl Generator<'_> {
         segments: &[TypedPatternBitArraySegment],
         fail_target: InstrSeqId,
     ) -> Scope {
-        let bits_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]);
+        let bits_type = self.bits_type();
         let bit_size = self.runtime_function_id(
             BIT_ARRAY_MODULE,
             "bit_array_bit_size",
@@ -870,7 +877,7 @@ impl Generator<'_> {
     ) {
         let size = SegmentSize::Constant(bits.size);
         self.check_room(instructions, matching, &size, last);
-        let bits_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]);
+        let bits_type = self.bits_type();
         if bits.size == 0 {
             // Nothing to compare.
         } else if bits.size < instructions.int_bits() as u64 {
@@ -902,8 +909,7 @@ impl Generator<'_> {
                 type_::bool(),
             );
             let global = self.bit_array_global(bits);
-            let _ = instructions.local_get(matching.bits);
-            push_position(instructions, &matching.position);
+            push_bits_at(instructions, matching);
             let _ = instructions
                 .global_as_non_null(global)
                 .call(match_)
@@ -985,15 +991,13 @@ impl Generator<'_> {
                 SegmentSize::Local(local)
             }
         };
-        let bits_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]);
+        let bits_type = self.bits_type();
         let arguments = vec![bits_type.clone(), type_::int(), type_::int()];
         if type_.is_float() {
-            let mut arguments = arguments.clone();
-            arguments.push(type_::bool());
             let is_float = self.runtime_function_id(
                 BIT_ARRAY_MODULE,
                 "bit_array_is_float",
-                arguments,
+                [arguments.as_slice(), &[type_::bool()]].concat(),
                 type_::bool(),
             );
             self.push_read_arguments(instructions, matching, &size);
@@ -1004,31 +1008,27 @@ impl Generator<'_> {
                 .br_if(matching.fail_target);
         }
         if !value.is_discard() {
-            let (name, mut arguments, result) = if type_.is_int() {
-                let mut arguments = arguments;
-                arguments.extend([type_::bool(), type_::bool()]);
-                ("bit_array_read_int", arguments, type_::int())
+            // The read function, with its flags after the arguments.
+            let (name, flags, result) = if type_.is_int() {
+                (
+                    "bit_array_read_int",
+                    vec![little, segment.signed()],
+                    type_::int(),
+                )
             } else if type_.is_float() {
-                let mut arguments = arguments;
-                arguments.push(type_::bool());
-                ("bit_array_read_float", arguments, type_::float())
+                ("bit_array_read_float", vec![little], type_::float())
             } else if type_.is_bit_array() {
-                ("bit_array_read_bits", arguments, bits_type)
+                ("bit_array_read_bits", vec![], bits_type)
             } else {
                 panic!("invalid bit array segment type {type_:?}")
             };
             self.push_read_arguments(instructions, matching, &size);
-            if type_.is_int() {
-                let _ = instructions.bool_const(little).bool_const(segment.signed());
-            } else if type_.is_float() {
-                let _ = instructions.bool_const(little);
+            let mut arguments = arguments;
+            for flag in flags {
+                arguments.push(type_::bool());
+                let _ = instructions.bool_const(flag);
             }
-            let read = self.runtime_function_id(
-                BIT_ARRAY_MODULE,
-                name,
-                std::mem::take(&mut arguments),
-                result,
-            );
+            let read = self.runtime_function_id(BIT_ARRAY_MODULE, name, arguments, result);
             let _ = instructions.call(read);
             if let Pattern::Float { value, .. } = value {
                 // A float is equal to the literal when its bits are, so 0.0
@@ -1066,25 +1066,28 @@ impl Generator<'_> {
         segment: &TypedPatternBitArraySegment,
         last: bool,
     ) -> Scope {
-        let bits_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]);
-        let little = segment.endianness() == Endianness::Little;
-        let (read, size) = if segment.has_utf16_codepoint_option() {
-            (
-                "bit_array_read_codepoint_utf16",
-                Some("bit_array_codepoint_utf16_size"),
-            )
-        } else if segment.has_utf32_codepoint_option() {
-            ("bit_array_read_codepoint_utf32", None)
-        } else {
-            (
+        let bits_type = self.bits_type();
+        let write = Write::of(segment);
+        let (read, size) = match write {
+            Write::CodepointUtf8 => (
                 "bit_array_read_codepoint_utf8",
                 Some("bit_array_codepoint_utf8_size"),
-            )
+            ),
+            Write::CodepointUtf16(_) => (
+                "bit_array_read_codepoint_utf16",
+                Some("bit_array_codepoint_utf16_size"),
+            ),
+            Write::CodepointUtf32(_) => ("bit_array_read_codepoint_utf32", None),
+            Write::Int(_)
+            | Write::Float(_)
+            | Write::Bits
+            | Write::Utf8
+            | Write::Utf16(_)
+            | Write::Utf32(_) => panic!("invalid code point segment {write:?}"),
         };
         let mut arguments = vec![bits_type, type_::int()];
-        let _ = instructions.local_get(matching.bits);
-        push_position(instructions, &matching.position);
-        if read != "bit_array_read_codepoint_utf8" {
+        push_bits_at(instructions, matching);
+        if let Some(little) = write.little() {
             arguments.push(type_::bool());
             let _ = instructions.bool_const(little);
         }
@@ -1237,10 +1240,7 @@ impl Generator<'_> {
             push_position(instructions, &matching.position);
             let _ = instructions.int_sub();
         }
-        let _ = match size {
-            SegmentSize::Constant(size) => instructions.int_const(&(*size).into()),
-            SegmentSize::Local(size) => instructions.local_get(*size),
-        };
+        push_size(instructions, size);
         let _ = if last {
             instructions.int_ne()
         } else {
@@ -1257,12 +1257,8 @@ impl Generator<'_> {
         matching: &Matching,
         size: &SegmentSize,
     ) {
-        let _ = instructions.local_get(matching.bits);
-        push_position(instructions, &matching.position);
-        let _ = match size {
-            SegmentSize::Constant(size) => instructions.int_const(&(*size).into()),
-            SegmentSize::Local(size) => instructions.local_get(*size),
-        };
+        push_bits_at(instructions, matching);
+        push_size(instructions, size);
     }
 
     /// The largest `Int`, which is larger than the number of bits of any bit
@@ -1301,6 +1297,19 @@ impl Generator<'_> {
             }
         }
     }
+}
+
+/// Pushes the bit array of a pattern and the position.
+fn push_bits_at(instructions: &mut Instructions<'_, '_>, matching: &Matching) {
+    let _ = instructions.local_get(matching.bits);
+    push_position(instructions, &matching.position);
+}
+
+fn push_size(instructions: &mut Instructions<'_, '_>, size: &SegmentSize) {
+    let _ = match size {
+        SegmentSize::Constant(size) => instructions.int_const(&(*size).into()),
+        SegmentSize::Local(size) => instructions.local_get(*size),
+    };
 }
 
 fn push_position(instructions: &mut Instructions<'_, '_>, position: &Position) {

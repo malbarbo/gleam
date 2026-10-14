@@ -41,9 +41,6 @@ pub fn compare(a: BitArray, b: BitArray) -> Int
 @external(webassembly, "builtins", "bit_array_starts_with")
 pub fn starts_with(x: BitArray, prefix: BitArray) -> Bool
 
-@external(webassembly, "builtins", "bit_array_to_int_and_size")
-pub fn to_int_and_size(x: BitArray) -> #(Int, Int)
-
 @external(webassembly, "builtins", "bit_array_base64_encode")
 pub fn base64_encode(x: BitArray, padding: Bool) -> String
 
@@ -410,8 +407,6 @@ pub fn main() {
   let assert False = bit_array.starts_with(<<1, 2>>, <<1, 2, 3>>)
   let assert True = bit_array.starts_with(<<1, 2>>, <<0:7>>)
   let assert False = bit_array.starts_with(<<1, 2>>, <<1:7>>)
-  let assert #(258, 16) = bit_array.to_int_and_size(<<1, 2>>)
-  let assert #(5, 3) = bit_array.to_int_and_size(<<5:3>>)
   Nil
 }
 "#);

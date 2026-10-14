@@ -6,7 +6,6 @@
 //! multiple of 8; pointers and lengths are `u32`.
 
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::slice;
 

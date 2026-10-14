@@ -93,11 +93,6 @@ impl Instructions<'_, '_> {
         index: usize,
     ) -> &mut Self {
         use BuiltinFunctionExternal as B;
-        let is_i32 = builtin == B::BytesNew
-            || matches!(builtin, B::BytesGet | B::BytesSet | B::BytesToString) && index > 0
-            || builtin == B::BytesCopy && !matches!(index, 0 | 2)
-            || builtin == B::Float32Byte && index == 1
-            || builtin == B::Float32FromBits;
         match (builtin, index) {
             // The bits of the float, shifted by the second argument.
             (B::Float64Byte, 0) => self.float_to_f64().f64_reinterpret(),
@@ -108,7 +103,11 @@ impl Instructions<'_, '_> {
             // The high and the low 32 bits of the float, joined.
             (B::Float64FromBits, 0) => self.int_to_i64().i64_const(32).i64_shl(),
             (B::Float64FromBits, _) => self.int_to_i64().i64_const(0xFFFF_FFFF).i64_and(),
-            _ if is_i32 => self.int_to_i32(),
+            // Sizes and indices of bytes, and the bits of an `f32`.
+            (B::BytesNew | B::Float32FromBits, _)
+            | (B::BytesGet | B::BytesSet | B::BytesToString, 1..)
+            | (B::BytesCopy, 1 | 3..)
+            | (B::Float32Byte, 1) => self.int_to_i32(),
             _ => self,
         }
     }
