@@ -1009,6 +1009,15 @@ impl FloatType {
         value.parse().expect("float literal to fit in f64")
     }
 
+    /// The value of the float literal `value` in this type, as an `f64`.
+    pub(super) fn literal_value(self, value: &str) -> f64 {
+        let value = value.replace("_", "");
+        match self {
+            FloatType::F32 => f64::from(self.to_f32(&value)),
+            FloatType::F64 => self.to_f64(&value),
+        }
+    }
+
     pub(super) fn float_const(&self, value: &str) -> ConstExpr {
         let value = value.replace("_", "");
         match self {

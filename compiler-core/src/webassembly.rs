@@ -3246,7 +3246,7 @@ impl<'a> Generator<'a> {
                 );
                 // A literal one is the global of its bits, and any other one
                 // is created by the start function.
-                let const_ = match Bits::of_literal(segments) {
+                let const_ = match Bits::of_literal(segments, self.float) {
                     Some(bits) => WasmConst::Global {
                         dest: id.global_id(),
                         src: self.bit_array_global(bits),

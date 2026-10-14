@@ -68,9 +68,13 @@ impl Bits {
     }
 
     /// Pushes `segment` when it is a literal.
-    fn push_literal<V: Literal>(&mut self, segment: &BitArraySegment<V, Arc<Type>>) -> bool {
+    fn push_literal<V: Literal>(
+        &mut self,
+        segment: &BitArraySegment<V, Arc<Type>>,
+        float: FloatType,
+    ) -> bool {
         let (size, length) = (self.size, self.bytes.len());
-        let pushed = self.push_segment(segment).is_some();
+        let pushed = self.push_segment(segment, float).is_some();
         if !pushed {
             self.size = size;
             self.bytes.truncate(length);
@@ -97,21 +101,27 @@ impl Bits {
         }
     }
 
-    /// The bits of `segments`, when they are literals.
+    /// The bits of `segments`, when they are literals, with floats of type
+    /// `float`.
     pub(super) fn of_literal<V: Literal>(
         segments: &[BitArraySegment<V, Arc<Type>>],
+        float: FloatType,
     ) -> Option<Bits> {
         let mut bits = Bits::default();
         for segment in segments {
-            bits.push_segment(segment)?;
+            bits.push_segment(segment, float)?;
         }
         Some(bits)
     }
 
-    fn push_segment<V: Literal>(&mut self, segment: &BitArraySegment<V, Arc<Type>>) -> Option<()> {
+    fn push_segment<V: Literal>(
+        &mut self,
+        segment: &BitArraySegment<V, Arc<Type>>,
+        float: FloatType,
+    ) -> Option<()> {
         let size = match segment.size() {
             Some(size) => {
-                let LiteralValue::Int(size) = size.literal()? else {
+                let LiteralValue::Int(size) = size.literal(float)? else {
                     return None;
                 };
                 Some((size * segment.unit()).to_u64()?)
@@ -120,7 +130,7 @@ impl Bits {
         };
         let endianness = segment.endianness();
         let type_ = &segment.type_;
-        match segment.value.literal()? {
+        match segment.value.literal(float)? {
             LiteralValue::Int(value) if type_.is_int() => {
                 let size = size.unwrap_or(8);
                 // A larger one is written by the runtime.
@@ -189,27 +199,28 @@ pub(super) enum LiteralValue<'a> {
     BitArray(Bits),
 }
 
-/// An expression or a constant that can be a literal of a bit array.
+/// An expression or a constant that can be a literal of a bit array. A
+/// float is its value in `float`, as the program sees it.
 pub(super) trait Literal {
-    fn literal(&self) -> Option<LiteralValue<'_>>;
+    fn literal(&self, float: FloatType) -> Option<LiteralValue<'_>>;
 }
 
 impl Literal for TypedExpr {
-    fn literal(&self) -> Option<LiteralValue<'_>> {
+    fn literal(&self, float: FloatType) -> Option<LiteralValue<'_>> {
         match self {
             TypedExpr::Int { int_value, .. } => Some(LiteralValue::Int(int_value.clone())),
-            TypedExpr::NegateInt { value, .. } => match value.literal()? {
+            TypedExpr::NegateInt { value, .. } => match value.literal(float)? {
                 LiteralValue::Int(value) => Some(LiteralValue::Int(-value)),
                 LiteralValue::Float(_) | LiteralValue::String(_) | LiteralValue::BitArray(_) => {
                     None
                 }
             },
-            TypedExpr::Float { float_value, .. } => Some(LiteralValue::Float(float_value.value())),
+            TypedExpr::Float { value, .. } => Some(LiteralValue::Float(float.literal_value(value))),
             TypedExpr::String { value, .. } => Some(LiteralValue::String(value)),
             TypedExpr::BitArray { segments, .. } => {
-                Bits::of_literal(segments).map(LiteralValue::BitArray)
+                Bits::of_literal(segments, float).map(LiteralValue::BitArray)
             }
-            TypedExpr::Var { constructor, .. } => constant_literal(&constructor.variant),
+            TypedExpr::Var { constructor, .. } => constant_literal(&constructor.variant, float),
             TypedExpr::Block { .. }
             | TypedExpr::Pipeline { .. }
             | TypedExpr::Fn { .. }
@@ -233,17 +244,17 @@ impl Literal for TypedExpr {
 }
 
 impl Literal for TypedConstant {
-    fn literal(&self) -> Option<LiteralValue<'_>> {
+    fn literal(&self, float: FloatType) -> Option<LiteralValue<'_>> {
         match self {
             Constant::Int { int_value, .. } => Some(LiteralValue::Int(int_value.clone())),
-            Constant::Float { float_value, .. } => Some(LiteralValue::Float(float_value.value())),
+            Constant::Float { value, .. } => Some(LiteralValue::Float(float.literal_value(value))),
             Constant::String { value, .. } => Some(LiteralValue::String(value)),
             Constant::BitArray { segments, .. } => {
-                Bits::of_literal(segments).map(LiteralValue::BitArray)
+                Bits::of_literal(segments, float).map(LiteralValue::BitArray)
             }
             Constant::Var { constructor, .. } => constructor
                 .as_ref()
-                .and_then(|constructor| constant_literal(&constructor.variant)),
+                .and_then(|constructor| constant_literal(&constructor.variant, float)),
             Constant::Tuple { .. }
             | Constant::List { .. }
             | Constant::Record { .. }
@@ -256,7 +267,7 @@ impl Literal for TypedConstant {
 }
 
 impl Literal for TypedPattern {
-    fn literal(&self) -> Option<LiteralValue<'_>> {
+    fn literal(&self, _float: FloatType) -> Option<LiteralValue<'_>> {
         match self {
             Pattern::Int { int_value, .. } => Some(LiteralValue::Int(int_value.clone())),
             Pattern::String { value, .. } => Some(LiteralValue::String(value)),
@@ -277,9 +288,12 @@ impl Literal for TypedPattern {
 }
 
 /// The literal of the module constant that `variant` names.
-fn constant_literal(variant: &ValueConstructorVariant) -> Option<LiteralValue<'_>> {
+fn constant_literal(
+    variant: &ValueConstructorVariant,
+    float: FloatType,
+) -> Option<LiteralValue<'_>> {
     if let ValueConstructorVariant::ModuleConstant { literal, .. } = variant {
-        literal.literal()
+        literal.literal(float)
     } else {
         None
     }
@@ -436,7 +450,7 @@ impl Generator<'_> {
         segments: &[BitArraySegment<V, Arc<Type>>],
         evaluate: &mut impl FnMut(&mut Generator<'_>, &mut Instructions<'_, '_>, &V),
     ) {
-        if let Some(bits) = Bits::of_literal(segments) {
+        if let Some(bits) = Bits::of_literal(segments, self.float) {
             let index = self.bit_array_global(bits);
             let _ = instructions.global_as_non_null(index);
             return;
@@ -452,7 +466,7 @@ impl Generator<'_> {
         // A first segment that is a whole bit array is extended (see
         // `bit_array_extend`).
         let extended = match segments {
-            [first, ..] if first.size().is_none() && first.value.literal().is_none() => {
+            [first, ..] if first.size().is_none() && first.value.literal(self.float).is_none() => {
                 first.type_.is_bit_array().then(|| {
                     let val_type = self.val_type(&bits_type);
                     let local = self.wasm_local(val_type);
@@ -466,7 +480,7 @@ impl Generator<'_> {
         let mut literal = Bits::default();
         let mut parts = vec![];
         for segment in segments.iter().skip(usize::from(extended.is_some())) {
-            if literal.push_literal(segment) {
+            if literal.push_literal(segment, self.float) {
                 continue;
             }
             if literal.size > 0 {
@@ -632,7 +646,7 @@ impl Generator<'_> {
         let unit = BigInt::from(segment.unit());
         let size = match segment.size() {
             None => None,
-            Some(size) => match size.literal() {
+            Some(size) => match size.literal(self.float) {
                 Some(LiteralValue::Int(size)) => Some(SizeOption::Literal(size * &unit)),
                 _ => {
                     let local = self.wasm_local(self.int.val_type());
@@ -821,7 +835,7 @@ impl Generator<'_> {
         let mut literal = Bits::default();
         let mut ends_with_literal = true;
         for (index, segment) in segments.iter().enumerate() {
-            if is_literal_segment(segment) && literal.push_literal(segment) {
+            if is_literal_segment(segment) && literal.push_literal(segment, self.float) {
                 ends_with_literal = true;
                 continue;
             }
@@ -925,8 +939,8 @@ impl Generator<'_> {
                 value: pattern.clone(),
                 ..segment.clone()
             };
-            let bits =
-                Bits::of_literal(std::slice::from_ref(&literal)).expect("literal string segment");
+            let bits = Bits::of_literal(std::slice::from_ref(&literal), self.float)
+                .expect("literal string segment");
             self.pattern_literal(instructions, matching, bits, last);
             let local = locals.for_pattern(value);
             let index = self.string_index(string);
@@ -1016,10 +1030,10 @@ impl Generator<'_> {
                 result,
             );
             let _ = instructions.call(read);
-            if let Pattern::Float { float_value, .. } = value {
+            if let Pattern::Float { value, .. } = value {
                 // A float is equal to the literal when its bits are, so 0.0
                 // and -0.0 are different.
-                let value = float_value.value();
+                let value = self.float.literal_value(value);
                 let _ = match self.float {
                     FloatType::F32 => instructions
                         .float_reinterpret()

@@ -767,6 +767,12 @@ pub fn main() {
   let assert "<<63, 248, 0, 0, 0, 0, 0, 0>>" = bit_array.inspect(<<id(1.5):float>>)
   let assert "<<0, 0, 48, 192>>" = bit_array.inspect(<<id(-2.75):32-float-little>>)
   let assert "<<123, 255>>" = bit_array.inspect(<<id(65504.0):16-float>>)
+  // A literal is the same float as a value.
+  let assert True = <<id(1.1):float>> == <<1.1:float>>
+  let assert True = <<id(1.1):float-little>> == <<1.1:float-little>>
+  let assert True = <<id(0.1):32-float>> == <<0.1:32-float>>
+  let assert <<1.1:float>> = <<id(1.1):float>>
+  let assert <<1.1:float>> = <<1.1:float>>
   Nil
 }
 "#,
