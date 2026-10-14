@@ -32,7 +32,6 @@ use runtime::{Hooks, RUNTIME_PACKAGE};
 pub use runtime::{RuntimeModule, modules as runtime_modules};
 use scope::*;
 use specialization::*;
-use stdlib::*;
 
 use ecow::EcoString;
 use indexmap::IndexMap;
@@ -792,6 +791,8 @@ struct Generator<'a> {
     /// constructor, see `get_function_constructor`.
     pending: HashMap<(EcoString, usize), Vec<PendingFunction<'a>>>,
     builtins_external: HashMap<BuiltinFunctionExternal, FunctionId>,
+    /// The builtin of each function of `builtins_external`.
+    builtins_external_ids: HashMap<FunctionId, BuiltinFunctionExternal>,
     /// The functions of builtins-wasm, by name.
     rust_functions: HashMap<EcoString, FunctionId>,
     main: Option<FunctionId>,
@@ -871,6 +872,7 @@ impl<'a> Generator<'a> {
             constructed: HashMap::new(),
             pending: HashMap::new(),
             builtins_external: HashMap::new(),
+            builtins_external_ids: HashMap::new(),
             rust_functions: HashMap::new(),
             main: None,
             error: None,
@@ -4354,9 +4356,24 @@ impl<'a> Generator<'a> {
                     CallTarget::Dynamic => None,
                 };
                 if let Some((id, tail)) = direct {
-                    let _ = instructions
-                        .expressions(self, locals, scope, args)
-                        .call_maybe_tail(id, tail);
+                    let builtin = self.builtins_external_ids.get(&id).copied();
+                    if let Some(
+                        builtin @ (BuiltinFunctionExternal::IntBitwiseShiftLeft
+                        | BuiltinFunctionExternal::IntBitwiseShiftRight),
+                    ) = builtin
+                        && let [x, n] = arguments.as_slice()
+                        && let TypedExpr::Int { int_value, .. } = &n.value
+                    {
+                        let left = builtin == BuiltinFunctionExternal::IntBitwiseShiftLeft;
+                        let _ = instructions
+                            .expression(self, locals, scope, &x.value)
+                            .int_shift_by(left, int_value);
+                        return;
+                    }
+                    let _ = instructions.expressions(self, locals, scope, args);
+                    if !builtin.is_some_and(|builtin| instructions.builtin_inline(builtin)) {
+                        let _ = instructions.call_maybe_tail(id, tail);
+                    }
                 } else {
                     // The closure is the first argument, and its field 0 is
                     // the code to call.
@@ -4607,6 +4624,9 @@ impl<'a> Generator<'a> {
             BinOp::AddInt => instructions.int_add(),
             BinOp::SubInt => instructions.int_sub(),
             BinOp::MultInt => instructions.int_mul(),
+            BinOp::DivInt if divisor_is_safe(name, right) => instructions.int_div_s(),
+            BinOp::RemainderInt if divisor_is_safe(name, right) => instructions.int_rem_s(),
+            BinOp::DivFloat if divisor_is_safe(name, right) => instructions.float_div_raw(),
             BinOp::DivInt => {
                 let (left, right) = locals.for_div(&scope, left, right);
                 instructions.int_div(left, right)
@@ -5589,18 +5609,59 @@ impl<'a> Generator<'a> {
             return *id;
         }
 
+        let int_vt = self.int.val_type();
+        let float_vt = self.float.val_type();
+        let string_vt = self.string.val_type();
         let index = match builtin {
+            BuiltinFunctionExternal::IntBitwiseAnd
+            | BuiltinFunctionExternal::IntBitwiseOr
+            | BuiltinFunctionExternal::IntBitwiseExclusiveOr => {
+                self.code_builtin_inline(builtin, &[int_vt, int_vt], int_vt)
+            }
+            BuiltinFunctionExternal::IntBitwiseNot => {
+                self.code_builtin_inline(builtin, &[int_vt], int_vt)
+            }
+            BuiltinFunctionExternal::IntToFloat => {
+                self.code_builtin_inline(builtin, &[int_vt], float_vt)
+            }
+            BuiltinFunctionExternal::FloatFloor
+            | BuiltinFunctionExternal::FloatCeiling
+            | BuiltinFunctionExternal::FloatSquareRoot => {
+                self.code_builtin_inline(builtin, &[float_vt], float_vt)
+            }
+            BuiltinFunctionExternal::FloatTruncate => {
+                self.code_builtin_inline(builtin, &[float_vt], int_vt)
+            }
+            BuiltinFunctionExternal::I32ToInt | BuiltinFunctionExternal::UtfCodepointToInt => {
+                self.code_builtin_inline(builtin, &[ValType::I32], int_vt)
+            }
+            BuiltinFunctionExternal::IntToI32
+            | BuiltinFunctionExternal::UnsafeIntToUtfCodepoint => {
+                self.code_builtin_inline(builtin, &[int_vt], ValType::I32)
+            }
+            BuiltinFunctionExternal::I64ToInt => {
+                self.code_builtin_inline(builtin, &[ValType::I64], int_vt)
+            }
+            BuiltinFunctionExternal::IntToI64 => {
+                self.code_builtin_inline(builtin, &[int_vt], ValType::I64)
+            }
+            BuiltinFunctionExternal::F32ToFloat => {
+                self.code_builtin_inline(builtin, &[ValType::F32], float_vt)
+            }
+            BuiltinFunctionExternal::FloatToF32 => {
+                self.code_builtin_inline(builtin, &[float_vt], ValType::F32)
+            }
+            BuiltinFunctionExternal::F64ToFloat => {
+                self.code_builtin_inline(builtin, &[ValType::F64], float_vt)
+            }
+            BuiltinFunctionExternal::FloatToF64 => {
+                self.code_builtin_inline(builtin, &[float_vt], ValType::F64)
+            }
+            BuiltinFunctionExternal::StringNumBytes | BuiltinFunctionExternal::StringByteSize => {
+                self.code_builtin_inline(builtin, &[string_vt], int_vt)
+            }
             BuiltinFunctionExternal::StringConcat => self.code_string_concat(),
-            BuiltinFunctionExternal::StringNumBytes => self.code_string_num_bytes(),
             BuiltinFunctionExternal::StringGetByte => self.code_string_get_byte(),
-            BuiltinFunctionExternal::I32ToInt => self.code_i32_to_int(),
-            BuiltinFunctionExternal::IntToI32 => self.code_int_to_i32(),
-            BuiltinFunctionExternal::I64ToInt => self.code_i64_to_int(),
-            BuiltinFunctionExternal::IntToI64 => self.code_int_to_i64(),
-            BuiltinFunctionExternal::F32ToFloat => self.code_f32_to_float(),
-            BuiltinFunctionExternal::FloatToF32 => self.code_float_to_f32(),
-            BuiltinFunctionExternal::F64ToFloat => self.code_f64_to_float(),
-            BuiltinFunctionExternal::FloatToF64 => self.code_float_to_f64(),
             BuiltinFunctionExternal::IntToUtfCodepoint => self.code_int_to_utf_codepoint(),
             BuiltinFunctionExternal::IntRepr => self.code_int_repr(),
             BuiltinFunctionExternal::FloatRepr => self.code_float_repr(),
@@ -5610,23 +5671,9 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::MemoryToString => self.code_memory_to_string(),
             BuiltinFunctionExternal::ParseInt => self.code_parse_int(),
             BuiltinFunctionExternal::ParseFloat => self.code_parse_float(),
-            BuiltinFunctionExternal::IntBitwiseAnd => self.code_int_bitwise_binop(IntBitwise::And),
-            BuiltinFunctionExternal::IntBitwiseOr => self.code_int_bitwise_binop(IntBitwise::Or),
-            BuiltinFunctionExternal::IntBitwiseExclusiveOr => {
-                self.code_int_bitwise_binop(IntBitwise::ExclusiveOr)
-            }
-            BuiltinFunctionExternal::IntBitwiseNot => self.code_int_bitwise_not(),
             BuiltinFunctionExternal::IntBitwiseShiftLeft => self.code_int_shift(true),
             BuiltinFunctionExternal::IntBitwiseShiftRight => self.code_int_shift(false),
-            BuiltinFunctionExternal::IntToFloat => self.code_int_to_float(),
-            BuiltinFunctionExternal::FloatFloor => self.code_float_unop(FloatUnary::Floor),
-            BuiltinFunctionExternal::FloatCeiling => self.code_float_unop(FloatUnary::Ceiling),
-            BuiltinFunctionExternal::FloatTruncate => self.code_float_truncate(),
             BuiltinFunctionExternal::FloatRound => self.code_float_round(),
-            BuiltinFunctionExternal::FloatSquareRoot => {
-                self.code_float_unop(FloatUnary::SquareRoot)
-            }
-            BuiltinFunctionExternal::StringByteSize => self.code_string_num_bytes(),
             BuiltinFunctionExternal::StringByteSlice => self.code_string_byte_slice(),
             BuiltinFunctionExternal::StringPopCodeunit => self.code_string_pop_codeunit(),
             BuiltinFunctionExternal::StringStartsWith => self.function_string_starts_with(),
@@ -5636,14 +5683,11 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::StringLessThan => self.code_string_less_than(),
             BuiltinFunctionExternal::StringConcatList => self.code_string_join(false),
             BuiltinFunctionExternal::StringJoin => self.code_string_join(true),
-            BuiltinFunctionExternal::UtfCodepointToInt => self.code_utf_codepoint_to_int(),
-            BuiltinFunctionExternal::UnsafeIntToUtfCodepoint => {
-                self.code_unsafe_int_to_utf_codepoint()
-            }
             BuiltinFunctionExternal::StringPopGrapheme => self.code_string_pop_grapheme(),
         };
         self.wasm_module.funcs.get_mut(index).name = Some(builtin.name().to_string());
         let _ = self.builtins_external.insert(builtin, index);
+        let _ = self.builtins_external_ids.insert(index, builtin);
         index
     }
 
@@ -5672,6 +5716,23 @@ fn replace_function_body(module: &mut walrus::Module, dest: FunctionId, src: Fun
         module.funcs.get_mut(dest).name = Some(name);
     }
     module.funcs.delete(src);
+}
+
+/// Whether `divisor` is a literal for which the wasm instruction of
+/// `operator` gives the Gleam result: not 0, which gives 0 instead of
+/// trapping (or an infinity), nor -1 for `/`, as `MIN / -1` wraps.
+fn divisor_is_safe(operator: &BinOp, divisor: &TypedExpr) -> bool {
+    match (operator, divisor) {
+        (BinOp::DivInt, TypedExpr::Int { int_value, .. }) => {
+            *int_value != 0.into() && *int_value != (-1).into()
+        }
+        (BinOp::RemainderInt, TypedExpr::Int { int_value, .. }) => *int_value != 0.into(),
+        // Also not 0 as an `f32`.
+        (BinOp::DivFloat, TypedExpr::Float { float_value, .. }) => {
+            float_value.value() as f32 != 0.0
+        }
+        _ => false,
+    }
 }
 
 fn is_main_funtion(function: &TypedFunction) -> bool {

@@ -21,7 +21,7 @@ use crate::{
 use src_span::SrcSpan;
 use vec1::Vec1;
 
-use super::{Generator, monomorphize::set_ubound_or_generic};
+use super::{Generator, divisor_is_safe, monomorphize::set_ubound_or_generic};
 
 #[derive(Clone, PartialEq)]
 pub(super) enum IdKind {
@@ -534,7 +534,8 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
         if matches!(
             operator,
             BinOp::DivInt | BinOp::RemainderInt | BinOp::DivFloat
-        ) {
+        ) && !divisor_is_safe(operator, right)
+        {
             self.locals.insert_div(self.generator, left, right);
         }
         visit_typed_expr_bin_op(self, location, type_, operator, operator_start, left, right);

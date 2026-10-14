@@ -7,53 +7,93 @@
 
 use super::*;
 
-#[derive(Clone, Copy)]
-pub(super) enum IntBitwise {
-    And,
-    Or,
-    ExclusiveOr,
-}
+impl Instructions<'_, '_> {
+    /// Emits `builtin` over its arguments on the stack when it is a few
+    /// instructions that need no locals, so that a call to it is replaced by
+    /// them. Returns false, emitting nothing, for any other builtin.
+    pub(super) fn builtin_inline(&mut self, builtin: BuiltinFunctionExternal) -> bool {
+        use BuiltinFunctionExternal as B;
+        let _ = match builtin {
+            B::IntBitwiseAnd => self.int_and(),
+            B::IntBitwiseOr => self.int_or(),
+            B::IntBitwiseExclusiveOr => self.int_xor(),
+            B::IntBitwiseNot => self.int_const(&(-1).into()).int_xor(),
+            B::IntToFloat => self.int_to_float(),
+            B::FloatFloor => self.float_floor(),
+            B::FloatCeiling => self.float_ceil(),
+            B::FloatSquareRoot => self.float_sqrt(),
+            B::FloatTruncate => self.float_to_int_sat(),
+            B::I32ToInt | B::UtfCodepointToInt => self.i32_to_int(),
+            B::IntToI32 | B::UnsafeIntToUtfCodepoint => self.int_to_i32(),
+            B::I64ToInt => self.i64_to_int(),
+            B::IntToI64 => self.int_to_i64(),
+            B::F32ToFloat => self.f32_to_float(),
+            B::FloatToF32 => self.float_to_f32(),
+            B::F64ToFloat => self.f64_to_float(),
+            B::FloatToF64 => self.float_to_f64(),
+            B::StringNumBytes | B::StringByteSize => self.string_len().i32_to_int(),
+            B::StringConcat
+            | B::StringGetByte
+            | B::IntToUtfCodepoint
+            | B::IntRepr
+            | B::FloatRepr
+            | B::UtfCodepointRepr
+            | B::StringRepr
+            | B::StringToMemory
+            | B::MemoryToString
+            | B::ParseInt
+            | B::ParseFloat
+            | B::IntBitwiseShiftLeft
+            | B::IntBitwiseShiftRight
+            | B::FloatRound
+            | B::StringByteSlice
+            | B::StringPopCodeunit
+            | B::StringStartsWith
+            | B::StringEndsWith
+            | B::StringRemovePrefix
+            | B::StringRemoveSuffix
+            | B::StringLessThan
+            | B::StringConcatList
+            | B::StringJoin
+            | B::StringPopGrapheme => return false,
+        };
+        true
+    }
 
-#[derive(Clone, Copy)]
-pub(super) enum FloatUnary {
-    Floor,
-    Ceiling,
-    SquareRoot,
+    /// Shifts the `Int` on the stack by the constant `amount`, like
+    /// `code_int_shift` does for any amount.
+    pub(super) fn int_shift_by(&mut self, left: bool, amount: &BigInt) -> &mut Self {
+        let (left, amount) = if *amount < BigInt::from(0) {
+            (!left, -amount)
+        } else {
+            (left, amount.clone())
+        };
+        let bits = self.int_bits();
+        match (left, amount < BigInt::from(bits)) {
+            (true, true) => self.int_const(&amount).int_shl(),
+            (false, true) => self.int_const(&amount).int_shr_s(),
+            (true, false) => self.drop().int_const(&0.into()),
+            (false, false) => self.int_const(&(bits - 1).into()).int_shr_s(),
+        }
+    }
 }
 
 impl<'a> Generator<'a> {
-    pub(super) fn code_int_bitwise_binop(&mut self, operator: IntBitwise) -> FunctionId {
-        let int_vt = self.int.val_type();
-        // params
-        let a = self.wasm_local(int_vt); // Int
-        let b = self.wasm_local(int_vt); // Int
-        let name = match operator {
-            IntBitwise::And => "_int_bitwise_and",
-            IntBitwise::Or => "_int_bitwise_or",
-            IntBitwise::ExclusiveOr => "_int_bitwise_exclusive_or",
-        };
-        let mut function = Function::new(self, name, &[a, b], &[int_vt]);
+    /// A builtin that `builtin_inline` emits, as a function to call it as a
+    /// value.
+    pub(super) fn code_builtin_inline(
+        &mut self,
+        builtin: BuiltinFunctionExternal,
+        params: &[ValType],
+        result: ValType,
+    ) -> FunctionId {
+        let params: Vec<_> = params.iter().map(|vt| self.wasm_local(*vt)).collect();
+        let mut function = Function::new(self, builtin.name(), &params, &[result]);
         let mut instructions = function.extend_instructions(self);
-        let _ = instructions.local_get(a).local_get(b);
-        let _ = match operator {
-            IntBitwise::And => instructions.int_and(),
-            IntBitwise::Or => instructions.int_or(),
-            IntBitwise::ExclusiveOr => instructions.int_xor(),
-        };
-        function.finish(self)
-    }
-
-    pub(super) fn code_int_bitwise_not(&mut self) -> FunctionId {
-        let int_vt = self.int.val_type();
-        // params
-        let a = self.wasm_local(int_vt); // Int
-        let mut function = Function::new(self, "_int_bitwise_not", &[a], &[int_vt]);
-        let _ = function
-            .extend_instructions(self)
-            .local_get(a)
-            .int_const(&(-1).into())
-            .int_xor()
-            .end();
+        for param in params {
+            let _ = instructions.local_get(param);
+        }
+        assert!(instructions.builtin_inline(builtin));
         function.finish(self)
     }
 
@@ -132,54 +172,6 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    pub(super) fn code_int_to_float(&mut self) -> FunctionId {
-        let int_vt = self.int.val_type();
-        let float_vt = self.float.val_type();
-        // params
-        let a = self.wasm_local(int_vt); // Int
-        let mut function = Function::new(self, "_int_to_float", &[a], &[float_vt]);
-        let _ = function
-            .extend_instructions(self)
-            .local_get(a)
-            .int_to_float()
-            .end();
-        function.finish(self)
-    }
-
-    pub(super) fn code_float_unop(&mut self, operator: FloatUnary) -> FunctionId {
-        let float_vt = self.float.val_type();
-        // params
-        let a = self.wasm_local(float_vt); // Float
-        let name = match operator {
-            FloatUnary::Floor => "_float_floor",
-            FloatUnary::Ceiling => "_float_ceiling",
-            FloatUnary::SquareRoot => "_float_square_root",
-        };
-        let mut function = Function::new(self, name, &[a], &[float_vt]);
-        let mut instructions = function.extend_instructions(self);
-        let _ = instructions.local_get(a);
-        let _ = match operator {
-            FloatUnary::Floor => instructions.float_floor(),
-            FloatUnary::Ceiling => instructions.float_ceil(),
-            FloatUnary::SquareRoot => instructions.float_sqrt(),
-        };
-        function.finish(self)
-    }
-
-    pub(super) fn code_float_truncate(&mut self) -> FunctionId {
-        let int_vt = self.int.val_type();
-        let float_vt = self.float.val_type();
-        // params
-        let a = self.wasm_local(float_vt); // Float
-        let mut function = Function::new(self, "_float_truncate", &[a], &[int_vt]);
-        let _ = function
-            .extend_instructions(self)
-            .local_get(a)
-            .float_to_int_sat()
-            .end();
-        function.finish(self)
-    }
-
     /// Rounds half away from zero. `floor(x + 0.5)` would be wrong for
     /// `0.49999999999999994` (the sum rounds up to 1.0) and `nearest` rounds
     /// half to even, so the fraction is compared instead.
@@ -221,33 +213,6 @@ impl<'a> Generator<'a> {
             .local_get(x)
             .float_copysign()
             .float_to_int_sat()
-            .end();
-        function.finish(self)
-    }
-
-    pub(super) fn code_utf_codepoint_to_int(&mut self) -> FunctionId {
-        let int_vt = self.int.val_type();
-        // params
-        let a = self.wasm_local(ValType::I32); // UtfCodepoint
-        let mut function = Function::new(self, "_utf_codepoint_to_int", &[a], &[int_vt]);
-        let _ = function
-            .extend_instructions(self)
-            .local_get(a)
-            .i32_to_int()
-            .end();
-        function.finish(self)
-    }
-
-    pub(super) fn code_unsafe_int_to_utf_codepoint(&mut self) -> FunctionId {
-        let int_vt = self.int.val_type();
-        // params
-        let a = self.wasm_local(int_vt); // Int
-        let mut function =
-            Function::new(self, "_unsafe_int_to_utf_codepoint", &[a], &[ValType::I32]);
-        let _ = function
-            .extend_instructions(self)
-            .local_get(a)
-            .int_to_i32()
             .end();
         function.finish(self)
     }

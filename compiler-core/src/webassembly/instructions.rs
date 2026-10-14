@@ -1094,6 +1094,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
     float_op!(float_add, F32Add, F64Add);
     float_op!(float_sub, F32Sub, F64Sub);
     float_op!(float_mul, F32Mul, F64Mul);
+    float_op!(float_div_raw, F32Div, F64Div);
     float_op!(float_eq, F32Eq, F64Eq);
     float_op!(float_ne, F32Ne, F64Ne);
     float_op!(float_lt, F32Lt, F64Lt);

@@ -3,7 +3,7 @@
 
 //! Compiler builtins used by the standard library.
 
-use super::{run_ok, run_ok_i64};
+use super::{compile_wasm, for_each_operator, run_ok, run_ok_i64, run_wasm_with_config};
 
 const INT: &str = r#"
 @external(webassembly, "builtins", "_int_bitwise_and")
@@ -65,6 +65,98 @@ pub fn main() {{
 }}
 "#
     ));
+}
+
+/// The amounts are variables, so the builtin functions are called.
+#[test]
+fn int_shift_by_variable() {
+    run_ok(&format!(
+        r#"{INT}
+pub fn main() {{
+    let #(a, b, c, d, e, f) = #(2, -2, 32, 1000, -32, -2147483648)
+    let assert 48 = shl(12, a)
+    let assert 3 = shr(12, a)
+    let assert -4 = shr(-13, a)
+    let assert 3 = shl(12, b)
+    let assert 48 = shr(12, b)
+    let assert 0 = shl(1, c)
+    let assert 0 = shr(12, c)
+    let assert -1 = shr(-12, c)
+    let assert -1 = shr(-12, d)
+    let assert 0 = shl(12, e)
+    let assert -1 = shl(-12, f)
+    let assert 0 = shr(12, f)
+    let assert 48 = {{ shl }}(12, 2)
+}}
+"#
+    ));
+}
+
+/// Builtins of a few instructions and shifts by a literal are emitted in
+/// place of the call.
+#[test]
+fn builtins_are_inlined() {
+    let wasm = compile_wasm(
+        &format!(
+            r#"{INT}
+pub fn main() {{
+    let a = 12
+    let b = and(a, 10) + or(a, 10) + xor(a, 10) + not(a)
+    let c = shl(a, 2) + shr(a, -3) + shl(a, 40) + shr(a, 40)
+    to_float(b + c)
+}}
+"#
+        ),
+        vec![],
+    );
+    for_each_operator(&wasm, |function, op| {
+        if function == "main" {
+            assert!(
+                !matches!(op, wasmparser::Operator::Call { .. }),
+                "main calls a builtin"
+            );
+        }
+    });
+}
+
+#[test]
+fn division_by_literal() {
+    run_ok(
+        r#"
+pub fn main() {
+    let #(a, b, x) = #(-7, 7, -2147483648)
+    let assert -2 = a / 3
+    let assert -1 = a % 3
+    let assert 2 = b / 3
+    let assert 1 = b % -3
+    let assert 0 = x % -1
+    let assert 1073741824 = x / -2
+    let assert -3.5 = -7.0 /. 2.0
+    let f = 7.0
+    let assert -3.5 = f /. -2.0
+    let assert 0 = b / 0
+    let assert 0 = b % 0
+    let assert 0.0 = f /. 0.0
+}
+"#,
+    );
+}
+
+/// `1.0e-50` is 0 as an `f32`, so the division gives 0 too.
+#[test]
+fn division_by_literal_zero_in_f32() {
+    let result = run_wasm_with_config(
+        r#"
+pub fn main() {
+    let f = 7.0
+    let assert 0.0 = f /. 1.0e-50
+}
+"#,
+        vec![],
+        crate::config::WasmInt::I32,
+        crate::config::WasmFloat::F32,
+    );
+    assert!(result.status.success(), "{}", result.stderr);
 }
 
 #[test]

@@ -511,18 +511,6 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    pub(super) fn code_string_num_bytes(&mut self) -> FunctionId {
-        let string_vt = self.string.val_type();
-        let int_vt = self.int.val_type();
-        // params
-        let s = self.wasm_local(string_vt); // String
-        // return Int
-        let mut function = Function::new(self, "_string_num_bytes", &[s], &[int_vt]);
-        let mut instructions = function.extend_instructions(self);
-        let _ = instructions.local_get(s).string_len().i32_to_int().end();
-        function.finish(self)
-    }
-
     pub(super) fn code_string_get_byte(&mut self) -> FunctionId {
         let string_vt = self.string.val_type();
         let int_vt = self.int.val_type();
@@ -1098,102 +1086,6 @@ impl<'a> Generator<'a> {
             let _ = instructions.local_get(*param);
         }
         let _ = instructions.struct_new(struct_index).end();
-        function.finish(self)
-    }
-
-    pub(super) fn code_i32_to_int(&mut self) -> FunctionId {
-        let int_vt = self.int.val_type();
-        let p = self.wasm_local(ValType::I32);
-        let mut function = Function::new(self, "_i32_to_int", &[p], &[int_vt]);
-        let _ = function
-            .extend_instructions(self)
-            .local_get(p)
-            .i32_to_int()
-            .end();
-        function.finish(self)
-    }
-
-    pub(super) fn code_int_to_i32(&mut self) -> FunctionId {
-        let int_vt = self.int.val_type();
-        let p = self.wasm_local(int_vt);
-        let mut function = Function::new(self, "_int_to_i32", &[p], &[ValType::I32]);
-        let _ = function
-            .extend_instructions(self)
-            .local_get(p)
-            .int_to_i32()
-            .end();
-        function.finish(self)
-    }
-
-    pub(super) fn code_i64_to_int(&mut self) -> FunctionId {
-        let int_vt = self.int.val_type();
-        let p = self.wasm_local(ValType::I64);
-        let mut function = Function::new(self, "_i64_to_int", &[p], &[int_vt]);
-        let _ = function
-            .extend_instructions(self)
-            .local_get(p)
-            .i64_to_int()
-            .end();
-        function.finish(self)
-    }
-
-    pub(super) fn code_int_to_i64(&mut self) -> FunctionId {
-        let int_vt = self.int.val_type();
-        let p = self.wasm_local(int_vt);
-        let mut function = Function::new(self, "_int_to_i64", &[p], &[ValType::I64]);
-        let _ = function
-            .extend_instructions(self)
-            .local_get(p)
-            .int_to_i64()
-            .end();
-        function.finish(self)
-    }
-
-    pub(super) fn code_f32_to_float(&mut self) -> FunctionId {
-        let float_vt = self.float.val_type();
-        let p = self.wasm_local(ValType::F32);
-        let mut function = Function::new(self, "_f32_to_float", &[p], &[float_vt]);
-        let _ = function
-            .extend_instructions(self)
-            .local_get(p)
-            .f32_to_float()
-            .end();
-        function.finish(self)
-    }
-
-    pub(super) fn code_float_to_f32(&mut self) -> FunctionId {
-        let float_vt = self.float.val_type();
-        let p = self.wasm_local(float_vt);
-        let mut function = Function::new(self, "_float_to_f32", &[p], &[ValType::F32]);
-        let _ = function
-            .extend_instructions(self)
-            .local_get(p)
-            .float_to_f32()
-            .end();
-        function.finish(self)
-    }
-
-    pub(super) fn code_f64_to_float(&mut self) -> FunctionId {
-        let float_vt = self.float.val_type();
-        let p = self.wasm_local(ValType::F64);
-        let mut function = Function::new(self, "_f64_to_float", &[p], &[float_vt]);
-        let _ = function
-            .extend_instructions(self)
-            .local_get(p)
-            .f64_to_float()
-            .end();
-        function.finish(self)
-    }
-
-    pub(super) fn code_float_to_f64(&mut self) -> FunctionId {
-        let float_vt = self.float.val_type();
-        let p = self.wasm_local(float_vt);
-        let mut function = Function::new(self, "_float_to_f64", &[p], &[ValType::F64]);
-        let _ = function
-            .extend_instructions(self)
-            .local_get(p)
-            .float_to_f64()
-            .end();
         function.finish(self)
     }
 
