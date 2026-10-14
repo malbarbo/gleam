@@ -3264,7 +3264,7 @@ impl<'a> Generator<'a> {
             }
             Constant::BinaryOperator { operator, .. } => {
                 if *operator != BinOp::Concatenate {
-                    todo!("{operator:?} constants are not yet supported");
+                    unreachable!("invalid constant binop made it to code generation");
                 }
                 let id = self.add_const(
                     const_name,
@@ -3438,7 +3438,7 @@ impl<'a> Generator<'a> {
                 ..
             } => {
                 if *operator != BinOp::Concatenate {
-                    todo!("{operator:?} constants are not yet supported");
+                    unreachable!("invalid constant binop made it to code generation");
                 }
                 let concat =
                     self.get_function_builtin_external(BuiltinFunctionExternal::StringConcat);
