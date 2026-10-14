@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-//! Bit arrays: the literals, and the functions of the runtime module
-//! `builtins/bit_array`.
+//! Bit arrays: the literals, their construction from values, and the
+//! functions of the runtime module `builtins/bit_array`.
 
-use super::{TEST_PACKAGE, compile_wasm, for_each_operator, run_wasm_with_config};
+use super::{TEST_PACKAGE, compile_wasm, for_each_operator, run_wasm, run_wasm_with_config};
 use crate::config::{WasmFloat, WasmInt};
 
 const BIT_ARRAY: &str = r#"
@@ -320,8 +320,245 @@ fn map(list: List(a), f: fn(a) -> b) -> List(b) {
 "#);
 }
 
-/// The builtins of `Bytes` are emitted in place of their calls, so the
-/// module has no function for them.
+/// Integer segments of values: sizes that are not multiples of 8, at any
+/// position, little endian, negative values and sizes larger than `Int`. The
+/// results are those of the Erlang target.
+#[test]
+fn construction_ints() {
+    let _ = run(r#"
+import bit_array
+
+fn id(x: a) -> a {
+  x
+}
+
+pub fn main() {
+  let assert "<<1>>" = bit_array.inspect(<<id(1)>>)
+  let assert "<<1, 2>>" = bit_array.inspect(<<id(258):16>>)
+  let assert "<<2, 1>>" = bit_array.inspect(<<id(258):16-little>>)
+  let assert "<<255, 15:size(4)>>" = bit_array.inspect(<<id(-1):12>>)
+  let assert "<<232, 3:size(4)>>" = bit_array.inspect(<<id(1000):12-little>>)
+  let assert "<<222, 188, 10:size(4)>>" = bit_array.inspect(<<id(0xABCDE):20-little>>)
+  let assert "<<255, 255, 255, 255, 255, 255, 255, 255, 63:size(6)>>" = bit_array.inspect(<<id(-1):70>>)
+  let assert "<<254, 255, 255, 255, 255, 255, 255, 255, 63:size(6)>>" = bit_array.inspect(<<id(-2):70-little>>)
+  let assert "<<161, 44>>" = bit_array.inspect(<<id(5):3, id(300):13>>)
+  let assert "<<154, 9, 0:size(1)>>" = bit_array.inspect(<<id(1):1, id(0x1234):16-little>>)
+  let assert "<<251>>" = bit_array.inspect(<<id(-5):8>>)
+  let assert "<<18, 52, 86, 120>>" = bit_array.inspect(<<id(0x12345678):32-big>>)
+  let assert "<<0, 1:size(2)>>" = bit_array.inspect(<<id(1):size(id(10))>>)
+  let assert "<<0, 0, 1>>" = bit_array.inspect(<<id(1):size(id(3))-unit(8)>>)
+  let assert "<<1>>" = bit_array.inspect(<<id(7):size(0), 1>>)
+  Nil
+}
+"#);
+}
+
+/// Float segments of values, with 16 bits floats rounded half to even. The
+/// results are those of the Erlang target.
+#[test]
+fn construction_floats() {
+    let _ = run(r#"
+import bit_array
+
+fn id(x: a) -> a {
+  x
+}
+
+pub fn main() {
+  let assert "<<63, 248, 0, 0, 0, 0, 0, 0>>" = bit_array.inspect(<<id(1.5):float>>)
+  let assert "<<63, 192, 0, 0>>" = bit_array.inspect(<<id(1.5):32-float>>)
+  let assert "<<0, 0, 0, 0, 0, 0, 6, 192>>" = bit_array.inspect(<<id(-2.75):64-float-little>>)
+  let assert "<<159, 252, 0, 0, 0, 0, 0, 0, 0:size(1)>>" = bit_array.inspect(<<id(1):1, id(1.5):float>>)
+  let assert "<<63, 192, 0, 0>>" = bit_array.inspect(<<id(1.5):float-size(id(32))>>)
+  let assert "<<62, 0>>" = bit_array.inspect(<<id(1.5):16-float>>)
+  let assert "<<123, 255>>" = bit_array.inspect(<<id(65504.0):16-float>>)
+  let assert "<<123, 255>>" = bit_array.inspect(<<id(65519.0):16-float>>)
+  let assert "<<124, 0>>" = bit_array.inspect(<<id(65520.0):16-float>>)
+  let assert "<<0, 1>>" = bit_array.inspect(<<id(5.960464477539063e-8):16-float>>)
+  let assert "<<0, 0>>" = bit_array.inspect(<<id(2.9802322387695312e-8):16-float>>)
+  let assert "<<0, 0>>" = bit_array.inspect(<<id(2.9802322387695315e-8):16-float>>)
+  let assert "<<3, 255>>" = bit_array.inspect(<<id(6.097555160522461e-5):16-float>>)
+  let assert "<<128, 0>>" = bit_array.inspect(<<id(-0.0):16-float>>)
+  let assert "<<60, 1>>" = bit_array.inspect(<<id(1.0009765625):16-float>>)
+  let assert "<<60, 0>>" = bit_array.inspect(<<id(1.00048828125):16-float>>)
+  let assert "<<60, 2>>" = bit_array.inspect(<<id(1.00146484375):16-float>>)
+  let assert "<<72, 66>>" = bit_array.inspect(<<id(3.14159):16-float-little>>)
+  let assert "<<0, 0>>" = bit_array.inspect(<<id(1.0e-30):16-float>>)
+  let assert "<<124, 0>>" = bit_array.inspect(<<id(1.0e30):16-float>>)
+  Nil
+}
+"#);
+}
+
+/// String and code point segments of values, in UTF-8, UTF-16 and UTF-32. The
+/// results are those of the Erlang target.
+#[test]
+fn construction_unicode() {
+    let _ = run(r#"
+import bit_array
+
+fn id(x: a) -> a {
+  x
+}
+
+@external(webassembly, "builtins", "_unsafe_int_to_utf_codepoint")
+fn cp(value: Int) -> UtfCodepoint
+
+pub fn main() {
+  let assert "<<104, 195, 169, 108, 108, 111>>" = bit_array.inspect(<<id("héllo"):utf8>>)
+  let assert "<<0, 97, 216, 61, 222, 0>>" = bit_array.inspect(<<id("a😀"):utf16>>)
+  let assert "<<97, 0, 61, 216, 0, 222>>" = bit_array.inspect(<<id("a😀"):utf16-little>>)
+  let assert "<<0, 0, 0, 97, 0, 0, 0, 233, 0, 1, 246, 0>>" = bit_array.inspect(<<id("aé😀"):utf32>>)
+  let assert "<<97, 0, 0, 0, 233, 0, 0, 0, 0, 246, 1, 0>>" = bit_array.inspect(<<id("aé😀"):utf32-little>>)
+  let assert "<<44, 44, 2:size(3)>>" = bit_array.inspect(<<id(1):3, id("ab"):utf8>>)
+  let assert "<<32, 29, 1:size(3)>>" = bit_array.inspect(<<id(1):3, id("é"):utf16>>)
+  let assert "<<97, 195, 169, 226, 130, 172, 240, 159, 152, 128>>" = bit_array.inspect(<<cp(0x61):utf8_codepoint, cp(0xE9):utf8_codepoint, cp(0x20AC):utf8_codepoint, cp(0x1F600):utf8_codepoint>>)
+  let assert "<<0, 233, 61, 216, 0, 222>>" = bit_array.inspect(<<cp(0xE9):utf16_codepoint, cp(0x1F600):utf16_codepoint-little>>)
+  let assert "<<0, 0, 0, 233, 0, 246, 1, 0>>" = bit_array.inspect(<<cp(0xE9):utf32_codepoint, cp(0x1F600):utf32_codepoint-little>>)
+  let assert "<<120, 160, 171, 0:size(2)>>" = bit_array.inspect(<<id(1):2, cp(0x20AC):utf8_codepoint>>)
+  let assert "<<120, 121, 5:size(3)>>" = bit_array.inspect(<<"x", id("y"):utf8, 5:3>>)
+  Nil
+}
+"#);
+}
+
+/// Bit array segments of values, and literal segments among them. The
+/// results are those of the Erlang target.
+#[test]
+fn construction_bits() {
+    let _ = run(r#"
+import bit_array
+
+fn id(x: a) -> a {
+  x
+}
+
+pub fn main() {
+  let assert "<<1, 2, 3>>" = bit_array.inspect(<<id(<<1, 2, 3>>):bits>>)
+  let assert "<<1, 2, 3, 4>>" = bit_array.inspect(<<id(<<1, 2, 3>>):bits, 4>>)
+  let assert "<<1, 0:size(4)>>" = bit_array.inspect(<<id(<<1, 2, 3>>):bits-size(12)>>)
+  let assert "<<1, 2>>" = bit_array.inspect(<<id(<<1, 2, 3>>):bits-size(16)>>)
+  let assert "<<1, 2, 3:size(4)>>" = bit_array.inspect(<<id(<<1, 2>>):bits, id(<<3:4>>):bits>>)
+  let assert "<<255, 128, 85, 1:size(2)>>" = bit_array.inspect(<<id(1):1, id(<<0xFF, 0x00, 0xAA>>):bits, id(1):1>>)
+  let assert "<<248, 0:size(4)>>" = bit_array.inspect(<<id(<<1:1>>):bits, id(<<0xF0, 0x0F>>):bits-size(id(11))>>)
+  let assert "<<1, 2, 3, 97, 98, 4:size(4)>>" = bit_array.inspect(<<1, 2, id(3), "ab", 4:4>>)
+  Nil
+}
+"#);
+}
+
+/// Integer segments of values larger than 32 bits.
+#[test]
+fn construction_large_ints() {
+    let result = run_wasm_with_config(
+        r#"
+import bit_array
+
+fn id(x: a) -> a {
+  x
+}
+
+pub fn main() {
+  let assert "<<1, 35, 69, 103, 137, 171, 205, 239>>" = bit_array.inspect(<<id(0x123456789ABCDEF):64>>)
+  let assert "<<128, 145, 162, 179, 196, 1:size(1)>>" = bit_array.inspect(<<id(1):1, id(0x123456789):40>>)
+  Nil
+}
+"#,
+        vec![(TEST_PACKAGE, "bit_array", BIT_ARRAY)],
+        WasmInt::I64,
+        WasmFloat::F64,
+    );
+    assert!(result.status.success(), "{}", result.stderr);
+}
+
+/// Float segments of values when `Float` has 32 bits.
+#[test]
+fn construction_floats_of_32_bits() {
+    let result = run_wasm_with_config(
+        r#"
+import bit_array
+
+fn id(x: a) -> a {
+  x
+}
+
+pub fn main() {
+  let assert "<<63, 248, 0, 0, 0, 0, 0, 0>>" = bit_array.inspect(<<id(1.5):float>>)
+  let assert "<<0, 0, 48, 192>>" = bit_array.inspect(<<id(-2.75):32-float-little>>)
+  let assert "<<123, 255>>" = bit_array.inspect(<<id(65504.0):16-float>>)
+  Nil
+}
+"#,
+        vec![(TEST_PACKAGE, "bit_array", BIT_ARRAY)],
+        WasmInt::I32,
+        WasmFloat::F32,
+    );
+    assert!(result.status.success(), "{}", result.stderr);
+}
+
+/// The values and the sizes of the segments are evaluated in order, before
+/// the bit array is created, and an integer segment of a negative size is
+/// empty.
+#[test]
+fn construction_evaluation() {
+    let output = run(r#"
+import bit_array
+
+fn trace(x: a, name: String) -> a {
+  echo name
+  x
+}
+
+pub fn main() {
+  let bits = <<trace(1, "a"):size(trace(4, "b")), trace(<<2>>, "c"):bits, trace(3, "d")>>
+  let assert "<<16, 32, 3:size(4)>>" = bit_array.inspect(bits)
+  let assert "<<1>>" = bit_array.inspect(<<trace(9, "e"):size(trace(-3, "f")), 1>>)
+  Nil
+}
+"#);
+    let names: Vec<_> = output
+        .lines()
+        .filter_map(|line| line.strip_prefix('"')?.strip_suffix('"'))
+        .collect();
+    assert_eq!(names, ["a", "b", "c", "d", "e", "f"]);
+}
+
+/// A segment that cannot be created fails when it is created.
+#[test]
+fn construction_errors() {
+    for (segment, message) in [
+        (
+            "id(<<1>>):bits-size(id(9))",
+            "Bit array segment size is larger than its value",
+        ),
+        (
+            "id(1.5):float-size(id(8))",
+            "Sized floats must be 16-bit, 32-bit or 64-bit",
+        ),
+    ] {
+        let src = format!(
+            r#"
+fn id(x: a) -> a {{
+  x
+}}
+
+pub fn main() {{
+  <<{segment}>>
+}}
+"#
+        );
+        let result = run_wasm(&src, vec![]);
+        assert!(!result.status.success(), "{segment} did not fail");
+        assert!(
+            result.stderr.contains(message),
+            "{segment} failed with:\n{}",
+            result.stderr
+        );
+    }
+}
+
+/// The builtins of `Bytes` and of the bytes of floats are emitted in place
+/// of their calls, so the module has no function for them.
 #[test]
 fn bytes_builtins_are_inlined() {
     let wasm = compile_wasm(
@@ -330,7 +567,12 @@ import bit_array
 
 pub fn main() {
   let bits = bit_array.concat([<<1:4>>, bit_array.from_string("ab")])
+  let _ = floats(1.5)
   bit_array.to_string(bits)
+}
+
+fn floats(x: Float) -> BitArray {
+  <<x:float, x:32-float>>
 }
 "#,
         vec![(TEST_PACKAGE, "bit_array", BIT_ARRAY)],
@@ -340,7 +582,11 @@ pub fn main() {
     names.dedup();
     let builtins = names
         .iter()
-        .filter(|name| name.starts_with("_bytes") || name.starts_with("_string_offset"))
+        .filter(|name| {
+            ["_bytes", "_string_offset", "_float64_byte", "_float32_byte"]
+                .iter()
+                .any(|builtin| name.starts_with(builtin))
+        })
         .collect::<Vec<_>>();
     assert!(builtins.is_empty(), "{builtins:?}");
 }

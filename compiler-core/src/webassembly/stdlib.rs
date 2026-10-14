@@ -42,6 +42,13 @@ impl Instructions<'_, '_> {
             B::StringBytes => self.string_bytes(),
             B::StringOffset => self.string_off().i32_to_int(),
             B::BytesToString => self.struct_new(self.string.type_index),
+            B::Float64Byte => self
+                .i64_shr_u()
+                .i32_wrap_i64()
+                .i32_const(0xFF)
+                .i32_and()
+                .i32_to_int(),
+            B::Float32Byte => self.i32_shr_u().i32_const(0xFF).i32_and().i32_to_int(),
             B::StringConcat
             | B::StringGetByte
             | B::IntToUtfCodepoint
@@ -72,8 +79,8 @@ impl Instructions<'_, '_> {
 
     /// Converts the argument at `index` of `builtin`, just pushed, to the
     /// type that `builtin_inline` expects: the `Int` positions and sizes of
-    /// `Bytes` are `i32`. Only builtins that `builtin_inline` emits convert
-    /// their arguments.
+    /// `Bytes` are `i32`, and a float whose bytes are taken is its bits. Only
+    /// builtins that `builtin_inline` emits convert their arguments.
     pub(super) fn builtin_argument(
         &mut self,
         builtin: BuiltinFunctionExternal,
@@ -82,8 +89,16 @@ impl Instructions<'_, '_> {
         use BuiltinFunctionExternal as B;
         let is_i32 = builtin == B::BytesNew
             || matches!(builtin, B::BytesGet | B::BytesSet | B::BytesToString) && index > 0
-            || builtin == B::BytesCopy && !matches!(index, 0 | 2);
-        if is_i32 { self.int_to_i32() } else { self }
+            || builtin == B::BytesCopy && !matches!(index, 0 | 2)
+            || builtin == B::Float32Byte && index == 1;
+        match (builtin, index) {
+            // The bits of the float, shifted by the second argument.
+            (B::Float64Byte, 0) => self.float_to_f64().f64_reinterpret(),
+            (B::Float64Byte, _) => self.int_to_i64(),
+            (B::Float32Byte, 0) => self.float_to_f32().f32_reinterpret(),
+            _ if is_i32 => self.int_to_i32(),
+            _ => self,
+        }
     }
 
     /// Shifts the `Int` on the stack by the constant `amount`, like

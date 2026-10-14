@@ -1112,6 +1112,8 @@ impl<'a> Generator<'a> {
                 .expect("builtin to have at least one parameter"),
             // Builtins without I32 — return a dummy (unused by type_())
             BuiltinFunctionExternal::StringConcat
+            | BuiltinFunctionExternal::Float64Byte
+            | BuiltinFunctionExternal::Float32Byte
             | BuiltinFunctionExternal::StringNumBytes
             | BuiltinFunctionExternal::StringGetByte
             | BuiltinFunctionExternal::IntToUtfCodepoint
@@ -4586,11 +4588,7 @@ impl<'a> Generator<'a> {
                 }
             }
             TypedExpr::BitArray { segments, .. } => {
-                let Some(bits) = Bits::of_literal(segments) else {
-                    todo!("BitArray expressions with values are not yet supported")
-                };
-                let index = self.bit_array_global(bits);
-                let _ = instructions.global_as_non_null(index);
+                self.expression_bit_array(locals, scope, instructions, segments);
             }
             TypedExpr::ModuleSelect {
                 constructor,
@@ -5746,6 +5744,9 @@ impl<'a> Generator<'a> {
             }
             BuiltinFunctionExternal::BytesToString => {
                 self.code_builtin_inline(builtin, &[bytes_vt, int_vt, int_vt], string_vt)
+            }
+            BuiltinFunctionExternal::Float64Byte | BuiltinFunctionExternal::Float32Byte => {
+                self.code_builtin_inline(builtin, &[float_vt, int_vt], int_vt)
             }
             BuiltinFunctionExternal::StringConcat => self.code_string_concat(),
             BuiltinFunctionExternal::StringGetByte => self.code_string_get_byte(),

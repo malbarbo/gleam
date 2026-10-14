@@ -99,6 +99,414 @@ fn aligned(bits: Bits) -> Bits {
   }
 }
 
+// -- Construction from values -------------------------------------------------
+//
+// The compiler creates a bit array whose segments are not all literals with
+// the sizes of its segments, by constants or by the `bit_array_*_size`
+// functions, and then writes them to the new bytes with the
+// `bit_array_write_*` functions, which return the position after what they
+// write. A size function fails when the segment cannot be created.
+
+/// The size of an integer segment of `size` bits: a negative size is an
+/// empty segment.
+pub fn bit_array_int_size(size: Int) -> Int {
+  max(size, 0)
+}
+
+pub fn bit_array_float_size(size: Int) -> Int {
+  case size {
+    16 | 32 | 64 -> size
+    _ -> panic as "Sized floats must be 16-bit, 32-bit or 64-bit"
+  }
+}
+
+/// The size of a segment with the first `size` bits of `bits`.
+pub fn bit_array_bits_size(bits: Bits, size: Int) -> Int {
+  case size < 0 || size > bits.end - bits.start {
+    True -> panic as "Bit array segment size is larger than its value"
+    False -> size
+  }
+}
+
+pub fn bit_array_utf8_size(string: String) -> Int {
+  string_byte_size(string) * 8
+}
+
+pub fn bit_array_utf16_size(string: String) -> Int {
+  let start = string_offset(string)
+  unicode_size(string_bytes(string), start, start + string_byte_size(string), 16, 0)
+}
+
+pub fn bit_array_utf32_size(string: String) -> Int {
+  let start = string_offset(string)
+  unicode_size(string_bytes(string), start, start + string_byte_size(string), 32, 0)
+}
+
+/// The size of the UTF-16 or UTF-32 (`unit` 16 or 32) code units of the
+/// UTF-8 bytes from `index` to `end`.
+fn unicode_size(bytes: Bytes, index: Int, end: Int, unit: Int, acc: Int) -> Int {
+  case index < end {
+    False -> acc
+    True -> {
+      let byte = bytes_get(bytes, index)
+      let size = case unit == 16 && byte >= 0xF0 {
+        True -> 32
+        False -> unit
+      }
+      unicode_size(bytes, index + utf8_length(byte), end, unit, acc + size)
+    }
+  }
+}
+
+pub fn bit_array_codepoint_utf8_size(codepoint: UtfCodepoint) -> Int {
+  let codepoint = codepoint_to_int(codepoint)
+  case codepoint {
+    _ if codepoint < 0x80 -> 8
+    _ if codepoint < 0x800 -> 16
+    _ if codepoint < 0x10000 -> 24
+    _ -> 32
+  }
+}
+
+pub fn bit_array_codepoint_utf16_size(codepoint: UtfCodepoint) -> Int {
+  case codepoint_to_int(codepoint) < 0x10000 {
+    True -> 16
+    False -> 32
+  }
+}
+
+/// Writes `value` in `size` bits, in two's complement. A little endian
+/// value has its bytes from the least significant, and then the bits that
+/// are left.
+pub fn bit_array_write_int(
+  bytes: Bytes,
+  at: Int,
+  value: Int,
+  size: Int,
+  little: Bool,
+) -> Int {
+  let rest = bitwise_and(size, 7)
+  case little {
+    False -> {
+      let at = put_bits(bytes, at, int_bits(value, size - rest, rest), rest)
+      write_int_big(bytes, at, value, size - rest)
+    }
+    True -> {
+      let whole = size - rest
+      let at = write_int_little(bytes, at, value, 0, whole)
+      put_bits(bytes, at, int_bits(value, whole, rest), rest)
+    }
+  }
+}
+
+/// Writes the `size` bits of `value` below bit `size`, a multiple of 8,
+/// from the most significant byte.
+fn write_int_big(bytes: Bytes, at: Int, value: Int, size: Int) -> Int {
+  case size {
+    0 -> at
+    _ -> {
+      let size = size - 8
+      let at = put_bits(bytes, at, int_bits(value, size, 8), 8)
+      write_int_big(bytes, at, value, size)
+    }
+  }
+}
+
+/// Writes the bytes of `value` from bit `shift` to bit `end`, from the
+/// least significant.
+fn write_int_little(bytes: Bytes, at: Int, value: Int, shift: Int, end: Int) -> Int {
+  case shift == end {
+    True -> at
+    False -> {
+      let at = put_bits(bytes, at, int_bits(value, shift, 8), 8)
+      write_int_little(bytes, at, value, shift + 8, end)
+    }
+  }
+}
+
+/// The `count` bits of `value` from bit `shift`, from 0 to 8 of them.
+fn int_bits(value: Int, shift: Int, count: Int) -> Int {
+  bitwise_and(
+    bitwise_shift_right(value, shift),
+    bitwise_shift_left(1, count) - 1,
+  )
+}
+
+/// Writes `value` as a float of `size` bits, 16, 32 or 64.
+pub fn bit_array_write_float(
+  bytes: Bytes,
+  at: Int,
+  value: Float,
+  size: Int,
+  little: Bool,
+) -> Int {
+  case size {
+    16 -> bit_array_write_int(bytes, at, float16_bits(value), 16, little)
+    _ -> write_float_loop(bytes, at, value, size, little, 0)
+  }
+}
+
+/// Writes the bytes of the float of `size` bits of `value` from the byte
+/// `index`.
+fn write_float_loop(
+  bytes: Bytes,
+  at: Int,
+  value: Float,
+  size: Int,
+  little: Bool,
+  index: Int,
+) -> Int {
+  case index * 8 == size {
+    True -> at
+    False -> {
+      let shift = case little {
+        True -> index * 8
+        False -> size - 8 - index * 8
+      }
+      let byte = case size {
+        64 -> float64_byte(value, shift)
+        _ -> float32_byte(value, shift)
+      }
+      let at = put_bits(bytes, at, byte, 8)
+      write_float_loop(bytes, at, value, size, little, index + 1)
+    }
+  }
+}
+
+/// The bits of the 16 bits float nearest to `value`, rounded half to even.
+fn float16_bits(value: Float) -> Int {
+  let high = float64_byte(value, 56)
+  let sign = bitwise_shift_left(bitwise_shift_right(high, 7), 15)
+  let exponent =
+    bitwise_or(
+      bitwise_shift_left(bitwise_and(high, 0x7F), 4),
+      bitwise_shift_right(float64_byte(value, 48), 4),
+    )
+  // The 24 most significant bits of the fraction, and whether any of the
+  // others is set.
+  let fraction =
+    bitwise_or(
+      bitwise_shift_left(bitwise_and(float64_byte(value, 48), 0x0F), 20),
+      bitwise_or(
+        bitwise_shift_left(float64_byte(value, 40), 12),
+        bitwise_or(
+          bitwise_shift_left(float64_byte(value, 32), 4),
+          bitwise_shift_right(float64_byte(value, 24), 4),
+        ),
+      ),
+    )
+  let sticky =
+    bitwise_and(float64_byte(value, 24), 0x0F) != 0
+    || float64_byte(value, 16) != 0
+    || float64_byte(value, 8) != 0
+    || float64_byte(value, 0) != 0
+  let half = case exponent {
+    0x7FF ->
+      case fraction != 0 || sticky {
+        True -> 0x7E00
+        False -> 0x7C00
+      }
+    _ -> {
+      // The significand, with 24 bits after the point, and the exponent of
+      // the half float.
+      let significand = bitwise_or(bitwise_shift_left(1, 24), fraction)
+      let exponent = exponent - 1023 + 15
+      case exponent >= 1 {
+        // The rounding may carry into the exponent, up to infinity.
+        True ->
+          min(
+            { exponent - 1 } * 1024 + round_shift(significand, 14, sticky),
+            0x7C00,
+          )
+        False -> round_shift(significand, 15 - exponent, sticky)
+      }
+    }
+  }
+  case half {
+    0x7E00 -> half
+    _ -> bitwise_or(sign, half)
+  }
+}
+
+/// `value` shifted right by `shift`, rounded half to even. `sticky` is
+/// whether there are bits set after the ones of `value`, which is less than
+/// `2^25`.
+fn round_shift(value: Int, shift: Int, sticky: Bool) -> Int {
+  case shift > 26 {
+    True -> 0
+    False -> {
+      let quotient = bitwise_shift_right(value, shift)
+      let remainder = bitwise_and(value, bitwise_shift_left(1, shift) - 1)
+      let half = bitwise_shift_left(1, shift - 1)
+      case
+        remainder > half
+        || remainder == half && { sticky || bitwise_and(quotient, 1) == 1 }
+      {
+        True -> quotient + 1
+        False -> quotient
+      }
+    }
+  }
+}
+
+/// Writes the first `size` bits of `bits`.
+pub fn bit_array_write_bits(bytes: Bytes, at: Int, bits: Bits, size: Int) -> Int {
+  let _ = copy_bits(bytes, at, bits.bytes, bits.start, size)
+  at + size
+}
+
+pub fn bit_array_write_utf8(bytes: Bytes, at: Int, string: String) -> Int {
+  let size = string_byte_size(string) * 8
+  let _ =
+    copy_bits(bytes, at, string_bytes(string), string_offset(string) * 8, size)
+  at + size
+}
+
+pub fn bit_array_write_utf16(
+  bytes: Bytes,
+  at: Int,
+  string: String,
+  little: Bool,
+) -> Int {
+  let start = string_offset(string)
+  let end = start + string_byte_size(string)
+  write_unicode(bytes, at, string_bytes(string), start, end, 16, little)
+}
+
+pub fn bit_array_write_utf32(
+  bytes: Bytes,
+  at: Int,
+  string: String,
+  little: Bool,
+) -> Int {
+  let start = string_offset(string)
+  let end = start + string_byte_size(string)
+  write_unicode(bytes, at, string_bytes(string), start, end, 32, little)
+}
+
+/// Writes the code points of the UTF-8 bytes of `string` from `index` to
+/// `end` in UTF-16 or UTF-32 (`unit` 16 or 32).
+fn write_unicode(
+  bytes: Bytes,
+  at: Int,
+  string: Bytes,
+  index: Int,
+  end: Int,
+  unit: Int,
+  little: Bool,
+) -> Int {
+  case index < end {
+    False -> at
+    True -> {
+      let byte = bytes_get(string, index)
+      let length = utf8_length(byte)
+      let codepoint = utf8_decode(string, index, length)
+      let at = case unit {
+        16 -> write_utf16(bytes, at, codepoint, little)
+        _ -> bit_array_write_int(bytes, at, codepoint, 32, little)
+      }
+      write_unicode(bytes, at, string, index + length, end, unit, little)
+    }
+  }
+}
+
+pub fn bit_array_write_codepoint_utf8(
+  bytes: Bytes,
+  at: Int,
+  codepoint: UtfCodepoint,
+) -> Int {
+  let codepoint = codepoint_to_int(codepoint)
+  case codepoint {
+    _ if codepoint < 0x80 -> put_bits(bytes, at, codepoint, 8)
+    _ if codepoint < 0x800 ->
+      at
+      |> put_bits(bytes, _, 0xC0 + bitwise_shift_right(codepoint, 6), 8)
+      |> put_continuation(bytes, _, codepoint, 0)
+    _ if codepoint < 0x10000 ->
+      at
+      |> put_bits(bytes, _, 0xE0 + bitwise_shift_right(codepoint, 12), 8)
+      |> put_continuation(bytes, _, codepoint, 6)
+      |> put_continuation(bytes, _, codepoint, 0)
+    _ ->
+      at
+      |> put_bits(bytes, _, 0xF0 + bitwise_shift_right(codepoint, 18), 8)
+      |> put_continuation(bytes, _, codepoint, 12)
+      |> put_continuation(bytes, _, codepoint, 6)
+      |> put_continuation(bytes, _, codepoint, 0)
+  }
+}
+
+/// Writes the UTF-8 continuation byte of the 6 bits of `codepoint` from bit
+/// `shift`.
+fn put_continuation(bytes: Bytes, at: Int, codepoint: Int, shift: Int) -> Int {
+  put_bits(bytes, at, 0x80 + int_bits(codepoint, shift, 6), 8)
+}
+
+pub fn bit_array_write_codepoint_utf16(
+  bytes: Bytes,
+  at: Int,
+  codepoint: UtfCodepoint,
+  little: Bool,
+) -> Int {
+  write_utf16(bytes, at, codepoint_to_int(codepoint), little)
+}
+
+pub fn bit_array_write_codepoint_utf32(
+  bytes: Bytes,
+  at: Int,
+  codepoint: UtfCodepoint,
+  little: Bool,
+) -> Int {
+  bit_array_write_int(bytes, at, codepoint_to_int(codepoint), 32, little)
+}
+
+fn write_utf16(bytes: Bytes, at: Int, codepoint: Int, little: Bool) -> Int {
+  case codepoint < 0x10000 {
+    True -> bit_array_write_int(bytes, at, codepoint, 16, little)
+    False -> {
+      let codepoint = codepoint - 0x10000
+      let high = 0xD800 + bitwise_shift_right(codepoint, 10)
+      let low = 0xDC00 + bitwise_and(codepoint, 0x3FF)
+      let at = bit_array_write_int(bytes, at, high, 16, little)
+      bit_array_write_int(bytes, at, low, 16, little)
+    }
+  }
+}
+
+/// The number of bytes of the UTF-8 code point whose first byte is `byte`.
+fn utf8_length(byte: Int) -> Int {
+  case byte {
+    _ if byte < 0x80 -> 1
+    _ if byte < 0xE0 -> 2
+    _ if byte < 0xF0 -> 3
+    _ -> 4
+  }
+}
+
+/// The code point of the `length` UTF-8 bytes of `bytes` from `index`.
+fn utf8_decode(bytes: Bytes, index: Int, length: Int) -> Int {
+  let first = bytes_get(bytes, index)
+  case length {
+    1 -> first
+    2 -> utf8_continue(bytes, index + 1, 1, bitwise_and(first, 0x1F))
+    3 -> utf8_continue(bytes, index + 1, 2, bitwise_and(first, 0x0F))
+    _ -> utf8_continue(bytes, index + 1, 3, bitwise_and(first, 0x07))
+  }
+}
+
+fn utf8_continue(bytes: Bytes, index: Int, count: Int, acc: Int) -> Int {
+  case count {
+    0 -> acc
+    _ ->
+      utf8_continue(
+        bytes,
+        index + 1,
+        count - 1,
+        acc * 64 + bitwise_and(bytes_get(bytes, index), 0x3F),
+      )
+  }
+}
+
 // -- Queries ------------------------------------------------------------------
 
 pub fn bit_array_bit_size(bits: Bits) -> Int {
@@ -476,11 +884,29 @@ fn or_bits(dst: Bytes, at: Int, value: Int, count: Int) -> Nil {
   }
 }
 
+/// Writes the `count` bits of `value`, from 0 to 8 of them, to `dst` at
+/// `at`, whose bits are zero, and returns the position after them.
+fn put_bits(dst: Bytes, at: Int, value: Int, count: Int) -> Int {
+  let _ = case count, bitwise_and(at, 7) {
+    0, _ -> Nil
+    8, 0 -> bytes_set(dst, bitwise_shift_right(at, 3), value)
+    _, _ -> or_bits(dst, at, value, count)
+  }
+  at + count
+}
+
 fn sign(value: Int) -> Int {
   case value {
     0 -> 0
     _ if value < 0 -> -1
     _ -> 1
+  }
+}
+
+fn min(a: Int, b: Int) -> Int {
+  case a < b {
+    True -> a
+    False -> b
   }
 }
 
@@ -522,3 +948,14 @@ fn string_byte_size(string: String) -> Int
 /// The string of the `size` bytes of `bytes` from `start`, which are UTF-8.
 @external(webassembly, "builtins", "_bytes_to_string")
 fn bytes_to_string(bytes: Bytes, start: Int, size: Int) -> String
+
+@external(webassembly, "builtins", "_utf_codepoint_to_int")
+fn codepoint_to_int(codepoint: UtfCodepoint) -> Int
+
+/// The byte of the bits of `value` as a 64 bits float from bit `shift`.
+@external(webassembly, "builtins", "_float64_byte")
+fn float64_byte(value: Float, shift: Int) -> Int
+
+/// The byte of the bits of `value` as a 32 bits float from bit `shift`.
+@external(webassembly, "builtins", "_float32_byte")
+fn float32_byte(value: Float, shift: Int) -> Int

@@ -123,6 +123,8 @@ pub(super) enum BuiltinFunctionExternal {
     StringBytes,
     StringOffset,
     BytesToString,
+    Float64Byte,
+    Float32Byte,
 }
 
 pub fn builtin_function_names() -> Vec<EcoString> {
@@ -190,6 +192,8 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::StringBytes,
             BuiltinFunctionExternal::StringOffset,
             BuiltinFunctionExternal::BytesToString,
+            BuiltinFunctionExternal::Float64Byte,
+            BuiltinFunctionExternal::Float32Byte,
         ]
     }
 
@@ -252,6 +256,8 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::StringBytes => "_string_bytes",
             BuiltinFunctionExternal::StringOffset => "_string_offset",
             BuiltinFunctionExternal::BytesToString => "_bytes_to_string",
+            BuiltinFunctionExternal::Float64Byte => "_float64_byte",
+            BuiltinFunctionExternal::Float32Byte => "_float32_byte",
         }
     }
 
@@ -325,6 +331,9 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::StringBytes => (vec![string()], i32),
             BuiltinFunctionExternal::StringOffset => (vec![string()], int()),
             BuiltinFunctionExternal::BytesToString => (vec![i32, int(), int()], string()),
+            BuiltinFunctionExternal::Float64Byte | BuiltinFunctionExternal::Float32Byte => {
+                (vec![float(), int()], int())
+            }
         }
     }
 }
