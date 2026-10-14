@@ -523,7 +523,7 @@ impl<'a> Generator<'a> {
 
     /// The function `name` of the runtime module `module`, with the type
     /// `fn(arguments) -> return_`.
-    fn runtime_function_id(
+    pub(super) fn runtime_function_id(
         &mut self,
         module: &str,
         name: &str,

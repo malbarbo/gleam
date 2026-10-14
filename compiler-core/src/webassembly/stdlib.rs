@@ -32,6 +32,16 @@ impl Instructions<'_, '_> {
             B::F64ToFloat => self.f64_to_float(),
             B::FloatToF64 => self.float_to_f64(),
             B::StringNumBytes | B::StringByteSize => self.string_len().i32_to_int(),
+            B::BytesNew => self.bytes_new(),
+            B::BytesSize => self.array_len().i32_to_int(),
+            B::BytesGet => self.bytes_get().i32_to_int(),
+            B::BytesSet => self.bytes_set().i32_const(0),
+            B::BytesCopy => self
+                .array_copy(self.string.bytes_index, self.string.bytes_index)
+                .i32_const(0),
+            B::StringBytes => self.string_bytes(),
+            B::StringOffset => self.string_off().i32_to_int(),
+            B::BytesToString => self.struct_new(self.string.type_index),
             B::StringConcat
             | B::StringGetByte
             | B::IntToUtfCodepoint
@@ -58,6 +68,22 @@ impl Instructions<'_, '_> {
             | B::StringPopGrapheme => return false,
         };
         true
+    }
+
+    /// Converts the argument at `index` of `builtin`, just pushed, to the
+    /// type that `builtin_inline` expects: the `Int` positions and sizes of
+    /// `Bytes` are `i32`. Only builtins that `builtin_inline` emits convert
+    /// their arguments.
+    pub(super) fn builtin_argument(
+        &mut self,
+        builtin: BuiltinFunctionExternal,
+        index: usize,
+    ) -> &mut Self {
+        use BuiltinFunctionExternal as B;
+        let is_i32 = builtin == B::BytesNew
+            || matches!(builtin, B::BytesGet | B::BytesSet | B::BytesToString) && index > 0
+            || builtin == B::BytesCopy && !matches!(index, 0 | 2);
+        if is_i32 { self.int_to_i32() } else { self }
     }
 
     /// Shifts the `Int` on the stack by the constant `amount`, like
@@ -90,8 +116,10 @@ impl<'a> Generator<'a> {
         let params: Vec<_> = params.iter().map(|vt| self.wasm_local(*vt)).collect();
         let mut function = Function::new(self, builtin.name(), &params, &[result]);
         let mut instructions = function.extend_instructions(self);
-        for param in params {
-            let _ = instructions.local_get(param);
+        for (index, param) in params.into_iter().enumerate() {
+            let _ = instructions
+                .local_get(param)
+                .builtin_argument(builtin, index);
         }
         assert!(instructions.builtin_inline(builtin));
         function.finish(self)

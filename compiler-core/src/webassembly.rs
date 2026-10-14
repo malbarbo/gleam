@@ -3,6 +3,7 @@
 
 #![allow(clippy::todo)]
 mod array;
+mod bit_array;
 mod builtins;
 mod captures;
 mod dynamic;
@@ -20,6 +21,7 @@ mod stdlib;
 mod tests;
 
 use array::*;
+use bit_array::*;
 pub use builtins::builtin_function_names;
 use builtins::*;
 use captures::{Capture, Variables};
@@ -477,10 +479,9 @@ struct CustomTypeDefinition {
 
 #[derive(Clone)]
 enum WasmConst {
-    String {
-        dest: GlobalId,
-        src: GlobalId,
-    },
+    /// The value of a global created by the start function, a string or a
+    /// bit array.
+    Global { dest: GlobalId, src: GlobalId },
     Constant {
         global_index: GlobalId,
         value: Box<TypedConstant>,
@@ -803,6 +804,10 @@ struct Generator<'a> {
     /// a `HashMap` here would make the emitted module differ between runs of
     /// the compiler over the same source.
     strings: IndexMap<EcoString, GlobalId>,
+    /// The bit arrays of literals, see `bit_array_global`.
+    bit_arrays: IndexMap<Bits, GlobalId>,
+    /// `bit_array_from_bytes` of the runtime, once a bit array is used.
+    bit_array_from_bytes: Option<FunctionId>,
     consts: Vec<WasmConst>,
     globals: Rc<RefCell<Vec<Id>>>,
     int: IntType,
@@ -877,6 +882,8 @@ impl<'a> Generator<'a> {
             main: None,
             error: None,
             strings: IndexMap::new(),
+            bit_arrays: IndexMap::new(),
+            bit_array_from_bytes: None,
             consts: vec![],
             globals: Rc::default(),
             int: IntType::I32,
@@ -1086,13 +1093,20 @@ impl<'a> Generator<'a> {
             | BuiltinFunctionExternal::FloatRepr
             | BuiltinFunctionExternal::UtfCodepointRepr
             | BuiltinFunctionExternal::StringRepr
-            | BuiltinFunctionExternal::StringToMemory => return_,
+            | BuiltinFunctionExternal::StringToMemory
+            | BuiltinFunctionExternal::BytesNew
+            | BuiltinFunctionExternal::StringBytes => return_,
             // For builtins that take an external type as first param
             BuiltinFunctionExternal::I32ToInt
             | BuiltinFunctionExternal::I64ToInt
             | BuiltinFunctionExternal::F32ToFloat
             | BuiltinFunctionExternal::F64ToFloat
-            | BuiltinFunctionExternal::MemoryToString => params
+            | BuiltinFunctionExternal::MemoryToString
+            | BuiltinFunctionExternal::BytesSize
+            | BuiltinFunctionExternal::BytesGet
+            | BuiltinFunctionExternal::BytesSet
+            | BuiltinFunctionExternal::BytesCopy
+            | BuiltinFunctionExternal::BytesToString => params
                 .into_iter()
                 .next()
                 .expect("builtin to have at least one parameter"),
@@ -1127,7 +1141,8 @@ impl<'a> Generator<'a> {
             | BuiltinFunctionExternal::StringJoin
             | BuiltinFunctionExternal::UtfCodepointToInt
             | BuiltinFunctionExternal::UnsafeIntToUtfCodepoint
-            | BuiltinFunctionExternal::StringPopGrapheme => type_::int(),
+            | BuiltinFunctionExternal::StringPopGrapheme
+            | BuiltinFunctionExternal::StringOffset => type_::int(),
         }
     }
 
@@ -1269,6 +1284,8 @@ impl<'a> Generator<'a> {
             "F32" => (ValType::F32, Some(F32_TO_STR)),
             "F64" => (ValType::F64, Some(F64_TO_STR)),
             "AnyRef" => (ANYREF, None),
+            // Only for the runtime, which writes only the bytes it creates.
+            "Bytes" if package == RUNTIME_PACKAGE => (self.string.bytes_val_type(), None),
             // Only for the runtime, which reads the positions it knows.
             "Array" if package == RUNTIME_PACKAGE => {
                 if custom_type.parameters.len() != 1 {
@@ -1423,6 +1440,14 @@ impl<'a> Generator<'a> {
         for runtime_module in self.runtime {
             self.add_module_types(&runtime_module.module);
         }
+        // The `BitArray` of the prelude is the `Bits` of the runtime.
+        let _ = self.types.insert(
+            (PRELUDE_MODULE_NAME.into(), "BitArray".into()),
+            CustomType::Runtime {
+                module: BIT_ARRAY_MODULE.into(),
+                name: "Bits".into(),
+            },
+        );
     }
 
     fn functions_external(
@@ -2078,8 +2103,6 @@ impl<'a> Generator<'a> {
                 "F64" => ValType::F64,
                 _ => panic!("unexpected named type should not reach code generation: {name}"),
             }
-        } else if type_.is_bit_array() {
-            todo!("BitArray is not yet supported");
         } else {
             panic!("unexpected type should not reach code generation: {type_:#?}");
         }
@@ -3010,7 +3033,7 @@ impl<'a> Generator<'a> {
                     true,
                 );
                 let src = self.string_index(value);
-                self.consts.push(WasmConst::String {
+                self.consts.push(WasmConst::Global {
                     dest: id.global_id(),
                     src,
                 });
@@ -3193,7 +3216,25 @@ impl<'a> Generator<'a> {
                 });
                 id
             }
-            Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
+            Constant::BitArray { segments, .. } => {
+                let Some(bits) = Bits::of_literal(segments) else {
+                    todo!("BitArray constants with values are not yet supported")
+                };
+                let src = self.bit_array_global(bits);
+                let type_index = self.type_index(&type_::bit_array());
+                let id = self.add_const(
+                    const_name,
+                    self.val_type_ref_nullable(type_index),
+                    const_expr_ref_null(type_index),
+                    export,
+                    true,
+                );
+                self.consts.push(WasmConst::Global {
+                    dest: id.global_id(),
+                    src,
+                });
+                id
+            }
             Constant::RecordUpdate { .. } => {
                 panic!("record update constants should not reach code generation")
             }
@@ -3239,8 +3280,7 @@ impl<'a> Generator<'a> {
                     self.register_string_const(&arg.value)
                 }
             }
-            Constant::Var { .. } => {}
-            Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
+            Constant::Var { .. } | Constant::BitArray { .. } => {}
             Constant::RecordUpdate { .. } => {
                 panic!("record update constants should not reach code generation")
             }
@@ -3353,7 +3393,13 @@ impl<'a> Generator<'a> {
                     self.expression_var(&scope, instructions, name, type_, None);
                 }
             }
-            Constant::BitArray { .. } => todo!("BitArray constants are not yet supported"),
+            Constant::BitArray { segments, .. } => {
+                let Some(bits) = Bits::of_literal(segments) else {
+                    todo!("BitArray constants with values are not yet supported")
+                };
+                let index = self.bit_array_global(bits);
+                let _ = instructions.global_as_non_null(index);
+            }
             Constant::RecordUpdate { .. } => {
                 panic!("record update constants should not reach code generation")
             }
@@ -4370,7 +4416,15 @@ impl<'a> Generator<'a> {
                             .int_shift_by(left, int_value);
                         return;
                     }
-                    let _ = instructions.expressions(self, locals, scope, args);
+                    if let Some(builtin) = builtin {
+                        for (index, arg) in arguments.iter().enumerate() {
+                            let _ = instructions
+                                .expression(self, locals, scope.clone(), &arg.value)
+                                .builtin_argument(builtin, index);
+                        }
+                    } else {
+                        let _ = instructions.expressions(self, locals, scope, args);
+                    }
                     if !builtin.is_some_and(|builtin| instructions.builtin_inline(builtin)) {
                         let _ = instructions.call_maybe_tail(id, tail);
                     }
@@ -4531,7 +4585,13 @@ impl<'a> Generator<'a> {
                     }
                 }
             }
-            TypedExpr::BitArray { .. } => todo!("BitArray expressions are not yet supported"),
+            TypedExpr::BitArray { segments, .. } => {
+                let Some(bits) = Bits::of_literal(segments) else {
+                    todo!("BitArray expressions with values are not yet supported")
+                };
+                let index = self.bit_array_global(bits);
+                let _ = instructions.global_as_non_null(index);
+            }
             TypedExpr::ModuleSelect {
                 constructor,
                 module_name,
@@ -5612,6 +5672,7 @@ impl<'a> Generator<'a> {
         let int_vt = self.int.val_type();
         let float_vt = self.float.val_type();
         let string_vt = self.string.val_type();
+        let bytes_vt = self.string.bytes_val_type();
         let index = match builtin {
             BuiltinFunctionExternal::IntBitwiseAnd
             | BuiltinFunctionExternal::IntBitwiseOr
@@ -5659,6 +5720,32 @@ impl<'a> Generator<'a> {
             }
             BuiltinFunctionExternal::StringNumBytes | BuiltinFunctionExternal::StringByteSize => {
                 self.code_builtin_inline(builtin, &[string_vt], int_vt)
+            }
+            BuiltinFunctionExternal::BytesNew => {
+                self.code_builtin_inline(builtin, &[int_vt], bytes_vt)
+            }
+            BuiltinFunctionExternal::BytesSize => {
+                self.code_builtin_inline(builtin, &[bytes_vt], int_vt)
+            }
+            BuiltinFunctionExternal::BytesGet => {
+                self.code_builtin_inline(builtin, &[bytes_vt, int_vt], int_vt)
+            }
+            BuiltinFunctionExternal::BytesSet => {
+                self.code_builtin_inline(builtin, &[bytes_vt, int_vt, int_vt], ValType::I32)
+            }
+            BuiltinFunctionExternal::BytesCopy => self.code_builtin_inline(
+                builtin,
+                &[bytes_vt, int_vt, bytes_vt, int_vt, int_vt],
+                ValType::I32,
+            ),
+            BuiltinFunctionExternal::StringBytes => {
+                self.code_builtin_inline(builtin, &[string_vt], bytes_vt)
+            }
+            BuiltinFunctionExternal::StringOffset => {
+                self.code_builtin_inline(builtin, &[string_vt], int_vt)
+            }
+            BuiltinFunctionExternal::BytesToString => {
+                self.code_builtin_inline(builtin, &[bytes_vt, int_vt, int_vt], string_vt)
             }
             BuiltinFunctionExternal::StringConcat => self.code_string_concat(),
             BuiltinFunctionExternal::StringGetByte => self.code_string_get_byte(),

@@ -6,7 +6,6 @@ use alloc::vec::Vec;
 use base64::Engine;
 use base64::alphabet;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
-use core::cmp::Ordering;
 
 //////////////
 // bit arrays
@@ -31,14 +30,6 @@ impl<'a> Bits<'a> {
         Bits::new(bytes, bytes.len() * 8)
     }
 
-    fn bit(&self, i: usize) -> bool {
-        self.bytes[i / 8] & (0x80 >> (i % 8)) != 0
-    }
-
-    fn whole_bytes(&self) -> Option<&'a [u8]> {
-        self.bit_len.is_multiple_of(8).then_some(self.bytes)
-    }
-
     /// The bytes with the unused bits of the last byte set to zero.
     fn padded(&self) -> Vec<u8> {
         let mut v = Vec::from(self.bytes);
@@ -48,73 +39,6 @@ impl<'a> Bits<'a> {
         }
         v
     }
-}
-
-pub fn bit_array_to_string(bits: Bits<'_>) -> Option<&str> {
-    core::str::from_utf8(bits.whole_bytes()?).ok()
-}
-
-pub fn bit_array_is_utf8(bits: Bits) -> bool {
-    bit_array_to_string(bits).is_some()
-}
-
-pub fn bit_array_inspect(bits: Bits) -> String {
-    let mut out = String::from("<<");
-    let rem = bits.bit_len % 8;
-    for (i, &b) in bits.bytes.iter().enumerate() {
-        if i > 0 {
-            out.push_str(", ");
-        }
-        let mut n = itoa::Buffer::new();
-        if i + 1 == bits.bytes.len() && rem != 0 {
-            out.push_str(n.format(b >> (8 - rem)));
-            out.push_str(":size(");
-            out.push_str(n.format(rem));
-            out.push(')');
-        } else {
-            out.push_str(n.format(b));
-        }
-    }
-    out.push_str(">>");
-    out
-}
-
-/// Unsigned big endian value of all bits (wrapping to 64 bits) and bit size.
-pub fn bit_array_to_int_and_size(bits: Bits) -> (i64, i64) {
-    let value = (0..bits.bit_len).fold(0u64, |acc, i| (acc << 1) | bits.bit(i) as u64);
-    (value as i64, bits.bit_len as i64)
-}
-
-/// Same result as `bit_array.compare`: bytes are compared while both sides
-/// have a whole byte; then, if both are non empty, the remaining bits are
-/// compared as unsigned integers and, when equal, by bit size.
-pub fn bit_array_compare(a: Bits, b: Bits) -> Ordering {
-    let mut i = 0;
-    while a.bit_len - i >= 8 && b.bit_len - i >= 8 {
-        match a.bytes[i / 8].cmp(&b.bytes[i / 8]) {
-            Ordering::Equal => i += 8,
-            o => return o,
-        }
-    }
-    match (a.bit_len - i, b.bit_len - i) {
-        (0, 0) => Ordering::Equal,
-        (_, 0) => Ordering::Greater,
-        (0, _) => Ordering::Less,
-        _ => compare_uint(a, b, i).then((a.bit_len - i).cmp(&(b.bit_len - i))),
-    }
-}
-
-/// Compares the bits from `start` of `a` and `b` as unsigned integers.
-fn compare_uint(a: Bits, b: Bits, start: usize) -> Ordering {
-    let first_one = |x: Bits| (start..x.bit_len).find(|&i| x.bit(i)).unwrap_or(x.bit_len);
-    let (fa, fb) = (first_one(a), first_one(b));
-    let (wa, wb) = (a.bit_len - fa, b.bit_len - fb);
-    wa.cmp(&wb).then_with(|| {
-        (0..wa)
-            .map(|k| a.bit(fa + k).cmp(&b.bit(fb + k)))
-            .find(|o| o.is_ne())
-            .unwrap_or(Ordering::Equal)
-    })
 }
 
 //////////////
@@ -227,7 +151,6 @@ pub fn parse_query(query: &str) -> Option<Vec<(String, String)>> {
 mod tests {
     use super::*;
 
-    type CompareCase = (&'static [u8], usize, &'static [u8], usize, Ordering);
     type QueryCase = (
         &'static str,
         Option<&'static [(&'static str, &'static str)]>,
@@ -235,147 +158,6 @@ mod tests {
 
     fn bits(bytes: &[u8], bit_len: usize) -> Bits<'_> {
         Bits::new(bytes, bit_len)
-    }
-
-    #[test]
-    fn to_string() {
-        assert_eq!(bit_array_to_string(Bits::bytes(b"abc")), Some("abc"));
-        assert_eq!(bit_array_to_string(Bits::bytes(b"")), Some(""));
-        assert_eq!(bit_array_to_string(Bits::bytes(&[0xFF])), None);
-        assert_eq!(bit_array_to_string(Bits::bytes(&[0xC3])), None);
-        assert_eq!(bit_array_to_string(bits(b"ab", 15)), None);
-        assert!(bit_array_is_utf8(Bits::bytes("é".as_bytes())));
-        assert!(!bit_array_is_utf8(bits(b"a", 7)));
-    }
-
-    #[test]
-    fn inspect() {
-        let cases: &[(&[u8], usize, &str)] = &[
-            (&[], 0, "<<>>"),
-            (&[1, 2, 3], 24, "<<1, 2, 3>>"),
-            (&[255], 8, "<<255>>"),
-            (&[0b1010_0000], 3, "<<5:size(3)>>"),
-            (&[0b1010_0111], 3, "<<5:size(3)>>"),
-            (&[1, 0b1100_0000], 10, "<<1, 3:size(2)>>"),
-            (&[1, 0b1111_1110], 15, "<<1, 127:size(7)>>"),
-            (&[0x80], 1, "<<1:size(1)>>"),
-        ];
-        for &(b, n, expected) in cases {
-            assert_eq!(bit_array_inspect(bits(b, n)), expected);
-        }
-    }
-
-    #[test]
-    fn int_and_size() {
-        assert_eq!(bit_array_to_int_and_size(bits(&[], 0)), (0, 0));
-        assert_eq!(bit_array_to_int_and_size(bits(&[1, 2], 16)), (258, 16));
-        assert_eq!(bit_array_to_int_and_size(bits(&[0b1010_0000], 3)), (5, 3));
-        assert_eq!(
-            bit_array_to_int_and_size(bits(&[1, 0b1100_0000], 10)),
-            (7, 10)
-        );
-        assert_eq!(bit_array_to_int_and_size(bits(&[0xFF; 8], 64)), (-1, 64));
-        // wraps past 64 bits
-        assert_eq!(
-            bit_array_to_int_and_size(bits(&[1, 0, 0, 0, 0, 0, 0, 0, 2], 72)),
-            (2, 72)
-        );
-    }
-
-    #[test]
-    fn compare() {
-        use Ordering::*;
-        let cases: &[CompareCase] = &[
-            (&[], 0, &[], 0, Equal),
-            (&[1], 8, &[1], 8, Equal),
-            (&[1], 8, &[2], 8, Less),
-            (&[2], 8, &[1], 8, Greater),
-            (&[1, 2], 16, &[1], 8, Greater),
-            (&[1], 8, &[1, 2], 16, Less),
-            (&[1], 8, &[], 0, Greater),
-            (&[], 0, &[0x80], 1, Less),
-            (&[0x80], 1, &[], 0, Greater),
-            // partial bits: compared as integers, then by size
-            (&[0b1000_0000], 1, &[0b0100_0000], 2, Equal.then(Less)),
-            (&[0b1000_0000], 1, &[0b1000_0000], 2, Less),
-            (&[0b1100_0000], 2, &[0b0110_0000], 3, Less),
-            (&[0b0010_0000], 3, &[0b0100_0000], 2, Greater),
-            (&[0b0000_0000], 3, &[0b0000_0000], 2, Greater),
-            (&[0b0000_0000], 2, &[0b0000_0000], 2, Equal),
-            (&[0b1110_0000], 3, &[0b1100_0000], 2, Greater),
-            // one side partial, other with whole bytes
-            (&[0b1110_0000], 3, &[0, 0], 16, Greater),
-            (&[0b1110_0000], 3, &[0, 7], 16, Equal.then(Less)),
-            (&[0b1110_0000], 3, &[0, 8], 16, Less),
-            (&[0b0010_0000], 3, &[0], 8, Greater),
-            (&[0b0000_0000], 3, &[0], 8, Less),
-            (&[5, 0b1000_0000], 9, &[5, 0b1000_0000], 9, Equal),
-            (&[5, 0b1000_0000], 9, &[5, 0b1000_0000], 10, Less),
-            (&[4, 0b1000_0000], 9, &[5, 0b1000_0000], 9, Less),
-            (&[5, 0xFF], 9, &[5, 0x80], 9, Equal),
-        ];
-        for &(a, na, b, nb, expected) in cases {
-            assert_eq!(
-                bit_array_compare(bits(a, na), bits(b, nb)),
-                expected,
-                "{a:?}:{na} {b:?}:{nb}"
-            );
-        }
-    }
-
-    /// Direct transcription of `bit_array.compare` (with big integers
-    /// replaced by the bit lists they come from).
-    fn reference_compare(a: &[bool], b: &[bool]) -> Ordering {
-        if a.len() >= 8 && b.len() >= 8 {
-            let (fa, fb) = (&a[..8], &b[..8]);
-            return match fa.cmp(fb) {
-                Ordering::Equal => reference_compare(&a[8..], &b[8..]),
-                o => o,
-            };
-        }
-        match (a.is_empty(), b.is_empty()) {
-            (true, true) => Ordering::Equal,
-            (false, true) => Ordering::Greater,
-            (true, false) => Ordering::Less,
-            _ => {
-                let strip = |x: &[bool]| {
-                    let i = x.iter().position(|&b| b).unwrap_or(x.len());
-                    x[i..].to_vec()
-                };
-                let (va, vb) = (strip(a), strip(b));
-                va.len()
-                    .cmp(&vb.len())
-                    .then(va.cmp(&vb))
-                    .then(a.len().cmp(&b.len()))
-            }
-        }
-    }
-
-    #[test]
-    fn compare_exhaustive_small() {
-        // every bit array up to 10 bits against every other
-        let mut all = Vec::new();
-        for n in 0..=10usize {
-            for v in 0..(1u32 << n) {
-                let bools: Vec<bool> = (0..n).map(|i| v >> (n - 1 - i) & 1 == 1).collect();
-                let mut bytes = vec![0u8; n.div_ceil(8)];
-                for (i, &b) in bools.iter().enumerate() {
-                    if b {
-                        bytes[i / 8] |= 0x80 >> (i % 8);
-                    }
-                }
-                all.push((bools, bytes, n));
-            }
-        }
-        for (ba, ya, na) in &all {
-            for (bb, yb, nb) in &all {
-                assert_eq!(
-                    bit_array_compare(bits(ya, *na), bits(yb, *nb)),
-                    reference_compare(ba, bb),
-                    "{ba:?} {bb:?}"
-                );
-            }
-        }
     }
 
     #[test]

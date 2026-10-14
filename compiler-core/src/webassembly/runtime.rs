@@ -53,6 +53,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("runtime/string_tree.gleam"),
     ),
     ("builtins/dynamic", include_str!("runtime/dynamic.gleam")),
+    (
+        "builtins/bit_array",
+        include_str!("runtime/bit_array.gleam"),
+    ),
 ];
 
 /// The functions of the runtime that give `==`, `_hash` and the text of
@@ -84,6 +88,15 @@ const HOOKS: &[(&str, &str, Hooks)] = &[
             equal: "string_tree_is_equal",
             hash: "string_tree_hash",
             inspect: "string_tree_inspect",
+        },
+    ),
+    (
+        "builtins/bit_array",
+        "Bits",
+        Hooks {
+            equal: "bit_array_equal",
+            hash: "bit_array_hash",
+            inspect: "bit_array_inspect",
         },
     ),
     (

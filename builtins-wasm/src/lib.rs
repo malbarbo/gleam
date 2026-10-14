@@ -24,7 +24,7 @@ mod io;
 #[cfg(target_arch = "wasm32")]
 mod exports {
     use crate::abi::{Out, bits_arg, bytes_arg, list_arg, str_arg};
-    use crate::codec::{self, Bits};
+    use crate::codec;
     use crate::io::{self, STDERR, STDOUT};
     use crate::num::{self, FLOAT_BUF_LEN, Xoshiro256};
     use crate::text;
@@ -443,17 +443,6 @@ mod exports {
 
     // bit_array
 
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bit_array_to_string(ptr: i32, len: i32, bits: i32, ret: i32) {
-        let b = unsafe { bits_arg(ptr, len, bits) };
-        Out::new(ret).result(codec::bit_array_to_string(b), str_out)
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bit_array_is_utf8(ptr: i32, len: i32, bits: i32) -> i32 {
-        codec::bit_array_is_utf8(unsafe { bits_arg(ptr, len, bits) }) as i32
-    }
-
     unsafe fn base64_encode(ptr: i32, len: i32, bits: i32, padding: i32, url: bool, ret: i32) {
         let b = unsafe { bits_arg(ptr, len, bits) };
         Out::new(ret).string(codec::base64_encode(b, padding != 0, url))
@@ -503,33 +492,6 @@ mod exports {
     pub unsafe extern "C" fn bit_array_base16_decode(ptr: i32, len: i32, ret: i32) {
         let s = unsafe { str_arg(ptr, len) };
         Out::new(ret).result(codec::base16_decode(s), Out::bit_array)
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bit_array_inspect(ptr: i32, len: i32, bits: i32, ret: i32) {
-        let b = unsafe { bits_arg(ptr, len, bits) };
-        Out::new(ret).string(codec::bit_array_inspect(b))
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bit_array_compare(
-        p1: i32,
-        l1: i32,
-        b1: i32,
-        p2: i32,
-        l2: i32,
-        b2: i32,
-    ) -> i64 {
-        let (a, b): (Bits, Bits) = unsafe { (bits_arg(p1, l1, b1), bits_arg(p2, l2, b2)) };
-        codec::bit_array_compare(a, b) as i64
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn bit_array_to_int_and_size(ptr: i32, len: i32, bits: i32, ret: i32) {
-        let (value, size) = codec::bit_array_to_int_and_size(unsafe { bits_arg(ptr, len, bits) });
-        let out = Out::new(ret);
-        out.i64(value);
-        out.at(8).i64(size);
     }
 
     // uri

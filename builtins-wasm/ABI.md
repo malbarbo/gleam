@@ -161,21 +161,17 @@ configured width (`_config`).
 | `string_from_utf_codepoints` | `fn(List(UtfCodepoint)) -> String` | invalid code point panics |
 | `string_inspect` | `fn(String) -> String` | Gleam source repr with quotes and escapes, as `string.inspect` on Erlang/JS (both agree): `\\`, `\"`, `\n`, `\r`, `\t`, `\f`, and the other code points below U+0020 or in U+007F..U+009F as `\u{XXXX}` (4 upper case hex digits) |
 
-**bit_array**
+**bit_array** (the other functions of `gleam/bit_array` are in the runtime,
+see `builtins/bit_array`)
 
 | Export | Gleam type | Notes |
 |---|---|---|
-| `bit_array_to_string` | `fn(BitArray) -> Result(String, Nil)` | whole bytes and valid UTF-8 |
-| `bit_array_is_utf8` | `fn(BitArray) -> Bool` | |
 | `bit_array_base64_encode` | `fn(BitArray, Bool) -> String` | standard alphabet; `Bool` = padding; trailing bits padded with zeros |
 | `bit_array_base64_decode` | `fn(String) -> Result(BitArray, Nil)` | padding optional; non canonical trailing bits accepted |
 | `bit_array_base64_url_encode` | `fn(BitArray, Bool) -> String` | URL-safe alphabet |
 | `bit_array_base64_url_decode` | `fn(String) -> Result(BitArray, Nil)` | |
 | `bit_array_base16_encode` | `fn(BitArray) -> String` | upper case |
 | `bit_array_base16_decode` | `fn(String) -> Result(BitArray, Nil)` | both cases |
-| `bit_array_inspect` | `fn(BitArray) -> String` | `<<1, 2, 3:size(2)>>` |
-| `bit_array_compare` | `fn(BitArray, BitArray) -> Int` | -1, 0, 1 (`order.Order` built by the caller), same result as `bit_array.compare`: bytes while both sides have 8 bits left, then an empty side is smaller, then the remaining bits as unsigned integers, then the bit size |
-| `bit_array_to_int_and_size` | `fn(BitArray) -> #(Int, Int)` | unsigned big endian value (wrapping to 64 bits, Erlang gives a big integer) and bit size |
 
 **uri**
 
@@ -285,20 +281,23 @@ arrays of `Dynamic`.
 | `_array_remove` | `fn(Array(a), Int) -> Array(a)` | a copy without the element |
 | `_array_from_list` | `fn(List(a)) -> Array(a)` | |
 
-### Planned builtins (not implemented yet)
+**Bytes** (`@external(webassembly, "builtins", "Bytes") type Bytes`, the byte
+array of strings, only for the runtime)
 
-**BitArray** (needs BitArray support in the compiler; a `BitArray` would be a
-view `{ bytes, off, bit_len }` like `String`)
+The runtime changes only the bytes it has just created, before it returns the
+value that holds them, so strings and bit arrays share their bytes. These
+builtins are emitted in place of their calls.
 
 | Name | Gleam type | Semantics |
 |---|---|---|
-| `_bit_array_from_string` | `fn(String) -> BitArray` | shares the bytes |
-| `_bit_array_bit_size` / `_bit_array_byte_size` | `fn(BitArray) -> Int` | |
-| `_bit_array_pad_to_bytes` | `fn(BitArray) -> BitArray` | |
-| `_bit_array_slice` | `fn(BitArray, Int, Int) -> Result(BitArray, Nil)` | `(position, length)` in bytes, as in Erlang |
-| `_bit_array_concat` | `fn(List(BitArray)) -> BitArray` | |
-| `_bit_array_starts_with` | `fn(BitArray, BitArray) -> Bool` | |
-| `_bit_array_compare` | `fn(BitArray, BitArray) -> order.Order` | as `bit_array.compare` (the Rust `bit_array_compare` returns -1/0/1) |
+| `_bytes_new` | `fn(Int) -> Bytes` | `array.new_default`: zeros |
+| `_bytes_size` | `fn(Bytes) -> Int` | `array.len` |
+| `_bytes_get` | `fn(Bytes, Int) -> Int` | `array.get_u`, traps out of range |
+| `_bytes_set` | `fn(Bytes, Int, Int) -> Nil` | `array.set` of the low 8 bits |
+| `_bytes_copy` | `fn(Bytes, Int, Bytes, Int, Int) -> Nil` | `(dst, at, src, from, count)`, `array.copy` |
+| `_string_bytes` | `fn(String) -> Bytes` | the bytes of the string, which start at `_string_offset` |
+| `_string_offset` | `fn(String) -> Int` | |
+| `_bytes_to_string` | `fn(Bytes, Int, Int) -> String` | `(start, size)`, sharing the bytes, which are UTF-8 |
 
 ## Runtime in Gleam
 
@@ -314,13 +313,15 @@ function once the external types are replaced by their representation.
 |---|---|---|
 | `Dict(k, v)` | `builtins/dict` | a CHAMP (hash trie) with `Array` nodes, with the hash of `_hash` |
 | `StringTree` | `builtins/string_tree` | a rope that stores the size of each node |
+| `BitArray` (of the prelude) | `builtins/bit_array` | `Bits(bytes, start, end)`: the bits of a `Bytes` from `start` to `end` (not included), shared by slices and with the strings they come from; literals are computed when compiling and created by the start function |
 | `Dynamic` | `builtins/dynamic` | a closed sum: `DInt`, `DFloat`, `DString`, `DBool`, `DNil`, `DList`, `DArray` (an `Array(Dynamic)`), `DDict` and `DOther(AnyRef, VTable)` |
 
-Their functions are named after the type: `dict_*`, `string_tree_*` and
-`dynamic_*` (see the modules). The equality, the hash and the text of
-`string.inspect` of these types are not structural: they call hooks of the
-runtime (`dict_equal`, `dict_hash`, `dict_inspect`, and the same for
-`string_tree` and `dynamic`), also when they are nested in other values.
+Their functions are named after the type: `dict_*`, `string_tree_*`,
+`bit_array_*` and `dynamic_*` (see the modules). The equality, the hash and
+the text of `string.inspect` of these types are not structural: they call
+hooks of the runtime (`dict_equal`, `dict_hash`, `dict_inspect`, and the same
+for `string_tree`, `bit_array` and `dynamic`), also when they are nested in
+other values.
 
 **Dynamic**
 

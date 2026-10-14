@@ -115,6 +115,14 @@ pub(super) enum BuiltinFunctionExternal {
     UtfCodepointToInt,
     UnsafeIntToUtfCodepoint,
     StringPopGrapheme,
+    BytesNew,
+    BytesSize,
+    BytesGet,
+    BytesSet,
+    BytesCopy,
+    StringBytes,
+    StringOffset,
+    BytesToString,
 }
 
 pub fn builtin_function_names() -> Vec<EcoString> {
@@ -174,6 +182,14 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::UtfCodepointToInt,
             BuiltinFunctionExternal::UnsafeIntToUtfCodepoint,
             BuiltinFunctionExternal::StringPopGrapheme,
+            BuiltinFunctionExternal::BytesNew,
+            BuiltinFunctionExternal::BytesSize,
+            BuiltinFunctionExternal::BytesGet,
+            BuiltinFunctionExternal::BytesSet,
+            BuiltinFunctionExternal::BytesCopy,
+            BuiltinFunctionExternal::StringBytes,
+            BuiltinFunctionExternal::StringOffset,
+            BuiltinFunctionExternal::BytesToString,
         ]
     }
 
@@ -228,6 +244,14 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::UtfCodepointToInt => "_utf_codepoint_to_int",
             BuiltinFunctionExternal::UnsafeIntToUtfCodepoint => "_unsafe_int_to_utf_codepoint",
             BuiltinFunctionExternal::StringPopGrapheme => "_string_pop_grapheme",
+            BuiltinFunctionExternal::BytesNew => "_bytes_new",
+            BuiltinFunctionExternal::BytesSize => "_bytes_size",
+            BuiltinFunctionExternal::BytesGet => "_bytes_get",
+            BuiltinFunctionExternal::BytesSet => "_bytes_set",
+            BuiltinFunctionExternal::BytesCopy => "_bytes_copy",
+            BuiltinFunctionExternal::StringBytes => "_string_bytes",
+            BuiltinFunctionExternal::StringOffset => "_string_offset",
+            BuiltinFunctionExternal::BytesToString => "_bytes_to_string",
         }
     }
 
@@ -290,6 +314,17 @@ impl BuiltinFunctionExternal {
                 vec![string()],
                 result(tuple(vec![string(), string()]), nil()),
             ),
+            // `i32` is `Bytes` for these.
+            BuiltinFunctionExternal::BytesNew => (vec![int()], i32),
+            BuiltinFunctionExternal::BytesSize => (vec![i32], int()),
+            BuiltinFunctionExternal::BytesGet => (vec![i32, int()], int()),
+            BuiltinFunctionExternal::BytesSet => (vec![i32, int(), int()], nil()),
+            BuiltinFunctionExternal::BytesCopy => {
+                (vec![i32.clone(), int(), i32, int(), int()], nil())
+            }
+            BuiltinFunctionExternal::StringBytes => (vec![string()], i32),
+            BuiltinFunctionExternal::StringOffset => (vec![string()], int()),
+            BuiltinFunctionExternal::BytesToString => (vec![i32, int(), int()], string()),
         }
     }
 }
@@ -346,6 +381,7 @@ impl<'a> Generator<'a> {
                 .string_from_bytes()
                 .global_set(index);
         }
+        self.code_bit_arrays(&mut instructions);
         let _ = instructions.call(constants).end();
         function.finish(self)
     }
@@ -359,7 +395,7 @@ impl<'a> Generator<'a> {
         let mut instructions = function.extend_instructions(self);
         for const_ in self.consts.clone() {
             match const_ {
-                WasmConst::String { dest, src } => {
+                WasmConst::Global { dest, src } => {
                     let _ = instructions.global_get(src).global_set(dest);
                 }
                 WasmConst::Constant {
@@ -1213,8 +1249,6 @@ impl<'a> Generator<'a> {
                 self.type_pretty_name(type_),
                 None,
             )
-        } else if type_.is_bit_array() {
-            todo!("BitArray repr is not yet supported");
         } else {
             panic!("unexpected type should not reach repr: {type_:#?}");
         };
@@ -1593,8 +1627,6 @@ impl<'a> Generator<'a> {
             self.code_never(&[val_type, ValType::I32], &[ValType::I32])
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             self.code_custom_type_repr(type_, &custom_type, &args)
-        } else if type_.is_bit_array() {
-            todo!("BitArray repr is not yet supported");
         } else {
             panic!("unexpected type should not reach repr: {type_:#?}");
         }

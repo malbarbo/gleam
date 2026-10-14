@@ -10,9 +10,9 @@ use std::{
 
 use crate::{
     ast::{
-        AssignmentKind, ClauseGuard, Constant, Pattern, Statement, TypedArg, TypedAssignment,
-        TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr, TypedFunction, TypedPattern,
-        TypedRecordConstructor, TypedStatement,
+        AssignmentKind, BitArrayOption, ClauseGuard, Constant, Pattern, Statement, TypedArg,
+        TypedAssignment, TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr,
+        TypedFunction, TypedPattern, TypedRecordConstructor, TypedStatement,
     },
     type_::{Type, TypeVar},
     webassembly::{
@@ -567,7 +567,19 @@ impl Monomorphizer {
                 self.expression(value);
             }
             TypedExpr::Int { .. } | TypedExpr::Float { .. } | TypedExpr::String { .. } => {}
-            TypedExpr::BitArray { .. } => todo!("BitArray expressions are not yet supported"),
+            TypedExpr::BitArray {
+                type_, segments, ..
+            } => {
+                *type_ = self.type_(type_);
+                for segment in segments {
+                    self.expression(&mut segment.value);
+                    for option in &mut segment.options {
+                        if let BitArrayOption::Size { value, .. } = option {
+                            self.expression(value);
+                        }
+                    }
+                }
+            }
             TypedExpr::ModuleSelect { type_, .. } => {
                 *type_ = self.type_(type_);
             }
