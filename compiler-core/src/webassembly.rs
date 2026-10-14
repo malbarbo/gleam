@@ -1114,6 +1114,8 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::StringConcat
             | BuiltinFunctionExternal::Float64Byte
             | BuiltinFunctionExternal::Float32Byte
+            | BuiltinFunctionExternal::Float64FromBits
+            | BuiltinFunctionExternal::Float32FromBits
             | BuiltinFunctionExternal::StringNumBytes
             | BuiltinFunctionExternal::StringGetByte
             | BuiltinFunctionExternal::IntToUtfCodepoint
@@ -5355,8 +5357,18 @@ impl<'a> Generator<'a> {
                         .local_set(rest_local);
                 }
             }
-            Pattern::BitArray { .. } | Pattern::BitArraySize(_) => {
-                todo!("BitArray patterns are not yet supported")
+            Pattern::BitArray { segments, .. } => {
+                scope = self.pattern_bit_array(
+                    locals,
+                    scope,
+                    instructions,
+                    pattern,
+                    segments,
+                    fail_target,
+                );
+            }
+            Pattern::BitArraySize(_) => {
+                panic!("bit array sizes are matched with their segments")
             }
             Pattern::Assign {
                 name,
@@ -5747,6 +5759,12 @@ impl<'a> Generator<'a> {
             }
             BuiltinFunctionExternal::Float64Byte | BuiltinFunctionExternal::Float32Byte => {
                 self.code_builtin_inline(builtin, &[float_vt, int_vt], int_vt)
+            }
+            BuiltinFunctionExternal::Float64FromBits => {
+                self.code_builtin_inline(builtin, &[int_vt, int_vt], float_vt)
+            }
+            BuiltinFunctionExternal::Float32FromBits => {
+                self.code_builtin_inline(builtin, &[int_vt], float_vt)
             }
             BuiltinFunctionExternal::StringConcat => self.code_string_concat(),
             BuiltinFunctionExternal::StringGetByte => self.code_string_get_byte(),

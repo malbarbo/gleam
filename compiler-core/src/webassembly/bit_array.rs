@@ -5,10 +5,15 @@
 //! runtime module `builtins/bit_array`, which also has their functions. Here
 //! is how a bit array expression is created: one whose segments are literals
 //! is computed when compiling, and created once by the start function, and
-//! any other one writes its segments with the functions of the runtime.
+//! any other one writes its segments with the functions of the runtime. And
+//! here is how a bit array pattern is matched, segment by segment, with the
+//! functions of the runtime that read them.
 
 use super::*;
-use crate::ast::{BitArraySegment, Endianness, TypedExprBitArraySegment};
+use crate::ast::{
+    BitArraySegment, BitArraySize, Endianness, IntOperator, TypedBitArraySize,
+    TypedExprBitArraySegment, TypedPatternBitArraySegment,
+};
 use num_traits::ToPrimitive;
 
 /// The runtime module of bit arrays.
@@ -63,13 +68,20 @@ impl Bits {
     }
 
     /// Pushes `segment` when it is a literal.
-    fn push_literal(&mut self, segment: &TypedExprBitArraySegment) -> bool {
+    fn push_literal<V: Literal>(&mut self, segment: &BitArraySegment<V, Arc<Type>>) -> bool {
         let mut bits = self.clone();
         let pushed = bits.push_segment(segment).is_some();
         if pushed {
             *self = bits;
         }
         pushed
+    }
+
+    /// The unsigned integer of the bits.
+    fn unsigned(&self) -> BigInt {
+        (0..self.size).fold(BigInt::ZERO, |value, index| {
+            value * 2 + u8::from(self.bit(index))
+        })
     }
 
     fn push_bits(&mut self, bits: &Bits, size: u64) {
@@ -227,6 +239,27 @@ impl Literal for TypedConstant {
             | Constant::BinaryOperator { .. }
             | Constant::Invalid { .. }
             | Constant::Todo { .. } => None,
+        }
+    }
+}
+
+impl Literal for TypedPattern {
+    fn literal(&self) -> Option<LiteralValue<'_>> {
+        match self {
+            Pattern::Int { int_value, .. } => Some(LiteralValue::Int(int_value.clone())),
+            Pattern::String { value, .. } => Some(LiteralValue::String(value)),
+            Pattern::BitArraySize(size) => size.compile_time_number().map(LiteralValue::Int),
+            // A float is matched by its value, see `pattern_segment`.
+            Pattern::Float { .. }
+            | Pattern::Variable { .. }
+            | Pattern::Assign { .. }
+            | Pattern::Discard { .. }
+            | Pattern::List { .. }
+            | Pattern::Constructor { .. }
+            | Pattern::Tuple { .. }
+            | Pattern::BitArray { .. }
+            | Pattern::StringPrefix { .. }
+            | Pattern::Invalid { .. } => None,
         }
     }
 }
@@ -597,5 +630,576 @@ impl Generator<'_> {
                 .call(from_bytes)
                 .global_set(index);
         }
+    }
+}
+
+/// The largest literal integer segment of a pattern whose bits are compared
+/// with the bits of the other literals, instead of with its value.
+const MAX_LITERAL_INT_SIZE: u64 = 1 << 16;
+
+/// The position of a segment of a bit array pattern: a constant and the sum
+/// of the sizes before it that are not constant, if any.
+#[derive(Default)]
+struct Position {
+    constant: u64,
+    local: Option<LocalId>,
+}
+
+/// The locals of a bit array pattern while its segments are matched.
+struct Matching {
+    /// The bit array.
+    bits: LocalId,
+    /// Its size.
+    size: LocalId,
+    position: Position,
+    fail_target: InstrSeqId,
+}
+
+impl Generator<'_> {
+    /// Matches the bit array on the stack with the `segments` of `pattern`,
+    /// from its first bit, see the runtime module of bit arrays: consecutive
+    /// literal segments are compared with the bits of their literal, and any
+    /// other one checks that the bit array has its bits before reading them.
+    pub(super) fn pattern_bit_array(
+        &mut self,
+        locals: &Locals,
+        mut scope: Scope,
+        instructions: &mut Instructions<'_, '_>,
+        pattern: &TypedPattern,
+        segments: &[TypedPatternBitArraySegment],
+        fail_target: InstrSeqId,
+    ) -> Scope {
+        let bits_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]);
+        let bit_size = self.runtime_function_id(
+            BIT_ARRAY_MODULE,
+            "bit_array_bit_size",
+            vec![bits_type],
+            type_::int(),
+        );
+        let mut matching = Matching {
+            bits: locals.for_pattern(pattern),
+            size: self.wasm_local(self.int.val_type()),
+            position: Position::default(),
+            fail_target,
+        };
+        let _ = instructions
+            .local_tee(matching.bits)
+            .call(bit_size)
+            .local_set(matching.size);
+        let mut literal = Bits::default();
+        let mut ends_with_literal = true;
+        for (index, segment) in segments.iter().enumerate() {
+            if is_literal_segment(segment) && literal.push_literal(segment) {
+                ends_with_literal = true;
+                continue;
+            }
+            ends_with_literal = false;
+            if literal.size > 0 {
+                self.pattern_literal(
+                    instructions,
+                    &mut matching,
+                    std::mem::take(&mut literal),
+                    false,
+                );
+            }
+            let last = index + 1 == segments.len();
+            scope = self.pattern_segment(locals, scope, instructions, &mut matching, segment, last);
+        }
+        if ends_with_literal {
+            self.pattern_literal(instructions, &mut matching, literal, true);
+        }
+        scope
+    }
+
+    /// Compares the bits of the bit array at the position with `bits`, the
+    /// bits of consecutive literal segments, the `last` ones of the pattern
+    /// when it ends with them. The bits of a non-negative `Int` are compared
+    /// with the integer that is read.
+    fn pattern_literal(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        matching: &mut Matching,
+        bits: Bits,
+        last: bool,
+    ) {
+        let size = SegmentSize::Constant(bits.size);
+        self.check_room(instructions, matching, &size, last);
+        let bits_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]);
+        if bits.size == 0 {
+            // Nothing to compare.
+        } else if bits.size < instructions.int_bits() as u64 {
+            let read = self.runtime_function_id(
+                BIT_ARRAY_MODULE,
+                "bit_array_read_int",
+                vec![
+                    bits_type,
+                    type_::int(),
+                    type_::int(),
+                    type_::bool(),
+                    type_::bool(),
+                ],
+                type_::int(),
+            );
+            self.push_read_arguments(instructions, matching, &size);
+            let _ = instructions
+                .bool_const(false)
+                .bool_const(false)
+                .call(read)
+                .int_const(&bits.unsigned())
+                .int_ne()
+                .br_if(matching.fail_target);
+        } else {
+            let match_ = self.runtime_function_id(
+                BIT_ARRAY_MODULE,
+                "bit_array_match",
+                vec![bits_type.clone(), type_::int(), bits_type],
+                type_::bool(),
+            );
+            let global = self.bit_array_global(bits);
+            let _ = instructions.local_get(matching.bits);
+            push_position(instructions, &matching.position);
+            let _ = instructions
+                .global_as_non_null(global)
+                .call(match_)
+                .bool_not()
+                .br_if(matching.fail_target);
+        }
+        if !last {
+            self.advance(instructions, matching, size);
+        }
+    }
+
+    /// Matches `segment`, which is not a literal, the `last` one of the
+    /// pattern when it is.
+    fn pattern_segment(
+        &mut self,
+        locals: &Locals,
+        mut scope: Scope,
+        instructions: &mut Instructions<'_, '_>,
+        matching: &mut Matching,
+        segment: &TypedPatternBitArraySegment,
+        last: bool,
+    ) -> Scope {
+        let type_ = &segment.type_;
+        if type_.is_utf_codepoint() {
+            return self.pattern_codepoint(locals, scope, instructions, matching, segment, last);
+        }
+        let value = segment.value.as_ref();
+        if let Pattern::Assign { name, pattern, .. } = value
+            && let Pattern::String { value: string, .. } = pattern.as_ref()
+        {
+            // The string of the literal is the value of the assignment.
+            let literal = BitArraySegment {
+                value: pattern.clone(),
+                ..segment.clone()
+            };
+            let bits =
+                Bits::of_literal(std::slice::from_ref(&literal)).expect("literal string segment");
+            self.pattern_literal(instructions, matching, bits, last);
+            let local = locals.for_pattern(value);
+            let index = self.string_index(string);
+            let _ = instructions.global_as_non_null(index).local_set(local);
+            return scope.insert_local(name.clone(), local);
+        }
+        let little = segment.endianness() == Endianness::Little;
+        let size = match segment.size() {
+            Some(Pattern::BitArraySize(size)) => Some(self.pattern_segment_size(
+                &scope,
+                instructions,
+                matching,
+                size,
+                segment.unit(),
+            )),
+            Some(size) => panic!("invalid bit array segment size {size:?}"),
+            None if type_.is_int() => Some(SegmentSize::Constant(8)),
+            None if type_.is_float() => Some(SegmentSize::Constant(64)),
+            None => None,
+        };
+        let size = match size {
+            Some(size) => {
+                self.check_room(instructions, matching, &size, last);
+                size
+            }
+            None => {
+                // The rest of the bit array, of whole bytes for `bytes`.
+                let local = self.wasm_local(self.int.val_type());
+                let _ = instructions.local_get(matching.size);
+                push_position(instructions, &matching.position);
+                let _ = instructions.int_sub().local_tee(local);
+                if segment.has_bytes_option() {
+                    let _ = instructions
+                        .int_const(&7.into())
+                        .int_and()
+                        .int_eqz()
+                        .bool_not()
+                        .br_if(matching.fail_target);
+                } else {
+                    let _ = instructions.drop();
+                }
+                SegmentSize::Local(local)
+            }
+        };
+        let bits_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]);
+        let arguments = vec![bits_type.clone(), type_::int(), type_::int()];
+        if type_.is_float() {
+            let mut arguments = arguments.clone();
+            arguments.push(type_::bool());
+            let is_float = self.runtime_function_id(
+                BIT_ARRAY_MODULE,
+                "bit_array_is_float",
+                arguments,
+                type_::bool(),
+            );
+            self.push_read_arguments(instructions, matching, &size);
+            let _ = instructions
+                .bool_const(little)
+                .call(is_float)
+                .bool_not()
+                .br_if(matching.fail_target);
+        }
+        if !value.is_discard() {
+            let (name, mut arguments, result) = if type_.is_int() {
+                let mut arguments = arguments;
+                arguments.extend([type_::bool(), type_::bool()]);
+                ("bit_array_read_int", arguments, type_::int())
+            } else if type_.is_float() {
+                let mut arguments = arguments;
+                arguments.push(type_::bool());
+                ("bit_array_read_float", arguments, type_::float())
+            } else if type_.is_bit_array() {
+                ("bit_array_read_bits", arguments, bits_type)
+            } else {
+                panic!("invalid bit array segment type {type_:?}")
+            };
+            self.push_read_arguments(instructions, matching, &size);
+            if type_.is_int() {
+                let _ = instructions.bool_const(little).bool_const(segment.signed());
+            } else if type_.is_float() {
+                let _ = instructions.bool_const(little);
+            }
+            let read = self.runtime_function_id(
+                BIT_ARRAY_MODULE,
+                name,
+                std::mem::take(&mut arguments),
+                result,
+            );
+            let _ = instructions.call(read);
+            if let Pattern::Float { float_value, .. } = value {
+                // A float is equal to the literal when its bits are, so 0.0
+                // and -0.0 are different.
+                let value = float_value.value();
+                let _ = match self.float {
+                    FloatType::F32 => instructions
+                        .float_reinterpret()
+                        .i32_const((value as f32).to_bits() as i32)
+                        .i32_ne(),
+                    FloatType::F64 => instructions
+                        .float_reinterpret()
+                        .i64_const(value.to_bits() as i64)
+                        .i64_ne(),
+                };
+                let _ = instructions.br_if(matching.fail_target);
+            } else {
+                scope = self._pattern(locals, scope, instructions, value, matching.fail_target);
+            }
+        }
+        if !last {
+            self.advance(instructions, matching, size);
+        }
+        scope
+    }
+
+    /// Matches the code point `segment`, whose size is the size of the code
+    /// point that is read.
+    fn pattern_codepoint(
+        &mut self,
+        locals: &Locals,
+        mut scope: Scope,
+        instructions: &mut Instructions<'_, '_>,
+        matching: &mut Matching,
+        segment: &TypedPatternBitArraySegment,
+        last: bool,
+    ) -> Scope {
+        let bits_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]);
+        let little = segment.endianness() == Endianness::Little;
+        let (read, size) = if segment.has_utf16_codepoint_option() {
+            (
+                "bit_array_read_codepoint_utf16",
+                Some("bit_array_codepoint_utf16_size"),
+            )
+        } else if segment.has_utf32_codepoint_option() {
+            ("bit_array_read_codepoint_utf32", None)
+        } else {
+            (
+                "bit_array_read_codepoint_utf8",
+                Some("bit_array_codepoint_utf8_size"),
+            )
+        };
+        let mut arguments = vec![bits_type, type_::int()];
+        let _ = instructions.local_get(matching.bits);
+        push_position(instructions, &matching.position);
+        if read != "bit_array_read_codepoint_utf8" {
+            arguments.push(type_::bool());
+            let _ = instructions.bool_const(little);
+        }
+        let read = self.runtime_function_id(BIT_ARRAY_MODULE, read, arguments, type_::int());
+        let codepoint = self.wasm_local(self.int.val_type());
+        let _ = instructions
+            .call(read)
+            .local_tee(codepoint)
+            .int_const(&0.into())
+            .int_lt()
+            .br_if(matching.fail_target);
+        let size = match size {
+            None => SegmentSize::Constant(32),
+            Some(name) => {
+                let size = self.runtime_function_id(
+                    BIT_ARRAY_MODULE,
+                    name,
+                    vec![type_::utf_codepoint()],
+                    type_::int(),
+                );
+                let local = self.wasm_local(self.int.val_type());
+                let _ = instructions
+                    .local_get(codepoint)
+                    .int_to_i32()
+                    .call(size)
+                    .local_set(local);
+                SegmentSize::Local(local)
+            }
+        };
+        if last {
+            self.check_room(instructions, matching, &size, true);
+        }
+        if !segment.value.is_discard() {
+            let _ = instructions.local_get(codepoint).int_to_i32();
+            scope = self._pattern(
+                locals,
+                scope,
+                instructions,
+                &segment.value,
+                matching.fail_target,
+            );
+        }
+        if !last {
+            self.advance(instructions, matching, size);
+        }
+        scope
+    }
+
+    /// The size in bits of a segment of `size` in `unit`s, in a local that
+    /// fails the match when it is negative, unless it is constant.
+    fn pattern_segment_size(
+        &mut self,
+        scope: &Scope,
+        instructions: &mut Instructions<'_, '_>,
+        matching: &Matching,
+        size: &TypedBitArraySize,
+        unit: u8,
+    ) -> SegmentSize {
+        if let Some(size) = size.compile_time_number() {
+            // No bit array has more bits than the largest `Int`, and none
+            // has a segment of a negative size.
+            let max = self.int_max();
+            return match (size * unit).to_u64() {
+                Some(size) => SegmentSize::Constant(size.min(max)),
+                None => {
+                    let _ = instructions.bool_const(true).br_if(matching.fail_target);
+                    SegmentSize::Constant(0)
+                }
+            };
+        }
+        let local = self.wasm_local(self.int.val_type());
+        self.bit_array_size(scope, instructions, size);
+        if unit != 1 {
+            let _ = instructions.int_const(&unit.into()).int_mul();
+        }
+        let _ = instructions
+            .local_tee(local)
+            .int_const(&0.into())
+            .int_lt()
+            .br_if(matching.fail_target);
+        SegmentSize::Local(local)
+    }
+
+    /// The value of `size`, with the operators of `Int`.
+    fn bit_array_size(
+        &mut self,
+        scope: &Scope,
+        instructions: &mut Instructions<'_, '_>,
+        size: &TypedBitArraySize,
+    ) {
+        match size {
+            BitArraySize::Int { int_value, .. } => {
+                let _ = instructions.int_const(int_value);
+            }
+            BitArraySize::Variable { name, .. } => {
+                self.expression_var(scope, instructions, name, &type_::int(), None);
+            }
+            BitArraySize::Block { inner, .. } => self.bit_array_size(scope, instructions, inner),
+            BitArraySize::BinaryOperator {
+                operator,
+                left,
+                right,
+                ..
+            } => {
+                self.bit_array_size(scope, instructions, left);
+                self.bit_array_size(scope, instructions, right);
+                let _ = match operator {
+                    IntOperator::Add => instructions.int_add(),
+                    IntOperator::Subtract => instructions.int_sub(),
+                    IntOperator::Multiply => instructions.int_mul(),
+                    IntOperator::Divide | IntOperator::Remainder => {
+                        let dividend = self.wasm_local(self.int.val_type());
+                        let divisor = self.wasm_local(self.int.val_type());
+                        if *operator == IntOperator::Divide {
+                            instructions.int_div(dividend, divisor)
+                        } else {
+                            instructions.int_rem(dividend, divisor)
+                        }
+                    }
+                };
+            }
+        }
+    }
+
+    /// Fails the match when the bit array does not have `size` bits from the
+    /// position, or more of them after the `last` segment. The bits after
+    /// the position are compared, as the position is not after the end.
+    fn check_room(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        matching: &Matching,
+        size: &SegmentSize,
+        last: bool,
+    ) {
+        let _ = instructions.local_get(matching.size);
+        if matching.position.constant > 0 || matching.position.local.is_some() {
+            push_position(instructions, &matching.position);
+            let _ = instructions.int_sub();
+        }
+        let _ = match size {
+            SegmentSize::Constant(size) => instructions.int_const(&(*size).into()),
+            SegmentSize::Local(size) => instructions.local_get(*size),
+        };
+        let _ = if last {
+            instructions.int_ne()
+        } else {
+            instructions.int_lt()
+        };
+        let _ = instructions.br_if(matching.fail_target);
+    }
+
+    /// Pushes the arguments of a `bit_array_read_*` function: the bit array,
+    /// the position and the size.
+    fn push_read_arguments(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        matching: &Matching,
+        size: &SegmentSize,
+    ) {
+        let _ = instructions.local_get(matching.bits);
+        push_position(instructions, &matching.position);
+        let _ = match size {
+            SegmentSize::Constant(size) => instructions.int_const(&(*size).into()),
+            SegmentSize::Local(size) => instructions.local_get(*size),
+        };
+    }
+
+    /// The largest `Int`, which is larger than the number of bits of any bit
+    /// array.
+    fn int_max(&self) -> u64 {
+        match self.int {
+            IntType::I32 => i32::MAX as u64,
+            IntType::I64 => i64::MAX as u64,
+        }
+    }
+
+    /// Moves the position after a segment of `size` bits.
+    fn advance(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        matching: &mut Matching,
+        size: SegmentSize,
+    ) {
+        match size {
+            SegmentSize::Constant(size) => {
+                matching.position.constant = (matching.position.constant + size).min(self.int_max())
+            }
+            SegmentSize::Local(size) => {
+                matching.position.local = Some(match matching.position.local {
+                    None => size,
+                    Some(position) => {
+                        let local = self.wasm_local(self.int.val_type());
+                        let _ = instructions
+                            .local_get(position)
+                            .local_get(size)
+                            .int_add()
+                            .local_set(local);
+                        local
+                    }
+                });
+            }
+        }
+    }
+}
+
+fn push_position(instructions: &mut Instructions<'_, '_>, position: &Position) {
+    match position.local {
+        None => {
+            let _ = instructions.int_const(&position.constant.into());
+        }
+        Some(local) => {
+            let _ = instructions.local_get(local);
+            if position.constant > 0 {
+                let _ = instructions.int_const(&position.constant.into()).int_add();
+            }
+        }
+    }
+}
+
+/// Whether `segment` is a literal whose bits are compared with the bits of
+/// the other literals: a string, or an integer of a constant size that has
+/// its value.
+fn is_literal_segment(segment: &TypedPatternBitArraySegment) -> bool {
+    match segment.value.as_ref() {
+        Pattern::String { .. } => true,
+        Pattern::Int { int_value, .. } => {
+            let size = match segment.size() {
+                None => Some(BigInt::from(8)),
+                Some(Pattern::BitArraySize(size)) => {
+                    size.compile_time_number().map(|size| size * segment.unit())
+                }
+                Some(_) => None,
+            };
+            size.and_then(|size| size.to_u64()).is_some_and(|size| {
+                size <= MAX_LITERAL_INT_SIZE && fits(int_value, size, segment.signed())
+            })
+        }
+        Pattern::Float { .. }
+        | Pattern::Variable { .. }
+        | Pattern::BitArraySize(_)
+        | Pattern::Assign { .. }
+        | Pattern::Discard { .. }
+        | Pattern::List { .. }
+        | Pattern::Constructor { .. }
+        | Pattern::Tuple { .. }
+        | Pattern::BitArray { .. }
+        | Pattern::StringPrefix { .. }
+        | Pattern::Invalid { .. } => false,
+    }
+}
+
+/// Whether `value` is an integer of `size` bits.
+fn fits(value: &BigInt, size: u64, signed: bool) -> bool {
+    if size == 0 {
+        return *value == BigInt::ZERO;
+    }
+    let bound = BigInt::from(1) << size;
+    if signed {
+        let half = &bound >> 1;
+        -&half <= *value && *value < half
+    } else {
+        BigInt::ZERO <= *value && *value < bound
     }
 }

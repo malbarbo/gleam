@@ -698,12 +698,17 @@ impl<'a, 'b> Instructions<'a, 'b> {
     binop!(i32_div_s, I32DivS);
     binop!(i64_ne, I64Ne);
     binop!(i64_shr_u, I64ShrU);
+    binop!(i64_shl, I64Shl);
+    binop!(i64_and, I64And);
+    binop!(i64_or, I64Or);
     binop!(i64_div_s, I64DivS);
     binop!(f32_div, F32Div);
     binop!(f64_div, F64Div);
 
     unop!(i32_eqz, I32Eqz);
     unop!(i32_wrap_i64, I32WrapI64);
+    unop!(f64_reinterpret_i64, F64ReinterpretI64);
+    unop!(f32_reinterpret_i32, F32ReinterpretI32);
 }
 
 #[allow(unused)]

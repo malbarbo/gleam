@@ -49,6 +49,8 @@ impl Instructions<'_, '_> {
                 .i32_and()
                 .i32_to_int(),
             B::Float32Byte => self.i32_shr_u().i32_const(0xFF).i32_and().i32_to_int(),
+            B::Float64FromBits => self.i64_or().f64_reinterpret_i64().f64_to_float(),
+            B::Float32FromBits => self.f32_reinterpret_i32().f32_to_float(),
             B::StringConcat
             | B::StringGetByte
             | B::IntToUtfCodepoint
@@ -79,8 +81,9 @@ impl Instructions<'_, '_> {
 
     /// Converts the argument at `index` of `builtin`, just pushed, to the
     /// type that `builtin_inline` expects: the `Int` positions and sizes of
-    /// `Bytes` are `i32`, and a float whose bytes are taken is its bits. Only
-    /// builtins that `builtin_inline` emits convert their arguments.
+    /// `Bytes` are `i32`, a float whose bytes are taken is its bits, and the
+    /// bits of a float are `i64` or `i32`. Only builtins that `builtin_inline`
+    /// emits convert their arguments.
     pub(super) fn builtin_argument(
         &mut self,
         builtin: BuiltinFunctionExternal,
@@ -90,12 +93,16 @@ impl Instructions<'_, '_> {
         let is_i32 = builtin == B::BytesNew
             || matches!(builtin, B::BytesGet | B::BytesSet | B::BytesToString) && index > 0
             || builtin == B::BytesCopy && !matches!(index, 0 | 2)
-            || builtin == B::Float32Byte && index == 1;
+            || builtin == B::Float32Byte && index == 1
+            || builtin == B::Float32FromBits;
         match (builtin, index) {
             // The bits of the float, shifted by the second argument.
             (B::Float64Byte, 0) => self.float_to_f64().f64_reinterpret(),
             (B::Float64Byte, _) => self.int_to_i64(),
             (B::Float32Byte, 0) => self.float_to_f32().f32_reinterpret(),
+            // The high and the low 32 bits of the float, joined.
+            (B::Float64FromBits, 0) => self.int_to_i64().i64_const(32).i64_shl(),
+            (B::Float64FromBits, _) => self.int_to_i64().i64_const(0xFFFF_FFFF).i64_and(),
             _ if is_i32 => self.int_to_i32(),
             _ => self,
         }

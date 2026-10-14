@@ -557,7 +557,7 @@ pub fn main() {{
     }
 }
 
-/// The builtins of `Bytes` and of the bytes of floats are emitted in place
+/// The builtins of `Bytes` and of the bits of floats are emitted in place
 /// of their calls, so the module has no function for them.
 #[test]
 fn bytes_builtins_are_inlined() {
@@ -568,11 +568,17 @@ import bit_array
 pub fn main() {
   let bits = bit_array.concat([<<1:4>>, bit_array.from_string("ab")])
   let _ = floats(1.5)
+  let _ = read_floats(bits)
   bit_array.to_string(bits)
 }
 
 fn floats(x: Float) -> BitArray {
   <<x:float, x:32-float>>
+}
+
+fn read_floats(bits: BitArray) -> Float {
+  let assert <<x:float, y:32-float>> = bits
+  x +. y
 }
 "#,
         vec![(TEST_PACKAGE, "bit_array", BIT_ARRAY)],
@@ -583,10 +589,421 @@ fn floats(x: Float) -> BitArray {
     let builtins = names
         .iter()
         .filter(|name| {
-            ["_bytes", "_string_offset", "_float64_byte", "_float32_byte"]
-                .iter()
-                .any(|builtin| name.starts_with(builtin))
+            [
+                "_bytes",
+                "_string_offset",
+                "_float64_byte",
+                "_float32_byte",
+                "_float64_from_bits",
+                "_float32_from_bits",
+            ]
+            .iter()
+            .any(|builtin| name.starts_with(builtin))
         })
         .collect::<Vec<_>>();
     assert!(builtins.is_empty(), "{builtins:?}");
+}
+
+/// Integer segments of patterns. The results are those of the Erlang target.
+#[test]
+fn pattern_ints() {
+    let _ = run(r##"
+import bit_array.{show}
+
+fn ints(b: BitArray) -> String {
+  case b {
+    <<>> -> "empty"
+    <<a>> -> "one " <> show(a)
+    <<a, b>> -> "two " <> show(#(a, b))
+    <<a:3, b:13-signed, c:5-little, d:11-little-signed, rest:bytes>> ->
+      "mixed " <> show(#(a, b, c, d, rest))
+    <<a:16, 0:1, rest:bits>> -> "16+0 " <> show(#(a, rest))
+    <<a:16-little, 1:1, rest:bits>> -> "16le+1 " <> show(#(a, rest))
+    _ -> "other"
+  }
+}
+
+fn signed(b: BitArray) -> String {
+  case b {
+    <<a:8-signed, b:16-signed-little, c:7-signed, d:9-signed, e:1-signed, f:24-little-signed>> ->
+      show(#(a, b, c, d, e, f))
+    _ -> "other"
+  }
+}
+
+pub fn main() {
+  let assert "empty" = ints(<<>>)
+  let assert "one 1" = ints(<<1>>)
+  let assert "two #(1, 2)" = ints(<<1, 2>>)
+  let assert "16+0 #(258, <<3:size(7)>>)" = ints(<<1, 2, 3>>)
+  let assert "16+0 #(258, <<5:size(3)>>)" = ints(<<1, 2, 0:1, 5:3>>)
+  let assert "16le+1 #(1027, <<>>)" = ints(<<3, 4, 1:1>>)
+  let assert "mixed #(5, 1370, 7, 920, <<15, 240>>)" = ints(<<0xA5, 0x5A, 0x3C, 0xC3, 0x0F, 0xF0>>)
+  let assert "16le+1 #(59093, <<3:size(7)>>)" = ints(<<1:1, 0xABCD:16, 3:7>>)
+  let assert "mixed #(5, -1, 31, -1, <<1>>)" = ints(<<0xBF, 0xFF, 0xFF, 0xFF, 1>>)
+  let assert "16le+1 #(65471, <<255, 255>>)" = ints(<<0xBF, 0xFF, 0xFF, 0xFF, 1:1>>)
+  let assert "#(-3, -300, -5, -200, -1, -98765)" = signed(<<-3:8, -300:16-little, -5:7, -200:9, -1:1, -98765:24-little>>)
+  let assert "#(127, 32767, 63, 255, 0, 8388607)" = signed(<<127, 32767:16-little, 63:7, 255:9, 0:1, 8388607:24-little>>)
+  Nil
+}
+"##);
+}
+
+/// Consecutive literal segments of patterns, compared with the bits of their
+/// literal, and literals that are not their bits.
+#[test]
+fn pattern_literals() {
+    let _ = run(r##"
+import bit_array.{show}
+
+fn literals(b: BitArray) -> String {
+  case b {
+    <<"GET ", rest:bytes>> -> "get " <> show(rest)
+    <<0x89, "PNG", rest:bits>> -> "png " <> show(rest)
+    <<1, 2, 3:4, 4:4-little, -1:8-signed, rest:bits>> -> "lits " <> show(rest)
+    <<"héllo":utf16, rest:bits>> -> "utf16 " <> show(rest)
+    <<"h€":utf32-little, rest:bits>> -> "utf32le " <> show(rest)
+    <<"ab":utf8, 1:1, x:7>> -> "ab+bit " <> show(x)
+    <<0x1234:16-little, x>> -> "le " <> show(x)
+    <<1000:12, x:4>> -> "12 " <> show(x)
+    <<"abc" as s, rest:bits>> -> "assign " <> s <> " " <> show(rest)
+    <<7 as n, rest:bits>> -> "assign int " <> show(#(n, rest))
+    <<-1, _:bits>> -> "never"
+    <<256, _:bits>> -> "never"
+    _ -> "other"
+  }
+}
+
+pub fn main() {
+  let assert "get <<47, 105>>" = literals(<<"GET /i">>)
+  let assert "other" = literals(<<"GET">>)
+  let assert "png <<1:size(3)>>" = literals(<<0x89, "PNG", 1:3>>)
+  let assert "other" = literals(<<0x89, "PNx">>)
+  let assert "lits <<9>>" = literals(<<1, 2, 3:4, 4:4-little, 255, 9>>)
+  let assert "other" = literals(<<1, 2, 3:4, 4:4-little, 254>>)
+  let assert "utf16 <<1>>" = literals(<<"héllo":utf16, 1>>)
+  let assert "utf32le <<2:size(2)>>" = literals(<<"h€":utf32-little, 2:2>>)
+  let assert "ab+bit 5" = literals(<<"ab", 1:1, 5:7>>)
+  let assert "other" = literals(<<"ab", 0:1, 5:7>>)
+  let assert "le 9" = literals(<<0x34, 0x12, 9>>)
+  let assert "12 3" = literals(<<1000:12, 3:4>>)
+  let assert "assign abc <<100>>" = literals(<<"abcd">>)
+  let assert "assign int #(7, <<8, 9>>)" = literals(<<7, 8, 9>>)
+  let assert "other" = literals(<<255>>)
+  let assert "other" = literals(<<0, 1>>)
+  Nil
+}
+"##);
+}
+
+/// Float segments of patterns, which are finite, and literal floats, which
+/// are equal to the read floats when their bits are. The results are those
+/// of the Erlang target.
+#[test]
+fn pattern_floats() {
+    let _ = run(r##"
+import bit_array.{show}
+
+fn floats(b: BitArray) -> String {
+  case b {
+    <<1.5:float>> -> "lit 1.5"
+    <<0.0:float>> -> "lit 0.0"
+    <<x:float>> -> "f64 " <> show(x)
+    <<x:16-float, _:bits>> -> "f16 first " <> show(x)
+    <<_:float, _:bits>> -> "some float"
+    _ -> "other"
+  }
+}
+
+fn floats32(b: BitArray) -> String {
+  case b {
+    <<0.5:32-float, x:32-float>> -> "half " <> show(x)
+    <<0.1:32-float, _:bits>> -> "never"
+    <<x:32-float-little, y:32-float>> -> show(#(x, y))
+    _ -> "other"
+  }
+}
+
+fn floats16(b: BitArray) -> String {
+  case b {
+    <<x:16-float, y:16-float-little>> -> show(#(x, y))
+    _ -> "other"
+  }
+}
+
+fn sized(b: BitArray, n: Int) -> String {
+  case b {
+    <<x:float-size(n), rest:bits>> -> show(#(x, rest))
+    _ -> "other"
+  }
+}
+
+pub fn main() {
+  let assert "lit 1.5" = floats(<<1.5:float>>)
+  let assert "lit 0.0" = floats(<<0.0:float>>)
+  let assert "f64 -0.0" = floats(<<-0.0:float>>)
+  let assert "f64 2.5" = floats(<<2.5:float>>)
+  let assert "f16 first 1.0" = floats(<<0x3C00:16, 1:3>>)
+  let assert "other" = floats(<<0x7FF0:16, 0:48>>)
+  let assert "f16 first -2.0" = floats(<<0xC000:16, 1:3>>)
+  let assert "some float" = floats(<<1.0e300:float, 0x7FF0:16>>)
+  let assert "other" = floats(<<0x7FF8:16, 0:48, 1>>)
+  let assert "half 1.25" = floats32(<<0.5:32-float, 1.25:32-float>>)
+  let assert "#(-429492128.0, 1.25)" = floats32(<<0.1:32-float, 1.25:32-float>>)
+  let assert "#(2.0, -3.0)" = floats32(<<2.0:32-float-little, -3.0:32-float>>)
+  let assert "other" = floats32(<<0x0000807F:32, 1.0:32-float>>)
+  let assert "#(1.0, -2.0)" = floats16(<<0x3C00:16, 0x00C0:16>>)
+  let assert "#(5.960464477539063e-8, 0.00006103515625)" = floats16(<<0x0001:16, 0x0004:16>>)
+  let assert "#(-65504.0, 0.000022649765014648438)" = floats16(<<0xFBFF:16, 0x7C:8, 1>>)
+  let assert "other" = floats16(<<0x7C00:16, 0, 0>>)
+  let assert "#(2.015625, <<0, 0, 0, 0, 0, 0, 1:size(1)>>)" = sized(<<3.0:float, 1:1>>, 16)
+  let assert "#(2.125, <<0, 0, 0, 0, 1:size(1)>>)" = sized(<<3.0:float, 1:1>>, 32)
+  let assert "#(3.0, <<1:size(1)>>)" = sized(<<3.0:float, 1:1>>, 64)
+  let assert "other" = sized(<<3.0:float, 1:1>>, 8)
+  let assert "#(0.0, <<64, 8, 0, 0, 0, 0, 0, 0, 1:size(1)>>)" = sized(<<3.0:float, 1:1>>, 0)
+  let assert "other" = sized(<<3.0:float, 1:1>>, -1)
+  Nil
+}
+"##);
+}
+
+/// Bit array segments of patterns, and sizes of variables, of the previous
+/// segments and of operators, whose division by zero is zero, and sizes
+/// larger than any bit array. The results are those of the Erlang target,
+/// which has no division in sizes.
+#[test]
+fn pattern_bits_and_sizes() {
+    let _ = run(r##"
+import bit_array.{show}
+
+const four = 4
+
+fn bits(b: BitArray) -> String {
+  case b {
+    <<x:bits-size(four), y:bytes-size(1), rest:bytes>> -> "4+8 " <> show(#(x, y, rest))
+    <<len, payload:bytes-size(len), rest:bits>> -> "len " <> show(#(len, payload, rest))
+    _ -> "other"
+  }
+}
+
+fn sizes(b: BitArray, n: Int, z: Int) -> String {
+  case b {
+    <<a:size(n), b:size(a * 2 - 1), c:size(n * z), d:size({ a + n } - 4)-unit(2), rest:bits>> ->
+      show(#(a, b, c, d, rest))
+    _ -> "other"
+  }
+}
+
+fn division(b: BitArray, n: Int) -> String {
+  case b {
+    <<a:size(8 / n), b:size(9 % n), rest:bits>> -> show(#(a, b, rest))
+    _ -> "other"
+  }
+}
+
+fn negative(b: BitArray, n: Int) -> String {
+  case b {
+    <<a:size(n), rest:bits>> -> show(#(a, rest))
+    _ -> "other"
+  }
+}
+
+fn huge(b: BitArray, n: Int) -> String {
+  case b {
+    <<_:4, a:size(n), _:bits>> -> show(a)
+    <<_:size(4_611_686_018_427_387_904)-unit(8), _:bits>> -> "never"
+    <<_:size({ -1 }), _:bits>> -> "never"
+    _ -> "other"
+  }
+}
+
+pub fn main() {
+  let assert "4+8 #(<<10:size(4)>>, <<188>>, <<222, 242>>)" = bits(<<0xAB, 0xCD, 0xEF, 0x2:4>>)
+  let assert "other" = bits(<<0xAB, 0xCD, 0xEF, 0x12>>)
+  let assert "len #(2, <<7, 8>>, <<9>>)" = bits(<<2, 7, 8, 9>>)
+  let assert "other" = bits(<<3, 1, 2>>)
+  let assert "len #(0, <<>>, <<>>)" = bits(<<0>>)
+  let assert "len #(0, <<>>, <<1:size(1)>>)" = bits(<<0, 1:1>>)
+  let input = <<0xDE, 0xAD, 0xBE, 0xEF, 0x55>>
+  let assert "other" = sizes(input, 1, 0)
+  let assert "#(3, 15, 0, 1, <<91, 125, 222, 85:size(7)>>)" = sizes(input, 2, 0)
+  let assert "#(3, 15, 1, 1, <<109, 247, 122, 21:size(5)>>)" = sizes(input, 2, 1)
+  let assert "#(6, 1963, 0, 446, <<239, 85>>)" = sizes(input, 3, 0)
+  let assert "#(6, 1963, 3, 503, <<122, 21:size(5)>>)" = sizes(input, 3, 1)
+  let assert "other" = sizes(input, 4, 1)
+  let assert "#(0, 0, <<222>>)" = division(<<0xDE>>, 0)
+  let assert "#(13, 1, <<6:size(3)>>)" = division(<<0xDE>>, 2)
+  let assert "#(222, 0, <<>>)" = division(<<0xDE>>, 1)
+  let assert "other" = negative(<<0xF0>>, -1)
+  let assert "#(0, <<240>>)" = negative(<<0xF0>>, 0)
+  let assert "#(7, <<16:size(5)>>)" = negative(<<0xF0>>, 3)
+  let assert "#(240, <<>>)" = negative(<<0xF0>>, 8)
+  let assert "other" = negative(<<0xF0>>, 9)
+  let assert "other" = huge(<<0xF0>>, 0x7FFFFFFF)
+  let assert "other" = huge(<<0xF0>>, 0x7FFFFFFE)
+  let assert "15" = huge(<<0xFF>>, 4)
+  Nil
+}
+"##);
+}
+
+/// Code point segments of patterns, which are valid code points. The
+/// results are those of the Erlang target.
+#[test]
+fn pattern_codepoints() {
+    let _ = run(r##"
+import bit_array.{show}
+
+@external(webassembly, "builtins", "_utf_codepoint_to_int")
+fn int(codepoint: UtfCodepoint) -> Int
+
+fn codepoints(b: BitArray) -> String {
+  case b {
+    <<c:utf8_codepoint, d:utf16_codepoint, e:utf32_codepoint-little>> ->
+      "all " <> show(#(int(c), int(d), int(e)))
+    <<c:utf8_codepoint, rest:bits>> -> "utf8 " <> show(#(int(c), rest))
+    _ -> "other"
+  }
+}
+
+fn utf16(b: BitArray) -> String {
+  case b {
+    <<c:utf16_codepoint-little, rest:bits>> -> "utf16le " <> show(#(int(c), rest))
+    _ -> "other"
+  }
+}
+
+fn last(b: BitArray) -> String {
+  case b {
+    <<0, c:utf8_codepoint>> -> "last " <> show(int(c))
+    <<1, c:utf32_codepoint>> -> "last32 " <> show(int(c))
+    _ -> "other"
+  }
+}
+
+pub fn main() {
+  let assert "all #(233, 8364, 128512)" = codepoints(<<"é":utf8, "€":utf16, "😀":utf32-little>>)
+  let assert "utf8 #(128512, <<1:size(1)>>)" = codepoints(<<"😀":utf8, 1:1>>)
+  let assert "other" = codepoints(<<0xC0, 0x80>>)
+  let assert "other" = codepoints(<<0xED, 0xA0, 0x80>>)
+  let assert "other" = codepoints(<<0xF4, 0x90, 0x80, 0x80>>)
+  let assert "other" = codepoints(<<0xE2, 0x82>>)
+  let assert "utf8 #(61, <<216, 0, 222, 7>>)" = codepoints(<<0x3D, 0xD8, 0x00, 0xDE, 7>>)
+  let assert "other" = codepoints(<<0xFF>>)
+  let assert "utf16le #(128512, <<7>>)" = utf16(<<0x3D, 0xD8, 0x00, 0xDE, 7>>)
+  let assert "other" = utf16(<<0x00, 0xDC>>)
+  let assert "other" = utf16(<<0x3D, 0xD8, 0x00, 0x00>>)
+  let assert "last 97" = last(<<0, "a">>)
+  let assert "other" = last(<<0, "ab">>)
+  let assert "last 8364" = last(<<0, "€">>)
+  let assert "last32 128512" = last(<<1, 0x1F600:32>>)
+  let assert "other" = last(<<1, 0xD800:32>>)
+  let assert "other" = last(<<1, 0x110000:32>>)
+  let assert "other" = last(<<1, 0x41:32, 0>>)
+  Nil
+}
+"##);
+}
+
+/// Bit array patterns with guards, alternatives, assignments and nested
+/// matches of slices that do not start at a whole byte.
+#[test]
+fn pattern_clauses() {
+    let _ = run(r##"
+import bit_array.{show}
+
+fn guards(b: BitArray) -> String {
+  case b {
+    <<a, b>> if a > b -> "gt"
+    <<a, _>> if a == 0 -> "zero"
+    <<_, _>> | <<_, _, _>> -> "2 or 3"
+    _ -> "other"
+  }
+}
+
+fn lets(b: BitArray) -> String {
+  let assert <<a:4, b:bits>> = b
+  let <<c:bits>> = b
+  show(#(a, b, c))
+}
+
+fn tail(b: BitArray) -> String {
+  case b {
+    <<_:3, rest:bits>> ->
+      case rest {
+        <<a:5, b:bytes>> -> "aligned " <> show(#(a, b))
+        <<a, b:bits>> -> "unaligned " <> show(#(a, b))
+        _ -> "other"
+      }
+    _ -> "other"
+  }
+}
+
+pub fn main() {
+  let assert "gt" = guards(<<2, 1>>)
+  let assert "2 or 3" = guards(<<1, 2>>)
+  let assert "zero" = guards(<<0, 3>>)
+  let assert "2 or 3" = guards(<<5, 5, 5>>)
+  let assert "other" = guards(<<1>>)
+  let assert "#(10, <<11:size(4)>>, <<11:size(4)>>)" = lets(<<0xAB>>)
+  let assert "#(1, <<35, 33:size(7)>>, <<35, 33:size(7)>>)" = lets(<<0x12, 0x34, 1:3>>)
+  let assert "aligned #(31, <<255>>)" = tail(<<0xFF, 0xFF>>)
+  let assert "unaligned #(86, <<103, 129>>)" = tail(<<0b10101010, 0b11001100, 0b11110000, 1:3>>)
+  Nil
+}
+"##);
+}
+
+/// Integer segments of patterns of 64 bits and more, of which an `Int` has
+/// the least significant bits.
+#[test]
+fn pattern_large_ints() {
+    let result = run_wasm_with_config(
+        r##"
+import bit_array.{show}
+
+fn large(b: BitArray) -> String {
+  case b {
+    <<e:64-signed, f:64-little-signed, g:32, h:32-little-signed, i:size(70), _:bits>> ->
+      show(#(e, f, g, h, i))
+    _ -> "other"
+  }
+}
+
+pub fn main() {
+  let assert "#(-1234567890123, -98765432109, 4294967295, -2, -1)" = large(<<-1234567890123:64, -98765432109:64-little, 0xFFFFFFFF:32, -2:32-little, -1:70>>)
+  Nil
+}
+"##,
+        vec![(TEST_PACKAGE, "bit_array", BIT_ARRAY)],
+        WasmInt::I64,
+        WasmFloat::F64,
+    );
+    assert!(result.status.success(), "{}", result.stderr);
+}
+
+/// Float segments of patterns when `Float` has 32 bits.
+#[test]
+fn pattern_floats_of_32_bits() {
+    let result = run_wasm_with_config(
+        r##"
+import bit_array.{show}
+
+fn floats(b: BitArray) -> String {
+  case b {
+    <<1.5:float, x:32-float-little, y:16-float>> -> show(#(x, y))
+    _ -> "other"
+  }
+}
+
+pub fn main() {
+  let assert "#(-2.75, 65504.0)" = floats(<<1.5:float, -2.75:32-float-little, 65504.0:16-float>>)
+  Nil
+}
+"##,
+        vec![(TEST_PACKAGE, "bit_array", BIT_ARRAY)],
+        WasmInt::I32,
+        WasmFloat::F32,
+    );
+    assert!(result.status.success(), "{}", result.stderr);
 }

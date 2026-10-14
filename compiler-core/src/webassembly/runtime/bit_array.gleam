@@ -15,8 +15,7 @@
 
 import builtins/base.{
   bitwise_and, bitwise_exclusive_or, bitwise_or, bitwise_shift_left,
-  bitwise_shift_right, concat_strings, inspect, low_32_bits,
-  reverse_and_prepend,
+  bitwise_shift_right, concat_strings, inspect, low_32_bits, reverse_and_prepend,
 }
 
 /// An array of bytes, the `(array (mut i8))` of strings.
@@ -134,17 +133,35 @@ pub fn bit_array_utf8_size(string: String) -> Int {
 
 pub fn bit_array_utf16_size(string: String) -> Int {
   let start = string_offset(string)
-  unicode_size(string_bytes(string), start, start + string_byte_size(string), 16, 0)
+  unicode_size(
+    string_bytes(string),
+    start,
+    start + string_byte_size(string),
+    16,
+    0,
+  )
 }
 
 pub fn bit_array_utf32_size(string: String) -> Int {
   let start = string_offset(string)
-  unicode_size(string_bytes(string), start, start + string_byte_size(string), 32, 0)
+  unicode_size(
+    string_bytes(string),
+    start,
+    start + string_byte_size(string),
+    32,
+    0,
+  )
 }
 
 /// The size of the UTF-16 or UTF-32 (`unit` 16 or 32) code units of the
 /// UTF-8 bytes from `index` to `end`.
-fn unicode_size(bytes: Bytes, index: Int, end: Int, unit: Int, acc: Int) -> Int {
+fn unicode_size(
+  bytes: Bytes,
+  index: Int,
+  end: Int,
+  unit: Int,
+  acc: Int,
+) -> Int {
   case index < end {
     False -> acc
     True -> {
@@ -214,7 +231,13 @@ fn write_int_big(bytes: Bytes, at: Int, value: Int, size: Int) -> Int {
 
 /// Writes the bytes of `value` from bit `shift` to bit `end`, from the
 /// least significant.
-fn write_int_little(bytes: Bytes, at: Int, value: Int, shift: Int, end: Int) -> Int {
+fn write_int_little(
+  bytes: Bytes,
+  at: Int,
+  value: Int,
+  shift: Int,
+  end: Int,
+) -> Int {
   case shift == end {
     True -> at
     False -> {
@@ -340,7 +363,8 @@ fn round_shift(value: Int, shift: Int, sticky: Bool) -> Int {
       let half = bitwise_shift_left(1, shift - 1)
       case
         remainder > half
-        || remainder == half && { sticky || bitwise_and(quotient, 1) == 1 }
+        || remainder == half
+        && { sticky || bitwise_and(quotient, 1) == 1 }
       {
         True -> quotient + 1
         False -> quotient
@@ -350,7 +374,12 @@ fn round_shift(value: Int, shift: Int, sticky: Bool) -> Int {
 }
 
 /// Writes the first `size` bits of `bits`.
-pub fn bit_array_write_bits(bytes: Bytes, at: Int, bits: Bits, size: Int) -> Int {
+pub fn bit_array_write_bits(
+  bytes: Bytes,
+  at: Int,
+  bits: Bits,
+  size: Int,
+) -> Int {
   let _ = copy_bits(bytes, at, bits.bytes, bits.start, size)
   at + size
 }
@@ -507,6 +536,354 @@ fn utf8_continue(bytes: Bytes, index: Int, count: Int, acc: Int) -> Int {
   }
 }
 
+// -- Pattern matching ---------------------------------------------------------
+
+// The compiler matches a bit array pattern segment by segment, from the
+// position 0 of the bit array, checking that the bit array has the bits of a
+// segment before reading them with the `bit_array_read_*` functions, or
+// before comparing them to the bits of consecutive literal segments with
+// `bit_array_match`. A code point is read with the check of its bits, and is
+// -1 when they are not one.
+
+/// Whether the bits of `bits` at `at` are the bits of `literal`.
+pub fn bit_array_match(bits: Bits, at: Int, literal: Bits) -> Bool {
+  equal_loop(
+    bits.bytes,
+    bits.start + at,
+    literal.bytes,
+    literal.start,
+    literal.end - literal.start,
+  )
+}
+
+/// The integer of the `size` bits of `bits` at `at`, in two's complement
+/// when it is `signed`. A little endian integer has its bytes from the least
+/// significant, and then the bits that are left.
+pub fn bit_array_read_int(
+  bits: Bits,
+  at: Int,
+  size: Int,
+  little: Bool,
+  signed: Bool,
+) -> Int {
+  let position = bits.start + at
+  let value = case size, bitwise_and(position, 7) {
+    8, 0 -> bytes_get(bits.bytes, bitwise_shift_right(position, 3))
+    _, _ -> read_int(bits.bytes, position, size, little)
+  }
+  case signed {
+    False -> value
+    // The shifts are 0 when `size` is at least the number of bits of `Int`.
+    True ->
+      case
+        size > 0 && bitwise_and(bitwise_shift_right(value, size - 1), 1) == 1
+      {
+        True -> value - bitwise_shift_left(1, size)
+        False -> value
+      }
+  }
+}
+
+/// The unsigned integer of the `size` bits of `bytes` at `position`.
+fn read_int(bytes: Bytes, position: Int, size: Int, little: Bool) -> Int {
+  case bitwise_and(position, 7), little {
+    0, False -> read_big(bytes, bitwise_shift_right(position, 3), size, 0)
+    0, True -> {
+      // From the most significant byte, after the whole bytes.
+      let index = bitwise_shift_right(position, 3)
+      let whole = bitwise_shift_right(size, 3)
+      let high = read_big(bytes, index + whole, bitwise_and(size, 7), 0)
+      read_little(bytes, index, index + whole, high)
+    }
+    _, False -> to_int_loop(bytes, position, size, 0)
+    _, True -> read_int_little(bytes, position, size, 0, 0)
+  }
+}
+
+/// The integer `acc` followed by the `remaining` bits from the byte
+/// `index`.
+fn read_big(bytes: Bytes, index: Int, remaining: Int, acc: Int) -> Int {
+  case remaining >= 8 {
+    True ->
+      read_big(
+        bytes,
+        index + 1,
+        remaining - 8,
+        acc * 256 + bytes_get(bytes, index),
+      )
+    False ->
+      case remaining {
+        0 -> acc
+        _ ->
+          bitwise_shift_left(acc, remaining)
+          + bitwise_shift_right(bytes_get(bytes, index), 8 - remaining)
+      }
+  }
+}
+
+/// The integer `acc` followed by the bytes from `end - 1` to `start`.
+fn read_little(bytes: Bytes, start: Int, end: Int, acc: Int) -> Int {
+  case end == start {
+    True -> acc
+    False ->
+      read_little(bytes, start, end - 1, acc * 256 + bytes_get(bytes, end - 1))
+  }
+}
+
+fn read_int_little(
+  bytes: Bytes,
+  position: Int,
+  remaining: Int,
+  shift: Int,
+  acc: Int,
+) -> Int {
+  case remaining >= 8 {
+    True ->
+      read_int_little(
+        bytes,
+        position + 8,
+        remaining - 8,
+        shift + 8,
+        bitwise_or(acc, bitwise_shift_left(byte_at(bytes, position), shift)),
+      )
+    False ->
+      case remaining {
+        0 -> acc
+        _ ->
+          bitwise_or(
+            acc,
+            bitwise_shift_left(bits_at(bytes, position, remaining), shift),
+          )
+      }
+  }
+}
+
+/// Whether the `size` bits of `bits` at `at` are a float of 16, 32 or 64
+/// bits that is finite, or the 0.0 of no bits.
+pub fn bit_array_is_float(
+  bits: Bits,
+  at: Int,
+  size: Int,
+  little: Bool,
+) -> Bool {
+  let position = bits.start + at
+  case size {
+    0 -> True
+    16 -> {
+      let half = read_int(bits.bytes, position, 16, little)
+      bitwise_and(half, 0x7C00) != 0x7C00
+    }
+    32 -> {
+      let single = read_int(bits.bytes, position, 32, little)
+      bitwise_and(single, 0x7F800000) != 0x7F800000
+    }
+    64 -> {
+      let high = case little {
+        False -> read_int(bits.bytes, position, 32, False)
+        True -> read_int(bits.bytes, position + 32, 32, True)
+      }
+      bitwise_and(high, 0x7FF00000) != 0x7FF00000
+    }
+    _ -> False
+  }
+}
+
+/// The float of the `size` bits of `bits` at `at`, which
+/// `bit_array_is_float` accepts.
+pub fn bit_array_read_float(
+  bits: Bits,
+  at: Int,
+  size: Int,
+  little: Bool,
+) -> Float {
+  let position = bits.start + at
+  case size {
+    0 -> 0.0
+    16 ->
+      float32_from_bits(
+        float16_to_float32(read_int(bits.bytes, position, 16, little)),
+      )
+    32 -> float32_from_bits(read_int(bits.bytes, position, 32, little))
+    _ -> {
+      let first = read_int(bits.bytes, position, 32, little)
+      let second = read_int(bits.bytes, position + 32, 32, little)
+      case little {
+        False -> float64_from_bits(first, second)
+        True -> float64_from_bits(second, first)
+      }
+    }
+  }
+}
+
+/// The bits of the 32 bits float of the finite 16 bits float of the bits
+/// `half`.
+fn float16_to_float32(half: Int) -> Int {
+  let sign = bitwise_shift_left(bitwise_shift_right(half, 15), 31)
+  let exponent = bitwise_and(bitwise_shift_right(half, 10), 0x1F)
+  let fraction = bitwise_and(half, 0x3FF)
+  case exponent, fraction {
+    0, 0 -> sign
+    0, _ -> float16_subnormal(sign, fraction, 113)
+    _, _ ->
+      bitwise_or(
+        sign,
+        bitwise_or(
+          bitwise_shift_left(exponent + 112, 23),
+          bitwise_shift_left(fraction, 13),
+        ),
+      )
+  }
+}
+
+/// Normalizes the `fraction` of a subnormal 16 bits float, whose value is
+/// `fraction * 2^-24`, decrementing the `exponent` of the 32 bits float.
+fn float16_subnormal(sign: Int, fraction: Int, exponent: Int) -> Int {
+  case bitwise_and(fraction, 0x400) {
+    0 -> float16_subnormal(sign, fraction * 2, exponent - 1)
+    _ ->
+      bitwise_or(
+        sign,
+        bitwise_or(
+          bitwise_shift_left(exponent, 23),
+          bitwise_shift_left(bitwise_and(fraction, 0x3FF), 13),
+        ),
+      )
+  }
+}
+
+/// The `size` bits of `bits` at `at`.
+pub fn bit_array_read_bits(bits: Bits, at: Int, size: Int) -> Bits {
+  let start = bits.start + at
+  Bits(bits.bytes, start, start + size)
+}
+
+/// The code point of the UTF-8 bytes of `bits` at `at`, without overlong
+/// encodings or surrogates, or -1.
+pub fn bit_array_read_codepoint_utf8(bits: Bits, at: Int) -> Int {
+  let position = bits.start + at
+  case position + 8 <= bits.end {
+    False -> -1
+    True -> {
+      let byte = byte_at(bits.bytes, position)
+      case byte {
+        _ if byte < 0x80 -> byte
+        _ if byte < 0xC2 -> -1
+        _ if byte < 0xE0 ->
+          codepoint_tail(bits, position, 1, 0x80, 0xBF, bitwise_and(byte, 0x1F))
+        0xE0 -> codepoint_tail(bits, position, 2, 0xA0, 0xBF, 0)
+        0xED -> codepoint_tail(bits, position, 2, 0x80, 0x9F, 0x0D)
+        _ if byte < 0xF0 ->
+          codepoint_tail(bits, position, 2, 0x80, 0xBF, bitwise_and(byte, 0x0F))
+        0xF0 -> codepoint_tail(bits, position, 3, 0x90, 0xBF, 0)
+        0xF4 -> codepoint_tail(bits, position, 3, 0x80, 0x8F, 4)
+        _ if byte < 0xF4 ->
+          codepoint_tail(bits, position, 3, 0x80, 0xBF, bitwise_and(byte, 0x07))
+        _ -> -1
+      }
+    }
+  }
+}
+
+/// The code point of the `count` bytes after the first one at `position`,
+/// the first of them from `low` to `high`, whose first bits are `acc`, or
+/// -1.
+fn codepoint_tail(
+  bits: Bits,
+  position: Int,
+  count: Int,
+  low: Int,
+  high: Int,
+  acc: Int,
+) -> Int {
+  let next = position + 8
+  case next + count * 8 <= bits.end {
+    False -> -1
+    True -> {
+      let byte = byte_at(bits.bytes, next)
+      case low <= byte && byte <= high {
+        False -> -1
+        True ->
+          codepoint_continuation(
+            bits.bytes,
+            next + 8,
+            count - 1,
+            acc * 64 + bitwise_and(byte, 0x3F),
+          )
+      }
+    }
+  }
+}
+
+fn codepoint_continuation(
+  bytes: Bytes,
+  position: Int,
+  count: Int,
+  acc: Int,
+) -> Int {
+  case count {
+    0 -> acc
+    _ -> {
+      let byte = byte_at(bytes, position)
+      case 0x80 <= byte && byte <= 0xBF {
+        False -> -1
+        True ->
+          codepoint_continuation(
+            bytes,
+            position + 8,
+            count - 1,
+            acc * 64 + bitwise_and(byte, 0x3F),
+          )
+      }
+    }
+  }
+}
+
+/// The code point of the UTF-16 code units of `bits` at `at`, or -1.
+pub fn bit_array_read_codepoint_utf16(
+  bits: Bits,
+  at: Int,
+  little: Bool,
+) -> Int {
+  let position = bits.start + at
+  case position + 16 <= bits.end {
+    False -> -1
+    True -> {
+      let unit = read_int(bits.bytes, position, 16, little)
+      case unit {
+        _ if unit < 0xD800 || unit > 0xDFFF -> unit
+        _ if unit >= 0xDC00 || position + 32 > bits.end -> -1
+        _ -> {
+          let low = read_int(bits.bytes, position + 16, 16, little)
+          case 0xDC00 <= low && low <= 0xDFFF {
+            True -> 0x10000 + { unit - 0xD800 } * 0x400 + { low - 0xDC00 }
+            False -> -1
+          }
+        }
+      }
+    }
+  }
+}
+
+/// The code point of the UTF-32 code unit of `bits` at `at`, or -1.
+pub fn bit_array_read_codepoint_utf32(
+  bits: Bits,
+  at: Int,
+  little: Bool,
+) -> Int {
+  let position = bits.start + at
+  case position + 32 <= bits.end {
+    False -> -1
+    True -> {
+      let unit = read_int(bits.bytes, position, 32, little)
+      // `unit` is negative from bit 31 when `Int` has 32 bits.
+      case 0 <= unit && unit < 0xD800 || 0xE000 <= unit && unit <= 0x10FFFF {
+        True -> unit
+        False -> -1
+      }
+    }
+  }
+}
+
 // -- Queries ------------------------------------------------------------------
 
 pub fn bit_array_bit_size(bits: Bits) -> Int {
@@ -519,7 +896,11 @@ pub fn bit_array_byte_size(bits: Bits) -> Int {
 
 /// The bytes from `position` to `position + length`, or from
 /// `position + length` to `position` when `length` is negative.
-pub fn bit_array_slice(bits: Bits, position: Int, length: Int) -> Result(Bits, Nil) {
+pub fn bit_array_slice(
+  bits: Bits,
+  position: Int,
+  length: Int,
+) -> Result(Bits, Nil) {
   let #(from, to) = case length < 0 {
     True -> #(position + length, position)
     False -> #(position, position + length)
@@ -699,7 +1080,12 @@ fn utf8_tail(
   }
 }
 
-fn utf8_continuation(bytes: Bytes, position: Int, end: Int, count: Int) -> Bool {
+fn utf8_continuation(
+  bytes: Bytes,
+  position: Int,
+  end: Int,
+  count: Int,
+) -> Bool {
   case count {
     0 -> utf8_loop(bytes, position, end)
     _ -> {
@@ -716,15 +1102,46 @@ fn utf8_continuation(bytes: Bytes, position: Int, end: Int, count: Int) -> Bool 
 
 pub fn bit_array_equal(a: Bits, b: Bits) -> Bool {
   let size = a.end - a.start
-  size == b.end - b.start && equal_loop(a.bytes, a.start, b.bytes, b.start, size)
+  size == b.end - b.start
+  && equal_loop(a.bytes, a.start, b.bytes, b.start, size)
 }
 
 /// Whether the `size` bits of `a` at `i` and of `b` at `j` are equal.
 fn equal_loop(a: Bytes, i: Int, b: Bytes, j: Int, size: Int) -> Bool {
+  case bitwise_and(bitwise_or(i, j), 7) {
+    0 ->
+      equal_bytes(
+        a,
+        bitwise_shift_right(i, 3),
+        b,
+        bitwise_shift_right(j, 3),
+        size,
+      )
+    _ -> equal_bits(a, i, b, j, size)
+  }
+}
+
+/// Whether the `size` bits of `a` from the byte `i` and of `b` from the
+/// byte `j` are equal.
+fn equal_bytes(a: Bytes, i: Int, b: Bytes, j: Int, size: Int) -> Bool {
+  case size >= 8 {
+    True ->
+      case bytes_get(a, i) == bytes_get(b, j) {
+        True -> equal_bytes(a, i + 1, b, j + 1, size - 8)
+        False -> False
+      }
+    False ->
+      size == 0
+      || bitwise_shift_right(bytes_get(a, i), 8 - size)
+      == bitwise_shift_right(bytes_get(b, j), 8 - size)
+  }
+}
+
+fn equal_bits(a: Bytes, i: Int, b: Bytes, j: Int, size: Int) -> Bool {
   case size >= 8 {
     True ->
       case byte_at(a, i) == byte_at(b, j) {
-        True -> equal_loop(a, i + 8, b, j + 8, size - 8)
+        True -> equal_bits(a, i + 8, b, j + 8, size - 8)
         False -> False
       }
     False -> size == 0 || bits_at(a, i, size) == bits_at(b, j, size)
@@ -825,7 +1242,11 @@ fn bits_at(bytes: Bytes, position: Int, count: Int) -> Int {
   let shift = bitwise_and(position, 7)
   let high = bitwise_shift_left(bytes_get(bytes, index), shift)
   let window = case shift + count > 8 {
-    True -> bitwise_or(high, bitwise_shift_right(bytes_get(bytes, index + 1), 8 - shift))
+    True ->
+      bitwise_or(
+        high,
+        bitwise_shift_right(bytes_get(bytes, index + 1), 8 - shift),
+      )
     False -> high
   }
   bitwise_shift_right(bitwise_and(window, 0xFF), 8 - count)
@@ -845,13 +1266,25 @@ fn copy_bits(dst: Bytes, at: Int, src: Bytes, from: Int, count: Int) -> Nil {
           bitwise_shift_right(from, 3),
           whole,
         )
-      copy_bits_loop(dst, at + whole * 8, src, from + whole * 8, count - whole * 8)
+      copy_bits_loop(
+        dst,
+        at + whole * 8,
+        src,
+        from + whole * 8,
+        count - whole * 8,
+      )
     }
     False -> copy_bits_loop(dst, at, src, from, count)
   }
 }
 
-fn copy_bits_loop(dst: Bytes, at: Int, src: Bytes, from: Int, count: Int) -> Nil {
+fn copy_bits_loop(
+  dst: Bytes,
+  at: Int,
+  src: Bytes,
+  from: Int,
+  count: Int,
+) -> Nil {
   case count >= 8 {
     True -> {
       let _ = or_bits(dst, at, byte_at(src, from), 8)
@@ -959,3 +1392,11 @@ fn float64_byte(value: Float, shift: Int) -> Int
 /// The byte of the bits of `value` as a 32 bits float from bit `shift`.
 @external(webassembly, "builtins", "_float32_byte")
 fn float32_byte(value: Float, shift: Int) -> Int
+
+/// The float of the high and the low 32 bits of a 64 bits float.
+@external(webassembly, "builtins", "_float64_from_bits")
+fn float64_from_bits(high: Int, low: Int) -> Float
+
+/// The float of the bits of a 32 bits float.
+@external(webassembly, "builtins", "_float32_from_bits")
+fn float32_from_bits(bits: Int) -> Float
