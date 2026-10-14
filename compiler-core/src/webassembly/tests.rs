@@ -293,7 +293,7 @@ pub fn for_each_operator(wasm_bytes: &[u8], mut f: impl FnMut(&str, wasmparser::
         let payload = payload.expect("valid wasm");
         if let wasmparser::Payload::ImportSection(imports) = payload {
             index += imports
-                .into_iter()
+                .into_imports()
                 .filter(|import| {
                     matches!(
                         import.as_ref().expect("valid wasm").ty,
@@ -502,6 +502,7 @@ mod fail;
 mod function_fields;
 mod functions;
 mod glue;
+mod link;
 mod lists;
 mod local_closures;
 mod memory;

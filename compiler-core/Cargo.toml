@@ -49,7 +49,8 @@ sourcemap = "9"
 indexmap = "2.12.1"
 # Generate and edit wasm modules
 walrus = "0.26.1"
-wasmparser = "0.240.0"
+wasmparser = "0.245.1"
+wasm-encoder = { version = "0.245.1", features = ["wasmparser"] }
 
 src-span.workspace = true
 num-bigint.workspace = true

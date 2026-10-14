@@ -9,6 +9,7 @@ mod dynamic;
 mod glue;
 mod hash;
 mod instructions;
+mod link;
 mod liveness;
 mod monomorphize;
 mod runtime;
@@ -731,15 +732,27 @@ impl UnionFieldLayout {
     }
 }
 
+/// How the functions of builtins-wasm get into the generated module.
+#[derive(Debug)]
+enum Linking {
+    /// The module is built on builtins-wasm, parsed by walrus, see
+    /// `eliminate_dead_code`.
+    Walrus {
+        /// The functions exported by builtins-wasm, removed before the dead
+        /// code elimination.
+        exports: Vec<walrus::ExportId>,
+        /// The names of the functions of builtins-wasm.
+        names: HashSet<String>,
+    },
+    /// The module refers to builtins-wasm through stubs, see `link`.
+    Stubs(link::Linker),
+}
+
 struct Generator<'a> {
     pub(super) wasm_module: walrus::Module,
     memory: Option<MemoryId>,
-    /// Names of builtin data segments, indexed by segment index.
-    /// The functions exported by builtins-wasm, removed before the dead code
-    /// elimination.
-    builtin_exports: Vec<walrus::ExportId>,
-    /// The names of the functions of builtins-wasm.
-    builtin_names: HashSet<String>,
+    /// How the functions of builtins-wasm get into the module.
+    linking: Linking,
     wasm_types: IndexMap<WasmType, TypeId>,
     /// The type ids of the custom types instantiations.
     custom_type_ids: HashMap<EcoString, CustomTypeId>,
@@ -807,23 +820,34 @@ impl<'a> Generator<'a> {
         all_modules: &'a HashMap<EcoString, &'a TypedModule>,
         all_line_numbers: &'a HashMap<EcoString, LineNumbers>,
     ) -> Self {
-        let mut wasm_module =
-            walrus::Module::from_buffer(BUILTINS_WASM).expect("builtins wasm to be a valid module");
-        let memory = wasm_module.memories.iter().next().map(|m| m.id());
-        let builtin_exports = wasm_module
-            .exports
-            .iter()
-            .filter(|e| matches!(e.item, walrus::ExportItem::Function(_)))
-            .map(|e| e.id())
-            .collect();
+        let (mut wasm_module, memory, linking) = if link::walrus() {
+            let wasm_module = walrus::Module::from_buffer(BUILTINS_WASM)
+                .expect("builtins wasm to be a valid module");
+            let memory = wasm_module.memories.iter().next().map(|m| m.id());
+            let exports = wasm_module
+                .exports
+                .iter()
+                .filter(|e| matches!(e.item, walrus::ExportItem::Function(_)))
+                .map(|e| e.id())
+                .collect();
+            let linking = Linking::Walrus {
+                exports,
+                names: HashSet::new(),
+            };
+            (wasm_module, memory, linking)
+        } else {
+            let mut wasm_module = walrus::Module::default();
+            let linker = link::Linker::new(&mut wasm_module);
+            let memory = Some(linker.memory());
+            (wasm_module, memory, Linking::Stubs(linker))
+        };
         let string = StringType::new(&mut wasm_module);
         let mut wasm_types = IndexMap::new();
         let _ = wasm_types.insert(StringType::wasm_type(), string.bytes_index);
         Generator {
             wasm_module,
             memory,
-            builtin_exports,
-            builtin_names: HashSet::new(),
+            linking,
             wasm_types,
             custom_type_ids: HashMap::new(),
             custom_type_definitions: Vec::new(),
@@ -977,13 +1001,18 @@ impl<'a> Generator<'a> {
         let start = self.generate()?;
         self.wasm_module.name = Some(self.module.name.to_string());
         self.wasm_module.start = Some(start);
-        eliminate_dead_code(
-            &mut self.wasm_module,
-            &self.builtin_exports,
-            &self.builtin_names,
-        );
-        liveness::clear_dead_locals(&mut self.wasm_module);
-        Ok(self.wasm_module.emit_wasm())
+        match self.linking {
+            Linking::Walrus { exports, names } => {
+                eliminate_dead_code(&mut self.wasm_module, &exports, &names);
+                liveness::clear_dead_locals(&mut self.wasm_module);
+                Ok(self.wasm_module.emit_wasm())
+            }
+            Linking::Stubs(linker) => {
+                let link = linker.eliminate_dead_code(&mut self.wasm_module);
+                liveness::clear_dead_locals(&mut self.wasm_module);
+                Ok(link::emit(&mut self.wasm_module, link))
+            }
+        }
     }
 
     fn generate(&mut self) -> Result<FunctionId, Error> {
@@ -1407,24 +1436,33 @@ impl<'a> Generator<'a> {
     fn functions_external(
         &mut self,
     ) -> Result<Vec<(BuiltinFunctionExternal, EcoString, Arc<Type>)>, Error> {
-        // The walrus module was parsed from BUILTINS_WASM in Generator::new;
-        // discover its functions and data segments directly.
         let mut available: HashMap<EcoString, (Vec<ValType>, Vec<ValType>)> = HashMap::new();
-        let func_info: Vec<(EcoString, FunctionId, Vec<ValType>, Vec<ValType>)> = self
-            .wasm_module
-            .funcs
-            .iter()
-            .filter_map(|f| {
-                let name = f.name.as_ref()?;
-                let ty = self.wasm_module.types.get(f.ty());
-                Some((
-                    EcoString::from(name.as_str()),
-                    f.id(),
-                    ty.params().to_vec(),
-                    ty.results().to_vec(),
-                ))
-            })
-            .collect();
+        let func_info: Vec<(EcoString, FunctionId, Vec<ValType>, Vec<ValType>)> =
+            match &self.linking {
+                // The walrus module was parsed from BUILTINS_WASM in
+                // Generator::new; discover its functions directly.
+                Linking::Walrus { .. } => self
+                    .wasm_module
+                    .funcs
+                    .iter()
+                    .filter_map(|f| {
+                        let name = f.name.as_ref()?;
+                        let ty = self.wasm_module.types.get(f.ty());
+                        Some((
+                            EcoString::from(name.as_str()),
+                            f.id(),
+                            ty.params().to_vec(),
+                            ty.results().to_vec(),
+                        ))
+                    })
+                    .collect(),
+                Linking::Stubs(linker) => linker
+                    .exports()
+                    .map(|(name, id, params, results)| {
+                        (name.into(), id, params.to_vec(), results.to_vec())
+                    })
+                    .collect(),
+            };
         for (name, id, params, results) in func_info {
             // Gleam names can't start with `_`, so these don't shadow Gleam
             // functions; the others are only reached through glue.
@@ -1435,7 +1473,9 @@ impl<'a> Generator<'a> {
             let _ = available.insert(name, (params, results));
         }
 
-        self.builtin_names = self.rust_functions.keys().map(|n| n.to_string()).collect();
+        if let Linking::Walrus { names, .. } = &mut self.linking {
+            *names = self.rust_functions.keys().map(|n| n.to_string()).collect();
+        }
 
         // Validate external function signatures and collect needed builtins
         self.validate_externals(&available)
