@@ -69,10 +69,17 @@ impl Bits {
 
     /// Pushes `segment` when it is a literal.
     fn push_literal<V: Literal>(&mut self, segment: &BitArraySegment<V, Arc<Type>>) -> bool {
-        let mut bits = self.clone();
-        let pushed = bits.push_segment(segment).is_some();
-        if pushed {
-            *self = bits;
+        let (size, length) = (self.size, self.bytes.len());
+        let pushed = self.push_segment(segment).is_some();
+        if !pushed {
+            self.size = size;
+            self.bytes.truncate(length);
+            // The bits after `size` are zero.
+            if let Some(last) = self.bytes.last_mut()
+                && !size.is_multiple_of(8)
+            {
+                *last &= !(0xFF >> (size % 8));
+            }
         }
         pushed
     }
