@@ -115,7 +115,12 @@ impl Bits {
         let type_ = &segment.type_;
         match segment.value.literal()? {
             LiteralValue::Int(value) if type_.is_int() => {
-                self.push_int(&value, size.unwrap_or(8), endianness);
+                let size = size.unwrap_or(8);
+                // A larger one is written by the runtime.
+                if size > MAX_LITERAL_INT_SIZE {
+                    return None;
+                }
+                self.push_int(&value, size, endianness);
             }
             LiteralValue::Float(value) if type_.is_float() => {
                 let (bits, size) = match size.unwrap_or(64) {
@@ -751,8 +756,10 @@ impl Generator<'_> {
     }
 }
 
-/// The largest literal integer segment of a pattern whose bits are compared
-/// with the bits of the other literals, instead of with its value.
+/// The largest literal integer segment whose bits are computed when
+/// compiling: in an expression, they are part of the literal bits, and in a
+/// pattern, they are compared with the bits of the other literals, instead
+/// of with its value.
 const MAX_LITERAL_INT_SIZE: u64 = 1 << 16;
 
 /// The position of a segment of a bit array pattern: a constant and the sum

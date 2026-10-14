@@ -244,6 +244,22 @@ pub fn main() {
     );
 }
 
+/// A literal integer segment too large to be computed when compiling is
+/// written by the runtime.
+#[test]
+fn construction_large_literal_ints() {
+    let _ = run(r#"
+import bit_array
+
+pub fn main() {
+  let b = <<0:size(100_000), 1:size(70_000), 2>>
+  let assert 170_008 = bit_array.bit_size(b)
+  let assert <<0:size(100_000), 1:size(70_000), 2>> = b
+  Nil
+}
+"#);
+}
+
 /// Equal bit arrays are equal and have the same hash whatever the position
 /// of their bits in their bytes.
 #[test]
