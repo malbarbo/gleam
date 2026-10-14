@@ -37,6 +37,7 @@ impl Function {
             int: generator.int,
             float: generator.float,
             string: generator.string,
+            cell: generator.cell,
             memory: generator.memory,
             seq: SeqRef::Owned(self.fb.func_body()),
         }
@@ -52,6 +53,8 @@ pub(super) struct Instructions<'a, 'b> {
     pub(super) int: IntType,
     pub(super) float: FloatType,
     pub(super) string: StringType,
+    /// The `Cell` of the runtime, see `Generator::cell`.
+    pub(super) cell: TypeId,
     pub(super) memory: Option<MemoryId>,
     seq: SeqRef<'a, 'b>,
 }
@@ -289,22 +292,23 @@ impl<'a, 'b> Instructions<'a, 'b> {
         self
     }
 
-    fn cfg(&self) -> (IntType, FloatType, StringType, Option<MemoryId>) {
-        (self.int, self.float, self.string, self.memory)
+    fn cfg(&self) -> (IntType, FloatType, StringType, TypeId, Option<MemoryId>) {
+        (self.int, self.float, self.string, self.cell, self.memory)
     }
 }
 
 fn sub_seq(
-    cfg: (IntType, FloatType, StringType, Option<MemoryId>),
+    cfg: (IntType, FloatType, StringType, TypeId, Option<MemoryId>),
     seq: &mut InstrSeqBuilder<'_>,
     f: impl FnOnce(&mut Instructions<'_, '_>),
 ) {
-    let (int, float, string, memory) = cfg;
+    let (int, float, string, cell, memory) = cfg;
     let mut s = Instructions {
         seq: SeqRef::Borrowed(seq),
         int,
         float,
         string,
+        cell,
         memory,
     };
     f(&mut s);
@@ -649,6 +653,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
         global_get(index: GlobalId),
         struct_new(struct_type_index: TypeId),
         struct_get(struct_type_index: TypeId, field_index: u32),
+        struct_set(struct_type_index: TypeId, field_index: u32),
         ref_func(index: FunctionId),
         ref_is_null(),
         ref_as_non_null(),

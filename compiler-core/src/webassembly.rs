@@ -813,6 +813,9 @@ struct Generator<'a> {
     int: IntType,
     float: FloatType,
     string: StringType,
+    /// The `Cell` of the runtime, `(struct (field (mut i64)))`: an `Int`
+    /// that can be changed.
+    cell: TypeId,
     module: &'a TypedModule,
     line_numbers: &'a LineNumbers,
     all_modules: &'a HashMap<EcoString, &'a TypedModule>,
@@ -854,6 +857,11 @@ impl<'a> Generator<'a> {
             (wasm_module, memory, Linking::Stubs(linker))
         };
         let string = StringType::new(&mut wasm_module);
+        let cell = wasm_module.types.add_struct(vec![FieldType {
+            element_type: StorageType::Val(ValType::I64),
+            mutable: true,
+        }]);
+        wasm_module.types.get_mut(cell).name = Some("Cell".into());
         let mut wasm_types = IndexMap::new();
         let _ = wasm_types.insert(StringType::wasm_type(), string.bytes_index);
         Generator {
@@ -889,6 +897,7 @@ impl<'a> Generator<'a> {
             int: IntType::I32,
             float: FloatType::F64,
             string,
+            cell,
             module,
             line_numbers,
             all_modules,
@@ -1095,7 +1104,8 @@ impl<'a> Generator<'a> {
             | BuiltinFunctionExternal::StringRepr
             | BuiltinFunctionExternal::StringToMemory
             | BuiltinFunctionExternal::BytesNew
-            | BuiltinFunctionExternal::StringBytes => return_,
+            | BuiltinFunctionExternal::StringBytes
+            | BuiltinFunctionExternal::CellNew => return_,
             // For builtins that take an external type as first param
             BuiltinFunctionExternal::I32ToInt
             | BuiltinFunctionExternal::I64ToInt
@@ -1106,7 +1116,9 @@ impl<'a> Generator<'a> {
             | BuiltinFunctionExternal::BytesGet
             | BuiltinFunctionExternal::BytesSet
             | BuiltinFunctionExternal::BytesCopy
-            | BuiltinFunctionExternal::BytesToString => params
+            | BuiltinFunctionExternal::BytesToString
+            | BuiltinFunctionExternal::CellGet
+            | BuiltinFunctionExternal::CellSet => params
                 .into_iter()
                 .next()
                 .expect("builtin to have at least one parameter"),
@@ -1290,6 +1302,9 @@ impl<'a> Generator<'a> {
             "AnyRef" => (ANYREF, None),
             // Only for the runtime, which writes only the bytes it creates.
             "Bytes" if package == RUNTIME_PACKAGE => (self.string.bytes_val_type(), None),
+            // Only for the runtime, which shares a cell by the bit arrays of
+            // the same bytes.
+            "Cell" if package == RUNTIME_PACKAGE => (self.val_type_ref(self.cell), None),
             // Only for the runtime, which reads the positions it knows.
             "Array" if package == RUNTIME_PACKAGE => {
                 if custom_type.parameters.len() != 1 {
@@ -5766,6 +5781,17 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::Float32FromBits => {
                 self.code_builtin_inline(builtin, &[int_vt], float_vt)
             }
+            BuiltinFunctionExternal::CellNew => {
+                self.code_builtin_inline(builtin, &[int_vt], self.val_type_ref(self.cell))
+            }
+            BuiltinFunctionExternal::CellGet => {
+                self.code_builtin_inline(builtin, &[self.val_type_ref(self.cell)], int_vt)
+            }
+            BuiltinFunctionExternal::CellSet => self.code_builtin_inline(
+                builtin,
+                &[self.val_type_ref(self.cell), int_vt],
+                ValType::I32,
+            ),
             BuiltinFunctionExternal::StringConcat => self.code_string_concat(),
             BuiltinFunctionExternal::StringGetByte => self.code_string_get_byte(),
             BuiltinFunctionExternal::IntToUtfCodepoint => self.code_int_to_utf_codepoint(),

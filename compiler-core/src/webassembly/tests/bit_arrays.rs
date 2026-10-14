@@ -536,6 +536,82 @@ pub fn main() {
 "#);
 }
 
+/// A bit array extended by the segments after it, in the same bytes when it
+/// ends where they are written, changes no other bit array.
+#[test]
+fn construction_extend() {
+    let _ = run(r#"
+import bit_array
+
+fn id(x: a) -> a {
+  x
+}
+
+fn build(acc: BitArray, i: Int, n: Int, size: Int) -> BitArray {
+  case i == n {
+    True -> acc
+    False -> build(<<acc:bits, i:size(size)>>, i + 1, n, size)
+  }
+}
+
+fn sum(bits: BitArray, acc: Int) -> Int {
+  case bits {
+    <<byte, rest:bits>> -> sum(rest, acc + byte)
+    _ -> acc
+  }
+}
+
+pub fn main() {
+  let bytes = build(<<>>, 0, 1000, 8)
+  let assert 1000 = bit_array.byte_size(bytes)
+  let assert 124_716 = sum(bytes, 0)
+  let assert True = build(<<>>, 0, 8, 3) == <<0:3, 1:3, 2:3, 3:3, 4:3, 5:3, 6:3, 7:3>>
+
+  // Two bit arrays of the same one.
+  let base = <<id(<<1>>):bits, 2>>
+  let x = <<base:bits, 3>>
+  let y = <<base:bits, 4>>
+  let assert True = base == <<1, 2>>
+  let assert True = x == <<1, 2, 3>>
+  let assert True = y == <<1, 2, 4>>
+  let assert True = <<x:bits, 5>> == <<1, 2, 3, 5>>
+  let assert True = <<y:bits, 6>> == <<1, 2, 4, 6>>
+  let assert True = <<x:bits, 7>> == <<1, 2, 3, 7>>
+
+  // Bits that are not whole bytes.
+  let base = <<id(<<1:3>>):bits, 1:2>>
+  let x = <<base:bits, 1:1>>
+  let y = <<base:bits, 0:1>>
+  let assert True = base == <<1:3, 1:2>>
+  let assert True = x == <<1:3, 1:2, 1:1>>
+  let assert True = y == <<1:3, 1:2, 0:1>>
+
+  // Slices, the rest of a pattern and strings.
+  let assert Ok(head) = bit_array.slice(x, 0, 0)
+  let assert True = <<head:bits, 9>> == <<9>>
+  let z = <<id(<<1>>):bits, 2, 3>>
+  let assert Ok(middle) = bit_array.slice(z, 1, 1)
+  let assert True = <<middle:bits, 9>> == <<2, 9>>
+  let assert True = z == <<1, 2, 3>>
+  let assert <<_, rest:bits>> = z
+  let assert True = <<rest:bits, 4>> == <<2, 3, 4>>
+  let assert True = <<rest:bits, 5>> == <<2, 3, 5>>
+  let assert True = z == <<1, 2, 3>>
+  let text = id("ab")
+  let ab = bit_array.from_string(text)
+  let assert True = <<ab:bits, 99>> == <<"abc">>
+  let assert "ab" = text
+  let t = <<id(<<97>>):bits, 98>>
+  let assert Ok("ab") = bit_array.to_string(t)
+  let assert Ok(string) = bit_array.to_string(t)
+  let assert True = <<t:bits, 99>> == <<"abc">>
+  let assert "ab" = string
+  let assert True = <<<<1, 2>>:bits, id(3)>> == <<1, 2, 3>>
+  Nil
+}
+"#);
+}
+
 /// Integer segments of values larger than 32 bits.
 #[test]
 fn construction_large_ints() {

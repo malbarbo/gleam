@@ -268,7 +268,8 @@ arrays of `Dynamic`.
 array of strings, only for the runtime)
 
 The runtime changes only the bytes it has just created, before it returns the
-value that holds them, so strings and bit arrays share their bytes. These
+value that holds them, or the bytes after the bits written to them (see
+`BitArray` below), so strings and bit arrays share their bytes. These
 builtins are emitted in place of their calls.
 
 | Name | Gleam type | Semantics |
@@ -281,6 +282,15 @@ builtins are emitted in place of their calls.
 | `_string_bytes` | `fn(String) -> Bytes` | the bytes of the string, which start at `_string_offset` |
 | `_string_offset` | `fn(String) -> Int` | |
 | `_bytes_to_string` | `fn(Bytes, Int, Int) -> String` | `(start, size)`, sharing the bytes, which are UTF-8 |
+
+**Cell** (`@external(webassembly, "builtins", "Cell") type Cell`, an `Int`
+that can be changed, `(struct (field (mut i64)))`, only for the runtime)
+
+| Name | Gleam type | Semantics |
+|---|---|---|
+| `_cell_new` | `fn(Int) -> Cell` | `struct.new` |
+| `_cell_get` | `fn(Cell) -> Int` | `struct.get` |
+| `_cell_set` | `fn(Cell, Int) -> Nil` | `struct.set` |
 
 ## Runtime in Gleam
 
@@ -296,7 +306,7 @@ function once the external types are replaced by their representation.
 |---|---|---|
 | `Dict(k, v)` | `builtins/dict` | a CHAMP (hash trie) with `Array` nodes, with the hash of `_hash` |
 | `StringTree` | `builtins/string_tree` | a rope that stores the size of each node |
-| `BitArray` (of the prelude) | `builtins/bit_array` | `Bits(bytes, start, end)`: the bits of a `Bytes` from `start` to `end` (not included), shared by slices and with the strings they come from; literals are computed when compiling and created by the start function |
+| `BitArray` (of the prelude) | `builtins/bit_array` | `Bits(bytes, start, end, written)`: the bits of a `Bytes` from `start` to `end` (not included), shared by slices and with the strings they come from, and a `Cell` with the end of the bits written to the bytes, shared by the bit arrays of the same bytes; `<<bits:bits, ...>>` writes after `bits` in the same bytes when `bits` ends there and they have room; literals are computed when compiling and created by the start function |
 | `Dynamic` | `builtins/dynamic` | a closed sum: `DInt`, `DFloat`, `DString`, `DBool`, `DNil`, `DBitArray`, `DList`, `DArray` (an `Array(Dynamic)`), `DDict` and `DOther(AnyRef, VTable)` |
 
 Their functions are named after the type: `dict_*`, `string_tree_*`,

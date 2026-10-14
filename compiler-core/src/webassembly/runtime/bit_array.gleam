@@ -3,9 +3,12 @@
 //// `@external(webassembly, "builtins", "bit_array_...")`.
 ////
 //// The bits of a bit array are a range of a `Bytes`, the byte array of
-//// strings. Bytes are only changed by the function that creates them, before
-//// the bit array is returned, so slices and the bit arrays made from strings
-//// share them.
+//// strings, so slices and the bit arrays made from strings share them. The
+//// bits of a `Bytes` are written in order and only once: the bit arrays of
+//// the same bytes share a `Cell` with the end of the bits written so far, and
+//// the bits after it are zero. A bit array that ends there is extended by
+//// writing after it, in the same bytes, which changes no bit array: this
+//// makes `<<bits:bits, ...>>` in a loop linear, as on Erlang.
 ////
 //// A position or a size is a number of bits. The bits of a byte are counted
 //// from the most significant one, as in a bit array literal.
@@ -22,9 +25,15 @@ import builtins/base.{
 @external(webassembly, "builtins", "Bytes")
 pub type Bytes
 
-/// The bits of `bytes` from `start` to `end`, not included.
+/// An `Int` that can be changed, `(struct (field (mut i64)))`.
+@external(webassembly, "builtins", "Cell")
+pub type Cell
+
+/// The bits of `bytes` from `start` to `end`, not included, and the end of
+/// the bits written to `bytes`, which is `-1` when they are not written
+/// anymore.
 pub type Bits {
-  Bits(bytes: Bytes, start: Int, end: Int)
+  Bits(bytes: Bytes, start: Int, end: Int, written: Cell)
 }
 
 // -- Construction -------------------------------------------------------------
@@ -32,13 +41,36 @@ pub type Bits {
 /// The first `size` bits of `bytes`, which are no longer changed. The
 /// compiler creates the bit arrays of the literals with it.
 pub fn bit_array_from_bytes(bytes: Bytes, size: Int) -> Bits {
-  Bits(bytes, 0, size)
+  Bits(bytes, 0, size, cell_new(size))
 }
 
 /// The bytes of `string`, shared.
 pub fn bit_array_from_string(string: String) -> Bits {
   let start = string_offset(string) * 8
-  Bits(string_bytes(string), start, start + string_byte_size(string) * 8)
+  let end = start + string_byte_size(string) * 8
+  Bits(string_bytes(string), start, end, cell_new(-1))
+}
+
+/// `bits` followed by `size` bits, which are zero, to be written after
+/// `bits`: in the same bytes when `bits` ends where they are written and
+/// they have room, and otherwise in new bytes with room for as many bits
+/// more. The compiler creates `<<bits:bits, ...>>` with it.
+pub fn bit_array_extend(bits: Bits, size: Int) -> Bits {
+  let end = bits.end + size
+  case
+    cell_get(bits.written) == bits.end && end <= bytes_size(bits.bytes) * 8
+  {
+    True -> {
+      let _ = cell_set(bits.written, end)
+      Bits(bits.bytes, bits.start, end, bits.written)
+    }
+    False -> {
+      let length = bits.end - bits.start
+      let bytes = bytes_new(byte_count(length + size) * 2)
+      let _ = copy_bits(bytes, 0, bits.bytes, bits.start, length)
+      bit_array_from_bytes(bytes, length + size)
+    }
+  }
 }
 
 pub fn bit_array_concat(arrays: List(Bits)) -> Bits {
@@ -48,7 +80,7 @@ pub fn bit_array_concat(arrays: List(Bits)) -> Bits {
       let size = sum_sizes(arrays, 0)
       let bytes = bytes_new(byte_count(size))
       let _ = concat_loop(bytes, 0, arrays)
-      Bits(bytes, 0, size)
+      bit_array_from_bytes(bytes, size)
     }
   }
 }
@@ -80,7 +112,7 @@ pub fn bit_array_pad_to_bytes(bits: Bits) -> Bits {
       let count = byte_count(size)
       let bytes = bytes_new(count)
       let _ = copy_bits(bytes, 0, bits.bytes, bits.start, size)
-      Bits(bytes, 0, count * 8)
+      bit_array_from_bytes(bytes, count * 8)
     }
   }
 }
@@ -93,7 +125,7 @@ fn aligned(bits: Bits) -> Bits {
       let size = bits.end - bits.start
       let bytes = bytes_new(byte_count(size))
       let _ = copy_bits(bytes, 0, bits.bytes, bits.start, size)
-      Bits(bytes, 0, size)
+      bit_array_from_bytes(bytes, size)
     }
   }
 }
@@ -754,7 +786,7 @@ fn float16_subnormal(sign: Int, fraction: Int, exponent: Int) -> Int {
 /// The `size` bits of `bits` at `at`.
 pub fn bit_array_read_bits(bits: Bits, at: Int, size: Int) -> Bits {
   let start = bits.start + at
-  Bits(bits.bytes, start, start + size)
+  Bits(bits.bytes, start, start + size, bits.written)
 }
 
 /// The code point of the UTF-8 bytes of `bits` at `at`, without overlong
@@ -907,7 +939,10 @@ pub fn bit_array_slice(
   }
   case from < 0 || to * 8 > bits.end - bits.start {
     True -> Error(Nil)
-    False -> Ok(Bits(bits.bytes, bits.start + from * 8, bits.start + to * 8))
+    False -> {
+      let start = bits.start + from * 8
+      Ok(Bits(bits.bytes, start, bits.start + to * 8, bits.written))
+    }
   }
 }
 
@@ -1216,7 +1251,7 @@ fn base64_decode(encoded: String, url: Bool) -> Result(Bits, Nil) {
   let out = bytes_new({ size + missing } / 4 * 3)
   let decoder = Base64Decoder(string_bytes(encoded), start + size, out, url)
   case base64_decode_loop(decoder, start, start + size + missing, 0, 0, 0, 0) {
-    Ok(at) -> Ok(Bits(out, 0, at * 8))
+    Ok(at) -> Ok(bit_array_from_bytes(out, at * 8))
     Error(Nil) -> Error(Nil)
   }
 }
@@ -1365,7 +1400,7 @@ pub fn bit_array_base16_decode(encoded: String) -> Result(Bits, Nil) {
       let out = bytes_new(size / 2)
       let bytes = string_bytes(encoded)
       case base16_decode_loop(bytes, start, start + size, out, 0) {
-        True -> Ok(Bits(out, 0, size * 4))
+        True -> Ok(bit_array_from_bytes(out, size * 4))
         False -> Error(Nil)
       }
     }
@@ -1665,17 +1700,30 @@ fn max(a: Int, b: Int) -> Int {
 @external(webassembly, "builtins", "_bytes_new")
 fn bytes_new(size: Int) -> Bytes
 
+@external(webassembly, "builtins", "_bytes_size")
+fn bytes_size(bytes: Bytes) -> Int
+
 @external(webassembly, "builtins", "_bytes_get")
 fn bytes_get(bytes: Bytes, index: Int) -> Int
 
-/// Only on the bytes the caller has just created.
+/// Only on the bytes the caller has just created, or after the bits written
+/// to them.
 @external(webassembly, "builtins", "_bytes_set")
 fn bytes_set(bytes: Bytes, index: Int, byte: Int) -> Nil
 
 /// Copies `count` bytes of `src` from `from` to `dst` at `at`. Only on the
-/// bytes the caller has just created.
+/// bytes the caller has just created, or after the bits written to them.
 @external(webassembly, "builtins", "_bytes_copy")
 fn bytes_copy(dst: Bytes, at: Int, src: Bytes, from: Int, count: Int) -> Nil
+
+@external(webassembly, "builtins", "_cell_new")
+fn cell_new(value: Int) -> Cell
+
+@external(webassembly, "builtins", "_cell_get")
+fn cell_get(cell: Cell) -> Int
+
+@external(webassembly, "builtins", "_cell_set")
+fn cell_set(cell: Cell, value: Int) -> Nil
 
 /// The bytes of `string`, which start at `string_offset(string)`.
 @external(webassembly, "builtins", "_string_bytes")

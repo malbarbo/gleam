@@ -381,6 +381,9 @@ impl Generator<'_> {
     /// ```text
     /// from_bytes(bytes, write_2(bytes, write_1(bytes, 0, v1, s1), v2, s2))
     /// ```
+    ///
+    /// When the first segment is a whole bit array, the others are written
+    /// after it, to the bytes of `bit_array_extend(v1, s2 + s3)`.
     pub(super) fn expression_bit_array(
         &mut self,
         locals: &Locals,
@@ -400,9 +403,25 @@ impl Generator<'_> {
             let _ = instructions.expression(self, locals, scope, &segment.value);
             return;
         }
+        let bits_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]);
+        // A first segment that is a whole bit array is extended (see
+        // `bit_array_extend`).
+        let extended = match segments {
+            [first, ..] if first.size().is_none() && first.value.literal().is_none() => {
+                first.type_.is_bit_array().then(|| {
+                    let val_type = self.val_type(&bits_type);
+                    let local = self.wasm_local(val_type);
+                    let _ = instructions
+                        .expression(self, locals, scope.clone(), &first.value)
+                        .local_set(local);
+                    local
+                })
+            }
+            _ => None,
+        };
         let mut literal = Bits::default();
         let mut parts = vec![];
-        for segment in segments {
+        for segment in segments.iter().skip(usize::from(extended.is_some())) {
             if literal.push_literal(segment) {
                 continue;
             }
@@ -418,9 +437,8 @@ impl Generator<'_> {
         }
 
         let bytes_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bytes", vec![]);
-        let bits_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]);
         let bytes = self.wasm_local(self.string.bytes_val_type());
-        // The bytes of the total size.
+        // The size of the segments, after the extended bit array if any.
         let constant: u64 = parts
             .iter()
             .filter_map(|part| match part.size {
@@ -434,17 +452,52 @@ impl Generator<'_> {
                 let _ = instructions.local_get(size).int_add();
             }
         }
-        let _ = instructions
-            .int_const(&7.into())
-            .int_add()
-            .int_shift_by(false, &3.into())
-            .int_to_i32()
-            .bytes_new()
-            .local_set(bytes);
-        for _ in 0..=parts.len() {
+        // The bytes, and the position of the first segment on the stack.
+        let start = match extended {
+            None => {
+                let _ = instructions
+                    .int_const(&7.into())
+                    .int_add()
+                    .int_shift_by(false, &3.into())
+                    .int_to_i32()
+                    .bytes_new()
+                    .local_set(bytes);
+                None
+            }
+            Some(first) => {
+                let size = self.wasm_local(self.int.val_type());
+                let val_type = self.val_type(&bits_type);
+                let result = self.wasm_local(val_type);
+                let extend = self.runtime_function_id(
+                    BIT_ARRAY_MODULE,
+                    "bit_array_extend",
+                    vec![bits_type.clone(), type_::int()],
+                    bits_type.clone(),
+                );
+                let _ = instructions
+                    .local_set(size)
+                    .local_get(first)
+                    .local_get(size)
+                    .call(extend)
+                    .local_tee(result);
+                self.bits_field(instructions, 0);
+                let _ = instructions.local_set(bytes);
+                Some((size, result))
+            }
+        };
+        for _ in 0..parts.len() + usize::from(start.is_none()) {
             let _ = instructions.local_get(bytes);
         }
-        let _ = instructions.int_const(&0.into());
+        match start {
+            None => {
+                let _ = instructions.int_const(&0.into());
+            }
+            Some((size, result)) => {
+                let _ = instructions.local_get(result);
+                self.bits_field(instructions, 2);
+                let _ = instructions.local_get(size).int_sub();
+            }
+        }
         for part in parts {
             let (name, takes_size) = part.write.function();
             let value_type = match part.write {
@@ -475,13 +528,39 @@ impl Generator<'_> {
             let id = self.runtime_function_id(BIT_ARRAY_MODULE, name, arguments, type_::int());
             let _ = instructions.call(id);
         }
-        let from_bytes = self.runtime_function_id(
-            BIT_ARRAY_MODULE,
-            "bit_array_from_bytes",
-            vec![bytes_type, type_::int()],
-            bits_type,
-        );
-        let _ = instructions.call(from_bytes);
+        match start {
+            None => {
+                let from_bytes = self.runtime_function_id(
+                    BIT_ARRAY_MODULE,
+                    "bit_array_from_bytes",
+                    vec![bytes_type, type_::int()],
+                    bits_type,
+                );
+                let _ = instructions.call(from_bytes);
+            }
+            Some((_, result)) => {
+                let _ = instructions.drop().local_get(result);
+            }
+        }
+    }
+
+    /// Replaces the `Bits` of the runtime on the stack by its field `index`.
+    fn bits_field(&mut self, instructions: &mut Instructions<'_, '_>, index: u64) {
+        let bits_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bits", vec![]);
+        let (
+            CustomType::Struct {
+                custom_type,
+                constructor,
+            },
+            args,
+        ) = self.custom_type_expect(&bits_type)
+        else {
+            panic!("Bits to be a struct");
+        };
+        let (type_index, types) =
+            self.mono_struct_type_index(&bits_type, &custom_type, &constructor, &args);
+        let field = self.field_index(&types, index);
+        let _ = instructions.field_get(type_index, field);
     }
 
     fn literal_segment(&mut self, bits: Bits) -> Segment {

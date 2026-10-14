@@ -127,6 +127,9 @@ pub(super) enum BuiltinFunctionExternal {
     Float32Byte,
     Float64FromBits,
     Float32FromBits,
+    CellNew,
+    CellGet,
+    CellSet,
 }
 
 pub fn builtin_function_names() -> Vec<EcoString> {
@@ -198,6 +201,9 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::Float32Byte,
             BuiltinFunctionExternal::Float64FromBits,
             BuiltinFunctionExternal::Float32FromBits,
+            BuiltinFunctionExternal::CellNew,
+            BuiltinFunctionExternal::CellGet,
+            BuiltinFunctionExternal::CellSet,
         ]
     }
 
@@ -264,6 +270,9 @@ impl BuiltinFunctionExternal {
             BuiltinFunctionExternal::Float32Byte => "_float32_byte",
             BuiltinFunctionExternal::Float64FromBits => "_float64_from_bits",
             BuiltinFunctionExternal::Float32FromBits => "_float32_from_bits",
+            BuiltinFunctionExternal::CellNew => "_cell_new",
+            BuiltinFunctionExternal::CellGet => "_cell_get",
+            BuiltinFunctionExternal::CellSet => "_cell_set",
         }
     }
 
@@ -342,6 +351,10 @@ impl BuiltinFunctionExternal {
             }
             BuiltinFunctionExternal::Float64FromBits => (vec![int(), int()], float()),
             BuiltinFunctionExternal::Float32FromBits => (vec![int()], float()),
+            // `i32` is `Cell` for these.
+            BuiltinFunctionExternal::CellNew => (vec![int()], i32),
+            BuiltinFunctionExternal::CellGet => (vec![i32], int()),
+            BuiltinFunctionExternal::CellSet => (vec![i32, int()], nil()),
         }
     }
 }
