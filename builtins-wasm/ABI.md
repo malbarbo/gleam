@@ -297,7 +297,7 @@ function once the external types are replaced by their representation.
 | `Dict(k, v)` | `builtins/dict` | a CHAMP (hash trie) with `Array` nodes, with the hash of `_hash` |
 | `StringTree` | `builtins/string_tree` | a rope that stores the size of each node |
 | `BitArray` (of the prelude) | `builtins/bit_array` | `Bits(bytes, start, end)`: the bits of a `Bytes` from `start` to `end` (not included), shared by slices and with the strings they come from; literals are computed when compiling and created by the start function |
-| `Dynamic` | `builtins/dynamic` | a closed sum: `DInt`, `DFloat`, `DString`, `DBool`, `DNil`, `DList`, `DArray` (an `Array(Dynamic)`), `DDict` and `DOther(AnyRef, VTable)` |
+| `Dynamic` | `builtins/dynamic` | a closed sum: `DInt`, `DFloat`, `DString`, `DBool`, `DNil`, `DBitArray`, `DList`, `DArray` (an `Array(Dynamic)`), `DDict` and `DOther(AnyRef, VTable)` |
 
 Their functions are named after the type: `dict_*`, `string_tree_*`,
 `bit_array_*` and `dynamic_*` (see the modules). The equality, the hash and
@@ -312,7 +312,7 @@ other values.
 |---|---|---|
 | `dynamic_classify` | `fn(Dynamic) -> String` | the names used on Erlang (`"Int"`, `"Array"`, `"Dict"`, `"Nil"`, ...); `"Function"`, `"Result"` or `"Object"` for the other values |
 | `dynamic_is_null` | `fn(Dynamic) -> Bool` | |
-| `dynamic_decode_int` / `_float` / `_string` | `fn(Dynamic) -> Result(T, T)` | the value, or `Error` with the zero value |
+| `dynamic_decode_int` / `_float` / `_string` / `_bit_array` | `fn(Dynamic) -> Result(T, T)` | the value, or `Error` with the zero value |
 | `dynamic_decode_list_items` | `fn(Dynamic) -> Result(List(Dynamic), Nil)` | lists and arrays |
 | `dynamic_decode_dict` | `fn(Dynamic) -> Result(Dict(Dynamic, Dynamic), Nil)` | |
 | `dynamic_index` | `fn(Dynamic, Dynamic) -> Result(Result(Dynamic, Nil), String)` | Erlang `index` semantics, with `Result(_, Nil)` for `Option`; constant time for arrays |

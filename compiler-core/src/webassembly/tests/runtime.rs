@@ -184,6 +184,9 @@ pub fn index(data: Dynamic, key: Dynamic) -> Result(Result(Dynamic, Nil), String
 
 @external(webassembly, "builtins", "dynamic_array")
 pub fn array(items: List(Dynamic)) -> Dynamic
+
+@external(webassembly, "builtins", "dynamic_decode_bit_array")
+pub fn bit_array(data: Dynamic) -> Result(BitArray, BitArray)
 "#;
 
 #[track_caller]
@@ -362,6 +365,36 @@ pub fn main() {
 }
 "#,
     );
+}
+
+/// A bit array has its own variant, as on JavaScript.
+#[test]
+fn dynamic_of_bit_arrays() {
+    let stderr = run_dynamic(
+        r#"
+import dict
+import dynamic
+
+pub fn main() {
+  let assert "BitArray" = dynamic.classify(dynamic.cast(<<1, 2>>))
+  let assert Ok(<<1, 2:3>>) = dynamic.bit_array(dynamic.cast(<<1, 2:3>>))
+  let assert Error(_) = dynamic.bit_array(dynamic.cast("a"))
+  let assert Error(_) = dynamic.string(dynamic.cast(<<"a">>))
+  let assert Ok([a]) = dynamic.list_items(dynamic.cast([<<3>>]))
+  let assert Ok(<<3>>) = dynamic.bit_array(a)
+  let assert <<_, rest:bits>> = <<0, 1, 2>>
+  let assert True = dynamic.cast(rest) == dynamic.cast(<<1, 2>>)
+  let assert False = dynamic.cast(<<1, 2>>) == dynamic.cast(<<1, 2, 0:1>>)
+  let assert False = dynamic.cast(<<>>) == dynamic.cast("")
+  let d = dict.from_list([#(dynamic.cast(<<1>>), 1), #(dynamic.cast(<<1:1>>), 2)])
+  let assert Ok(1) = dict.get(d, dynamic.cast(<<1>>))
+  let assert Ok(2) = dict.get(d, dynamic.cast(<<1:1>>))
+  let assert Error(Nil) = dict.get(d, dynamic.cast(<<2>>))
+  echo dynamic.cast([<<1, 2:3>>])
+}
+"#,
+    );
+    assert!(stderr.contains("[<<1, 2:size(3)>>]"), "{stderr}");
 }
 
 #[test]

@@ -4,8 +4,8 @@
 ////
 //// WebAssembly has no runtime type information that generic code could use
 //// to inspect any value, so `Dynamic` is a closed sum. Ints, floats, strings,
-//// booleans, `Nil`, lists, tuples (as arrays) and dicts have their own
-//// variants; any other value is boxed in `DOther`, together with a table of
+//// booleans, `Nil`, bit arrays, lists, tuples (as arrays) and dicts have
+//// their own variants; any other value is boxed in `DOther`, together with a table of
 //// functions generated for its type.
 ////
 //// `_dynamic_cast`, which turns a value of any type into a `Dynamic`, needs
@@ -23,6 +23,7 @@ import builtins/array.{
 import builtins/base.{
   bitwise_exclusive_or, hash, inspect, low_32_bits, reverse_and_prepend,
 }
+import builtins/bit_array.{type Bits, bit_array_from_string}
 import builtins/dict.{type Dict}
 
 pub type Dynamic {
@@ -31,6 +32,7 @@ pub type Dynamic {
   DString(String)
   DBool(Bool)
   DNil
+  DBitArray(Bits)
   DList(List(Dynamic))
   /// A tuple, an `Array`, or a list made with `dynamic.array`.
   DArray(Array(Dynamic))
@@ -77,6 +79,10 @@ pub fn dynamic_int(value: Int) -> Dynamic {
 
 pub fn dynamic_nil() -> Dynamic {
   DNil
+}
+
+pub fn dynamic_bit_array(value: Bits) -> Dynamic {
+  DBitArray(value)
 }
 
 pub fn dynamic_list(value: List(Dynamic)) -> Dynamic {
@@ -138,6 +144,7 @@ pub fn dynamic_classify(data: Dynamic) -> String {
     DString(_) -> "String"
     DBool(_) -> "Bool"
     DNil -> "Nil"
+    DBitArray(_) -> "BitArray"
     DList(_) -> "List"
     DArray(_) -> "Array"
     DDict(_) -> "Dict"
@@ -170,6 +177,13 @@ pub fn dynamic_decode_string(data: Dynamic) -> Result(String, String) {
   case data {
     DString(value) -> Ok(value)
     _ -> Error("")
+  }
+}
+
+pub fn dynamic_decode_bit_array(data: Dynamic) -> Result(Bits, Bits) {
+  case data {
+    DBitArray(value) -> Ok(value)
+    _ -> Error(bit_array_from_string(""))
   }
 }
 
@@ -235,6 +249,7 @@ pub fn dynamic_equal(a: Dynamic, b: Dynamic) -> Bool {
     DString(x), DString(y) -> x == y
     DBool(x), DBool(y) -> x == y
     DNil, DNil -> True
+    DBitArray(x), DBitArray(y) -> x == y
     DList(xs), DList(ys) -> xs == ys
     DArray(xs), DArray(ys) -> xs == ys
     DDict(x), DDict(y) -> x == y
@@ -251,6 +266,7 @@ pub fn dynamic_hash(value: Dynamic) -> Int {
     DString(x) -> mix(3, hash(x))
     DBool(x) -> mix(4, hash(x))
     DNil -> 5
+    DBitArray(x) -> mix(10, hash(x))
     DList(xs) -> mix(6, hash(xs))
     DArray(xs) -> mix(7, hash(xs))
     DDict(x) -> mix(8, hash(x))
@@ -271,6 +287,7 @@ pub fn dynamic_inspect(value: Dynamic) -> String {
     DString(x) -> inspect(x)
     DBool(x) -> inspect(x)
     DNil -> "Nil"
+    DBitArray(x) -> inspect(x)
     DList(xs) -> inspect(xs)
     DArray(xs) -> inspect(xs)
     DDict(x) -> inspect(x)

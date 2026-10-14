@@ -52,11 +52,11 @@ const SOURCES: &[(&str, &str)] = &[
         "builtins/string_tree",
         include_str!("runtime/string_tree.gleam"),
     ),
-    ("builtins/dynamic", include_str!("runtime/dynamic.gleam")),
     (
         "builtins/bit_array",
         include_str!("runtime/bit_array.gleam"),
     ),
+    ("builtins/dynamic", include_str!("runtime/dynamic.gleam")),
 ];
 
 /// The functions of the runtime that give `==`, `_hash` and the text of

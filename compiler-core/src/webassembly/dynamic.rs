@@ -259,6 +259,15 @@ impl<'a> Generator<'a> {
                 vec![],
                 dynamic.clone(),
             ))
+        } else if let Some((BIT_ARRAY_MODULE, "Bits")) = type_
+            .named_type_information()
+            .as_ref()
+            .map(|(module, name, _)| (module.as_str(), name.as_str()))
+        {
+            Cast::Calls {
+                from_i32: false,
+                calls: vec![to_dynamic(self, "dynamic_bit_array", type_.clone())],
+            }
         } else if let Some(item) = type_.list_type() {
             if item.same_as(dynamic) {
                 Cast::Calls {
