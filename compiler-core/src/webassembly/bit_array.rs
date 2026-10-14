@@ -1142,9 +1142,22 @@ impl Generator<'_> {
             BitArraySize::Int { int_value, .. } => {
                 let _ = instructions.int_const(int_value);
             }
-            BitArraySize::Variable { name, .. } => {
-                self.expression_var(scope, instructions, name, &type_::int(), None);
-            }
+            BitArraySize::Variable {
+                name, constructor, ..
+            } => match constructor
+                .as_deref()
+                .map(|constructor| &constructor.variant)
+            {
+                // A constant, maybe of another module.
+                Some(ValueConstructorVariant::ModuleConstant { literal, .. }) => {
+                    self.constant_value(instructions, literal, &type_::int());
+                }
+                Some(ValueConstructorVariant::LocalVariable { location, .. }) => {
+                    let location = Some(*location);
+                    self.expression_var(scope, instructions, name, &type_::int(), location);
+                }
+                _ => self.expression_var(scope, instructions, name, &type_::int(), None),
+            },
             BitArraySize::Block { inner, .. } => self.bit_array_size(scope, instructions, inner),
             BitArraySize::BinaryOperator {
                 operator,

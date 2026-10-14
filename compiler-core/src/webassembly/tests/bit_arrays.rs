@@ -225,6 +225,25 @@ pub const nested = <<header:bits, 2:4>>
     );
 }
 
+/// The size of a pattern segment can be a constant of another module.
+#[test]
+fn pattern_size_of_other_modules() {
+    let _ = run_with(
+        r#"
+import other.{width, width as w}
+
+pub fn main() {
+  let assert <<5, 6>> = case <<5, 6>> {
+    <<x:size(width), y:size(w)>> -> <<x, y>>
+    _ -> <<>>
+  }
+  Nil
+}
+"#,
+        vec![("other", "pub const width = 8\n")],
+    );
+}
+
 /// Equal bit arrays are equal and have the same hash whatever the position
 /// of their bits in their bytes.
 #[test]
