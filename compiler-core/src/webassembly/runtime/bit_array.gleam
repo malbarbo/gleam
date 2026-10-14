@@ -57,9 +57,7 @@ pub fn bit_array_from_string(string: String) -> Bits {
 /// more. The compiler creates `<<bits:bits, ...>>` with it.
 pub fn bit_array_extend(bits: Bits, size: Int) -> Bits {
   let end = bits.end + size
-  case
-    cell_get(bits.written) == bits.end && end <= bytes_size(bits.bytes) * 8
-  {
+  case cell_get(bits.written) == bits.end && end <= bytes_size(bits.bytes) * 8 {
     True -> {
       let _ = cell_set(bits.written, end)
       Bits(bits.bytes, bits.start, end, bits.written)
