@@ -1108,6 +1108,26 @@ pub fn main() {
 }
 
 #[test]
+fn mono_local_function_used_with_a_type_var_bound_by_nothing() {
+    // The type of the use of `outer` has the type variable of the result of
+    // `make()`, which nothing binds, but `a` is still `Int`.
+    run_ok_i64(
+        r#"
+pub fn main() {
+    let outer = fn(a: a, fail: Bool) {
+        let make = fn() -> b { panic }
+        case fail {
+            True -> Error(make())
+            False -> Ok(a)
+        }
+    }
+    assert outer(42, False) == Ok(42)
+}
+"#,
+    );
+}
+
+#[test]
 fn mono_local_generic_function_echo_param() {
     let result = run_wasm(
         r#"

@@ -109,6 +109,9 @@ impl Monomorphizer {
     /// unified with them, and then it gets that type. The type of a use can
     /// depend on the type variables of another variable, like a call in the
     /// body of a local function, so the variables are bound until none is.
+    /// Then a use can still have type variables that no other variable can
+    /// bind, like the result of a call to a function that never returns, and
+    /// the variable is bound with them as `type_` resolves them.
     pub(super) fn bind_lets(&mut self, variables: &Variables<'_>) {
         let mut uses: HashMap<SrcSpan, Vec<&Arc<Type>>> = HashMap::new();
         for reference in &variables.references {
@@ -126,26 +129,51 @@ impl Monomorphizer {
                 Some((*location, assignment.value.type_()))
             })
             .collect();
+        let mut unbindable = false;
         loop {
             let count = lets.len();
+            // The type variables of each variable not bound yet.
+            let pending: Vec<_> = lets
+                .iter()
+                .map(|(location, type_)| {
+                    let mut ids = HashSet::new();
+                    self.free_variables(type_, &mut ids);
+                    (*location, ids)
+                })
+                .collect();
             lets.retain(|(location, type_)| {
                 if !self.has_free_variables(type_) {
                     return false;
                 }
                 let uses = uses.get(location).map_or(&[][..], Vec::as_slice);
-                if let [first, rest @ ..] = uses
-                    && !self.has_free_variables(first)
-                {
+                let Some(first) = uses.first() else {
+                    return true;
+                };
+                let mut free = HashSet::new();
+                for use_ in uses {
+                    self.free_variables(use_, &mut free);
+                }
+                let bindable = free.is_empty()
+                    || unbindable
+                        && pending
+                            .iter()
+                            .filter(|(other, _)| other != location)
+                            .all(|(_, ids)| ids.is_disjoint(&free));
+                if bindable {
                     let first = self.type_(first);
-                    if rest.iter().all(|other| self.type_(other).same_as(&first)) {
+                    if uses.iter().all(|other| self.type_(other).same_as(&first)) {
                         let _ = self.bound(type_, &first);
                         return false;
                     }
                 }
                 true
             });
-            if lets.len() == count {
+            if lets.len() < count {
+                unbindable = false;
+            } else if unbindable {
                 break;
+            } else {
+                unbindable = true;
             }
         }
     }
