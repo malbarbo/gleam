@@ -641,14 +641,23 @@ impl Generator<'_> {
             (Write::Int(_), None) => return Some(Segment::constant(value, 8, write)),
             (Write::Float(_), None) => return Some(Segment::constant(value, 64, write)),
             (Write::CodepointUtf32(_), _) => return Some(Segment::constant(value, 32, write)),
-            (Write::Int(_) | Write::Float(_), Some(SizeOption::Literal(size))) => {
+            (Write::Int(_), Some(SizeOption::Literal(size))) => {
                 return size
                     .to_u64()
                     .filter(|size| *size > 0)
                     .map(|size| Segment::constant(value, size, write));
             }
+            // The size of a float, maybe a constant, is checked by the
+            // runtime when it is not 16, 32 or 64.
+            (Write::Float(_), Some(SizeOption::Literal(size)))
+                if matches!(size.to_u64(), Some(16 | 32 | 64)) =>
+            {
+                return size
+                    .to_u64()
+                    .map(|size| Segment::constant(value, size, write));
+            }
             (Write::Int(_), Some(SizeOption::Local(_))) => ("bit_array_int_size", false),
-            (Write::Float(_), Some(SizeOption::Local(_))) => ("bit_array_float_size", false),
+            (Write::Float(_), Some(_)) => ("bit_array_float_size", false),
             (Write::Bits, None) => ("bit_array_bit_size", true),
             (Write::Bits, Some(_)) => ("bit_array_bits_size", true),
             (Write::Utf8, _) => ("bit_array_utf8_size", true),

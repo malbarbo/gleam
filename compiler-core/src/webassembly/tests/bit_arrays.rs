@@ -800,9 +800,25 @@ fn construction_errors() {
             "id(1.5):float-size(id(8))",
             "Sized floats must be 16-bit, 32-bit or 64-bit",
         ),
+        (
+            "id(1.5):float-size(n24)",
+            "Sized floats must be 16-bit, 32-bit or 64-bit",
+        ),
+        (
+            "id(1.5):float-size(n0)",
+            "Sized floats must be 16-bit, 32-bit or 64-bit",
+        ),
+        (
+            "1.5:float-size(n24)",
+            "Sized floats must be 16-bit, 32-bit or 64-bit",
+        ),
     ] {
         let src = format!(
             r#"
+const n24 = 24
+
+const n0 = 0
+
 fn id(x: a) -> a {{
   x
 }}
