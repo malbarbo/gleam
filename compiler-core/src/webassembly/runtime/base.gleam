@@ -35,6 +35,10 @@ fn repr_to_string(repr: Repr) -> String
 @external(webassembly, "builtins", "_string_concat_list")
 pub fn concat_strings(strings: List(String)) -> String
 
+@external(erlang, "erlang", "byte_size")
+@external(webassembly, "builtins", "_string_byte_size")
+pub fn string_byte_size(string: String) -> Int
+
 pub fn reverse_and_prepend(list: List(a), to suffix: List(a)) -> List(a) {
   case list {
     [] -> suffix

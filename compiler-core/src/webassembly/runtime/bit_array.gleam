@@ -19,6 +19,7 @@
 import builtins/base.{
   bitwise_and, bitwise_exclusive_or, bitwise_or, bitwise_shift_left,
   bitwise_shift_right, concat_strings, inspect, low_32_bits, reverse_and_prepend,
+  string_byte_size,
 }
 
 /// An array of bytes, the `(array (mut i8))` of strings.
@@ -1729,9 +1730,6 @@ fn string_bytes(string: String) -> Bytes
 
 @external(webassembly, "builtins", "_string_offset")
 fn string_offset(string: String) -> Int
-
-@external(webassembly, "builtins", "_string_byte_size")
-fn string_byte_size(string: String) -> Int
 
 /// The string of the `size` bytes of `bytes` from `start`, which are UTF-8.
 @external(webassembly, "builtins", "_bytes_to_string")

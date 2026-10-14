@@ -22,7 +22,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-import builtins/base.{concat_strings, hash, inspect, reverse_and_prepend}
+import builtins/base.{
+  concat_strings, hash, inspect, reverse_and_prepend, string_byte_size,
+}
 
 pub opaque type StringTree {
   Leaf(size: Int, string: String)
@@ -153,10 +155,6 @@ pub fn string_tree_inspect(rope: StringTree) -> String {
 }
 
 // -- Builtins -----------------------------------------------------------------
-
-@external(erlang, "erlang", "byte_size")
-@external(webassembly, "builtins", "_string_byte_size")
-fn string_byte_size(string: String) -> Int
 
 @external(erlang, "string", "lowercase")
 @external(webassembly, "builtins", "string_lowercase")
