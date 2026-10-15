@@ -147,25 +147,59 @@ pub fn setup(
             _ => run_erlang_command(paths, &root_config.name, &module, arguments),
         },
         Target::JavaScript => match runtime.unwrap_or(mod_config.javascript.runtime) {
-            Runtime::Deno => run_javascript_deno_command(
-                paths,
-                &root_config,
-                &main_function.package,
-                &module,
-                arguments,
-            ),
+            Runtime::Deno => {
+                let entrypoint =
+                    write_javascript_entrypoint(paths, &main_function.package, &module)?;
+                Ok(run_deno_command(&root_config, entrypoint, None, arguments))
+            }
             Runtime::NodeJs => {
-                run_javascript_node_command(paths, &main_function.package, &module, arguments)
+                let entrypoint =
+                    write_javascript_entrypoint(paths, &main_function.package, &module)?;
+                Ok(run_node_command(entrypoint, arguments))
             }
             Runtime::Bun => {
-                run_javascript_bun_command(paths, &main_function.package, &module, arguments)
+                let entrypoint =
+                    write_javascript_entrypoint(paths, &main_function.package, &module)?;
+                Ok(run_bun_command(entrypoint, arguments))
             }
         },
         Target::WebAssembly => {
-            eprintln!("webassembly run not implemented");
-            std::process::exit(1);
+            let entrypoint = write_webassembly_entrypoint(paths, &main_function.package, &module)?;
+            match runtime.unwrap_or(mod_config.javascript.runtime) {
+                // The host reads the WebAssembly modules.
+                Runtime::Deno => {
+                    let build = paths.build_directory_for_target(Mode::Dev, Target::WebAssembly);
+                    Ok(run_deno_command(
+                        &root_config,
+                        entrypoint,
+                        Some(build.to_string()),
+                        arguments,
+                    ))
+                }
+                Runtime::NodeJs => Ok(run_node_command(entrypoint, arguments)),
+                Runtime::Bun => Ok(run_bun_command(entrypoint, arguments)),
+            }
         }
     }
+}
+
+/// Writes the module that runs `module` of `package` with the host of the
+/// WebAssembly modules.
+fn write_webassembly_entrypoint(
+    paths: &ProjectPaths,
+    package: &str,
+    module: &str,
+) -> Result<Utf8PathBuf, Error> {
+    let path = paths
+        .build_directory_for_package(Mode::Dev, Target::WebAssembly, package)
+        .join(format!("gleam@@private_main_v{COMPILER_VERSION}.mjs"));
+    let entrypoint = format!(
+        r#"import {{ run }} from "./gleam.mjs";
+await run(new URL("./{module}.wasm", import.meta.url));
+"#,
+    );
+    crate::fs::write(&path, &entrypoint)?;
+    Ok(path)
 }
 
 fn run_erlang_command(
@@ -208,52 +242,40 @@ fn run_erlang_command(
     })
 }
 
-fn run_javascript_bun_command(
-    paths: &ProjectPaths,
-    package: &str,
-    module: &str,
-    arguments: Vec<String>,
-) -> Result<Command, Error> {
+fn run_bun_command(entrypoint: Utf8PathBuf, arguments: Vec<String>) -> Command {
     let mut args = vec!["run".to_string()];
-    let entry = write_javascript_entrypoint(paths, package, module)?;
 
-    args.push(entry.to_string());
+    args.push(entrypoint.to_string());
 
     for arg in arguments.into_iter() {
         args.push(arg);
     }
 
-    Ok(Command {
+    Command {
         program: "bun".to_string(),
         args,
         env: vec![],
         cwd: None,
         stdio: Stdio::Inherit,
-    })
+    }
 }
 
-fn run_javascript_node_command(
-    paths: &ProjectPaths,
-    package: &str,
-    module: &str,
-    arguments: Vec<String>,
-) -> Result<Command, Error> {
+fn run_node_command(entrypoint: Utf8PathBuf, arguments: Vec<String>) -> Command {
     let mut args = vec![];
-    let entry = write_javascript_entrypoint(paths, package, module)?;
 
-    args.push(entry.to_string());
+    args.push(entrypoint.to_string());
 
     for argument in arguments.into_iter() {
         args.push(argument);
     }
 
-    Ok(Command {
+    Command {
         program: "node".to_string(),
         args,
         env: vec![],
         cwd: None,
         stdio: Stdio::Inherit,
-    })
+    }
 }
 
 fn write_javascript_entrypoint(
@@ -274,13 +296,14 @@ main();
     Ok(path)
 }
 
-fn run_javascript_deno_command(
-    paths: &ProjectPaths,
+/// The command that runs `entrypoint` with Deno, which may also read the
+/// path `read`.
+fn run_deno_command(
     config: &PackageConfig,
-    package: &str,
-    module: &str,
+    entrypoint: Utf8PathBuf,
+    read: Option<String>,
     arguments: Vec<String>,
-) -> Result<Command, Error> {
+) -> Command {
     let mut args = vec![];
 
     // Run the main function.
@@ -323,11 +346,11 @@ fn run_javascript_deno_command(
         }
 
         // Allow read
-        add_deno_flag(
-            &mut args,
-            "--allow-read",
-            &config.javascript.deno.allow_read,
-        );
+        let mut allow_read = config.javascript.deno.allow_read.clone();
+        if let (DenoFlag::Allow(allow), Some(read)) = (&mut allow_read, read) {
+            allow.push(read);
+        }
+        add_deno_flag(&mut args, "--allow-read", &allow_read);
 
         // Allow run
         add_deno_flag(&mut args, "--allow-run", &config.javascript.deno.allow_run);
@@ -340,20 +363,19 @@ fn run_javascript_deno_command(
         );
     }
 
-    let entrypoint = write_javascript_entrypoint(paths, package, module)?;
     args.push(entrypoint.to_string());
 
     for argument in arguments.into_iter() {
         args.push(argument);
     }
 
-    Ok(Command {
+    Command {
         program: "deno".to_string(),
         args,
         env: vec![],
         cwd: None,
         stdio: Stdio::Inherit,
-    })
+    }
 }
 
 fn add_deno_flag(args: &mut Vec<String>, flag: &str, flags: &DenoFlag) {

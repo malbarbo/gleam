@@ -364,7 +364,8 @@ where
                 int,
                 float,
                 opt_level,
-            } => self.perform_webassembly_codegen(modules, *int, *float, *opt_level),
+                programs,
+            } => self.perform_webassembly_codegen(modules, *int, *float, *opt_level, *programs),
         }
     }
 
@@ -498,7 +499,15 @@ where
         int: crate::config::WasmInt,
         float: crate::config::WasmFloat,
         opt_level: crate::config::WasmOptLevel,
+        programs: bool,
     ) -> Result<(), Error> {
+        // The FFI modules of the host, like on JavaScript.
+        if self.copy_native_files {
+            self.copy_project_native_files(self.out, HashSet::new(), &mut HashSet::new())?;
+        } else {
+            tracing::debug!("skipping_native_file_copying");
+        }
+        let modules = if programs { modules } else { &[] };
         WebAssembly::new(self.out, int, float, opt_level).render(
             &self.io,
             modules,

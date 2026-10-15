@@ -71,6 +71,7 @@ pub fn command(options: CompilePackage) -> Result<()> {
             int: config.webassembly.int,
             float: config.webassembly.float,
             opt_level: config.webassembly.opt_level,
+            programs: true,
         },
     };
 

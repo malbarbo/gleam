@@ -210,6 +210,7 @@ fn do_compile_package(project: Project, target: Target) -> Result<(), Error> {
             int: config.webassembly.int,
             float: config.webassembly.float,
             opt_level: config.webassembly.opt_level,
+            programs: true,
         },
     };
 

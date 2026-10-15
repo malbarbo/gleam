@@ -206,7 +206,8 @@ where
         // verify that this version is appropriate.
         self.check_gleam_version_and_build_configuration()?;
 
-        // The JavaScript target requires a prelude module to be written.
+        // The JavaScript and WebAssembly targets require a prelude module to
+        // be written.
         self.write_prelude()?;
 
         // Dependencies are compiled first.
@@ -304,14 +305,23 @@ where
     }
 
     fn write_prelude(&self) -> Result<()> {
-        // Only the JavaScript target has a prelude to write.
-        if !self.target().is_javascript() {
-            return Ok(());
-        }
-
         let build = self
             .paths
             .build_directory_for_target(self.mode(), self.target());
+
+        // The WebAssembly target has the host of its programs as prelude.
+        if self.target() == Target::WebAssembly {
+            let path = build.join(crate::webassembly::HOST_FILE);
+            if !self.io.is_file(&path) {
+                self.io.write(&path, crate::webassembly::HOST)?;
+            }
+            return Ok(());
+        }
+
+        // Erlang has no prelude to write.
+        if !self.target().is_javascript() {
+            return Ok(());
+        }
 
         // Write the JavaScript prelude
         let path = build.join("prelude.mjs");
@@ -609,6 +619,7 @@ where
                 int: self.config.webassembly.int,
                 float: self.config.webassembly.float,
                 opt_level: self.config.webassembly.opt_level,
+                programs: is_root,
             },
         };
 
@@ -624,10 +635,7 @@ where
         );
         compiler.write_metadata = true;
         compiler.write_entrypoint = is_root;
-        // A WebAssembly module is a whole program, so only the modules of the
-        // root package are generated, with the dependencies inside them.
-        compiler.perform_codegen = self.options.codegen.should_codegen(is_root)
-            && (is_root || self.target() != Target::WebAssembly);
+        compiler.perform_codegen = self.options.codegen.should_codegen(is_root);
         compiler.webassembly_dependencies = &self.webassembly_dependencies;
         compiler.compile_modules = !(self.options.compile == Compile::DepsOnly && is_root);
         compiler.subprocess_stdio = self.subprocess_stdio;

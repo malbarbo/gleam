@@ -32,6 +32,14 @@ use instructions::*;
 use monomorphize::*;
 use runtime::{Hooks, RUNTIME_PACKAGE};
 pub use runtime::{RuntimeModule, modules as runtime_modules};
+
+/// The module that runs the WebAssembly programs in a JavaScript runtime,
+/// providing the functions they import. Every package reaches it through its
+/// `gleam.mjs`, like the prelude on JavaScript.
+pub const HOST: &str = include_str!("../templates/wasm_host.mjs");
+
+/// The location of `HOST` in the build directory of the target.
+pub const HOST_FILE: &str = "host.mjs";
 use scope::*;
 use specialization::*;
 

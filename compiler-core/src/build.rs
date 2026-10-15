@@ -186,6 +186,10 @@ pub enum TargetCodegenConfiguration {
         int: crate::config::WasmInt,
         float: crate::config::WasmFloat,
         opt_level: crate::config::WasmOptLevel,
+        /// Whether a program is generated for each module. A program is
+        /// whole, so only the modules of the root package are generated,
+        /// with the dependencies inside them.
+        programs: bool,
     },
 }
 

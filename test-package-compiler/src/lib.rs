@@ -70,6 +70,7 @@ impl TestHarness {
                 int: config.webassembly.int,
                 float: config.webassembly.float,
                 opt_level: config.webassembly.opt_level,
+                programs: true,
             },
         };
         let mut modules = imbl::HashMap::new();
