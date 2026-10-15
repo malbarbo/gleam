@@ -212,86 +212,104 @@ impl BuiltinFunctionExternal {
         self.into()
     }
 
-    pub(super) fn type_(&self, i32: Arc<Type>) -> (Vec<Arc<Type>>, Arc<Type>) {
+    /// The type of the params and of the result.
+    pub(super) fn type_(&self) -> (Vec<BuiltinType>, BuiltinType) {
+        use BuiltinFunctionExternal as B;
         use type_::{bool, float, int, list, nil, result, string, tuple, utf_codepoint};
-        match self {
-            BuiltinFunctionExternal::StringConcat => (vec![string(), string()], string()),
-            BuiltinFunctionExternal::StringNumBytes => (vec![string()], int()),
-            BuiltinFunctionExternal::StringGetByte => (vec![string(), int()], result(int(), nil())),
-            BuiltinFunctionExternal::I32ToInt | BuiltinFunctionExternal::I64ToInt => {
-                (vec![i32], int())
+        let ext = BuiltinType::External;
+        let (params, result) = match self {
+            B::StringConcat => (vec![string(), string()], string()),
+            B::StringNumBytes => (vec![string()], int()),
+            B::StringGetByte => (vec![string(), int()], result(int(), nil())),
+            B::I32ToInt => return (vec![ext("I32")], int().into()),
+            B::IntToI32 => return (vec![int().into()], ext("I32")),
+            B::I64ToInt => return (vec![ext("I64")], int().into()),
+            B::IntToI64 => return (vec![int().into()], ext("I64")),
+            B::F32ToFloat => return (vec![ext("F32")], float().into()),
+            B::FloatToF32 => return (vec![float().into()], ext("F32")),
+            B::F64ToFloat => return (vec![ext("F64")], float().into()),
+            B::FloatToF64 => return (vec![float().into()], ext("F64")),
+            B::IntToUtfCodepoint => (vec![int()], result(utf_codepoint(), nil())),
+            B::IntRepr => return (vec![int().into(), ext("I32")], ext("I32")),
+            B::FloatRepr => return (vec![float().into(), ext("I32")], ext("I32")),
+            B::UtfCodepointRepr => return (vec![utf_codepoint().into(), ext("I32")], ext("I32")),
+            B::StringRepr | B::StringToMemory => {
+                return (vec![string().into(), ext("I32")], ext("I32"));
             }
-            BuiltinFunctionExternal::IntToI32 | BuiltinFunctionExternal::IntToI64 => {
-                (vec![int()], i32)
+            B::MemoryToString => return (vec![ext("I32"), ext("I32")], string().into()),
+            B::ParseInt => (vec![string()], result(int(), nil())),
+            B::ParseFloat => (vec![string()], result(float(), nil())),
+            B::IntBitwiseAnd
+            | B::IntBitwiseOr
+            | B::IntBitwiseExclusiveOr
+            | B::IntBitwiseShiftLeft
+            | B::IntBitwiseShiftRight => (vec![int(), int()], int()),
+            B::IntBitwiseNot => (vec![int()], int()),
+            B::IntToFloat => (vec![int()], float()),
+            B::FloatFloor | B::FloatCeiling | B::FloatSquareRoot => (vec![float()], float()),
+            B::FloatTruncate | B::FloatRound => (vec![float()], int()),
+            B::StringByteSize => (vec![string()], int()),
+            B::StringByteSlice => (vec![string(), int(), int()], string()),
+            B::StringPopCodeunit => (vec![string()], tuple(vec![int(), string()])),
+            B::StringStartsWith | B::StringEndsWith | B::StringLessThan => {
+                (vec![string(), string()], bool())
             }
-            BuiltinFunctionExternal::F32ToFloat | BuiltinFunctionExternal::F64ToFloat => {
-                (vec![i32], float())
-            }
-            BuiltinFunctionExternal::FloatToF32 | BuiltinFunctionExternal::FloatToF64 => {
-                (vec![float()], i32)
-            }
-            BuiltinFunctionExternal::IntToUtfCodepoint => {
-                (vec![int()], result(utf_codepoint(), nil()))
-            }
-            BuiltinFunctionExternal::IntRepr => (vec![int(), i32.clone()], i32),
-            BuiltinFunctionExternal::FloatRepr => (vec![float(), i32.clone()], i32),
-            BuiltinFunctionExternal::UtfCodepointRepr => (vec![utf_codepoint(), i32.clone()], i32),
-            BuiltinFunctionExternal::StringRepr => (vec![string(), i32.clone()], i32),
-            BuiltinFunctionExternal::StringToMemory => (vec![string(), i32.clone()], i32),
-            BuiltinFunctionExternal::MemoryToString => (vec![i32.clone(), i32], string()),
-            BuiltinFunctionExternal::ParseInt => (vec![string()], result(int(), nil())),
-            BuiltinFunctionExternal::ParseFloat => (vec![string()], result(float(), nil())),
-            BuiltinFunctionExternal::IntBitwiseAnd => (vec![int(), int()], int()),
-            BuiltinFunctionExternal::IntBitwiseOr => (vec![int(), int()], int()),
-            BuiltinFunctionExternal::IntBitwiseExclusiveOr => (vec![int(), int()], int()),
-            BuiltinFunctionExternal::IntBitwiseNot => (vec![int()], int()),
-            BuiltinFunctionExternal::IntBitwiseShiftLeft => (vec![int(), int()], int()),
-            BuiltinFunctionExternal::IntBitwiseShiftRight => (vec![int(), int()], int()),
-            BuiltinFunctionExternal::IntToFloat => (vec![int()], float()),
-            BuiltinFunctionExternal::FloatFloor => (vec![float()], float()),
-            BuiltinFunctionExternal::FloatCeiling => (vec![float()], float()),
-            BuiltinFunctionExternal::FloatTruncate => (vec![float()], int()),
-            BuiltinFunctionExternal::FloatRound => (vec![float()], int()),
-            BuiltinFunctionExternal::FloatSquareRoot => (vec![float()], float()),
-            BuiltinFunctionExternal::StringByteSize => (vec![string()], int()),
-            BuiltinFunctionExternal::StringByteSlice => (vec![string(), int(), int()], string()),
-            BuiltinFunctionExternal::StringPopCodeunit => {
-                (vec![string()], tuple(vec![int(), string()]))
-            }
-            BuiltinFunctionExternal::StringStartsWith => (vec![string(), string()], bool()),
-            BuiltinFunctionExternal::StringEndsWith => (vec![string(), string()], bool()),
-            BuiltinFunctionExternal::StringRemovePrefix => (vec![string(), string()], string()),
-            BuiltinFunctionExternal::StringRemoveSuffix => (vec![string(), string()], string()),
-            BuiltinFunctionExternal::StringLessThan => (vec![string(), string()], bool()),
-            BuiltinFunctionExternal::StringConcatList => (vec![list(string())], string()),
-            BuiltinFunctionExternal::StringJoin => (vec![list(string()), string()], string()),
-            BuiltinFunctionExternal::UtfCodepointToInt => (vec![utf_codepoint()], int()),
-            BuiltinFunctionExternal::UnsafeIntToUtfCodepoint => (vec![int()], utf_codepoint()),
-            BuiltinFunctionExternal::StringPopGrapheme => (
+            B::StringRemovePrefix | B::StringRemoveSuffix => (vec![string(), string()], string()),
+            B::StringConcatList => (vec![list(string())], string()),
+            B::StringJoin => (vec![list(string()), string()], string()),
+            B::UtfCodepointToInt => (vec![utf_codepoint()], int()),
+            B::UnsafeIntToUtfCodepoint => (vec![int()], utf_codepoint()),
+            B::StringPopGrapheme => (
                 vec![string()],
                 result(tuple(vec![string(), string()]), nil()),
             ),
-            // `i32` is `Bytes` for these.
-            BuiltinFunctionExternal::BytesNew => (vec![int()], i32),
-            BuiltinFunctionExternal::BytesSize => (vec![i32], int()),
-            BuiltinFunctionExternal::BytesGet => (vec![i32, int()], int()),
-            BuiltinFunctionExternal::BytesSet => (vec![i32, int(), int()], nil()),
-            BuiltinFunctionExternal::BytesCopy => {
-                (vec![i32.clone(), int(), i32, int(), int()], nil())
+            B::BytesNew => return (vec![int().into()], ext("Bytes")),
+            B::BytesSize => return (vec![ext("Bytes")], int().into()),
+            B::BytesGet => return (vec![ext("Bytes"), int().into()], int().into()),
+            B::BytesSet => {
+                return (vec![ext("Bytes"), int().into(), int().into()], nil().into());
             }
-            BuiltinFunctionExternal::StringBytes => (vec![string()], i32),
-            BuiltinFunctionExternal::StringOffset => (vec![string()], int()),
-            BuiltinFunctionExternal::BytesToString => (vec![i32, int(), int()], string()),
-            BuiltinFunctionExternal::Float64Byte | BuiltinFunctionExternal::Float32Byte => {
-                (vec![float(), int()], int())
+            B::BytesCopy => {
+                let params = vec![
+                    ext("Bytes"),
+                    int().into(),
+                    ext("Bytes"),
+                    int().into(),
+                    int().into(),
+                ];
+                return (params, nil().into());
             }
-            BuiltinFunctionExternal::Float64FromBits => (vec![int(), int()], float()),
-            BuiltinFunctionExternal::Float32FromBits => (vec![int()], float()),
-            // `i32` is `Cell` for these.
-            BuiltinFunctionExternal::CellNew => (vec![int()], i32),
-            BuiltinFunctionExternal::CellGet => (vec![i32], int()),
-            BuiltinFunctionExternal::CellSet => (vec![i32, int()], nil()),
-        }
+            B::StringBytes => return (vec![string().into()], ext("Bytes")),
+            B::StringOffset => (vec![string()], int()),
+            B::BytesToString => {
+                return (
+                    vec![ext("Bytes"), int().into(), int().into()],
+                    string().into(),
+                );
+            }
+            B::Float64Byte | B::Float32Byte => (vec![float(), int()], int()),
+            B::Float64FromBits => (vec![int(), int()], float()),
+            B::Float32FromBits => (vec![int()], float()),
+            B::CellNew => return (vec![int().into()], ext("Cell")),
+            B::CellGet => return (vec![ext("Cell")], int().into()),
+            B::CellSet => return (vec![ext("Cell"), int().into()], nil().into()),
+        };
+        (params.into_iter().map(Into::into).collect(), result.into())
+    }
+}
+
+/// A param or the result of a `BuiltinFunctionExternal`: a Gleam type, or
+/// an external type of the builtins module, by its name, whose values are
+/// wasm values (see `Generator::wasm_external`).
+#[derive(Debug)]
+pub(super) enum BuiltinType {
+    Gleam(Arc<Type>),
+    External(&'static str),
+}
+
+impl From<Arc<Type>> for BuiltinType {
+    fn from(type_: Arc<Type>) -> Self {
+        BuiltinType::Gleam(type_)
     }
 }
 

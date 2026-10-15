@@ -90,6 +90,28 @@ fn to_str(value: Int, ptr: I32) -> I32
 }
 
 #[test]
+fn wrong_builtin_function_type() {
+    assert_wasm_error!(
+        r#"
+@external(webassembly, "builtins", "_string_concat")
+fn concat(a: String, b: Int) -> String
+"#,
+    );
+}
+
+#[test]
+fn wrong_builtin_function_external_type() {
+    assert_wasm_error!(
+        r#"
+type I64 {}
+
+@external(webassembly, "builtins", "_int_to_i32")
+fn to_i32(value: Int) -> I64
+"#,
+    );
+}
+
+#[test]
 fn wrong_external_function_arity() {
     assert_wasm_error!(
         r#"

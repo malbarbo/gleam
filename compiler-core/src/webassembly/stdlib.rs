@@ -198,13 +198,16 @@ impl Instructions<'_, '_> {
 impl<'a> Generator<'a> {
     /// A builtin that `builtin_inline` emits, as a function to call it as a
     /// value.
-    pub(super) fn code_builtin_inline(
-        &mut self,
-        builtin: BuiltinFunctionExternal,
-        params: &[ValType],
-        result: ValType,
-    ) -> FunctionId {
-        let params: Vec<_> = params.iter().map(|vt| self.wasm_local(*vt)).collect();
+    pub(super) fn code_builtin_inline(&mut self, builtin: BuiltinFunctionExternal) -> FunctionId {
+        let (params, result) = builtin.type_();
+        let params: Vec<_> = params
+            .iter()
+            .map(|type_| {
+                let val_type = self.builtin_val_type(type_);
+                self.wasm_local(val_type)
+            })
+            .collect();
+        let result = self.builtin_val_type(&result);
         let mut function = Function::new(self, builtin.name(), &params, &[result]);
         let mut instructions = function.extend_instructions(self);
         for (index, param) in params.into_iter().enumerate() {

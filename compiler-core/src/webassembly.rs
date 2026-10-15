@@ -1062,103 +1062,76 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn functions_builtins(
-        &mut self,
-        builtins: Vec<(BuiltinFunctionExternal, EcoString, Arc<Type>)>,
-    ) {
-        for (builtin, _name, type_) in &builtins {
-            let i32 = self.extract_external_type(builtin, type_);
-            let (arguments, result) = builtin.type_(i32);
-            let expected = type_::fn_(arguments, result);
-            if !expected.same_as(type_) {
-                panic!(
-                    "{expected:#?}\n{type_:#?}\n{} != {}",
-                    self.type_pretty_name(&expected),
-                    self.type_pretty_name(type_)
-                );
-            }
-        }
-        for (builtin, name, _) in builtins {
+    fn functions_builtins(&mut self, builtins: Vec<(BuiltinFunctionExternal, EcoString)>) {
+        for (builtin, name) in builtins {
             let index = self.get_function_builtin_external(builtin);
             let _ = self.add_function_to_globals(name, index);
         }
     }
 
-    /// Extract the actual external type from a builtin function's Gleam type signature.
-    /// Returns a dummy type for builtins that don't use external types.
-    fn extract_external_type(
+    /// Checks that the type of the external `function` is the type of
+    /// `builtin`.
+    fn validate_builtin_external(
         &self,
-        builtin: &BuiltinFunctionExternal,
-        fn_type: &Arc<Type>,
-    ) -> Arc<Type> {
-        let (params, return_) = fn_type.fn_types().expect("function type");
-        match builtin {
-            // For builtins that return I32, use the return type
-            BuiltinFunctionExternal::IntToI32
-            | BuiltinFunctionExternal::IntToI64
-            | BuiltinFunctionExternal::FloatToF32
-            | BuiltinFunctionExternal::FloatToF64
-            | BuiltinFunctionExternal::IntRepr
-            | BuiltinFunctionExternal::FloatRepr
-            | BuiltinFunctionExternal::UtfCodepointRepr
-            | BuiltinFunctionExternal::StringRepr
-            | BuiltinFunctionExternal::StringToMemory
-            | BuiltinFunctionExternal::BytesNew
-            | BuiltinFunctionExternal::StringBytes
-            | BuiltinFunctionExternal::CellNew => return_,
-            // For builtins that take an external type as first param
-            BuiltinFunctionExternal::I32ToInt
-            | BuiltinFunctionExternal::I64ToInt
-            | BuiltinFunctionExternal::F32ToFloat
-            | BuiltinFunctionExternal::F64ToFloat
-            | BuiltinFunctionExternal::MemoryToString
-            | BuiltinFunctionExternal::BytesSize
-            | BuiltinFunctionExternal::BytesGet
-            | BuiltinFunctionExternal::BytesSet
-            | BuiltinFunctionExternal::BytesCopy
-            | BuiltinFunctionExternal::BytesToString
-            | BuiltinFunctionExternal::CellGet
-            | BuiltinFunctionExternal::CellSet => params
-                .into_iter()
-                .next()
-                .expect("builtin to have at least one parameter"),
-            // Builtins without I32 — return a dummy (unused by type_())
-            BuiltinFunctionExternal::StringConcat
-            | BuiltinFunctionExternal::Float64Byte
-            | BuiltinFunctionExternal::Float32Byte
-            | BuiltinFunctionExternal::Float64FromBits
-            | BuiltinFunctionExternal::Float32FromBits
-            | BuiltinFunctionExternal::StringNumBytes
-            | BuiltinFunctionExternal::StringGetByte
-            | BuiltinFunctionExternal::IntToUtfCodepoint
-            | BuiltinFunctionExternal::ParseInt
-            | BuiltinFunctionExternal::ParseFloat
-            | BuiltinFunctionExternal::IntBitwiseAnd
-            | BuiltinFunctionExternal::IntBitwiseOr
-            | BuiltinFunctionExternal::IntBitwiseExclusiveOr
-            | BuiltinFunctionExternal::IntBitwiseNot
-            | BuiltinFunctionExternal::IntBitwiseShiftLeft
-            | BuiltinFunctionExternal::IntBitwiseShiftRight
-            | BuiltinFunctionExternal::IntToFloat
-            | BuiltinFunctionExternal::FloatFloor
-            | BuiltinFunctionExternal::FloatCeiling
-            | BuiltinFunctionExternal::FloatTruncate
-            | BuiltinFunctionExternal::FloatRound
-            | BuiltinFunctionExternal::FloatSquareRoot
-            | BuiltinFunctionExternal::StringByteSize
-            | BuiltinFunctionExternal::StringByteSlice
-            | BuiltinFunctionExternal::StringPopCodeunit
-            | BuiltinFunctionExternal::StringStartsWith
-            | BuiltinFunctionExternal::StringEndsWith
-            | BuiltinFunctionExternal::StringRemovePrefix
-            | BuiltinFunctionExternal::StringRemoveSuffix
-            | BuiltinFunctionExternal::StringLessThan
-            | BuiltinFunctionExternal::StringConcatList
-            | BuiltinFunctionExternal::StringJoin
-            | BuiltinFunctionExternal::UtfCodepointToInt
-            | BuiltinFunctionExternal::UnsafeIntToUtfCodepoint
-            | BuiltinFunctionExternal::StringPopGrapheme
-            | BuiltinFunctionExternal::StringOffset => type_::int(),
+        function: &TypedFunction,
+        name: &EcoString,
+        builtin: BuiltinFunctionExternal,
+    ) -> Result<(), Error> {
+        let (params, result) = builtin.type_();
+        let types = function
+            .arguments
+            .iter()
+            .map(|arg| &arg.type_)
+            .chain(iter::once(&function.return_type));
+        let is_valid = function.arguments.len() == params.len()
+            && params
+                .iter()
+                .chain(iter::once(&result))
+                .zip(types)
+                .all(|(expected, type_)| match expected {
+                    BuiltinType::Gleam(expected) => expected.same_as(type_),
+                    BuiltinType::External(name) => {
+                        self.external_val_type(type_)
+                            == self.wasm_external(name).map(|(val_type, _)| val_type)
+                    }
+                });
+        if is_valid {
+            return Ok(());
+        }
+        let show = |type_: &BuiltinType| match type_ {
+            BuiltinType::Gleam(type_) => self.type_pretty_name(type_),
+            BuiltinType::External(name) => (*name).into(),
+        };
+        Err(Error::WrongBuiltinFunctionSignature {
+            location: function.location,
+            name: name.clone(),
+            expected: format!(
+                "fn({}) -> {}",
+                params.iter().map(show).join(", "),
+                show(&result)
+            )
+            .into(),
+            got: self.type_pretty_name(&function_type(function)),
+        })
+    }
+
+    /// The wasm type of `type_` when it is an external type of wasm values.
+    fn external_val_type(&self, type_: &Arc<Type>) -> Option<ValType> {
+        let (module, name, _) = type_.named_type_information()?;
+        let CustomType::External { val_type, .. } = self.types.get(&(module, name))? else {
+            return None;
+        };
+        Some(*val_type)
+    }
+
+    /// The wasm type of a param or of the result of a builtin.
+    pub(super) fn builtin_val_type(&mut self, type_: &BuiltinType) -> ValType {
+        match type_ {
+            BuiltinType::Gleam(type_) => self.val_type(type_),
+            BuiltinType::External(name) => {
+                let (val_type, _) = self.wasm_external(name).expect("a wasm external type");
+                val_type
+            }
         }
     }
 
@@ -1259,11 +1232,12 @@ impl<'a> Generator<'a> {
                         Err(error) if is_main => return Err(error),
                         Err(_) => continue,
                     }
-                } else if is_main && custom_type.name == "I32" {
-                    CustomType::External {
-                        val_type: ValType::I32,
-                        to_str: Some(I32_TO_STR),
-                    }
+                } else if is_main
+                    && custom_type.constructors.is_empty()
+                    && matches!(custom_type.name.as_str(), "I32" | "I64" | "F32" | "F64")
+                    && let Some((val_type, to_str)) = self.wasm_external(&custom_type.name)
+                {
+                    CustomType::External { val_type, to_str }
                 } else {
                     continue;
                 };
@@ -1294,17 +1268,15 @@ impl<'a> Generator<'a> {
                 module: module.clone(),
             });
         }
-        let (val_type, to_str) = match name.as_str() {
-            "I32" => (ValType::I32, Some(I32_TO_STR)),
-            "I64" => (ValType::I64, Some(I64_TO_STR)),
-            "F32" => (ValType::F32, Some(F32_TO_STR)),
-            "F64" => (ValType::F64, Some(F64_TO_STR)),
-            "AnyRef" => (ANYREF, None),
-            // Only for the runtime, which writes only the bytes it creates.
-            "Bytes" if package == RUNTIME_PACKAGE => (self.string.bytes_val_type(), None),
-            // Only for the runtime, which shares a cell by the bit arrays of
-            // the same bytes.
-            "Cell" if package == RUNTIME_PACKAGE => (self.val_type_ref(self.cell), None),
+        // `Bytes` and `Cell` are only for the runtime, which writes only the
+        // bytes it creates, and shares a cell by the bit arrays of the same
+        // bytes.
+        if let Some((val_type, to_str)) = self.wasm_external(name)
+            && (package == RUNTIME_PACKAGE || !matches!(name.as_str(), "Bytes" | "Cell"))
+        {
+            return Ok(CustomType::External { val_type, to_str });
+        }
+        match name.as_str() {
             // Only for the runtime, which reads the positions it knows.
             "Array" if package == RUNTIME_PACKAGE => {
                 if custom_type.parameters.len() != 1 {
@@ -1315,7 +1287,7 @@ impl<'a> Generator<'a> {
                         got: custom_type.parameters.len(),
                     });
                 }
-                return Ok(CustomType::Array);
+                Ok(CustomType::Array)
             }
             _ => {
                 let Some((runtime_module, runtime_type)) = self.runtime_type(name) else {
@@ -1332,13 +1304,27 @@ impl<'a> Generator<'a> {
                         got: custom_type.parameters.len(),
                     });
                 }
-                return Ok(CustomType::Runtime {
+                Ok(CustomType::Runtime {
                     module: runtime_module,
                     name: name.clone(),
-                });
+                })
             }
-        };
-        Ok(CustomType::External { val_type, to_str })
+        }
+    }
+
+    /// The wasm type of the external type `name` of the builtins module
+    /// whose values are wasm values, and the function that shows them.
+    fn wasm_external(&self, name: &str) -> Option<(ValType, Option<&'static str>)> {
+        match name {
+            "I32" => Some((ValType::I32, Some(I32_TO_STR))),
+            "I64" => Some((ValType::I64, Some(I64_TO_STR))),
+            "F32" => Some((ValType::F32, Some(F32_TO_STR))),
+            "F64" => Some((ValType::F64, Some(F64_TO_STR))),
+            "AnyRef" => Some((ANYREF, None)),
+            "Bytes" => Some((self.string.bytes_val_type(), None)),
+            "Cell" => Some((self.val_type_ref(self.cell), None)),
+            _ => None,
+        }
     }
 
     /// The public type `name` of the runtime and its module.
@@ -1469,9 +1455,7 @@ impl<'a> Generator<'a> {
         );
     }
 
-    fn functions_external(
-        &mut self,
-    ) -> Result<Vec<(BuiltinFunctionExternal, EcoString, Arc<Type>)>, Error> {
+    fn functions_external(&mut self) -> Result<Vec<(BuiltinFunctionExternal, EcoString)>, Error> {
         let mut available: HashMap<EcoString, (Vec<ValType>, Vec<ValType>)> = HashMap::new();
         let func_info: Vec<(EcoString, FunctionId, Vec<ValType>, Vec<ValType>)> =
             match &self.linking {
@@ -1520,7 +1504,7 @@ impl<'a> Generator<'a> {
     fn validate_externals(
         &mut self,
         available: &HashMap<EcoString, (Vec<ValType>, Vec<ValType>)>,
-    ) -> Result<Vec<(BuiltinFunctionExternal, EcoString, Arc<Type>)>, Error> {
+    ) -> Result<Vec<(BuiltinFunctionExternal, EcoString)>, Error> {
         let mut builtins = vec![];
         let functions: Vec<_> = self.module.definitions.functions.iter().collect();
         for function in functions {
@@ -1568,7 +1552,8 @@ impl<'a> Generator<'a> {
                         });
                     }
                 } else if let Some(builtin) = BuiltinFunctionExternal::by_name(name) {
-                    builtins.push((builtin, name.clone(), function_type(function)));
+                    self.validate_builtin_external(function, name, builtin)?;
+                    builtins.push((builtin, name.clone()));
                 } else if let Some(array_function) = ArrayFunction::by_name(name)
                     && self.module.type_info.package == RUNTIME_PACKAGE
                 {
@@ -5713,104 +5698,7 @@ impl<'a> Generator<'a> {
             return *id;
         }
 
-        let int_vt = self.int.val_type();
-        let float_vt = self.float.val_type();
-        let string_vt = self.string.val_type();
-        let bytes_vt = self.string.bytes_val_type();
         let index = match builtin {
-            BuiltinFunctionExternal::IntBitwiseAnd
-            | BuiltinFunctionExternal::IntBitwiseOr
-            | BuiltinFunctionExternal::IntBitwiseExclusiveOr => {
-                self.code_builtin_inline(builtin, &[int_vt, int_vt], int_vt)
-            }
-            BuiltinFunctionExternal::IntBitwiseNot => {
-                self.code_builtin_inline(builtin, &[int_vt], int_vt)
-            }
-            BuiltinFunctionExternal::IntToFloat => {
-                self.code_builtin_inline(builtin, &[int_vt], float_vt)
-            }
-            BuiltinFunctionExternal::FloatFloor
-            | BuiltinFunctionExternal::FloatCeiling
-            | BuiltinFunctionExternal::FloatSquareRoot => {
-                self.code_builtin_inline(builtin, &[float_vt], float_vt)
-            }
-            BuiltinFunctionExternal::FloatTruncate => {
-                self.code_builtin_inline(builtin, &[float_vt], int_vt)
-            }
-            BuiltinFunctionExternal::I32ToInt | BuiltinFunctionExternal::UtfCodepointToInt => {
-                self.code_builtin_inline(builtin, &[ValType::I32], int_vt)
-            }
-            BuiltinFunctionExternal::IntToI32
-            | BuiltinFunctionExternal::UnsafeIntToUtfCodepoint => {
-                self.code_builtin_inline(builtin, &[int_vt], ValType::I32)
-            }
-            BuiltinFunctionExternal::I64ToInt => {
-                self.code_builtin_inline(builtin, &[ValType::I64], int_vt)
-            }
-            BuiltinFunctionExternal::IntToI64 => {
-                self.code_builtin_inline(builtin, &[int_vt], ValType::I64)
-            }
-            BuiltinFunctionExternal::F32ToFloat => {
-                self.code_builtin_inline(builtin, &[ValType::F32], float_vt)
-            }
-            BuiltinFunctionExternal::FloatToF32 => {
-                self.code_builtin_inline(builtin, &[float_vt], ValType::F32)
-            }
-            BuiltinFunctionExternal::F64ToFloat => {
-                self.code_builtin_inline(builtin, &[ValType::F64], float_vt)
-            }
-            BuiltinFunctionExternal::FloatToF64 => {
-                self.code_builtin_inline(builtin, &[float_vt], ValType::F64)
-            }
-            BuiltinFunctionExternal::StringNumBytes | BuiltinFunctionExternal::StringByteSize => {
-                self.code_builtin_inline(builtin, &[string_vt], int_vt)
-            }
-            BuiltinFunctionExternal::BytesNew => {
-                self.code_builtin_inline(builtin, &[int_vt], bytes_vt)
-            }
-            BuiltinFunctionExternal::BytesSize => {
-                self.code_builtin_inline(builtin, &[bytes_vt], int_vt)
-            }
-            BuiltinFunctionExternal::BytesGet => {
-                self.code_builtin_inline(builtin, &[bytes_vt, int_vt], int_vt)
-            }
-            BuiltinFunctionExternal::BytesSet => {
-                self.code_builtin_inline(builtin, &[bytes_vt, int_vt, int_vt], ValType::I32)
-            }
-            BuiltinFunctionExternal::BytesCopy => self.code_builtin_inline(
-                builtin,
-                &[bytes_vt, int_vt, bytes_vt, int_vt, int_vt],
-                ValType::I32,
-            ),
-            BuiltinFunctionExternal::StringBytes => {
-                self.code_builtin_inline(builtin, &[string_vt], bytes_vt)
-            }
-            BuiltinFunctionExternal::StringOffset => {
-                self.code_builtin_inline(builtin, &[string_vt], int_vt)
-            }
-            BuiltinFunctionExternal::BytesToString => {
-                self.code_builtin_inline(builtin, &[bytes_vt, int_vt, int_vt], string_vt)
-            }
-            BuiltinFunctionExternal::Float64Byte | BuiltinFunctionExternal::Float32Byte => {
-                self.code_builtin_inline(builtin, &[float_vt, int_vt], int_vt)
-            }
-            BuiltinFunctionExternal::Float64FromBits => {
-                self.code_builtin_inline(builtin, &[int_vt, int_vt], float_vt)
-            }
-            BuiltinFunctionExternal::Float32FromBits => {
-                self.code_builtin_inline(builtin, &[int_vt], float_vt)
-            }
-            BuiltinFunctionExternal::CellNew => {
-                self.code_builtin_inline(builtin, &[int_vt], self.val_type_ref(self.cell))
-            }
-            BuiltinFunctionExternal::CellGet => {
-                self.code_builtin_inline(builtin, &[self.val_type_ref(self.cell)], int_vt)
-            }
-            BuiltinFunctionExternal::CellSet => self.code_builtin_inline(
-                builtin,
-                &[self.val_type_ref(self.cell), int_vt],
-                ValType::I32,
-            ),
             BuiltinFunctionExternal::StringConcat => self.code_string_concat(),
             BuiltinFunctionExternal::StringGetByte => self.code_string_get_byte(),
             BuiltinFunctionExternal::IntToUtfCodepoint => self.code_int_to_utf_codepoint(),
@@ -5835,6 +5723,42 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::StringConcatList => self.code_string_join(false),
             BuiltinFunctionExternal::StringJoin => self.code_string_join(true),
             BuiltinFunctionExternal::StringPopGrapheme => self.code_string_pop_grapheme(),
+            BuiltinFunctionExternal::StringNumBytes
+            | BuiltinFunctionExternal::StringByteSize
+            | BuiltinFunctionExternal::I32ToInt
+            | BuiltinFunctionExternal::IntToI32
+            | BuiltinFunctionExternal::I64ToInt
+            | BuiltinFunctionExternal::IntToI64
+            | BuiltinFunctionExternal::F32ToFloat
+            | BuiltinFunctionExternal::FloatToF32
+            | BuiltinFunctionExternal::F64ToFloat
+            | BuiltinFunctionExternal::FloatToF64
+            | BuiltinFunctionExternal::IntBitwiseAnd
+            | BuiltinFunctionExternal::IntBitwiseOr
+            | BuiltinFunctionExternal::IntBitwiseExclusiveOr
+            | BuiltinFunctionExternal::IntBitwiseNot
+            | BuiltinFunctionExternal::IntToFloat
+            | BuiltinFunctionExternal::FloatFloor
+            | BuiltinFunctionExternal::FloatCeiling
+            | BuiltinFunctionExternal::FloatTruncate
+            | BuiltinFunctionExternal::FloatSquareRoot
+            | BuiltinFunctionExternal::UtfCodepointToInt
+            | BuiltinFunctionExternal::UnsafeIntToUtfCodepoint
+            | BuiltinFunctionExternal::BytesNew
+            | BuiltinFunctionExternal::BytesSize
+            | BuiltinFunctionExternal::BytesGet
+            | BuiltinFunctionExternal::BytesSet
+            | BuiltinFunctionExternal::BytesCopy
+            | BuiltinFunctionExternal::StringBytes
+            | BuiltinFunctionExternal::StringOffset
+            | BuiltinFunctionExternal::BytesToString
+            | BuiltinFunctionExternal::Float64Byte
+            | BuiltinFunctionExternal::Float32Byte
+            | BuiltinFunctionExternal::Float64FromBits
+            | BuiltinFunctionExternal::Float32FromBits
+            | BuiltinFunctionExternal::CellNew
+            | BuiltinFunctionExternal::CellGet
+            | BuiltinFunctionExternal::CellSet => self.code_builtin_inline(builtin),
         };
         self.wasm_module.funcs.get_mut(index).name = Some(builtin.name().to_string());
         let _ = self.builtins_external.insert(builtin, index);

@@ -1,0 +1,12 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+expression: "\n@external(webassembly, \"builtins\", \"_string_concat\")\nfn concat(a: String, b: Int) -> String\n"
+---
+----- SOURCE CODE
+
+@external(webassembly, "builtins", "_string_concat")
+fn concat(a: String, b: Int) -> String
+
+
+----- ERROR
+WrongBuiltinFunctionSignature { location: SrcSpan { start: 54, end: 82 }, name: "_string_concat", expected: "fn(String, String) -> String", got: "fn(String, Int) -> String" }
