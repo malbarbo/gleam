@@ -41,6 +41,15 @@ impl Monomorphizer {
         mono
     }
 
+    /// A monomorphizer that binds each type variable of `type_` to `to`.
+    pub(super) fn with_variables_bound(type_: &Arc<Type>, to: &Arc<Type>) -> Monomorphizer {
+        let mut ids = HashSet::new();
+        Monomorphizer::new().free_variables(type_, &mut ids);
+        Monomorphizer {
+            map: ids.into_iter().map(|id| (id, to.clone())).collect(),
+        }
+    }
+
     pub(super) fn variant_constructor(
         custom_type: &TypedCustomType,
         constructor: &TypedRecordConstructor,

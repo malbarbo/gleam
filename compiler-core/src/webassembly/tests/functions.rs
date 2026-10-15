@@ -1792,3 +1792,33 @@ pub fn main() {
     assert!(output.status.success(), "{stderr}");
     assert_eq!(stderr.matches("\"main\"").count(), 1, "{stderr}");
 }
+
+/// A public generic function without arguments is exported with its type
+/// variables as `Nil`, also when they are inside of a function result.
+#[test]
+fn public_generic_function_without_arguments_returning_a_constructor() {
+    let result = super::run_wasm(
+        r#"
+pub type Effect(r) {
+    Done(r)
+    Now(resume: fn(Int) -> Effect(r))
+}
+
+pub fn now() {
+    Now
+}
+
+pub fn main() {
+    let assert Now(resume) = now()(Done)
+    assert resume(1) == Done(1)
+    0
+}
+"#,
+        vec![],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}

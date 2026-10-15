@@ -2130,9 +2130,11 @@ impl<'a> Generator<'a> {
                 self.function(function, true, base_name)
             } else if function.arguments.is_empty() {
                 // The host calls the functions without arguments, like `main`
-                // and the tests, so they are exported with their generic
-                // result as `Nil`.
-                let type_ = type_::fn_(vec![], type_::nil());
+                // and the tests, so they are exported with their type
+                // variables as `Nil`, like a generic result of a `panic`.
+                let type_ = function_type(function);
+                let type_ =
+                    Monomorphizer::with_variables_bound(&type_, &type_::nil()).type_(&type_);
                 let id = self.function_generic(function, &type_, false, base_name.clone());
                 let _ = self.wasm_module.exports.add(&base_name, id.func_id());
                 id
