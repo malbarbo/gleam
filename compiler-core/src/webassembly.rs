@@ -3539,10 +3539,7 @@ impl<'a> Generator<'a> {
             }
         }
 
-        todo!(
-            "Name not found: {:?}. Are you using closures? They are not supported yet.",
-            name
-        );
+        panic!("module value {name} should be a constant or a function");
     }
 
     /// The function that the constant `constant` names, with type `type_`. A
