@@ -673,6 +673,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
         array_copy(array_type_index_dst: TypeId, array_type_index_src: TypeId),
         return_(),
         drop(),
+        select(ty: Option<ValType>),
         unreachable(),
         br(l: InstrSeqId),
         br_if(l: InstrSeqId),

@@ -621,6 +621,15 @@ impl Generator<'_> {
         id
     }
 
+    /// Pushes the number of bits of the `Bits` of `bits`.
+    fn push_bit_size(&mut self, instructions: &mut Instructions<'_, '_>, bits: LocalId) {
+        let _ = instructions.local_get(bits);
+        self.bits_field(instructions, 2);
+        let _ = instructions.local_get(bits);
+        self.bits_field(instructions, 1);
+        let _ = instructions.int_sub();
+    }
+
     /// Replaces the `Bits` of the runtime on the stack by its field `index`.
     fn bits_field(&mut self, instructions: &mut Instructions<'_, '_>, index: u64) {
         let bits_type = self.bits_type();
@@ -679,9 +688,10 @@ impl Generator<'_> {
             },
         };
         let write = Write::of(segment);
-        // The function of the runtime that computes the size from the value
-        // and the size option, if any.
-        let (name, with_value) = match (write, &size) {
+        // The size is computed in place when it is simple, and otherwise by a
+        // function of the runtime, from the value and the size option, if
+        // any.
+        let runtime = match (write, &size) {
             (Write::Int(_), None) => return Some(Segment::constant(value, 8, write)),
             (Write::Float(_), None) => return Some(Segment::constant(value, 64, write)),
             (Write::CodepointUtf32(_), _) => return Some(Segment::constant(value, 32, write)),
@@ -700,36 +710,62 @@ impl Generator<'_> {
                     .to_u64()
                     .map(|size| Segment::constant(value, size, write));
             }
-            (Write::Int(_), Some(SizeOption::Local(_))) => ("bit_array_int_size", false),
-            (Write::Float(_), Some(_)) => ("bit_array_float_size", false),
-            (Write::Bits, None) => ("bit_array_bit_size", true),
-            (Write::Bits, Some(_)) => ("bit_array_bits_size", true),
-            (Write::Utf8, _) => ("bit_array_utf8_size", true),
-            (Write::Utf16(_), _) => ("bit_array_utf16_size", true),
-            (Write::Utf32(_), _) => ("bit_array_utf32_size", true),
-            (Write::CodepointUtf8, _) => ("bit_array_codepoint_utf8_size", true),
-            (Write::CodepointUtf16(_), _) => ("bit_array_codepoint_utf16_size", true),
+            // A negative size is 0.
+            (Write::Int(_), Some(SizeOption::Local(size))) => {
+                let _ = instructions
+                    .local_get(*size)
+                    .int_const(&0.into())
+                    .local_get(*size)
+                    .int_const(&0.into())
+                    .int_gt()
+                    .select(None);
+                None
+            }
+            (Write::Bits, None) => {
+                self.push_bit_size(instructions, value);
+                None
+            }
+            (Write::Utf8, _) => {
+                let _ = instructions
+                    .local_get(value)
+                    .string_len()
+                    .i32_to_int()
+                    .int_const(&8.into())
+                    .int_mul();
+                None
+            }
+            (Write::CodepointUtf8 | Write::CodepointUtf16(_), _) => {
+                push_codepoint_size(instructions, value, false, write);
+                None
+            }
+            (Write::Float(_), Some(_)) => Some(("bit_array_float_size", false)),
+            (Write::Bits, Some(_)) => Some(("bit_array_bits_size", true)),
+            (Write::Utf16(_), _) => Some(("bit_array_utf16_size", true)),
+            (Write::Utf32(_), _) => Some(("bit_array_utf32_size", true)),
         };
-        let mut arguments = vec![];
-        if with_value {
-            let bits_type = self.bits_type();
-            arguments.push(write.value_type(&bits_type));
-            let _ = instructions.local_get(value);
-        }
-        match size {
-            None => {}
-            Some(SizeOption::Literal(size)) => {
-                arguments.push(type_::int());
-                let _ = instructions.int_const(&size);
+        if let Some((name, with_value)) = runtime {
+            let mut arguments = vec![];
+            if with_value {
+                let bits_type = self.bits_type();
+                arguments.push(write.value_type(&bits_type));
+                let _ = instructions.local_get(value);
             }
-            Some(SizeOption::Local(local)) => {
-                arguments.push(type_::int());
-                let _ = instructions.local_get(local);
+            match size {
+                None => {}
+                Some(SizeOption::Literal(size)) => {
+                    arguments.push(type_::int());
+                    let _ = instructions.int_const(&size);
+                }
+                Some(SizeOption::Local(local)) => {
+                    arguments.push(type_::int());
+                    let _ = instructions.local_get(local);
+                }
             }
+            let id = self.runtime_function_id(BIT_ARRAY_MODULE, name, arguments, type_::int());
+            let _ = instructions.call(id);
         }
-        let id = self.runtime_function_id(BIT_ARRAY_MODULE, name, arguments, type_::int());
         let local = self.wasm_local(self.int.val_type());
-        let _ = instructions.call(id).local_set(local);
+        let _ = instructions.local_set(local);
         Some(Segment {
             value: SegmentValue::Local(value),
             size: SegmentSize::Local(local),
@@ -822,23 +858,15 @@ impl Generator<'_> {
         segments: &[TypedPatternBitArraySegment],
         fail_target: InstrSeqId,
     ) -> Scope {
-        let bits_type = self.bits_type();
-        let bit_size = self.runtime_function_id(
-            BIT_ARRAY_MODULE,
-            "bit_array_bit_size",
-            vec![bits_type],
-            type_::int(),
-        );
         let mut matching = Matching {
             bits: locals.for_pattern(pattern),
             size: self.wasm_local(self.int.val_type()),
             position: Position::default(),
             fail_target,
         };
-        let _ = instructions
-            .local_tee(matching.bits)
-            .call(bit_size)
-            .local_set(matching.size);
+        let _ = instructions.local_set(matching.bits);
+        self.push_bit_size(instructions, matching.bits);
+        let _ = instructions.local_set(matching.size);
         let mut literal = Bits::default();
         let mut ends_with_literal = true;
         for (index, segment) in segments.iter().enumerate() {
@@ -1068,16 +1096,10 @@ impl Generator<'_> {
     ) -> Scope {
         let bits_type = self.bits_type();
         let write = Write::of(segment);
-        let (read, size) = match write {
-            Write::CodepointUtf8 => (
-                "bit_array_read_codepoint_utf8",
-                Some("bit_array_codepoint_utf8_size"),
-            ),
-            Write::CodepointUtf16(_) => (
-                "bit_array_read_codepoint_utf16",
-                Some("bit_array_codepoint_utf16_size"),
-            ),
-            Write::CodepointUtf32(_) => ("bit_array_read_codepoint_utf32", None),
+        let read = match write {
+            Write::CodepointUtf8 => "bit_array_read_codepoint_utf8",
+            Write::CodepointUtf16(_) => "bit_array_read_codepoint_utf16",
+            Write::CodepointUtf32(_) => "bit_array_read_codepoint_utf32",
             Write::Int(_)
             | Write::Float(_)
             | Write::Bits
@@ -1099,23 +1121,13 @@ impl Generator<'_> {
             .int_const(&0.into())
             .int_lt()
             .br_if(matching.fail_target);
-        let size = match size {
-            None => SegmentSize::Constant(32),
-            Some(name) => {
-                let size = self.runtime_function_id(
-                    BIT_ARRAY_MODULE,
-                    name,
-                    vec![type_::utf_codepoint()],
-                    type_::int(),
-                );
-                let local = self.wasm_local(self.int.val_type());
-                let _ = instructions
-                    .local_get(codepoint)
-                    .int_to_i32()
-                    .call(size)
-                    .local_set(local);
-                SegmentSize::Local(local)
-            }
+        let size = if let Write::CodepointUtf32(_) = write {
+            SegmentSize::Constant(32)
+        } else {
+            let local = self.wasm_local(self.int.val_type());
+            push_codepoint_size(instructions, codepoint, true, write);
+            let _ = instructions.local_set(local);
+            SegmentSize::Local(local)
         };
         if last {
             self.check_room(instructions, matching, &size, true);
@@ -1297,6 +1309,31 @@ impl Generator<'_> {
             }
         }
     }
+}
+
+/// Pushes the size in bits of the code point of `codepoint`, an `Int` or a
+/// `UtfCodepoint`, in the UTF-8 or UTF-16 of `write`: one unit, and one more
+/// from each limit.
+fn push_codepoint_size(
+    instructions: &mut Instructions<'_, '_>,
+    codepoint: LocalId,
+    is_int: bool,
+    write: Write,
+) {
+    let (limits, unit): (&[i32], i32) = if let Write::CodepointUtf8 = write {
+        (&[0x80, 0x800, 0x10000], 8)
+    } else {
+        (&[0x10000], 16)
+    };
+    let _ = instructions.i32_const(1);
+    for limit in limits {
+        let _ = instructions.local_get(codepoint);
+        if is_int {
+            let _ = instructions.int_to_i32();
+        }
+        let _ = instructions.i32_const(*limit).i32_ge_s().i32_add();
+    }
+    let _ = instructions.i32_const(unit).i32_mul().i32_to_int();
 }
 
 /// Pushes the bit array of a pattern and the position.
