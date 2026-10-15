@@ -650,6 +650,10 @@ pub fn main() {
   let assert "<<255, 128, 85, 1:size(2)>>" = bit_array.inspect(<<id(1):1, id(<<0xFF, 0x00, 0xAA>>):bits, id(1):1>>)
   let assert "<<248, 0:size(4)>>" = bit_array.inspect(<<id(<<1:1>>):bits, id(<<0xF0, 0x0F>>):bits-size(id(11))>>)
   let assert "<<1, 2, 3, 97, 98, 4:size(4)>>" = bit_array.inspect(<<1, 2, id(3), "ab", 4:4>>)
+  // Bits that do not start at the start of their bytes.
+  let assert <<_:3, u:bits>> = <<0:3, 1, 2, 3:2>>
+  let assert "<<5, 1, 2, 3:size(2)>>" = bit_array.inspect(<<id(5), u:bits>>)
+  let assert "<<1, 2, 192, 64, 11:size(4)>>" = bit_array.inspect(<<u:bits, u:bits>>)
   Nil
 }
 "#);

@@ -1632,9 +1632,9 @@ fn bits_at(bytes: Bytes, position: Int, count: Int) -> Int {
 /// Writes `count` bits of `src` at `from` to `dst` at `at`. The bits of
 /// `dst` from `at` on are zero.
 fn copy_bits(dst: Bytes, at: Int, src: Bytes, from: Int, count: Int) -> Nil {
-  case bitwise_and(at, 7) == 0 && bitwise_and(from, 7) == 0 {
-    True -> {
-      let whole = bitwise_shift_right(count, 3)
+  let whole = bitwise_shift_right(count, 3)
+  case bitwise_and(at, 7), bitwise_and(from, 7) {
+    0, 0 -> {
       let _ =
         bytes_copy(
           dst,
@@ -1651,7 +1651,34 @@ fn copy_bits(dst: Bytes, at: Int, src: Bytes, from: Int, count: Int) -> Nil {
         count - whole * 8,
       )
     }
-    False -> copy_bits_loop(dst, at, src, from, count)
+    0, _ -> {
+      let _ = copy_to_bytes(dst, bitwise_shift_right(at, 3), src, from, whole)
+      copy_bits_loop(
+        dst,
+        at + whole * 8,
+        src,
+        from + whole * 8,
+        count - whole * 8,
+      )
+    }
+    _, _ -> copy_bits_loop(dst, at, src, from, count)
+  }
+}
+
+/// Writes `count` bytes of `src` at `from` to `dst` from the byte `index`.
+fn copy_to_bytes(
+  dst: Bytes,
+  index: Int,
+  src: Bytes,
+  from: Int,
+  count: Int,
+) -> Nil {
+  case count {
+    0 -> Nil
+    _ -> {
+      let _ = bytes_set(dst, index, byte_at(src, from))
+      copy_to_bytes(dst, index + 1, src, from + 8, count - 1)
+    }
   }
 }
 
