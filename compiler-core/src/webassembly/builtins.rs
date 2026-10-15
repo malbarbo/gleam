@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
 use super::*;
+use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 
 #[derive(Hash, PartialEq, Eq, Clone, Debug)]
 pub(super) enum BuiltinFunction {
@@ -68,73 +69,134 @@ impl BuiltinFunction {
     }
 }
 
-#[derive(Hash, PartialEq, Eq, Ord, PartialOrd, Clone, Copy, Debug)]
+/// A builtin that a Gleam program declares as an `@external`, named as the
+/// external function.
+#[derive(Hash, PartialEq, Eq, Clone, Copy, Debug, EnumIter, EnumString, IntoStaticStr)]
 pub(super) enum BuiltinFunctionExternal {
+    #[strum(serialize = "_string_concat")]
     StringConcat,
+    #[strum(serialize = "_string_num_bytes")]
     StringNumBytes,
+    #[strum(serialize = "_string_get_byte")]
     StringGetByte,
+    #[strum(serialize = "_i32_to_int")]
     I32ToInt,
+    #[strum(serialize = "_int_to_i32")]
     IntToI32,
+    #[strum(serialize = "_i64_to_int")]
     I64ToInt,
+    #[strum(serialize = "_int_to_i64")]
     IntToI64,
+    #[strum(serialize = "_f32_to_float")]
     F32ToFloat,
+    #[strum(serialize = "_float_to_f32")]
     FloatToF32,
+    #[strum(serialize = "_f64_to_float")]
     F64ToFloat,
+    #[strum(serialize = "_float_to_f64")]
     FloatToF64,
+    #[strum(serialize = "_int_to_utf_codepoint")]
     IntToUtfCodepoint,
+    #[strum(serialize = "_repr_int")]
     IntRepr,
+    #[strum(serialize = "_repr_float")]
     FloatRepr,
+    #[strum(serialize = "_repr_utf_code_point")]
     UtfCodepointRepr,
+    #[strum(serialize = "_repr_string")]
     StringRepr,
+    #[strum(serialize = "_string_to_memory")]
     StringToMemory,
+    #[strum(serialize = "_memory_to_string")]
     MemoryToString,
+    #[strum(serialize = "_parse_int")]
     ParseInt,
+    #[strum(serialize = "_parse_float")]
     ParseFloat,
+    #[strum(serialize = "_int_bitwise_and")]
     IntBitwiseAnd,
+    #[strum(serialize = "_int_bitwise_or")]
     IntBitwiseOr,
+    #[strum(serialize = "_int_bitwise_exclusive_or")]
     IntBitwiseExclusiveOr,
+    #[strum(serialize = "_int_bitwise_not")]
     IntBitwiseNot,
+    #[strum(serialize = "_int_bitwise_shift_left")]
     IntBitwiseShiftLeft,
+    #[strum(serialize = "_int_bitwise_shift_right")]
     IntBitwiseShiftRight,
+    #[strum(serialize = "_int_to_float")]
     IntToFloat,
+    #[strum(serialize = "_float_floor")]
     FloatFloor,
+    #[strum(serialize = "_float_ceiling")]
     FloatCeiling,
+    #[strum(serialize = "_float_truncate")]
     FloatTruncate,
+    #[strum(serialize = "_float_round")]
     FloatRound,
+    #[strum(serialize = "_float_square_root")]
     FloatSquareRoot,
+    #[strum(serialize = "_string_byte_size")]
     StringByteSize,
+    #[strum(serialize = "_string_byte_slice")]
     StringByteSlice,
+    #[strum(serialize = "_string_pop_codeunit")]
     StringPopCodeunit,
+    #[strum(serialize = "_string_starts_with")]
     StringStartsWith,
+    #[strum(serialize = "_string_ends_with")]
     StringEndsWith,
+    #[strum(serialize = "_string_remove_prefix")]
     StringRemovePrefix,
+    #[strum(serialize = "_string_remove_suffix")]
     StringRemoveSuffix,
+    #[strum(serialize = "_string_less_than")]
     StringLessThan,
+    #[strum(serialize = "_string_concat_list")]
     StringConcatList,
+    #[strum(serialize = "_string_join")]
     StringJoin,
+    #[strum(serialize = "_utf_codepoint_to_int")]
     UtfCodepointToInt,
+    #[strum(serialize = "_unsafe_int_to_utf_codepoint")]
     UnsafeIntToUtfCodepoint,
+    #[strum(serialize = "_string_pop_grapheme")]
     StringPopGrapheme,
+    #[strum(serialize = "_bytes_new")]
     BytesNew,
+    #[strum(serialize = "_bytes_size")]
     BytesSize,
+    #[strum(serialize = "_bytes_get")]
     BytesGet,
+    #[strum(serialize = "_bytes_set")]
     BytesSet,
+    #[strum(serialize = "_bytes_copy")]
     BytesCopy,
+    #[strum(serialize = "_string_bytes")]
     StringBytes,
+    #[strum(serialize = "_string_offset")]
     StringOffset,
+    #[strum(serialize = "_bytes_to_string")]
     BytesToString,
+    #[strum(serialize = "_float64_byte")]
     Float64Byte,
+    #[strum(serialize = "_float32_byte")]
     Float32Byte,
+    #[strum(serialize = "_float64_from_bits")]
     Float64FromBits,
+    #[strum(serialize = "_float32_from_bits")]
     Float32FromBits,
+    #[strum(serialize = "_cell_new")]
     CellNew,
+    #[strum(serialize = "_cell_get")]
     CellGet,
+    #[strum(serialize = "_cell_set")]
     CellSet,
 }
 
 pub fn builtin_function_names() -> Vec<EcoString> {
-    BuiltinFunctionExternal::all()
-        .iter()
+    BuiltinFunctionExternal::iter()
         .map(|b| b.name().into())
         .chain([INSPECT.into(), HASH.into(), DYNAMIC_CAST.into()])
         .chain(ArrayFunction::all().iter().map(|f| f.name().into()))
@@ -142,138 +204,12 @@ pub fn builtin_function_names() -> Vec<EcoString> {
 }
 
 impl BuiltinFunctionExternal {
-    pub(super) fn all() -> &'static [BuiltinFunctionExternal] {
-        &[
-            BuiltinFunctionExternal::StringConcat,
-            BuiltinFunctionExternal::StringNumBytes,
-            BuiltinFunctionExternal::StringGetByte,
-            BuiltinFunctionExternal::I32ToInt,
-            BuiltinFunctionExternal::IntToI32,
-            BuiltinFunctionExternal::I64ToInt,
-            BuiltinFunctionExternal::IntToI64,
-            BuiltinFunctionExternal::F32ToFloat,
-            BuiltinFunctionExternal::FloatToF32,
-            BuiltinFunctionExternal::F64ToFloat,
-            BuiltinFunctionExternal::FloatToF64,
-            BuiltinFunctionExternal::IntToUtfCodepoint,
-            BuiltinFunctionExternal::IntRepr,
-            BuiltinFunctionExternal::FloatRepr,
-            BuiltinFunctionExternal::UtfCodepointRepr,
-            BuiltinFunctionExternal::StringRepr,
-            BuiltinFunctionExternal::StringToMemory,
-            BuiltinFunctionExternal::MemoryToString,
-            BuiltinFunctionExternal::ParseInt,
-            BuiltinFunctionExternal::ParseFloat,
-            BuiltinFunctionExternal::IntBitwiseAnd,
-            BuiltinFunctionExternal::IntBitwiseOr,
-            BuiltinFunctionExternal::IntBitwiseExclusiveOr,
-            BuiltinFunctionExternal::IntBitwiseNot,
-            BuiltinFunctionExternal::IntBitwiseShiftLeft,
-            BuiltinFunctionExternal::IntBitwiseShiftRight,
-            BuiltinFunctionExternal::IntToFloat,
-            BuiltinFunctionExternal::FloatFloor,
-            BuiltinFunctionExternal::FloatCeiling,
-            BuiltinFunctionExternal::FloatTruncate,
-            BuiltinFunctionExternal::FloatRound,
-            BuiltinFunctionExternal::FloatSquareRoot,
-            BuiltinFunctionExternal::StringByteSize,
-            BuiltinFunctionExternal::StringByteSlice,
-            BuiltinFunctionExternal::StringPopCodeunit,
-            BuiltinFunctionExternal::StringStartsWith,
-            BuiltinFunctionExternal::StringEndsWith,
-            BuiltinFunctionExternal::StringRemovePrefix,
-            BuiltinFunctionExternal::StringRemoveSuffix,
-            BuiltinFunctionExternal::StringLessThan,
-            BuiltinFunctionExternal::StringConcatList,
-            BuiltinFunctionExternal::StringJoin,
-            BuiltinFunctionExternal::UtfCodepointToInt,
-            BuiltinFunctionExternal::UnsafeIntToUtfCodepoint,
-            BuiltinFunctionExternal::StringPopGrapheme,
-            BuiltinFunctionExternal::BytesNew,
-            BuiltinFunctionExternal::BytesSize,
-            BuiltinFunctionExternal::BytesGet,
-            BuiltinFunctionExternal::BytesSet,
-            BuiltinFunctionExternal::BytesCopy,
-            BuiltinFunctionExternal::StringBytes,
-            BuiltinFunctionExternal::StringOffset,
-            BuiltinFunctionExternal::BytesToString,
-            BuiltinFunctionExternal::Float64Byte,
-            BuiltinFunctionExternal::Float32Byte,
-            BuiltinFunctionExternal::Float64FromBits,
-            BuiltinFunctionExternal::Float32FromBits,
-            BuiltinFunctionExternal::CellNew,
-            BuiltinFunctionExternal::CellGet,
-            BuiltinFunctionExternal::CellSet,
-        ]
-    }
-
     pub(super) fn by_name(name: &str) -> Option<BuiltinFunctionExternal> {
-        Self::all().iter().find(|f| f.name() == name).cloned()
+        name.parse().ok()
     }
 
-    pub(super) fn name(&self) -> &'static str {
-        match self {
-            BuiltinFunctionExternal::StringConcat => "_string_concat",
-            BuiltinFunctionExternal::StringNumBytes => "_string_num_bytes",
-            BuiltinFunctionExternal::StringGetByte => "_string_get_byte",
-            BuiltinFunctionExternal::I32ToInt => "_i32_to_int",
-            BuiltinFunctionExternal::IntToI32 => "_int_to_i32",
-            BuiltinFunctionExternal::I64ToInt => "_i64_to_int",
-            BuiltinFunctionExternal::IntToI64 => "_int_to_i64",
-            BuiltinFunctionExternal::F32ToFloat => "_f32_to_float",
-            BuiltinFunctionExternal::FloatToF32 => "_float_to_f32",
-            BuiltinFunctionExternal::F64ToFloat => "_f64_to_float",
-            BuiltinFunctionExternal::FloatToF64 => "_float_to_f64",
-            BuiltinFunctionExternal::IntToUtfCodepoint => "_int_to_utf_codepoint",
-            BuiltinFunctionExternal::IntRepr => "_repr_int",
-            BuiltinFunctionExternal::FloatRepr => "_repr_float",
-            BuiltinFunctionExternal::UtfCodepointRepr => "_repr_utf_code_point",
-            BuiltinFunctionExternal::StringRepr => "_repr_string",
-            BuiltinFunctionExternal::StringToMemory => "_string_to_memory",
-            BuiltinFunctionExternal::MemoryToString => "_memory_to_string",
-            BuiltinFunctionExternal::ParseInt => "_parse_int",
-            BuiltinFunctionExternal::ParseFloat => "_parse_float",
-            BuiltinFunctionExternal::IntBitwiseAnd => "_int_bitwise_and",
-            BuiltinFunctionExternal::IntBitwiseOr => "_int_bitwise_or",
-            BuiltinFunctionExternal::IntBitwiseExclusiveOr => "_int_bitwise_exclusive_or",
-            BuiltinFunctionExternal::IntBitwiseNot => "_int_bitwise_not",
-            BuiltinFunctionExternal::IntBitwiseShiftLeft => "_int_bitwise_shift_left",
-            BuiltinFunctionExternal::IntBitwiseShiftRight => "_int_bitwise_shift_right",
-            BuiltinFunctionExternal::IntToFloat => "_int_to_float",
-            BuiltinFunctionExternal::FloatFloor => "_float_floor",
-            BuiltinFunctionExternal::FloatCeiling => "_float_ceiling",
-            BuiltinFunctionExternal::FloatTruncate => "_float_truncate",
-            BuiltinFunctionExternal::FloatRound => "_float_round",
-            BuiltinFunctionExternal::FloatSquareRoot => "_float_square_root",
-            BuiltinFunctionExternal::StringByteSize => "_string_byte_size",
-            BuiltinFunctionExternal::StringByteSlice => "_string_byte_slice",
-            BuiltinFunctionExternal::StringPopCodeunit => "_string_pop_codeunit",
-            BuiltinFunctionExternal::StringStartsWith => "_string_starts_with",
-            BuiltinFunctionExternal::StringEndsWith => "_string_ends_with",
-            BuiltinFunctionExternal::StringRemovePrefix => "_string_remove_prefix",
-            BuiltinFunctionExternal::StringRemoveSuffix => "_string_remove_suffix",
-            BuiltinFunctionExternal::StringLessThan => "_string_less_than",
-            BuiltinFunctionExternal::StringConcatList => "_string_concat_list",
-            BuiltinFunctionExternal::StringJoin => "_string_join",
-            BuiltinFunctionExternal::UtfCodepointToInt => "_utf_codepoint_to_int",
-            BuiltinFunctionExternal::UnsafeIntToUtfCodepoint => "_unsafe_int_to_utf_codepoint",
-            BuiltinFunctionExternal::StringPopGrapheme => "_string_pop_grapheme",
-            BuiltinFunctionExternal::BytesNew => "_bytes_new",
-            BuiltinFunctionExternal::BytesSize => "_bytes_size",
-            BuiltinFunctionExternal::BytesGet => "_bytes_get",
-            BuiltinFunctionExternal::BytesSet => "_bytes_set",
-            BuiltinFunctionExternal::BytesCopy => "_bytes_copy",
-            BuiltinFunctionExternal::StringBytes => "_string_bytes",
-            BuiltinFunctionExternal::StringOffset => "_string_offset",
-            BuiltinFunctionExternal::BytesToString => "_bytes_to_string",
-            BuiltinFunctionExternal::Float64Byte => "_float64_byte",
-            BuiltinFunctionExternal::Float32Byte => "_float32_byte",
-            BuiltinFunctionExternal::Float64FromBits => "_float64_from_bits",
-            BuiltinFunctionExternal::Float32FromBits => "_float32_from_bits",
-            BuiltinFunctionExternal::CellNew => "_cell_new",
-            BuiltinFunctionExternal::CellGet => "_cell_get",
-            BuiltinFunctionExternal::CellSet => "_cell_set",
-        }
+    pub(super) fn name(self) -> &'static str {
+        self.into()
     }
 
     pub(super) fn type_(&self, i32: Arc<Type>) -> (Vec<Arc<Type>>, Arc<Type>) {
