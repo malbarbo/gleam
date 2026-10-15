@@ -734,10 +734,7 @@ fn float16_to_float32(half: Int) -> Int {
     0, _ -> float16_subnormal(sign, fraction, 113)
     // An infinity or a NaN.
     0x1F, _ ->
-      bitwise_or(
-        sign,
-        bitwise_or(0x7F800000, bitwise_shift_left(fraction, 13)),
-      )
+      bitwise_or(sign, bitwise_or(0x7F800000, bitwise_shift_left(fraction, 13)))
     _, _ ->
       bitwise_or(
         sign,
@@ -936,37 +933,78 @@ pub fn bit_array_starts_with(bits: Bits, prefix: Bits) -> Bool {
 /// The order of `a` and `b` as `-1`, `0` or `1`: byte by byte, and then by
 /// the value and size of the bits after the last whole byte of the shortest.
 pub fn bit_array_compare(a: Bits, b: Bits) -> Int {
-  compare_loop(a.bytes, a.start, a.end, b.bytes, b.start, b.end)
-}
-
-fn compare_loop(
-  a: Bytes,
-  i: Int,
-  a_end: Int,
-  b: Bytes,
-  j: Int,
-  b_end: Int,
-) -> Int {
-  case a_end - i >= 8 && b_end - j >= 8 {
-    True -> {
-      let x = byte_at(a, i)
-      let y = byte_at(b, j)
-      case x == y {
-        True -> compare_loop(a, i + 8, a_end, b, j + 8, b_end)
-        False -> sign(x - y)
-      }
-    }
-    False ->
-      case a_end - i, b_end - j {
+  let a_size = a.end - a.start
+  let b_size = b.end - b.start
+  let whole = bitwise_shift_right(min(a_size, b_size), 3)
+  let order = case bitwise_and(bitwise_or(a.start, b.start), 7) {
+    0 ->
+      compare_bytes(
+        a.bytes,
+        bitwise_shift_right(a.start, 3),
+        b.bytes,
+        bitwise_shift_right(b.start, 3),
+        whole,
+      )
+    _ -> compare_bits(a.bytes, a.start, b.bytes, b.start, whole)
+  }
+  case order {
+    0 -> {
+      let a_rest = a_size - whole * 8
+      let b_rest = b_size - whole * 8
+      let at = whole * 8
+      case a_rest, b_rest {
         0, 0 -> 0
         _, 0 -> 1
         0, _ -> -1
-        a_size, b_size ->
-          case compare_values(a, i, a_size, b, j, b_size, 0) {
-            0 -> sign(a_size - b_size)
+        _, _ ->
+          case
+            compare_values(
+              a.bytes,
+              a.start + at,
+              a_rest,
+              b.bytes,
+              b.start + at,
+              b_rest,
+              0,
+            )
+          {
+            0 -> sign(a_rest - b_rest)
             order -> order
           }
       }
+    }
+    _ -> order
+  }
+}
+
+/// The order of the `count` bytes of `a` from the byte `i` and of `b` from
+/// the byte `j`.
+fn compare_bytes(a: Bytes, i: Int, b: Bytes, j: Int, count: Int) -> Int {
+  case count {
+    0 -> 0
+    _ -> {
+      let x = bytes_get(a, i)
+      let y = bytes_get(b, j)
+      case x == y {
+        True -> compare_bytes(a, i + 1, b, j + 1, count - 1)
+        False -> sign(x - y)
+      }
+    }
+  }
+}
+
+/// The order of the `count` bytes of `a` at `i` and of `b` at `j`.
+fn compare_bits(a: Bytes, i: Int, b: Bytes, j: Int, count: Int) -> Int {
+  case count {
+    0 -> 0
+    _ -> {
+      let x = byte_at(a, i)
+      let y = byte_at(b, j)
+      case x == y {
+        True -> compare_bits(a, i + 8, b, j + 8, count - 1)
+        False -> sign(x - y)
+      }
+    }
   }
 }
 
@@ -1468,23 +1506,45 @@ fn equal_bits(a: Bytes, i: Int, b: Bytes, j: Int, size: Int) -> Bool {
 /// FNV-1a of the bytes, then of the bits after the last whole byte and
 /// their number.
 pub fn bit_array_hash(bits: Bits) -> Int {
-  hash_loop(bits.bytes, bits.start, bits.end - bits.start, -2_128_831_035)
+  let size = bits.end - bits.start
+  let whole = bitwise_shift_right(size, 3)
+  let acc = case bitwise_and(bits.start, 7) {
+    0 ->
+      hash_bytes(
+        bits.bytes,
+        bitwise_shift_right(bits.start, 3),
+        whole,
+        -2_128_831_035,
+      )
+    _ -> hash_bits(bits.bytes, bits.start, whole, -2_128_831_035)
+  }
+  case size - whole * 8 {
+    0 -> acc
+    rest ->
+      fnv(fnv(acc, bits_at(bits.bytes, bits.start + whole * 8, rest)), rest)
+  }
 }
 
-fn hash_loop(bytes: Bytes, position: Int, remaining: Int, acc: Int) -> Int {
-  case remaining >= 8 {
-    True ->
-      hash_loop(
+/// The hash `acc` of the `count` bytes of `bytes` from the byte `index`.
+fn hash_bytes(bytes: Bytes, index: Int, count: Int, acc: Int) -> Int {
+  case count {
+    0 -> acc
+    _ ->
+      hash_bytes(bytes, index + 1, count - 1, fnv(acc, bytes_get(bytes, index)))
+  }
+}
+
+/// The hash `acc` of the `count` bytes of `bytes` at `position`.
+fn hash_bits(bytes: Bytes, position: Int, count: Int, acc: Int) -> Int {
+  case count {
+    0 -> acc
+    _ ->
+      hash_bits(
         bytes,
         position + 8,
-        remaining - 8,
+        count - 1,
         fnv(acc, byte_at(bytes, position)),
       )
-    False ->
-      case remaining {
-        0 -> acc
-        _ -> fnv(fnv(acc, bits_at(bytes, position, remaining)), remaining)
-      }
   }
 }
 

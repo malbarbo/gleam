@@ -402,6 +402,14 @@ pub fn main() {
   let assert 0 = bit_array.compare(<<5, 1:1>>, <<5, 1:1>>)
   let assert -1 = bit_array.compare(<<5, 1:1>>, <<5, 2:2>>)
   let assert -1 = bit_array.compare(<<4, 1:1>>, <<5, 1:1>>)
+  // Bits that do not start at the start of their bytes.
+  let assert <<_:3, u:bits>> = <<0:3, 1, 2, 3:2>>
+  let assert <<_:5, v:bits>> = <<0:5, 1, 3>>
+  let assert 0 = bit_array.compare(u, <<1, 2, 3:2>>)
+  let assert -1 = bit_array.compare(u, v)
+  let assert 1 = bit_array.compare(v, <<1, 2, 3:2>>)
+  let assert 1 = bit_array.compare(u, <<1, 2>>)
+  let assert True = bit_array.hash(u) == bit_array.hash(<<1, 2, 3:2>>)
   let assert True = bit_array.starts_with(<<1, 2, 3, 4>>, <<1, 2>>)
   let assert True = bit_array.starts_with(<<1, 2>>, <<>>)
   let assert False = bit_array.starts_with(<<1, 2>>, <<1, 2, 3>>)
