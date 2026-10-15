@@ -164,6 +164,13 @@ pub enum Error {
         type_: EcoString,
         definition: Option<(EcoString, SrcSpan)>,
     },
+    /// A value of a type without constructors (an external type of other
+    /// targets) that is not declared with `@external(webassembly, ...)`, see
+    /// `val_type`. `definition` is the module and the location of the type.
+    ExternalTypeWithoutRepresentation {
+        type_: EcoString,
+        definition: Option<(EcoString, SrcSpan)>,
+    },
     /// A local variable used with different types, see
     /// `Monomorphizer::conflicting_reference`. `location` is a reference in
     /// `module`.
@@ -183,6 +190,10 @@ impl Error {
                 definition: Some((module, _)),
                 ..
             }
+            | Error::ExternalTypeWithoutRepresentation {
+                definition: Some((module, _)),
+                ..
+            }
             | Error::GenericLocalVariable { module, .. } => Some(module),
             Error::UnknownExternalType { .. }
             | Error::UnknownBuiltinFunction { .. }
@@ -195,6 +206,9 @@ impl Error {
             | Error::IntLiteralOutOfRange { .. }
             | Error::FloatLiteralOutOfRange { .. }
             | Error::TypeTooLarge {
+                definition: None, ..
+            }
+            | Error::ExternalTypeWithoutRepresentation {
                 definition: None, ..
             } => None,
         }
@@ -1232,12 +1246,14 @@ impl<'a> Generator<'a> {
                         Err(error) if is_main => return Err(error),
                         Err(_) => continue,
                     }
-                } else if is_main
-                    && custom_type.constructors.is_empty()
-                    && matches!(custom_type.name.as_str(), "I32" | "I64" | "F32" | "F64")
-                    && let Some((val_type, to_str)) = self.wasm_external(&custom_type.name)
+                } else if custom_type.constructors.is_empty()
+                    && let Some(type_) =
+                        self.wasm_external_type(&module.type_info.package, &custom_type.name)
                 {
-                    CustomType::External { val_type, to_str }
+                    // Outside the standard library, which cannot use
+                    // `@external(webassembly, ...)`, an external type is bound
+                    // to the wasm type of its name.
+                    type_
                 } else {
                     continue;
                 };
@@ -1268,13 +1284,8 @@ impl<'a> Generator<'a> {
                 module: module.clone(),
             });
         }
-        // `Bytes` and `Cell` are only for the runtime, which writes only the
-        // bytes it creates, and shares a cell by the bit arrays of the same
-        // bytes.
-        if let Some((val_type, to_str)) = self.wasm_external(name)
-            && (package == RUNTIME_PACKAGE || !matches!(name.as_str(), "Bytes" | "Cell"))
-        {
-            return Ok(CustomType::External { val_type, to_str });
+        if let Some(type_) = self.wasm_external_type(package, name) {
+            return Ok(type_);
         }
         match name.as_str() {
             // Only for the runtime, which reads the positions it knows.
@@ -1310,6 +1321,20 @@ impl<'a> Generator<'a> {
                 })
             }
         }
+    }
+
+    /// The representation of the external type `name` of `package` whose
+    /// values are wasm values.
+    fn wasm_external_type(&self, package: &str, name: &str) -> Option<CustomType> {
+        // `AnyRef`, `Bytes` and `Cell` are only for the runtime, which
+        // compares an `AnyRef` by the functions of its type, writes only the
+        // bytes it creates, and shares a cell by the bit arrays of the same
+        // bytes.
+        if package != RUNTIME_PACKAGE && matches!(name, "AnyRef" | "Bytes" | "Cell") {
+            return None;
+        }
+        let (val_type, to_str) = self.wasm_external(name)?;
+        Some(CustomType::External { val_type, to_str })
     }
 
     /// The wasm type of the external type `name` of the builtins module
@@ -1969,6 +1994,26 @@ impl<'a> Generator<'a> {
 
     /// The module and the location of the definition of the outermost custom
     /// type in `type_`, looking first at `type_` and then at its arguments.
+    /// The module and the location of the definition of the type `name` of
+    /// `module`.
+    fn type_definition(
+        &self,
+        module: &EcoString,
+        name: &EcoString,
+    ) -> Option<(EcoString, SrcSpan)> {
+        let typed_module = if *module == self.module.name {
+            self.module
+        } else {
+            self.all_modules.get(module)?
+        };
+        let custom_type = typed_module
+            .definitions
+            .custom_types
+            .iter()
+            .find(|t| t.name == *name)?;
+        Some((module.clone(), custom_type.location))
+    }
+
     fn custom_type_definition(&self, type_: &Arc<Type>) -> Option<(EcoString, SrcSpan)> {
         if let Some((module, _, _)) = type_.named_type_information()
             && module != PRELUDE_MODULE_NAME
@@ -2099,14 +2144,16 @@ impl<'a> Generator<'a> {
             self.val_type_ref(closure.type_index)
         } else if let Some((custom_type, args)) = self.custom_type(type_) {
             self.custom_type_val_type(type_, &custom_type, args)
-        } else if let Some((_, name)) = type_.named_type_name() {
-            match name.as_str() {
-                "I32" => ValType::I32,
-                "I64" => ValType::I64,
-                "F32" => ValType::F32,
-                "F64" => ValType::F64,
-                _ => panic!("unexpected named type should not reach code generation: {name}"),
+        } else if let Some((module, name, _)) = type_.named_type_information() {
+            // A type without constructors is external, and without
+            // `@external(webassembly, ...)` it has no representation here.
+            if self.error.is_none() {
+                self.error = Some(Error::ExternalTypeWithoutRepresentation {
+                    type_: self.type_pretty_name(type_),
+                    definition: self.type_definition(&module, &name),
+                });
             }
+            ANYREF
         } else {
             panic!("unexpected type should not reach code generation: {type_:#?}");
         }

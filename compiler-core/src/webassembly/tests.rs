@@ -132,6 +132,16 @@ pub fn compile_wasm_in(
     int: crate::config::WasmInt,
     float: crate::config::WasmFloat,
 ) -> Vec<u8> {
+    codegen_in(package, src, deps, int, float).expect("wasm codegen failed")
+}
+
+fn codegen_in(
+    package: &str,
+    src: &str,
+    deps: Vec<(&str, &str, &str)>,
+    int: crate::config::WasmInt,
+    float: crate::config::WasmFloat,
+) -> Result<Vec<u8>, crate::webassembly::Error> {
     let mut all_line_numbers: HashMap<EcoString, LineNumbers> = deps
         .iter()
         .map(|(_, name, dep_src)| (EcoString::from(*name), LineNumbers::new(dep_src)))
@@ -153,7 +163,6 @@ pub fn compile_wasm_in(
         int,
         float,
     )
-    .expect("wasm codegen failed")
 }
 
 /// Extract type names from the wasm binary's name section.
@@ -313,22 +322,30 @@ pub fn for_each_operator(wasm_bytes: &[u8], mut f: impl FnMut(&str, wasmparser::
 }
 
 pub fn compile_wasm_error(src: &str) -> crate::webassembly::Error {
-    compile_wasm_error_in(TEST_PACKAGE, src)
+    compile_wasm_error_with(src, vec![])
+}
+
+/// Like `compile_wasm_error`, with the modules `deps`.
+pub fn compile_wasm_error_with(
+    src: &str,
+    deps: Vec<(&str, &str, &str)>,
+) -> crate::webassembly::Error {
+    codegen_in(
+        TEST_PACKAGE,
+        src,
+        deps,
+        crate::config::WasmInt::I32,
+        crate::config::WasmFloat::F64,
+    )
+    .expect_err("expected codegen error")
 }
 
 /// Like `compile_wasm_error`, with the module in `package`.
 pub fn compile_wasm_error_in(package: &str, src: &str) -> crate::webassembly::Error {
-    let (main_module, _) = compile_in(package, src, vec![]);
-    let line_numbers = LineNumbers::new(src);
-    let main_ref: &TypedModule = &main_module;
-    let all_modules = HashMap::from([(main_module.name.clone(), main_ref)]);
-    let all_line_numbers = HashMap::from([(main_module.name.clone(), line_numbers.clone())]);
-    crate::webassembly::module(
-        &main_module,
-        &line_numbers,
-        &all_modules,
-        &all_line_numbers,
-        &crate::webassembly::runtime_modules(),
+    codegen_in(
+        package,
+        src,
+        vec![],
         crate::config::WasmInt::I32,
         crate::config::WasmFloat::F64,
     )

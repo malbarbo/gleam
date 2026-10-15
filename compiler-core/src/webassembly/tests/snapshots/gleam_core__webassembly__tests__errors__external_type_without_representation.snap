@@ -1,0 +1,19 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+expression: "\npub type Foo\n\npub fn same(x: Foo, y: Foo) -> Bool {\n    x == y\n}\n\npub fn main() {\n    echo same\n}\n"
+---
+----- SOURCE CODE
+
+pub type Foo
+
+pub fn same(x: Foo, y: Foo) -> Bool {
+    x == y
+}
+
+pub fn main() {
+    echo same
+}
+
+
+----- ERROR
+ExternalTypeWithoutRepresentation { type_: "Foo", definition: Some(("my/mod", SrcSpan { start: 1, end: 13 })) }

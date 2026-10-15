@@ -1,0 +1,17 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+assertion_line: 155
+expression: error
+---
+ExternalTypeWithoutRepresentation {
+    type_: "Foo",
+    definition: Some(
+        (
+            "other",
+            SrcSpan {
+                start: 1,
+                end: 13,
+            },
+        ),
+    ),
+}

@@ -112,6 +112,68 @@ fn to_i32(value: Int) -> I64
 }
 
 #[test]
+fn external_type_without_representation() {
+    assert_wasm_error!(
+        r#"
+pub type Foo
+
+pub fn same(x: Foo, y: Foo) -> Bool {
+    x == y
+}
+
+pub fn main() {
+    echo same
+}
+"#,
+    );
+}
+
+/// A value of a type without representation of another module is reported,
+/// also when its equality is generated.
+#[test]
+fn external_type_without_representation_of_other_module() {
+    let error = super::compile_wasm_error_with(
+        r#"
+import other.{type Foo, foo}
+
+pub fn main() {
+  foo() == foo()
+}
+"#,
+        vec![(
+            super::TEST_PACKAGE,
+            "other",
+            r#"
+pub type Foo
+
+pub fn foo() -> Foo {
+  panic
+}
+"#,
+        )],
+    );
+    insta::assert_debug_snapshot!(error);
+}
+
+/// `AnyRef` is only for the runtime.
+#[test]
+fn external_type_anyref() {
+    assert_wasm_error!(
+        r#"
+pub type AnyRef
+
+pub fn same(x: AnyRef, y: AnyRef) -> Bool {
+    x == y
+}
+
+pub fn main() {
+    echo same
+}
+"#,
+    );
+}
+
+#[test]
 fn wrong_external_function_arity() {
     assert_wasm_error!(
         r#"

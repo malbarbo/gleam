@@ -1228,3 +1228,31 @@ fn string_inspect(value: a) -> String
 "#,
     );
 }
+
+/// A type without constructors is external, and without
+/// `@external(webassembly, ...)` it has no representation, but it can be a
+/// phantom type.
+#[test]
+fn phantom_type_without_constructors() {
+    run_ok(
+        r#"
+pub type Meters
+
+pub type Tagged(a) {
+    Tagged(Int)
+}
+
+fn meters(n: Int) -> Tagged(Meters) {
+    Tagged(n)
+}
+
+pub fn main() {
+    let assert True = meters(3) == meters(3)
+    let assert "Tagged(3)" = string_inspect(meters(3))
+}
+
+@external(webassembly, "builtins", "_inspect")
+fn string_inspect(value: a) -> String
+"#,
+    );
+}

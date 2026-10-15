@@ -2299,6 +2299,10 @@ impl<'a> Generator<'a> {
         let (params, results) = self.builtin_type(&builtin);
         let placeholder_id = self.allocate_placeholder_function(&builtin.name(), &params, &results);
         let _ = self.builtins.insert(builtin, placeholder_id);
+        if self.error.is_some() {
+            // The code is not used, see `val_type`.
+            return placeholder_id;
+        }
         let real_id = code_fn(self);
         replace_function_body(&mut self.wasm_module, placeholder_id, real_id);
         placeholder_id

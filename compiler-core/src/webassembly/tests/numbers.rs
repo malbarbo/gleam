@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-use super::run_ok;
+use super::{TEST_PACKAGE, run_ok, run_wasm};
 
 #[test]
 fn int_const() {
@@ -528,6 +528,45 @@ pub fn main() {
   0
 }
 "#,
+    );
+}
+
+/// An external type of another module is bound to the wasm type of its name.
+#[test]
+fn external_type_i64_of_other_module() {
+    let result = run_wasm(
+        r#"
+import other.{type I64, from_i64, to_i64}
+
+fn id(value: I64) -> I64 {
+  value
+}
+
+pub fn main() {
+  let value = id(to_i64(42))
+  assert from_i64(value) == 42
+  assert value == to_i64(42)
+  0
+}
+"#,
+        vec![(
+            TEST_PACKAGE,
+            "other",
+            r#"
+pub type I64
+
+@external(webassembly, "builtins", "_int_to_i64")
+pub fn to_i64(value: Int) -> I64
+
+@external(webassembly, "builtins", "_i64_to_int")
+pub fn from_i64(value: I64) -> Int
+"#,
+        )],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
     );
 }
 

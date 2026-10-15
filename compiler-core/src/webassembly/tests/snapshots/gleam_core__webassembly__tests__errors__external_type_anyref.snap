@@ -1,0 +1,20 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+assertion_line: 161
+expression: "\npub type AnyRef\n\npub fn same(x: AnyRef, y: AnyRef) -> Bool {\n    x == y\n}\n\npub fn main() {\n    echo same\n}\n"
+---
+----- SOURCE CODE
+
+pub type AnyRef
+
+pub fn same(x: AnyRef, y: AnyRef) -> Bool {
+    x == y
+}
+
+pub fn main() {
+    echo same
+}
+
+
+----- ERROR
+ExternalTypeWithoutRepresentation { type_: "AnyRef", definition: Some(("my/mod", SrcSpan { start: 1, end: 16 })) }

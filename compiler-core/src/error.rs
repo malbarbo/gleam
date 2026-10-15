@@ -2252,6 +2252,19 @@ function that returns the same custom type with a larger type."
                         None,
                         definition.as_ref().map(|(_, location)| *location),
                     ),
+                    crate::webassembly::Error::ExternalTypeWithoutRepresentation {
+                        type_,
+                        definition,
+                    } => (
+                        "External type without representation",
+                        format!(
+                            "The type {type_} has no constructors, so it is an external type, \
+but it is not declared for the WebAssembly target with \
+`@external(webassembly, ...)`, so its values have no representation in it."
+                        ),
+                        None,
+                        definition.as_ref().map(|(_, location)| *location),
+                    ),
                     crate::webassembly::Error::GenericLocalVariable { name, location, .. } => (
                         "Local variable used with different types",
                         format!(

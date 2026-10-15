@@ -26,9 +26,13 @@ of a function says how the compiler implements it:
 The standard library does not depend on the choice: a builtin can move between
 Rust, Gleam and generated code without changing its name.
 
-The external types are `I32`, `I64`, `F32` and `F64` (numbers), `AnyRef` (a
-value of any type), `Array(a)` (an immutable array, section *Array*) and the
-types of the runtime written in Gleam.
+The external types are `I32`, `I64`, `F32` and `F64` (numbers), the types of
+the runtime written in Gleam and, only for the runtime, `AnyRef` (a value of
+any type), `Array(a)` (an immutable array, section *Array*), `Bytes` and
+`Cell`. Outside the standard library, which is the only one that can use
+`@external(webassembly, ...)` on a type, a type without constructors whose
+name is `I32`, `I64`, `F32` or `F64` is that external type; a value of any
+other type without constructors has no representation and is a compile error.
 
 ## Glue (names without `_`)
 
