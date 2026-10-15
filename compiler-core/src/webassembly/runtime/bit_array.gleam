@@ -1632,73 +1632,64 @@ fn bits_at(bytes: Bytes, position: Int, count: Int) -> Int {
 /// Writes `count` bits of `src` at `from` to `dst` at `at`. The bits of
 /// `dst` from `at` on are zero.
 fn copy_bits(dst: Bytes, at: Int, src: Bytes, from: Int, count: Int) -> Nil {
-  let whole = bitwise_shift_right(count, 3)
-  case bitwise_and(at, 7), bitwise_and(from, 7) {
-    0, 0 -> {
-      let _ =
-        bytes_copy(
-          dst,
-          bitwise_shift_right(at, 3),
-          src,
-          bitwise_shift_right(from, 3),
-          whole,
-        )
-      copy_bits_loop(
+  // The bits up to the first byte boundary of `dst`, then whole bytes, then
+  // the rest.
+  let head = min(bitwise_and(0 - at, 7), count)
+  let _ = copy_few_bits(dst, at, src, from, head)
+  let at = at + head
+  let from = from + head
+  let whole = bitwise_shift_right(count - head, 3)
+  let index = bitwise_shift_right(at, 3)
+  let _ = case bitwise_and(from, 7) {
+    0 -> bytes_copy(dst, index, src, bitwise_shift_right(from, 3), whole)
+    shift ->
+      copy_shifted(
         dst,
-        at + whole * 8,
+        index,
         src,
-        from + whole * 8,
-        count - whole * 8,
+        bitwise_shift_right(from, 3),
+        bitwise_shift_left(1, shift),
+        whole,
       )
-    }
-    0, _ -> {
-      let _ = copy_to_bytes(dst, bitwise_shift_right(at, 3), src, from, whole)
-      copy_bits_loop(
-        dst,
-        at + whole * 8,
-        src,
-        from + whole * 8,
-        count - whole * 8,
-      )
-    }
-    _, _ -> copy_bits_loop(dst, at, src, from, count)
   }
+  let rest = count - head - whole * 8
+  copy_few_bits(dst, at + whole * 8, src, from + whole * 8, rest)
 }
 
-/// Writes `count` bytes of `src` at `from` to `dst` from the byte `index`.
-fn copy_to_bytes(
-  dst: Bytes,
-  index: Int,
-  src: Bytes,
-  from: Int,
-  count: Int,
-) -> Nil {
-  case count {
-    0 -> Nil
-    _ -> {
-      let _ = bytes_set(dst, index, byte_at(src, from))
-      copy_to_bytes(dst, index + 1, src, from + 8, count - 1)
-    }
-  }
-}
-
-fn copy_bits_loop(
+/// Like `copy_bits`, for a `count` from 0 to 7.
+fn copy_few_bits(
   dst: Bytes,
   at: Int,
   src: Bytes,
   from: Int,
   count: Int,
 ) -> Nil {
-  case count >= 8 {
-    True -> {
-      let _ = or_bits(dst, at, byte_at(src, from), 8)
-      copy_bits_loop(dst, at + 8, src, from + 8, count - 8)
+  case count {
+    0 -> Nil
+    _ -> or_bits(dst, at, bits_at(src, from, count), count)
+  }
+}
+
+/// Writes `count` bytes to `dst` from `index`, each one made of the bits of
+/// the bytes `i` and `i + 1` of `src` from the bit log2(`scale`) of byte `i`.
+/// The bits are shifted by multiplying by `scale`, which is cheaper than a
+/// shift by a variable.
+fn copy_shifted(
+  dst: Bytes,
+  index: Int,
+  src: Bytes,
+  i: Int,
+  scale: Int,
+  count: Int,
+) -> Nil {
+  case count {
+    0 -> Nil
+    _ -> {
+      let window = bytes_get(src, i) * 256 + bytes_get(src, i + 1)
+      let byte = bitwise_and(bitwise_shift_right(window * scale, 8), 0xFF)
+      let _ = bytes_set(dst, index, byte)
+      copy_shifted(dst, index + 1, src, i + 1, scale, count - 1)
     }
-    False ->
-      case count {
-        0 -> Nil
-        _ -> or_bits(dst, at, bits_at(src, from, count), count)
-      }
   }
 }
 
