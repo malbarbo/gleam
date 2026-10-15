@@ -356,18 +356,22 @@ impl<'a> Generator<'a> {
         }
         // string data
         for (string, index) in self.strings.clone() {
-            let bytes = string.as_bytes().to_vec();
-            let data = self.wasm_module.data.add(walrus::DataKind::Passive, bytes);
-            let _ = instructions
-                .i32_const(0)
-                .i32_const(string.len() as i32)
-                .array_new_data(self.string.bytes_index, data)
-                .string_from_bytes()
-                .global_set(index);
+            self.push_bytes(&mut instructions, string.as_bytes().to_vec());
+            let _ = instructions.string_from_bytes().global_set(index);
         }
         self.code_bit_arrays(&mut instructions);
         let _ = instructions.call(constants).end();
         function.finish(self)
+    }
+
+    /// Pushes a new array with `bytes`, which are put in a data segment.
+    pub(super) fn push_bytes(&mut self, instructions: &mut Instructions<'_, '_>, bytes: Vec<u8>) {
+        let length = bytes.len() as i32;
+        let data = self.wasm_module.data.add(walrus::DataKind::Passive, bytes);
+        let _ = instructions
+            .i32_const(0)
+            .i32_const(length)
+            .array_new_data(self.string.bytes_index, data);
     }
 
     /// Creates the constants of the module. It is generated before the start

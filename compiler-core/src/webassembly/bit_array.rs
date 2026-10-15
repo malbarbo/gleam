@@ -806,15 +806,8 @@ impl Generator<'_> {
             return;
         };
         for (bits, index) in self.bit_arrays.clone() {
-            let length = bits.bytes.len() as i32;
-            let data = self
-                .wasm_module
-                .data
-                .add(walrus::DataKind::Passive, bits.bytes);
+            self.push_bytes(instructions, bits.bytes);
             let _ = instructions
-                .i32_const(0)
-                .i32_const(length)
-                .array_new_data(self.string.bytes_index, data)
                 .int_const(&bits.size.into())
                 .call(from_bytes)
                 .global_set(index);
