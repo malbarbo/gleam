@@ -1534,15 +1534,14 @@ impl<'a> Generator<'a> {
         let functions: Vec<_> = self.module.definitions.functions.iter().collect();
         for function in functions {
             if let Some((module, name, _)) = &function.external_webassembly {
+                if module != BUILTINS_MODULE {
+                    // A function of the host, imported with each type it is
+                    // used with.
+                    continue;
+                }
                 if !reaches_builtins(&self.module.type_info.package) {
                     return Err(Error::ExternalOutsideStdlib {
                         location: function.location,
-                    });
-                }
-                if module != BUILTINS_MODULE {
-                    return Err(Error::UnknownExternalModule {
-                        location: function.location,
-                        module: module.clone(),
                     });
                 }
                 if let Some((_, runtime_function)) = self.runtime_function(name) {
@@ -3514,32 +3513,9 @@ impl<'a> Generator<'a> {
 
         for function in &self.module.definitions.functions {
             if function_name(function) == name {
-                if let Some((_, fname, _)) = &function.external_webassembly {
-                    if let Some((module, _)) = self.runtime_function(fname) {
-                        return self.function_runtime(&module, fname, required_type);
-                    }
-                    if is_glued(fname) {
-                        return self.function_rust(fname, &function_type(function));
-                    }
-                    if fname == INSPECT {
-                        return self.function_inspect(required_type);
-                    }
-                    if fname == HASH {
-                        return self.function_hash_external(required_type);
-                    }
-                    if fname == DYNAMIC_CAST {
-                        return self.function_dynamic_cast_external(required_type);
-                    }
-                    if let Some(array_function) = ArrayFunction::by_name(fname) {
-                        return self.function_array_external(array_function, required_type);
-                    }
-                    if let Some(builtin) = BuiltinFunctionExternal::by_name(fname) {
-                        // Created on first use, also for externals declared in
-                        // imported modules.
-                        let index = self.get_function_builtin_external(builtin);
-                        return Id::func(fname.clone(), index);
-                    }
-                    return self.find_global_expect(fname);
+                if function.external_webassembly.is_some() {
+                    let module = self.module.name.clone();
+                    return self.function_external(function, &module, required_type);
                 }
                 let export = function.publicity.is_public();
                 let base_name = function_name(function).into();
@@ -4032,32 +4008,8 @@ impl<'a> Generator<'a> {
         required_type: &Arc<Type>,
     ) -> Id {
         let function = self.module_function_definition(module_name, fn_name);
-        if let Some((_, fname, _)) = &function.external_webassembly {
-            if let Some((module, _)) = self.runtime_function(fname) {
-                return self.function_runtime(&module, fname, required_type);
-            }
-            if is_glued(fname) {
-                return self.function_rust(fname, &function_type(function));
-            }
-            if fname == INSPECT {
-                return self.function_inspect(required_type);
-            }
-            if fname == HASH {
-                return self.function_hash_external(required_type);
-            }
-            if fname == DYNAMIC_CAST {
-                return self.function_dynamic_cast_external(required_type);
-            }
-            if let Some(array_function) = ArrayFunction::by_name(fname) {
-                return self.function_array_external(array_function, required_type);
-            }
-            if let Some(builtin) = BuiltinFunctionExternal::by_name(fname) {
-                // Created on first use, also for externals declared in
-                // imported modules.
-                let index = self.get_function_builtin_external(builtin);
-                return Id::func(fname.clone(), index);
-            }
-            return self.find_global_expect(fname);
+        if function.external_webassembly.is_some() {
+            return self.function_external(function, module_name, required_type);
         }
         // Track which module we're compiling for correct diagnostics.
         let prev_module = std::mem::replace(&mut self.current_module_name, module_name.clone());
@@ -4069,6 +4021,98 @@ impl<'a> Generator<'a> {
         };
         self.current_module_name = prev_module;
         id
+    }
+
+    /// The function that implements the external `function` of the module
+    /// `module`, used with type `required_type`.
+    fn function_external(
+        &mut self,
+        function: &TypedFunction,
+        module: &EcoString,
+        required_type: &Arc<Type>,
+    ) -> Id {
+        let (external_module, fname, _) = function
+            .external_webassembly
+            .as_ref()
+            .expect("an external function");
+        if external_module != BUILTINS_MODULE {
+            return self.function_host(external_module, fname, module, required_type);
+        }
+        if let Some((runtime_module, _)) = self.runtime_function(fname) {
+            return self.function_runtime(&runtime_module, fname, required_type);
+        }
+        if is_glued(fname) {
+            return self.function_rust(fname, &function_type(function));
+        }
+        if fname == INSPECT {
+            return self.function_inspect(required_type);
+        }
+        if fname == HASH {
+            return self.function_hash_external(required_type);
+        }
+        if fname == DYNAMIC_CAST {
+            return self.function_dynamic_cast_external(required_type);
+        }
+        if let Some(array_function) = ArrayFunction::by_name(fname) {
+            return self.function_array_external(array_function, required_type);
+        }
+        if let Some(builtin) = BuiltinFunctionExternal::by_name(fname) {
+            // Created on first use, also for externals declared in
+            // imported modules.
+            let index = self.get_function_builtin_external(builtin);
+            return Id::func(fname.clone(), index);
+        }
+        self.find_global_expect(fname)
+    }
+
+    /// The import of the function `name` of the host module `host_module`,
+    /// declared in the module `module`, used with type `type_`.
+    fn function_host(
+        &mut self,
+        host_module: &EcoString,
+        name: &EcoString,
+        module: &EcoString,
+        type_: &Arc<Type>,
+    ) -> Id {
+        let host_module = self.host_module_path(host_module, module);
+        let import_name = mangle(&ecow::eco_format!("{host_module}#{name}"), type_);
+        if let Some(id) = self.find_global(&import_name) {
+            return id;
+        }
+        let (params, return_) = type_.fn_types().expect("an external function");
+        let params = self.val_types(params);
+        let results = self.val_types(iter::once(return_));
+        let wasm_type = self.wasm_module.types.add(&params, &results);
+        let (index, _) = self
+            .wasm_module
+            .add_import_func(&host_module, name, wasm_type);
+        self.add_function_to_globals(import_name, index)
+    }
+
+    /// The name of the host module `host_module` in the program. As in a
+    /// JavaScript import, a relative path is relative to the module `module`
+    /// that declares it, so it is made relative to the program.
+    fn host_module_path(&self, host_module: &EcoString, module: &EcoString) -> EcoString {
+        if !host_module.starts_with("./") && !host_module.starts_with("../") {
+            return host_module.clone();
+        }
+        let declaring = self.all_modules.get(module).copied().unwrap_or(self.module);
+        let mut path = build_directory(declaring);
+        for part in host_module.split('/') {
+            match part {
+                "." => {}
+                ".." => {
+                    let _ = path.pop();
+                }
+                _ => path.push(part),
+            }
+        }
+        let from = build_directory(self.module);
+        let common = path.iter().zip(&from).take_while(|(a, b)| a == b).count();
+        let up = from.len() - common;
+        let mut relative = if up == 0 { vec!["."] } else { vec![".."; up] };
+        relative.extend(path.iter().skip(common));
+        relative.join("/").into()
     }
 
     /// The definition of the function `name` of the module `module`.
@@ -5932,6 +5976,14 @@ fn truncate(text: &str, length: usize) -> EcoString {
 
 fn type_pretty_name(names: &Names, type_: &Arc<Type>) -> EcoString {
     Printer::new(names).print_type(type_)
+}
+
+/// The parts of the path of the directory of `module` in the build directory.
+fn build_directory(module: &TypedModule) -> Vec<&str> {
+    let mut path = vec![module.type_info.package.as_str()];
+    path.extend(module.name.split('/'));
+    let _ = path.pop();
+    path
 }
 
 fn mangle(name: &EcoString, type_: &Arc<Type>) -> EcoString {

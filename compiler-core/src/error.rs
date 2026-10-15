@@ -2180,14 +2180,14 @@ Is your editor still running and connected to the language server?"
                     crate::webassembly::Error::UnknownExternalModule { location, module } => (
                         "Unknown external module",
                         format!(
-                            "The module \"{module}\" is not available. Only \"builtins\" is supported for the WebAssembly target."
+                            "The module \"{module}\" can't provide external types. Only \"builtins\" provides them for the WebAssembly target."
                         ),
                         None,
                         Some(*location),
                     ),
                     crate::webassembly::Error::ExternalOutsideStdlib { location } => (
                         "Unsupported external",
-                        "The WebAssembly target supports external functions and types only in the standard library.".into(),
+                        "On the WebAssembly target, only the standard library can use the module \"builtins\".".into(),
                         None,
                         Some(*location),
                     ),

@@ -520,6 +520,7 @@ mod fail;
 mod function_fields;
 mod functions;
 mod glue;
+mod host;
 mod link;
 mod lists;
 mod local_closures;
