@@ -72,7 +72,8 @@ use crate::{
         Publicity, Statement, StringPrefixLeftSideAssignment, TypeAst, TypeAstVar, TypedArg,
         TypedAssignment, TypedClause, TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr,
         TypedExprBitArraySegment, TypedFunction, TypedModule, TypedModuleConstant, TypedPattern,
-        TypedRecordConstructor, TypedRecordConstructorArg, TypedStatement,
+        TypedPatternBitArraySegment, TypedRecordConstructor, TypedRecordConstructorArg,
+        TypedStatement,
         visit::{self, Visit},
     },
     type_::{
@@ -158,11 +159,13 @@ pub enum Error {
         feature: EcoString,
     },
     IntLiteralOutOfRange {
+        module: EcoString,
         location: SrcSpan,
         value: EcoString,
         target: EcoString,
     },
     FloatLiteralOutOfRange {
+        module: EcoString,
         location: SrcSpan,
         value: EcoString,
         target: EcoString,
@@ -203,7 +206,9 @@ impl Error {
                 definition: Some((module, _)),
                 ..
             }
-            | Error::GenericLocalVariable { module, .. } => Some(module),
+            | Error::GenericLocalVariable { module, .. }
+            | Error::IntLiteralOutOfRange { module, .. }
+            | Error::FloatLiteralOutOfRange { module, .. } => Some(module),
             Error::UnknownExternalType { .. }
             | Error::UnknownBuiltinFunction { .. }
             | Error::WrongBuiltinFunctionSignature { .. }
@@ -212,8 +217,6 @@ impl Error {
             | Error::ReservedModuleName { .. }
             | Error::WrongExternalTypeArity { .. }
             | Error::UnsupportedFeature { .. }
-            | Error::IntLiteralOutOfRange { .. }
-            | Error::FloatLiteralOutOfRange { .. }
             | Error::TypeTooLarge {
                 definition: None, ..
             }
@@ -963,11 +966,57 @@ impl<'a> Generator<'a> {
         }
     }
 
+    /// Checks that the numeric literals of the module being generated and of
+    /// the modules it imports, directly or not, fit in their WebAssembly
+    /// types.
     fn validate_numeric_literals(&self) -> Result<(), Error> {
+        let mut validated = HashSet::new();
+        let mut modules = vec![self.module];
+        while let Some(module) = modules.pop() {
+            if !validated.insert(module.name.clone()) {
+                continue;
+            }
+            self.validate_module_numeric_literals(module)?;
+            modules.extend(
+                module
+                    .definitions
+                    .imports
+                    .iter()
+                    .filter_map(|import| self.all_modules.get(&import.module).copied()),
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_module_numeric_literals(&self, module: &TypedModule) -> Result<(), Error> {
         struct Validator {
+            module: EcoString,
             int: IntType,
             float: FloatType,
             error: Option<Error>,
+        }
+
+        impl Validator {
+            fn int(&mut self, location: &SrcSpan, int_value: &BigInt) {
+                if self.error.is_some() {
+                    return;
+                }
+                let err = match self.int {
+                    IntType::I32 => i32::try_from(int_value).err().map(|_| ()),
+                    IntType::I64 => i64::try_from(int_value).err().map(|_| ()),
+                };
+                if err.is_some() {
+                    self.error = Some(Error::IntLiteralOutOfRange {
+                        module: self.module.clone(),
+                        location: *location,
+                        value: int_value.to_string().into(),
+                        target: match self.int {
+                            IntType::I32 => "I32".into(),
+                            IntType::I64 => "I64".into(),
+                        },
+                    });
+                }
+            }
         }
 
         impl<'ast> Visit<'ast> for Validator {
@@ -978,22 +1027,41 @@ impl<'a> Generator<'a> {
                 _value: &'ast EcoString,
                 int_value: &'ast BigInt,
             ) {
-                if self.error.is_some() {
-                    return;
-                }
-                let err = match self.int {
-                    IntType::I32 => i32::try_from(int_value).err().map(|_| ()),
-                    IntType::I64 => i64::try_from(int_value).err().map(|_| ()),
-                };
-                if err.is_some() {
-                    self.error = Some(Error::IntLiteralOutOfRange {
-                        location: *location,
-                        value: int_value.to_string().into(),
-                        target: match self.int {
-                            IntType::I32 => "I32".into(),
-                            IntType::I64 => "I64".into(),
-                        },
-                    });
+                self.int(location, int_value);
+            }
+
+            fn visit_typed_pattern_int(
+                &mut self,
+                location: &'ast SrcSpan,
+                _value: &'ast EcoString,
+                int_value: &'ast BigInt,
+            ) {
+                self.int(location, int_value);
+            }
+
+            fn visit_typed_constant_int(
+                &mut self,
+                location: &'ast SrcSpan,
+                _value: &'ast EcoString,
+                int_value: &'ast BigInt,
+            ) {
+                self.int(location, int_value);
+            }
+
+            fn visit_typed_pattern_bit_array(
+                &mut self,
+                _location: &'ast SrcSpan,
+                segments: &'ast [TypedPatternBitArraySegment],
+            ) {
+                // As in an expression, a literal segment is matched with the
+                // value of its literal.
+                for segment in segments {
+                    if !Bits::is_literal(segment, self.float) {
+                        self.visit_typed_pattern(&segment.value);
+                    }
+                    for option in &segment.options {
+                        self.visit_typed_pattern_bit_array_option(option);
+                    }
                 }
             }
 
@@ -1036,6 +1104,7 @@ impl<'a> Generator<'a> {
                 };
                 if err {
                     self.error = Some(Error::FloatLiteralOutOfRange {
+                        module: self.module.clone(),
                         location: *location,
                         value: value.clone(),
                         target: match self.float {
@@ -1048,11 +1117,12 @@ impl<'a> Generator<'a> {
         }
 
         let mut v = Validator {
+            module: module.name.clone(),
             int: self.int,
             float: self.float,
             error: None,
         };
-        v.visit_typed_module(self.module);
+        v.visit_typed_module(module);
         match v.error {
             Some(e) => Err(e),
             None => Ok(()),

@@ -1,0 +1,13 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+expression: error
+---
+IntLiteralOutOfRange {
+    module: "other",
+    location: SrcSpan {
+        start: 54,
+        end: 65,
+    },
+    value: "4294967296",
+    target: "I32",
+}

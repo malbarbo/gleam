@@ -1,0 +1,19 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+expression: "\npub fn main() {\n    case 1 {\n        x if x < 0x10000000000000000 -> x\n        x -> x\n    }\n}\n"
+---
+----- SOURCE CODE
+
+pub fn main() {
+    case 1 {
+        x if x < 0x10000000000000000 -> x
+        x -> x
+    }
+}
+
+
+----- CONFIG
+int=I64 float=F64
+
+----- ERROR
+IntLiteralOutOfRange { module: "my/mod", location: SrcSpan { start: 47, end: 66 }, value: "18446744073709551616", target: "I64" }

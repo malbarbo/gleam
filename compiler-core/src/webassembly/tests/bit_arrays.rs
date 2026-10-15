@@ -257,6 +257,18 @@ pub fn main() {
 "#);
 }
 
+/// A literal segment of a pattern is matched with the value of its literal,
+/// which does not need to fit in an Int.
+#[test]
+fn pattern_large_literal_ints() {
+    let _ = run(r#"
+pub fn main() {
+  let assert <<0xFFF0000000000000:64>> = <<0xFFF0000000000000:64>>
+  Nil
+}
+"#);
+}
+
 /// Equal bit arrays are equal and have the same hash whatever the position
 /// of their bits in their bytes.
 #[test]

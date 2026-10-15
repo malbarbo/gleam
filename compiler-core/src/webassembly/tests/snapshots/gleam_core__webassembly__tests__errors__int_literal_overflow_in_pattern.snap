@@ -1,0 +1,19 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+expression: "\npub fn main() {\n    case 1 {\n        9223372036854775808 -> 1\n        x -> x\n    }\n}\n"
+---
+----- SOURCE CODE
+
+pub fn main() {
+    case 1 {
+        9223372036854775808 -> 1
+        x -> x
+    }
+}
+
+
+----- CONFIG
+int=I64 float=F64
+
+----- ERROR
+IntLiteralOutOfRange { module: "my/mod", location: SrcSpan { start: 38, end: 57 }, value: "9223372036854775808", target: "I64" }

@@ -2220,6 +2220,7 @@ which provides a module with this name."
                         Some(*location),
                     ),
                     crate::webassembly::Error::IntLiteralOutOfRange {
+                        module: _,
                         location,
                         value,
                         target,
@@ -2230,6 +2231,7 @@ which provides a module with this name."
                         Some(*location),
                     ),
                     crate::webassembly::Error::FloatLiteralOutOfRange {
+                        module: _,
                         location,
                         value,
                         target,

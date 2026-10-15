@@ -1,0 +1,18 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+expression: "\nconst big = 9223372036854775808\n\npub fn main() {\n    big\n}\n"
+---
+----- SOURCE CODE
+
+const big = 9223372036854775808
+
+pub fn main() {
+    big
+}
+
+
+----- CONFIG
+int=I64 float=F64
+
+----- ERROR
+IntLiteralOutOfRange { module: "my/mod", location: SrcSpan { start: 13, end: 32 }, value: "9223372036854775808", target: "I64" }

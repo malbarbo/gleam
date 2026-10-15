@@ -198,6 +198,80 @@ pub fn main() {
 }
 
 #[test]
+fn int_literal_overflow_in_guard() {
+    assert_wasm_validate_error!(
+        r#"
+pub fn main() {
+    case 1 {
+        x if x < 0x10000000000000000 -> x
+        x -> x
+    }
+}
+"#,
+        crate::config::WasmInt::I64,
+        crate::config::WasmFloat::F64,
+    );
+}
+
+#[test]
+fn int_literal_overflow_in_pattern() {
+    assert_wasm_validate_error!(
+        r#"
+pub fn main() {
+    case 1 {
+        9223372036854775808 -> 1
+        x -> x
+    }
+}
+"#,
+        crate::config::WasmInt::I64,
+        crate::config::WasmFloat::F64,
+    );
+}
+
+#[test]
+fn int_literal_overflow_in_constant() {
+    assert_wasm_validate_error!(
+        r#"
+const big = 9223372036854775808
+
+pub fn main() {
+    big
+}
+"#,
+        crate::config::WasmInt::I64,
+        crate::config::WasmFloat::F64,
+    );
+}
+
+/// A literal of an imported module is reported in that module.
+#[test]
+fn int_literal_overflow_in_imported_module() {
+    let error = super::compile_wasm_error_with(
+        r#"
+import other
+
+pub fn main() {
+  other.size(1)
+}
+"#,
+        vec![(
+            super::TEST_PACKAGE,
+            "other",
+            r#"
+pub fn size(x: Int) -> Int {
+  case x {
+    x if x < 0x100000000 -> 4
+    _ -> 8
+  }
+}
+"#,
+        )],
+    );
+    insta::assert_debug_snapshot!(error);
+}
+
+#[test]
 fn int_literal_overflow_i64() {
     assert_wasm_validate_error!(
         r#"

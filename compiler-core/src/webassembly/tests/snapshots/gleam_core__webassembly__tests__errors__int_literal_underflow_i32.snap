@@ -1,8 +1,6 @@
 ---
 source: compiler-core/src/webassembly/tests/errors.rs
-assertion_line: 90
 expression: "\npub fn main() {\n    -2147483649\n}\n"
-snapshot_kind: text
 ---
 ----- SOURCE CODE
 
@@ -12,4 +10,4 @@ pub fn main() {
 
 
 ----- ERROR
-IntLiteralOutOfRange { location: SrcSpan { start: 21, end: 32 }, value: "-2147483649", target: "I32" }
+IntLiteralOutOfRange { module: "my/mod", location: SrcSpan { start: 21, end: 32 }, value: "-2147483649", target: "I32" }
