@@ -23,6 +23,7 @@ use src_span::SrcSpan;
 #[derive(Debug, Default)]
 struct CallGraphBuilder<'a> {
     names: imbl::HashMap<&'a str, Option<(NodeIndex, SrcSpan)>>,
+    functions: std::collections::HashSet<NodeIndex>,
     graph: StableGraph<(), (), Directed>,
     current_function: NodeIndex,
 }
@@ -53,6 +54,7 @@ impl<'a> CallGraphBuilder<'a> {
 
         let index = self.graph.add_node(());
         let previous = self.names.insert(name, Some((index, location)));
+        _ = self.functions.insert(index);
 
         if let Some(Some((_, previous_location))) = previous {
             return Err(Error::DuplicateName {
@@ -62,6 +64,17 @@ impl<'a> CallGraphBuilder<'a> {
             });
         }
         Ok(())
+    }
+
+    /// Whether `expression` is a module function that is not shadowed.
+    fn is_module_function(&self, expression: &UntypedExpr) -> bool {
+        let UntypedExpr::Var { name, .. } = expression else {
+            return false;
+        };
+        matches!(
+            self.names.get(name.as_str()),
+            Some(Some((index, _))) if self.functions.contains(index)
+        )
     }
 
     /// Add each constant to the graph, storing the index of the node under the
@@ -253,6 +266,10 @@ impl<'a> CallGraphBuilder<'a> {
                     self.expression(tail);
                 }
             }
+
+            // A function has no fields, so this is the access of an imported
+            // module with the same name as a module function.
+            UntypedExpr::FieldAccess { container, .. } if self.is_module_function(container) => {}
 
             UntypedExpr::NegateInt {
                 value: expression, ..

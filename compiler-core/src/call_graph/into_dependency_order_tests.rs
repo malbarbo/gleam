@@ -255,6 +255,20 @@ fn record_access() {
     );
 }
 
+// `b.wibble` is the access of a module named `b`, as a function has no fields.
+#[test]
+fn module_access_with_the_name_of_a_function() {
+    let functions = [
+        ("a", [].as_slice(), "1"),
+        ("b", [].as_slice(), r#"c()"#),
+        ("c", [].as_slice(), r#"b.wibble()"#),
+    ];
+    assert_eq!(
+        parse_and_order(functions.as_slice(), [].as_slice()).unwrap(),
+        vec![vec!["a"], vec!["c"], vec!["b"]]
+    );
+}
+
 #[test]
 fn binop() {
     let functions = [
