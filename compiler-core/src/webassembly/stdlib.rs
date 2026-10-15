@@ -112,8 +112,73 @@ impl Instructions<'_, '_> {
         }
     }
 
+    /// Shifts the `Int` of `x` by the `Int` of `n`, which it changes, by any
+    /// amount: a negative shift goes the other way, and shifting by the
+    /// width of `Int` or more gives 0 (or -1 for an arithmetic right shift
+    /// of a negative number), unlike the wasm instructions that take the
+    /// shift modulo the width.
+    pub(super) fn int_shift(&mut self, left: bool, x: LocalId, n: LocalId) -> &mut Self {
+        let int_vt = self.int.val_type();
+        let bits = self.int_bits();
+        // `amount` is non negative or `MIN` (whose negation is itself);
+        // compared unsigned, `MIN` is out of range like any big shift.
+        let shl = |s: &mut Instructions<'_, '_>, amount: LocalId| {
+            let _ = s
+                .local_get(amount)
+                .int_const(&bits.into())
+                .int_ge_u()
+                .if_else(
+                    int_vt,
+                    |then_s| {
+                        let _ = then_s.int_const(&0.into());
+                    },
+                    |else_s| {
+                        let _ = else_s.local_get(x).local_get(amount).int_shl();
+                    },
+                );
+        };
+        let shr = |s: &mut Instructions<'_, '_>, amount: LocalId| {
+            let _ = s
+                .local_get(amount)
+                .int_const(&bits.into())
+                .int_ge_u()
+                .if_else(
+                    int_vt,
+                    |then_s| {
+                        let _ = then_s
+                            .local_get(x)
+                            .int_const(&(bits - 1).into())
+                            .int_shr_s();
+                    },
+                    |else_s| {
+                        let _ = else_s.local_get(x).local_get(amount).int_shr_s();
+                    },
+                );
+        };
+        #[rustfmt::skip]
+        let _ = self
+            .local_get(n)
+            .int_const(&0.into())
+            .int_lt()
+            .if_else(
+                int_vt,
+                |then_s| {
+                    let _ = then_s
+                        .int_const(&0.into())
+                        .local_get(n)
+                        .int_sub()
+                        .local_set(n);
+                    if left { shr(then_s, n) } else { shl(then_s, n) }
+                },
+                |else_s| {
+                    if left { shl(else_s, n) } else { shr(else_s, n) }
+                },
+            );
+        self
+    }
+
     /// Shifts the `Int` on the stack by the constant `amount`, like
-    /// `code_int_shift` does for any amount.
+    /// `int_shift` does for any amount.
     pub(super) fn int_shift_by(&mut self, left: bool, amount: &BigInt) -> &mut Self {
         let (left, amount) = if *amount < BigInt::from(0) {
             (!left, -amount)
@@ -151,10 +216,7 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    /// Shifts by any amount: a negative shift goes the other way, and shifting
-    /// by the width of `Int` or more gives 0 (or -1 for an arithmetic right
-    /// shift of a negative number), unlike the wasm instructions that take
-    /// the shift modulo the width.
+    /// Shifts by any amount, see `Instructions::int_shift`.
     pub(super) fn code_int_shift(&mut self, left: bool) -> FunctionId {
         let int_vt = self.int.val_type();
         // params
@@ -166,62 +228,9 @@ impl<'a> Generator<'a> {
             "_int_bitwise_shift_right"
         };
         let mut function = Function::new(self, name, &[x, n], &[int_vt]);
-        let mut instructions = function.extend_instructions(self);
-        let bits = instructions.int_bits();
-        // `amount` is on the stack, non negative or `MIN` (whose negation is
-        // itself); compared unsigned, `MIN` is out of range like any big shift.
-        let shl = |s: &mut Instructions<'_, '_>, amount: LocalId| {
-            let _ = s
-                .local_get(amount)
-                .int_const(&bits.into())
-                .int_ge_u()
-                .if_else(
-                    int_vt,
-                    |then_s| {
-                        let _ = then_s.int_const(&0.into());
-                    },
-                    |else_s| {
-                        let _ = else_s.local_get(x).local_get(amount).int_shl();
-                    },
-                );
-        };
-        let shr = |s: &mut Instructions<'_, '_>, amount: LocalId| {
-            let _ = s
-                .local_get(amount)
-                .int_const(&bits.into())
-                .int_ge_u()
-                .if_else(
-                    int_vt,
-                    |then_s| {
-                        let _ = then_s
-                            .local_get(x)
-                            .int_const(&(bits - 1).into())
-                            .int_shr_s();
-                    },
-                    |else_s| {
-                        let _ = else_s.local_get(x).local_get(amount).int_shr_s();
-                    },
-                );
-        };
-        #[rustfmt::skip]
-        let _ = instructions
-            .local_get(n)
-            .int_const(&0.into())
-            .int_lt()
-            .if_else(
-                int_vt,
-                |then_s| {
-                    let _ = then_s
-                        .int_const(&0.into())
-                        .local_get(n)
-                        .int_sub()
-                        .local_set(n);
-                    if left { shr(then_s, n) } else { shl(then_s, n) }
-                },
-                |else_s| {
-                    if left { shl(else_s, n) } else { shr(else_s, n) }
-                },
-            )
+        let _ = function
+            .extend_instructions(self)
+            .int_shift(left, x, n)
             .end();
         function.finish(self)
     }

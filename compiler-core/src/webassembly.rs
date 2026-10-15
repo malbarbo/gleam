@@ -4436,12 +4436,22 @@ impl<'a> Generator<'a> {
                         | BuiltinFunctionExternal::IntBitwiseShiftRight),
                     ) = builtin
                         && let [x, n] = arguments.as_slice()
-                        && let TypedExpr::Int { int_value, .. } = &n.value
                     {
+                        // A shift is emitted in place, by a constant amount
+                        // or by any amount.
                         let left = builtin == BuiltinFunctionExternal::IntBitwiseShiftLeft;
-                        let _ = instructions
-                            .expression(self, locals, scope, &x.value)
-                            .int_shift_by(left, int_value);
+                        let _ = instructions.expression(self, locals, scope.clone(), &x.value);
+                        if let TypedExpr::Int { int_value, .. } = &n.value {
+                            let _ = instructions.int_shift_by(left, int_value);
+                        } else {
+                            let value = self.wasm_local(self.int.val_type());
+                            let amount = self.wasm_local(self.int.val_type());
+                            let _ = instructions
+                                .local_set(value)
+                                .expression(self, locals, scope, &n.value)
+                                .local_set(amount)
+                                .int_shift(left, value, amount);
+                        }
                         return;
                     }
                     if let Some(builtin) = builtin {
