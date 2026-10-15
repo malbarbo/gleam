@@ -694,38 +694,9 @@ fn read_int_little(
   }
 }
 
-/// Whether the `size` bits of `bits` at `at` are a float of 16, 32 or 64
-/// bits that is finite, or the 0.0 of no bits.
-pub fn bit_array_is_float(
-  bits: Bits,
-  at: Int,
-  size: Int,
-  little: Bool,
-) -> Bool {
-  let position = bits.start + at
-  case size {
-    0 -> True
-    16 -> {
-      let half = read_int(bits.bytes, position, 16, little)
-      bitwise_and(half, 0x7C00) != 0x7C00
-    }
-    32 -> {
-      let single = read_int(bits.bytes, position, 32, little)
-      bitwise_and(single, 0x7F800000) != 0x7F800000
-    }
-    64 -> {
-      let high = case little {
-        False -> read_int(bits.bytes, position, 32, False)
-        True -> read_int(bits.bytes, position + 32, 32, True)
-      }
-      bitwise_and(high, 0x7FF00000) != 0x7FF00000
-    }
-    _ -> False
-  }
-}
-
-/// The float of the `size` bits of `bits` at `at`, which
-/// `bit_array_is_float` accepts.
+/// The float of the `size` bits of `bits` at `at`, or the 0.0 of no bits.
+/// It is not finite when the bits are not those of a finite float, or when
+/// `size` is not 0, 16, 32 or 64, so that the pattern does not match.
 pub fn bit_array_read_float(
   bits: Bits,
   at: Int,
@@ -740,7 +711,7 @@ pub fn bit_array_read_float(
         float16_to_float32(read_int(bits.bytes, position, 16, little)),
       )
     32 -> float32_from_bits(read_int(bits.bytes, position, 32, little))
-    _ -> {
+    64 -> {
       let first = read_int(bits.bytes, position, 32, little)
       let second = read_int(bits.bytes, position + 32, 32, little)
       case little {
@@ -748,11 +719,12 @@ pub fn bit_array_read_float(
         True -> float64_from_bits(second, first)
       }
     }
+    // A NaN.
+    _ -> float64_from_bits(0x7FF80000, 0)
   }
 }
 
-/// The bits of the 32 bits float of the finite 16 bits float of the bits
-/// `half`.
+/// The bits of the 32 bits float of the 16 bits float of the bits `half`.
 fn float16_to_float32(half: Int) -> Int {
   let sign = bitwise_shift_left(bitwise_shift_right(half, 15), 31)
   let exponent = bitwise_and(bitwise_shift_right(half, 10), 0x1F)
@@ -760,6 +732,12 @@ fn float16_to_float32(half: Int) -> Int {
   case exponent, fraction {
     0, 0 -> sign
     0, _ -> float16_subnormal(sign, fraction, 113)
+    // An infinity or a NaN.
+    0x1F, _ ->
+      bitwise_or(
+        sign,
+        bitwise_or(0x7F800000, bitwise_shift_left(fraction, 13)),
+      )
     _, _ ->
       bitwise_or(
         sign,

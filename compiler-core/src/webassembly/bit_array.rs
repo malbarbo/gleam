@@ -1021,21 +1021,8 @@ impl Generator<'_> {
         };
         let bits_type = self.bits_type();
         let arguments = vec![bits_type.clone(), type_::int(), type_::int()];
-        if type_.is_float() {
-            let is_float = self.runtime_function_id(
-                BIT_ARRAY_MODULE,
-                "bit_array_is_float",
-                [arguments.as_slice(), &[type_::bool()]].concat(),
-                type_::bool(),
-            );
-            self.push_read_arguments(instructions, matching, &size);
-            let _ = instructions
-                .bool_const(little)
-                .call(is_float)
-                .bool_not()
-                .br_if(matching.fail_target);
-        }
-        if !value.is_discard() {
+        // A float is read even when discarded, as it must be finite.
+        if !value.is_discard() || type_.is_float() {
             // The read function, with its flags after the arguments.
             let (name, flags, result) = if type_.is_int() {
                 (
@@ -1058,6 +1045,18 @@ impl Generator<'_> {
             }
             let read = self.runtime_function_id(BIT_ARRAY_MODULE, name, arguments, result);
             let _ = instructions.call(read);
+            if type_.is_float() {
+                // It is finite when subtracting it from itself gives 0.
+                let float = self.wasm_local(self.float.val_type());
+                let _ = instructions
+                    .local_tee(float)
+                    .local_get(float)
+                    .float_sub()
+                    .float_const("0.0")
+                    .float_ne()
+                    .br_if(matching.fail_target)
+                    .local_get(float);
+            }
             if let Pattern::Float { value, .. } = value {
                 // A float is equal to the literal when its bits are, so 0.0
                 // and -0.0 are different.

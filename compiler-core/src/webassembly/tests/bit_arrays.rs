@@ -768,6 +768,11 @@ pub fn main() {
   let assert True = <<id(0.1):32-float>> == <<0.1:32-float>>
   let assert <<1.1:float>> = <<id(1.1):float>>
   let assert <<1.1:float>> = <<1.1:float>>
+  // A float of 64 bits larger than any `Float` does not match.
+  let assert True = case <<0x7E37E43C:32, 0x0800759C:32>> {
+    <<_:float>> -> False
+    _ -> True
+  }
   Nil
 }
 "#,
