@@ -88,6 +88,15 @@ impl Bits {
         pushed
     }
 
+    /// Whether `segment` is a literal, written from the value of its
+    /// literals.
+    pub(super) fn is_literal<V: Literal>(
+        segment: &BitArraySegment<V, Arc<Type>>,
+        float: FloatType,
+    ) -> bool {
+        Bits::default().push_segment(segment, float).is_some()
+    }
+
     /// The unsigned integer of the bits.
     fn unsigned(&self) -> BigInt {
         (0..self.size).fold(BigInt::ZERO, |value, index| {
@@ -443,6 +452,7 @@ impl Generator<'_> {
     /// `expression_bit_array` does.
     pub(super) fn constant_bit_array(
         &mut self,
+        scope: &Scope,
         instructions: &mut Instructions<'_, '_>,
         segments: &[TypedConstantBitArraySegment],
     ) {
@@ -450,7 +460,7 @@ impl Generator<'_> {
             instructions,
             segments,
             &mut |generator, instructions, value| {
-                let _ = instructions.constant(generator, value);
+                let _ = instructions.constant(generator, scope, value);
             },
         );
     }

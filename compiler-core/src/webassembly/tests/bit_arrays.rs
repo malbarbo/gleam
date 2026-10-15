@@ -1322,3 +1322,18 @@ pub fn main() {
     );
     assert!(result.status.success(), "{}", result.stderr);
 }
+
+/// A literal integer segment is written from its literal, which does not need
+/// to fit in an `Int`.
+#[test]
+fn construction_literal_larger_than_int() {
+    let _ = run(r#"
+import bit_array
+
+pub fn main() {
+  let assert "<<255, 255, 255, 255, 255, 248, 0, 0, 0, 0:size(3)>>" =
+    bit_array.inspect(<<9_444_732_965_739_289_353_650_176:75>>)
+  Nil
+}
+"#);
+}

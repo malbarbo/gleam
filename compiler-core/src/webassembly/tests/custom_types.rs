@@ -1256,3 +1256,17 @@ fn string_inspect(value: a) -> String
 "#,
     );
 }
+
+#[test]
+fn prelude_import() {
+    run_ok(
+        r#"
+import gleam
+
+pub fn main() {
+    assert Ok(1) == gleam.Ok(1)
+    assert Nil == gleam.Nil
+}
+"#,
+    );
+}

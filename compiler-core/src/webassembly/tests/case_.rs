@@ -319,3 +319,54 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn guard_constant_with_pattern_variable() {
+    run_ok(
+        r#"
+pub fn main() {
+    assert case True {
+        a if #(a) == #(True) -> True
+        _ -> False
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn guard_list_with_tail() {
+    run_ok(
+        r#"
+fn go(x: List(Int), y: List(Int)) {
+    case x {
+        [_, ..x] if [1, 2, ..x] == y -> True
+        _ -> False
+    }
+}
+
+pub fn main() {
+    assert go([2, 3, 4], [1, 2, 3, 4])
+    assert !go([2, 3], [1, 2])
+}
+"#,
+    );
+}
+
+#[test]
+fn let_enum_with_one_value() {
+    run_ok(
+        r#"
+pub type NoFields {
+    NoFields
+}
+
+pub fn main() {
+    let result = {
+        let NoFields = NoFields
+    }
+    assert result == NoFields
+}
+"#,
+    );
+}

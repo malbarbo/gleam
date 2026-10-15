@@ -71,8 +71,9 @@ use crate::{
         AssignName, AssignmentKind, BinOp, ClauseGuard, Constant, PIPE_VARIABLE, Pattern,
         Publicity, Statement, StringPrefixLeftSideAssignment, TypeAst, TypeAstVar, TypedArg,
         TypedAssignment, TypedClause, TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr,
-        TypedFunction, TypedModule, TypedModuleConstant, TypedPattern, TypedRecordConstructor,
-        TypedRecordConstructorArg, TypedStatement, visit::Visit,
+        TypedExprBitArraySegment, TypedFunction, TypedModule, TypedModuleConstant, TypedPattern,
+        TypedRecordConstructor, TypedRecordConstructorArg, TypedStatement,
+        visit::{self, Visit},
     },
     type_::{
         self, Deprecation, ModuleValueConstructor, PRELUDE_MODULE_NAME, Type, TypeVar,
@@ -996,6 +997,21 @@ impl<'a> Generator<'a> {
                 }
             }
 
+            fn visit_typed_expr_bit_array_segment(
+                &mut self,
+                segment: &'ast TypedExprBitArraySegment,
+            ) {
+                // A literal segment is written from the value of its literal,
+                // which does not need to fit in an Int.
+                if Bits::is_literal(segment, self.float) {
+                    for option in &segment.options {
+                        self.visit_typed_bit_array_option(option);
+                    }
+                } else {
+                    visit::visit_typed_expr_bit_array_segment(self, segment);
+                }
+            }
+
             fn visit_typed_expr_float(
                 &mut self,
                 location: &'ast SrcSpan,
@@ -1723,6 +1739,8 @@ impl<'a> Generator<'a> {
     fn types_imported(&mut self) {
         let mut visited = HashSet::new();
         let _ = visited.insert(self.module.name.clone());
+        // The prelude can be imported, but it is not a module of the build.
+        let _ = visited.insert(PRELUDE_MODULE_NAME.into());
         let mut queue: Vec<EcoString> = self
             .module
             .definitions
@@ -3344,8 +3362,13 @@ impl<'a> Generator<'a> {
             Constant::String { value, .. } => {
                 let _ = self.string_index(value);
             }
-            Constant::Tuple { elements, .. } | Constant::List { elements, .. } => {
+            Constant::Tuple { elements, .. } => {
                 for element in elements {
+                    self.register_string_const(element);
+                }
+            }
+            Constant::List { elements, tail, .. } => {
+                for element in elements.iter().chain(tail.as_deref()) {
                     self.register_string_const(element);
                 }
             }
@@ -3380,7 +3403,12 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn _constant(&mut self, instructions: &mut Instructions<'_, '_>, const_: &TypedConstant) {
+    fn _constant(
+        &mut self,
+        scope: &Scope,
+        instructions: &mut Instructions<'_, '_>,
+        const_: &TypedConstant,
+    ) {
         match const_ {
             Constant::Int { int_value, .. } => {
                 let _ = instructions.int_const(int_value);
@@ -3393,7 +3421,10 @@ impl<'a> Generator<'a> {
                 let _ = instructions.global_as_non_null(index);
             }
             Constant::List {
-                elements, type_, ..
+                elements,
+                type_,
+                tail,
+                ..
             } => {
                 let (custom_type, cons, item_type, _) = self.list_type_cons(type_);
                 let supertype_index = self.mono_union_supertype_index(type_, &custom_type);
@@ -3403,9 +3434,12 @@ impl<'a> Generator<'a> {
                     type_.clone(),
                     cons_variant,
                 );
-                let _ = instructions.ref_null(HeapType::Concrete(supertype_index));
+                let _ = match tail {
+                    Some(tail) => instructions.constant(self, scope, tail),
+                    None => instructions.ref_null(HeapType::Concrete(supertype_index)),
+                };
                 for element in elements.iter().rev() {
-                    let _ = instructions.constant(self, element).call(cons_fn);
+                    let _ = instructions.constant(self, scope, element).call(cons_fn);
                 }
             }
             Constant::Tuple { elements, .. } => {
@@ -3418,7 +3452,7 @@ impl<'a> Generator<'a> {
                     .filter(|(_, field)| field.is_some())
                     .map(|(element, _)| element);
                 let _ = instructions
-                    .constants(self, elements)
+                    .constants(self, scope, elements)
                     .struct_new(type_index);
             }
             Constant::Record {
@@ -3450,7 +3484,11 @@ impl<'a> Generator<'a> {
                         variant,
                     );
                     let _ = instructions
-                        .constants(self, arguments.iter().flatten().map(|arg| &arg.value))
+                        .constants(
+                            self,
+                            scope,
+                            arguments.iter().flatten().map(|arg| &arg.value),
+                        )
                         .call(id);
                 }
             }
@@ -3472,12 +3510,11 @@ impl<'a> Generator<'a> {
                 {
                     self.constant_value(instructions, literal, type_);
                 } else {
-                    let scope = Scope::Global(self.globals.clone());
-                    self.expression_var(&scope, instructions, name, type_, None);
+                    self.expression_var(scope, instructions, name, type_, None);
                 }
             }
             Constant::BitArray { segments, .. } => {
-                self.constant_bit_array(instructions, segments);
+                self.constant_bit_array(scope, instructions, segments);
             }
             Constant::RecordUpdate { .. } => {
                 panic!("record update constants should not reach code generation")
@@ -3494,8 +3531,8 @@ impl<'a> Generator<'a> {
                 let concat =
                     self.get_function_builtin_external(BuiltinFunctionExternal::StringConcat);
                 let _ = instructions
-                    .constant(self, left)
-                    .constant(self, right)
+                    .constant(self, scope, left)
+                    .constant(self, scope, right)
                     .call(concat);
             }
             Constant::Todo { .. } => {
@@ -3578,15 +3615,17 @@ impl<'a> Generator<'a> {
         constant: &TypedConstant,
         type_: &Arc<Type>,
     ) {
+        // A module constant names no local variables.
+        let global = Scope::Global(self.globals.clone());
         if let Some(function) = self.constant_function(constant, type_) {
             let closure = self.closure_of(function, type_);
             let _ = instructions.global_get(closure);
         } else if is_generic_type(&constant.type_()) {
             let constant = Monomorphizer::with_bound(&constant.type_(), type_).constant(constant);
             self.register_string_const(&constant);
-            self._constant(instructions, &constant);
+            self._constant(&global, instructions, &constant);
         } else {
-            self._constant(instructions, constant);
+            self._constant(&global, instructions, constant);
         }
     }
 
@@ -5342,6 +5381,11 @@ impl<'a> Generator<'a> {
                 let name = &constructor.expect_ref("inferred pattern constructor").name;
                 let (custom_type, args) = self.custom_type_expect(type_);
                 match custom_type {
+                    // The value of an enum with one value is that value, so
+                    // it matches without a check, as an irrefutable `let`.
+                    CustomType::Enum { values } if values.len() == 1 => {
+                        let _ = instructions.drop();
+                    }
                     CustomType::Enum { values } => {
                         let value = Self::enum_value_index(&values, name);
                         let _ = instructions
@@ -5708,7 +5752,7 @@ impl<'a> Generator<'a> {
                     .bool_not();
             }
             ClauseGuard::Constant(constant) => {
-                let _ = instructions.constant(self, constant);
+                let _ = instructions.constant(self, scope, constant);
             }
             ClauseGuard::Block { value, .. } => {
                 let _ = instructions.clause_guard(self, locals, scope, value);
@@ -5772,7 +5816,8 @@ impl<'a> Generator<'a> {
                 }
             }
             ClauseGuard::ModuleSelect { literal, .. } => {
-                let _ = instructions.constant(self, literal);
+                let global = Scope::Global(self.globals.clone());
+                let _ = instructions.constant(self, &global, literal);
             }
             ClauseGuard::Invalid { .. } => {
                 panic!("invalid guards should not reach code generation")

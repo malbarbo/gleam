@@ -487,19 +487,21 @@ impl<'a, 'b> Instructions<'a, 'b> {
     pub(super) fn constant(
         &mut self,
         generator: &mut Generator<'_>,
+        scope: &Scope,
         const_: &TypedConstant,
     ) -> &mut Self {
-        generator._constant(self, const_);
+        generator._constant(scope, self, const_);
         self
     }
 
     pub(super) fn constants<'c>(
         &mut self,
         generator: &mut Generator<'_>,
+        scope: &Scope,
         consts: impl IntoIterator<Item = &'c TypedConstant>,
     ) -> &mut Self {
         for const_ in consts {
-            generator._constant(self, const_);
+            generator._constant(scope, self, const_);
         }
         self
     }

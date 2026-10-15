@@ -382,6 +382,7 @@ impl<'a> Generator<'a> {
     pub(super) fn function_constants(&mut self) -> FunctionId {
         let mut function = Function::new(self, "$constants", &[], &[]);
         let mut instructions = function.extend_instructions(self);
+        let scope = Scope::Global(self.globals.clone());
         for const_ in self.consts.clone() {
             match const_ {
                 WasmConst::Global { dest, src } => {
@@ -391,7 +392,9 @@ impl<'a> Generator<'a> {
                     global_index,
                     value,
                 } => {
-                    let _ = instructions.constant(self, &value).global_set(global_index);
+                    let _ = instructions
+                        .constant(self, &scope, &value)
+                        .global_set(global_index);
                 }
                 WasmConst::Struct {
                     global_index,
@@ -403,7 +406,7 @@ impl<'a> Generator<'a> {
                         let _ = instructions.i32_const(tag);
                     }
                     let _ = instructions
-                        .constants(self, &elements)
+                        .constants(self, &scope, &elements)
                         .struct_new(type_index)
                         .global_set(global_index);
                 }
