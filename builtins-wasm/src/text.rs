@@ -6,6 +6,10 @@ use alloc::vec::Vec;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub fn length(s: &str) -> i64 {
+    if s.is_ascii() {
+        // Every ASCII character is a grapheme, except "\r\n", which is one.
+        return (s.len() - s.matches("\r\n").count()) as i64;
+    }
     s.graphemes(true).count() as i64
 }
 
