@@ -1270,3 +1270,38 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn enum_value_with_the_name_of_an_imported_value() {
+    let result = super::run_wasm(
+        r#"
+import thepackage/option.{type Option, None}
+import thepackage/policy.{Strict as Restrict}
+
+pub fn main() {
+    let x: Option(Int) = None
+    assert x == option.None
+    assert policy.None != policy.Lax
+    assert Restrict == policy.Strict
+    0
+}
+"#,
+        vec![
+            (
+                super::TEST_PACKAGE,
+                "thepackage/option",
+                "pub type Option(a) { Some(a) None }",
+            ),
+            (
+                super::TEST_PACKAGE,
+                "thepackage/policy",
+                "pub type Policy { Lax Strict None }",
+            ),
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}

@@ -1806,16 +1806,18 @@ impl<'a> Generator<'a> {
                 .iter()
                 .all(|constructor| constructor.arguments.is_empty())
             {
-                let export =
-                    custom_type.publicity.is_public() && module_name != PRELUDE_MODULE_NAME;
-                for (value, constructor) in custom_type.constructors.iter().enumerate() {
-                    let _ = self.add_const(
-                        &constructor.name,
-                        ValType::I32,
-                        ConstExpr::Value(Value::I32(value as i32)),
-                        export,
-                        false,
-                    );
+                // The values are exported for the host, a value is used by
+                // its index (see `expression_var`).
+                if custom_type.publicity.is_public() && module_name == self.module.name {
+                    for (value, constructor) in custom_type.constructors.iter().enumerate() {
+                        let _ = self.add_const(
+                            &constructor.name,
+                            ValType::I32,
+                            ConstExpr::Value(Value::I32(value as i32)),
+                            true,
+                            false,
+                        );
+                    }
                 }
                 CustomType::Enum {
                     values: custom_type
@@ -5047,6 +5049,14 @@ impl<'a> Generator<'a> {
                 "local function {name} used as a value is not marked as one"
             );
             self.local_function_value(scope, instructions, &info);
+            return;
+        }
+        if type_.fn_types().is_none()
+            && let Some((CustomType::Enum { values }, _)) = self.custom_type(type_)
+            && values.contains(name)
+        {
+            let value = Self::enum_value_index(&values, name);
+            let _ = instructions.i32_const(value as i32);
             return;
         }
         let id = self.var_id(scope, name, type_);
