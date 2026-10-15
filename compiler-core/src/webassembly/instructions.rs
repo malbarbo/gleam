@@ -34,11 +34,13 @@ impl Function {
         generator: &Generator<'_>,
     ) -> Instructions<'a, 'a> {
         Instructions {
-            int: generator.int,
-            float: generator.float,
-            string: generator.string,
-            cell: generator.cell,
-            memory: generator.memory,
+            repr: Representations {
+                int: generator.int,
+                float: generator.float,
+                string: generator.string,
+                cell: generator.cell,
+                memory: generator.memory,
+            },
             seq: SeqRef::Owned(self.fb.func_body()),
         }
     }
@@ -50,13 +52,21 @@ impl Function {
 }
 
 pub(super) struct Instructions<'a, 'b> {
+    pub(super) repr: Representations,
+    seq: SeqRef<'a, 'b>,
+}
+
+/// How the values are represented in the module, fixed before its functions
+/// are generated.
+#[derive(Clone, Copy)]
+pub(super) struct Representations {
     pub(super) int: IntType,
     pub(super) float: FloatType,
     pub(super) string: StringType,
     /// The `Cell` of the runtime, see `Generator::cell`.
     pub(super) cell: TypeId,
+    /// The memory of builtins-wasm.
     pub(super) memory: Option<MemoryId>,
-    seq: SeqRef<'a, 'b>,
 }
 
 enum SeqRef<'a, 'b> {
@@ -163,19 +173,19 @@ impl<'a, 'b> Instructions<'a, 'b> {
     }
 
     pub(super) fn memory_size(&mut self) -> &mut Self {
-        let memory = self.memory.expect("memory available");
+        let memory = self.repr.memory.expect("memory available");
         let _ = self.seq.as_mut().memory_size(memory);
         self
     }
 
     pub(super) fn memory_grow(&mut self) -> &mut Self {
-        let memory = self.memory.expect("memory available");
+        let memory = self.repr.memory.expect("memory available");
         let _ = self.seq.as_mut().memory_grow(memory);
         self
     }
 
     pub(super) fn i32_store(&mut self, arg: MemArg) -> &mut Self {
-        let memory = self.memory.expect("memory available");
+        let memory = self.repr.memory.expect("memory available");
         let _ = self
             .seq
             .as_mut()
@@ -184,7 +194,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
     }
 
     pub(super) fn i32_store8(&mut self, arg: MemArg) -> &mut Self {
-        let memory = self.memory.expect("memory available");
+        let memory = self.repr.memory.expect("memory available");
         let _ = self
             .seq
             .as_mut()
@@ -193,7 +203,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
     }
 
     pub(super) fn i32_load(&mut self, arg: MemArg) -> &mut Self {
-        let memory = self.memory.expect("memory available");
+        let memory = self.repr.memory.expect("memory available");
         let _ = self
             .seq
             .as_mut()
@@ -202,7 +212,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
     }
 
     pub(super) fn i64_load(&mut self, arg: MemArg) -> &mut Self {
-        let memory = self.memory.expect("memory available");
+        let memory = self.repr.memory.expect("memory available");
         let _ = self
             .seq
             .as_mut()
@@ -211,13 +221,13 @@ impl<'a, 'b> Instructions<'a, 'b> {
     }
 
     pub(super) fn f64_load(&mut self, arg: MemArg) -> &mut Self {
-        let memory = self.memory.expect("memory available");
+        let memory = self.repr.memory.expect("memory available");
         let _ = self.seq.as_mut().load(memory, LoadKind::F64, arg);
         self
     }
 
     pub(super) fn i64_store(&mut self, arg: MemArg) -> &mut Self {
-        let memory = self.memory.expect("memory available");
+        let memory = self.repr.memory.expect("memory available");
         let _ = self
             .seq
             .as_mut()
@@ -226,13 +236,13 @@ impl<'a, 'b> Instructions<'a, 'b> {
     }
 
     pub(super) fn f64_store(&mut self, arg: MemArg) -> &mut Self {
-        let memory = self.memory.expect("memory available");
+        let memory = self.repr.memory.expect("memory available");
         let _ = self.seq.as_mut().store(memory, StoreKind::F64, arg);
         self
     }
 
     pub(super) fn i32_load8_u(&mut self, arg: MemArg) -> &mut Self {
-        let memory = self.memory.expect("memory available");
+        let memory = self.repr.memory.expect("memory available");
         let _ = self.seq.as_mut().load(
             memory,
             LoadKind::I32_8 {
@@ -257,11 +267,11 @@ impl<'a, 'b> Instructions<'a, 'b> {
         then: impl FnOnce(&mut Instructions<'_, '_>),
         else_: impl FnOnce(&mut Instructions<'_, '_>),
     ) -> &mut Self {
-        let cfg = self.cfg();
+        let repr = self.repr;
         let _ = self.seq.as_mut().if_else(
             ty,
-            |seq| sub_seq(cfg, seq, then),
-            |seq| sub_seq(cfg, seq, else_),
+            |seq| sub_seq(repr, seq, then),
+            |seq| sub_seq(repr, seq, else_),
         );
         self
     }
@@ -271,11 +281,11 @@ impl<'a, 'b> Instructions<'a, 'b> {
         ty: impl Into<InstrSeqType>,
         make_block: impl FnOnce(&mut Instructions<'_, '_>),
     ) -> &mut Self {
-        let cfg = self.cfg();
+        let repr = self.repr;
         let _ = self
             .seq
             .as_mut()
-            .block(ty, |seq| sub_seq(cfg, seq, make_block));
+            .block(ty, |seq| sub_seq(repr, seq, make_block));
         self
     }
 
@@ -284,32 +294,23 @@ impl<'a, 'b> Instructions<'a, 'b> {
         ty: impl Into<InstrSeqType>,
         make_loop: impl FnOnce(&mut Instructions<'_, '_>),
     ) -> &mut Self {
-        let cfg = self.cfg();
+        let repr = self.repr;
         let _ = self
             .seq
             .as_mut()
-            .loop_(ty, |seq| sub_seq(cfg, seq, make_loop));
+            .loop_(ty, |seq| sub_seq(repr, seq, make_loop));
         self
-    }
-
-    fn cfg(&self) -> (IntType, FloatType, StringType, TypeId, Option<MemoryId>) {
-        (self.int, self.float, self.string, self.cell, self.memory)
     }
 }
 
 fn sub_seq(
-    cfg: (IntType, FloatType, StringType, TypeId, Option<MemoryId>),
+    repr: Representations,
     seq: &mut InstrSeqBuilder<'_>,
     f: impl FnOnce(&mut Instructions<'_, '_>),
 ) {
-    let (int, float, string, cell, memory) = cfg;
     let mut s = Instructions {
+        repr,
         seq: SeqRef::Borrowed(seq),
-        int,
-        float,
-        string,
-        cell,
-        memory,
     };
     f(&mut s);
 }
@@ -324,54 +325,54 @@ impl<'a, 'b> Instructions<'a, 'b> {
 
     /// `[len] -> [bytes]`: a zeroed byte array to build a string.
     pub(super) fn bytes_new(&mut self) -> &mut Self {
-        self.array_new_default(self.string.bytes_index)
+        self.array_new_default(self.repr.string.bytes_index)
     }
 
     /// `[bytes, i, byte] -> []`.
     pub(super) fn bytes_set(&mut self) -> &mut Self {
-        self.array_set(self.string.bytes_index)
+        self.array_set(self.repr.string.bytes_index)
     }
 
     /// `[bytes, i] -> [byte]`.
     pub(super) fn bytes_get(&mut self) -> &mut Self {
-        self.array_get_u(self.string.bytes_index)
+        self.array_get_u(self.repr.string.bytes_index)
     }
 
     /// `[dst: bytes, dst_off, src: String, src_off, len] -> []`.
     pub(super) fn bytes_copy_from_string(&mut self) -> &mut Self {
-        self.call(self.string.copy_to_bytes)
+        self.call(self.repr.string.copy_to_bytes)
     }
 
     /// `[bytes] -> [String]`: the string of all the bytes, which must not be
     /// changed afterwards.
     pub(super) fn string_from_bytes(&mut self) -> &mut Self {
-        self.call(self.string.from_bytes)
+        self.call(self.repr.string.from_bytes)
     }
 
     /// `[s, i] -> [byte]`.
     pub(super) fn string_get(&mut self) -> &mut Self {
-        self.call(self.string.byte_at)
+        self.call(self.repr.string.byte_at)
     }
 
     /// `[s] -> [len]`.
     pub(super) fn string_len(&mut self) -> &mut Self {
-        self.struct_get(self.string.type_index, 2)
+        self.struct_get(self.repr.string.type_index, 2)
     }
 
     /// `[s] -> [bytes]`: the underlying array, indexed from `string_off`.
     pub(super) fn string_bytes(&mut self) -> &mut Self {
-        self.struct_get(self.string.type_index, 0)
+        self.struct_get(self.repr.string.type_index, 0)
     }
 
     /// `[s] -> [off]`.
     pub(super) fn string_off(&mut self) -> &mut Self {
-        self.struct_get(self.string.type_index, 1)
+        self.struct_get(self.repr.string.type_index, 1)
     }
 
     /// `[s, start, len] -> [String]`, sharing the bytes of `s` when the slice
     /// is big.
     pub(super) fn string_slice(&mut self) -> &mut Self {
-        self.call(self.string.slice)
+        self.call(self.repr.string.slice)
     }
 
     /// `[] -> [String]`: a new empty string.
@@ -751,7 +752,7 @@ impl IntType {
 macro_rules! int_op {
     ($name:ident, $i32:ident, $i64:ident) => {
         pub(super) fn $name(&mut self) -> &mut Self {
-            let op = match self.int {
+            let op = match self.repr.int {
                 IntType::I32 => BinaryOp::$i32,
                 IntType::I64 => BinaryOp::$i64,
             };
@@ -763,7 +764,7 @@ macro_rules! int_op {
 
 impl<'a, 'b> Instructions<'a, 'b> {
     pub(super) fn int_const(&mut self, value: &BigInt) -> &mut Self {
-        let int = self.int;
+        let int = self.repr.int;
         let _ = match int {
             IntType::I32 => self.seq.as_mut().i32_const(int.to_i32(value)).id(),
             IntType::I64 => self.seq.as_mut().i64_const(int.to_i64(value)).id(),
@@ -774,7 +775,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
     /// Gleam division: `x / 0` is 0 and `MIN / -1` wraps to `MIN` instead of
     /// trapping like `div_s`.
     pub(super) fn int_div(&mut self, dividend: LocalId, divisor: LocalId) -> &mut Self {
-        let int_vt = self.int.val_type();
+        let int_vt = self.repr.int.val_type();
         #[rustfmt::skip]
         let _ = self
             .local_set(divisor)
@@ -813,7 +814,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
 
     /// Gleam remainder: `x % 0` is 0 instead of trapping like `rem_s`.
     pub(super) fn int_rem(&mut self, dividend: LocalId, divisor: LocalId) -> &mut Self {
-        let int_vt = self.int.val_type();
+        let int_vt = self.repr.int.val_type();
         #[rustfmt::skip]
         let _ = self
             .local_set(divisor)
@@ -836,7 +837,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
     }
 
     pub(super) fn int_eqz(&mut self) -> &mut Self {
-        let op = match self.int {
+        let op = match self.repr.int {
             IntType::I32 => UnaryOp::I32Eqz,
             IntType::I64 => UnaryOp::I64Eqz,
         };
@@ -845,63 +846,63 @@ impl<'a, 'b> Instructions<'a, 'b> {
     }
 
     pub(super) fn i32_to_int(&mut self) -> &mut Self {
-        if let IntType::I64 = self.int {
+        if let IntType::I64 = self.repr.int {
             let _ = self.seq.as_mut().unop(UnaryOp::I64ExtendSI32);
         }
         self
     }
 
     pub(super) fn int_to_i32(&mut self) -> &mut Self {
-        if let IntType::I64 = self.int {
+        if let IntType::I64 = self.repr.int {
             let _ = self.seq.as_mut().unop(UnaryOp::I32WrapI64);
         }
         self
     }
 
     pub(super) fn i64_to_int(&mut self) -> &mut Self {
-        if let IntType::I32 = self.int {
+        if let IntType::I32 = self.repr.int {
             let _ = self.seq.as_mut().unop(UnaryOp::I32WrapI64);
         }
         self
     }
 
     pub(super) fn int_to_i64(&mut self) -> &mut Self {
-        if let IntType::I32 = self.int {
+        if let IntType::I32 = self.repr.int {
             let _ = self.seq.as_mut().unop(UnaryOp::I64ExtendSI32);
         }
         self
     }
 
     pub(super) fn f32_to_float(&mut self) -> &mut Self {
-        if let FloatType::F64 = self.float {
+        if let FloatType::F64 = self.repr.float {
             let _ = self.seq.as_mut().unop(UnaryOp::F64PromoteF32);
         }
         self
     }
 
     pub(super) fn float_to_f32(&mut self) -> &mut Self {
-        if let FloatType::F64 = self.float {
+        if let FloatType::F64 = self.repr.float {
             let _ = self.seq.as_mut().unop(UnaryOp::F32DemoteF64);
         }
         self
     }
 
     pub(super) fn f64_to_float(&mut self) -> &mut Self {
-        if let FloatType::F32 = self.float {
+        if let FloatType::F32 = self.repr.float {
             let _ = self.seq.as_mut().unop(UnaryOp::F32DemoteF64);
         }
         self
     }
 
     pub(super) fn float_to_f64(&mut self) -> &mut Self {
-        if let FloatType::F32 = self.float {
+        if let FloatType::F32 = self.repr.float {
             let _ = self.seq.as_mut().unop(UnaryOp::F64PromoteF32);
         }
         self
     }
 
     pub(super) fn int_to_float(&mut self) -> &mut Self {
-        let op = match (self.int, self.float) {
+        let op = match (self.repr.int, self.repr.float) {
             (IntType::I32, FloatType::F32) => UnaryOp::F32ConvertSI32,
             (IntType::I32, FloatType::F64) => UnaryOp::F64ConvertSI32,
             (IntType::I64, FloatType::F32) => UnaryOp::F32ConvertSI64,
@@ -914,7 +915,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
     /// Saturating conversion: NaN gives 0 and out of range values give the
     /// minimum or maximum `Int`.
     pub(super) fn float_to_int_sat(&mut self) -> &mut Self {
-        let op = match (self.float, self.int) {
+        let op = match (self.repr.float, self.repr.int) {
             (FloatType::F32, IntType::I32) => UnaryOp::I32TruncSSatF32,
             (FloatType::F64, IntType::I32) => UnaryOp::I32TruncSSatF64,
             (FloatType::F32, IntType::I64) => UnaryOp::I64TruncSSatF32,
@@ -952,7 +953,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
 
     /// `[Float] -> [i32 or i64]`: the bits of a `Float`.
     pub(super) fn float_reinterpret(&mut self) -> &mut Self {
-        let op = match self.float {
+        let op = match self.repr.float {
             FloatType::F32 => UnaryOp::I32ReinterpretF32,
             FloatType::F64 => UnaryOp::I64ReinterpretF64,
         };
@@ -962,7 +963,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
 
     /// The number of bits of `Int`.
     pub(super) fn int_bits(&self) -> i32 {
-        match self.int {
+        match self.repr.int {
             IntType::I32 => 32,
             IntType::I64 => 64,
         }
@@ -1024,7 +1025,7 @@ impl FloatType {
 macro_rules! float_op {
     ($name:ident, $f32:ident, $f64:ident) => {
         pub(super) fn $name(&mut self) -> &mut Self {
-            let op = match self.float {
+            let op = match self.repr.float {
                 FloatType::F32 => BinaryOp::$f32,
                 FloatType::F64 => BinaryOp::$f64,
             };
@@ -1037,7 +1038,7 @@ macro_rules! float_op {
 macro_rules! float_unop {
     ($name:ident, $f32:ident, $f64:ident) => {
         pub(super) fn $name(&mut self) -> &mut Self {
-            let op = match self.float {
+            let op = match self.repr.float {
                 FloatType::F32 => UnaryOp::$f32,
                 FloatType::F64 => UnaryOp::$f64,
             };
@@ -1049,8 +1050,8 @@ macro_rules! float_unop {
 
 impl<'a, 'b> Instructions<'a, 'b> {
     pub(super) fn float_const(&mut self, value: &str) -> &mut Self {
-        let value = self.float.literal_value(value);
-        let _ = match self.float {
+        let value = self.repr.float.literal_value(value);
+        let _ = match self.repr.float {
             FloatType::F32 => self.seq.as_mut().f32_const(value as f32).id(),
             FloatType::F64 => self.seq.as_mut().f64_const(value).id(),
         };
@@ -1058,7 +1059,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
     }
 
     pub(super) fn float_div(&mut self, dividend: LocalId, divisor: LocalId) -> &mut Self {
-        match self.float {
+        match self.repr.float {
             FloatType::F32 => {
                 #[rustfmt::skip]
                 let _ = self

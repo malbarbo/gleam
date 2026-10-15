@@ -37,11 +37,11 @@ impl Instructions<'_, '_> {
             B::BytesGet => self.bytes_get().i32_to_int(),
             B::BytesSet => self.bytes_set().i32_const(0),
             B::BytesCopy => self
-                .array_copy(self.string.bytes_index, self.string.bytes_index)
+                .array_copy(self.repr.string.bytes_index, self.repr.string.bytes_index)
                 .i32_const(0),
             B::StringBytes => self.string_bytes(),
             B::StringOffset => self.string_off().i32_to_int(),
-            B::BytesToString => self.struct_new(self.string.type_index),
+            B::BytesToString => self.struct_new(self.repr.string.type_index),
             B::Float64Byte => self
                 .i64_shr_u()
                 .i32_wrap_i64()
@@ -51,9 +51,9 @@ impl Instructions<'_, '_> {
             B::Float32Byte => self.i32_shr_u().i32_const(0xFF).i32_and().i32_to_int(),
             B::Float64FromBits => self.i64_or().f64_reinterpret_i64().f64_to_float(),
             B::Float32FromBits => self.f32_reinterpret_i32().f32_to_float(),
-            B::CellNew => self.struct_new(self.cell),
-            B::CellGet => self.struct_get(self.cell, 0).i64_to_int(),
-            B::CellSet => self.struct_set(self.cell, 0).i32_const(0),
+            B::CellNew => self.struct_new(self.repr.cell),
+            B::CellGet => self.struct_get(self.repr.cell, 0).i64_to_int(),
+            B::CellSet => self.struct_set(self.repr.cell, 0).i32_const(0),
             B::StringConcat
             | B::StringGetByte
             | B::IntToUtfCodepoint
@@ -118,7 +118,7 @@ impl Instructions<'_, '_> {
     /// of a negative number), unlike the wasm instructions that take the
     /// shift modulo the width.
     pub(super) fn int_shift(&mut self, left: bool, x: LocalId, n: LocalId) -> &mut Self {
-        let int_vt = self.int.val_type();
+        let int_vt = self.repr.int.val_type();
         let bits = self.int_bits();
         // `amount` is non negative or `MIN` (whose negation is itself);
         // compared unsigned, `MIN` is out of range like any big shift.
