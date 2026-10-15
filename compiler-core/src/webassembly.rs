@@ -2094,16 +2094,28 @@ impl<'a> Generator<'a> {
 
     fn functions(&mut self) {
         for function in &self.module.definitions.functions {
-            if function.publicity.is_public()
-                && !is_generic_type(&function_type(function))
-                && function.external_webassembly.is_none()
-            {
-                let id = self.function(function, true, function_name(function).into());
-                if is_main_funtion(function) {
-                    self.main = Some(id.func_id())
-                }
+            if !function.publicity.is_public() || function.external_webassembly.is_some() {
+                // Private and external functions are compiled elsewhere.
+                continue;
             }
-            // Private, generic, and external functions are compiled elsewhere.
+            let base_name: EcoString = function_name(function).into();
+            let id = if !is_generic_type(&function_type(function)) {
+                self.function(function, true, base_name)
+            } else if function.arguments.is_empty() {
+                // The host calls the functions without arguments, like `main`
+                // and the tests, so they are exported with their generic
+                // result as `Nil`.
+                let type_ = type_::fn_(vec![], type_::nil());
+                let id = self.function_generic(function, &type_, false, base_name.clone());
+                let _ = self.wasm_module.exports.add(&base_name, id.func_id());
+                id
+            } else {
+                // Other generic functions are compiled by each use.
+                continue;
+            };
+            if is_main_funtion(function) {
+                self.main = Some(id.func_id())
+            }
         }
     }
 
