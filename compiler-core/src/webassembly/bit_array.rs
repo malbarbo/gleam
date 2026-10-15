@@ -385,12 +385,12 @@ impl Write {
         }
     }
 
-    /// The type of the value that it writes, with `bits` for a bit array.
-    fn value_type(self, bits: &Arc<Type>) -> Arc<Type> {
+    /// The type of the value that it writes.
+    fn value_type(self) -> Arc<Type> {
         match self {
             Write::Int(_) => type_::int(),
             Write::Float(_) => type_::float(),
-            Write::Bits => bits.clone(),
+            Write::Bits => type_::bit_array(),
             Write::Utf8 | Write::Utf16(_) | Write::Utf32(_) => type_::string(),
             Write::CodepointUtf8 | Write::CodepointUtf16(_) | Write::CodepointUtf32(_) => {
                 type_::utf_codepoint()
@@ -475,13 +475,12 @@ impl Generator<'_> {
             evaluate(self, instructions, &segment.value);
             return;
         }
-        let bits_type = self.bits_type();
         // A first segment that is a whole bit array is extended (see
         // `bit_array_extend`).
         let extended = match segments {
             [first, ..] if first.size().is_none() && first.value.literal(self.float).is_none() => {
                 first.type_.is_bit_array().then(|| {
-                    let val_type = self.val_type(&bits_type);
+                    let val_type = self.val_type(&type_::bit_array());
                     let local = self.wasm_local(val_type);
                     evaluate(self, instructions, &first.value);
                     let _ = instructions.local_set(local);
@@ -537,13 +536,13 @@ impl Generator<'_> {
             }
             Some(first) => {
                 let size = self.wasm_local(self.int.val_type());
-                let val_type = self.val_type(&bits_type);
+                let val_type = self.val_type(&type_::bit_array());
                 let result = self.wasm_local(val_type);
                 let extend = self.runtime_function_id(
                     BIT_ARRAY_MODULE,
                     "bit_array_extend",
-                    vec![bits_type.clone(), type_::int()],
-                    bits_type.clone(),
+                    vec![type_::bit_array(), type_::int()],
+                    type_::bit_array(),
                 );
                 let _ = instructions
                     .local_set(size)
@@ -551,7 +550,7 @@ impl Generator<'_> {
                     .local_get(size)
                     .call(extend)
                     .local_tee(result);
-                self.bits_field(instructions, 0);
+                self.bits_field(instructions, "bytes");
                 let _ = instructions.local_set(bytes);
                 Some((size, result))
             }
@@ -565,13 +564,13 @@ impl Generator<'_> {
             }
             Some((size, result)) => {
                 let _ = instructions.local_get(result);
-                self.bits_field(instructions, 2);
+                self.bits_field(instructions, "end");
                 let _ = instructions.local_get(size).int_sub();
             }
         }
         for part in parts {
             let (name, takes_size) = part.write.function();
-            let value_type = part.write.value_type(&bits_type);
+            let value_type = part.write.value_type();
             let mut arguments = vec![bytes_type.clone(), type_::int(), value_type];
             let _ = match part.value {
                 SegmentValue::Local(local) => instructions.local_get(local),
@@ -610,12 +609,11 @@ impl Generator<'_> {
             return id;
         }
         let bytes_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bytes", vec![]);
-        let bits_type = self.bits_type();
         let id = self.runtime_function_id(
             BIT_ARRAY_MODULE,
             "bit_array_from_bytes",
             vec![bytes_type, type_::int()],
-            bits_type,
+            type_::bit_array(),
         );
         self.bit_array_from_bytes = Some(id);
         id
@@ -624,14 +622,14 @@ impl Generator<'_> {
     /// Pushes the number of bits of the `Bits` of `bits`.
     fn push_bit_size(&mut self, instructions: &mut Instructions<'_, '_>, bits: LocalId) {
         let _ = instructions.local_get(bits);
-        self.bits_field(instructions, 2);
+        self.bits_field(instructions, "end");
         let _ = instructions.local_get(bits);
-        self.bits_field(instructions, 1);
+        self.bits_field(instructions, "start");
         let _ = instructions.int_sub();
     }
 
-    /// Replaces the `Bits` of the runtime on the stack by its field `index`.
-    fn bits_field(&mut self, instructions: &mut Instructions<'_, '_>, index: u64) {
+    /// Replaces the `Bits` of the runtime on the stack by its field `label`.
+    fn bits_field(&mut self, instructions: &mut Instructions<'_, '_>, label: &str) {
         let bits_type = self.bits_type();
         let (
             CustomType::Struct {
@@ -645,7 +643,12 @@ impl Generator<'_> {
         };
         let (type_index, types) =
             self.mono_struct_type_index(&bits_type, &custom_type, &constructor, &args);
-        let field = self.field_index(&types, index);
+        let index = constructor
+            .arguments
+            .iter()
+            .position(|argument| matches!(&argument.label, Some((_, l)) if l == label))
+            .expect("Bits to have the field");
+        let field = self.field_index(&types, index as u64);
         let _ = instructions.field_get(type_index, field);
     }
 
@@ -746,8 +749,7 @@ impl Generator<'_> {
         if let Some((name, with_value)) = runtime {
             let mut arguments = vec![];
             if with_value {
-                let bits_type = self.bits_type();
-                arguments.push(write.value_type(&bits_type));
+                arguments.push(write.value_type());
                 let _ = instructions.local_get(value);
             }
             match size {
@@ -905,7 +907,6 @@ impl Generator<'_> {
     ) {
         let size = SegmentSize::Constant(bits.size);
         self.check_room(instructions, matching, &size, last);
-        let bits_type = self.bits_type();
         if bits.size == 0 {
             // Nothing to compare.
         } else if bits.size < instructions.int_bits() as u64 {
@@ -913,7 +914,7 @@ impl Generator<'_> {
                 BIT_ARRAY_MODULE,
                 "bit_array_read_int",
                 vec![
-                    bits_type,
+                    type_::bit_array(),
                     type_::int(),
                     type_::int(),
                     type_::bool(),
@@ -933,7 +934,7 @@ impl Generator<'_> {
             let match_ = self.runtime_function_id(
                 BIT_ARRAY_MODULE,
                 "bit_array_match",
-                vec![bits_type.clone(), type_::int(), bits_type],
+                vec![type_::bit_array(), type_::int(), type_::bit_array()],
                 type_::bool(),
             );
             let global = self.bit_array_global(bits);
@@ -1019,8 +1020,7 @@ impl Generator<'_> {
                 SegmentSize::Local(local)
             }
         };
-        let bits_type = self.bits_type();
-        let arguments = vec![bits_type.clone(), type_::int(), type_::int()];
+        let arguments = vec![type_::bit_array(), type_::int(), type_::int()];
         // A float is read even when discarded, as it must be finite.
         if !value.is_discard() || type_.is_float() {
             // The read function, with its flags after the arguments.
@@ -1033,7 +1033,7 @@ impl Generator<'_> {
             } else if type_.is_float() {
                 ("bit_array_read_float", vec![little], type_::float())
             } else if type_.is_bit_array() {
-                ("bit_array_read_bits", vec![], bits_type)
+                ("bit_array_read_bits", vec![], type_::bit_array())
             } else {
                 panic!("invalid bit array segment type {type_:?}")
             };
@@ -1093,7 +1093,6 @@ impl Generator<'_> {
         segment: &TypedPatternBitArraySegment,
         last: bool,
     ) -> Scope {
-        let bits_type = self.bits_type();
         let write = Write::of(segment);
         let read = match write {
             Write::CodepointUtf8 => "bit_array_read_codepoint_utf8",
@@ -1106,7 +1105,7 @@ impl Generator<'_> {
             | Write::Utf16(_)
             | Write::Utf32(_) => panic!("invalid code point segment {write:?}"),
         };
-        let mut arguments = vec![bits_type, type_::int()];
+        let mut arguments = vec![type_::bit_array(), type_::int()];
         push_bits_at(instructions, matching);
         if let Some(little) = write.little() {
             arguments.push(type_::bool());

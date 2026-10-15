@@ -531,7 +531,7 @@ impl<'a> Generator<'a> {
     }
 
     /// The function `name` of the runtime module `module`, with the type
-    /// `fn(arguments) -> return_`.
+    /// `fn(arguments) -> return_` (see `represent`).
     pub(super) fn runtime_function_id(
         &mut self,
         module: &str,
@@ -539,11 +539,8 @@ impl<'a> Generator<'a> {
         arguments: Vec<Arc<Type>>,
         return_: Arc<Type>,
     ) -> FunctionId {
-        self.function_imported(
-            &module.into(),
-            &name.into(),
-            &type_::fn_(arguments, return_),
-        )
-        .func_id()
+        let type_ = self.represent(&type_::fn_(arguments, return_));
+        self.function_imported(&module.into(), &name.into(), &type_)
+            .func_id()
     }
 }
