@@ -17,6 +17,7 @@ mod runtime;
 mod scope;
 mod specialization;
 mod stdlib;
+mod string;
 #[cfg(test)]
 mod tests;
 
@@ -42,6 +43,7 @@ pub const HOST: &str = include_str!("../templates/wasm_host.mjs");
 pub const HOST_FILE: &str = "host.mjs";
 use scope::*;
 use specialization::*;
+use string::*;
 
 use ecow::EcoString;
 use indexmap::IndexMap;
@@ -76,7 +78,7 @@ use crate::{
         TypedStatement,
         visit::{self, Visit},
     },
-    config::{WasmFloat, WasmInt, WebAssemblyConfig},
+    config::{WasmFloat, WasmInt, WasmString, WebAssemblyConfig},
     type_::{
         self, Deprecation, ModuleValueConstructor, PRELUDE_MODULE_NAME, Type, TypeVar,
         ValueConstructor, ValueConstructorVariant,
@@ -875,7 +877,7 @@ impl<'a> Generator<'a> {
             (wasm_module, memory, Linking::Stubs(linker))
         };
         let bytes = BytesType::new(&mut wasm_module);
-        let string = StringType::new(&mut wasm_module, bytes);
+        let string = StringType::new(&mut wasm_module, bytes, config.string);
         let cell = wasm_module.types.add_struct(vec![FieldType {
             element_type: StorageType::Val(ValType::I64),
             mutable: true,
@@ -5578,7 +5580,6 @@ impl<'a> Generator<'a> {
                 ..
             } => {
                 let subject = locals.for_pattern(pattern);
-                let prefix_len = unescape(left_side_string).len() as i32;
                 let starts_with = self.function_string_starts_with();
                 let prefix_index = self.string_index(left_side_string);
 
@@ -5600,15 +5601,8 @@ impl<'a> Generator<'a> {
                 if let AssignName::Variable(name) = right_side_assignment {
                     let rest_local = locals._get(right_location);
                     scope = scope.insert_local(name.clone(), rest_local);
-                    // rest = subject[prefix_len..]
                     let _ = instructions
-                        .local_get(subject)
-                        .i32_const(prefix_len)
-                        .local_get(subject)
-                        .string_len()
-                        .i32_const(prefix_len)
-                        .i32_sub()
-                        .string_slice()
+                        .string_drop_prefix(subject, &unescape(left_side_string))
                         .local_set(rest_local);
                 }
             }

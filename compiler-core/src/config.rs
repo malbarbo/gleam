@@ -799,6 +799,8 @@ pub struct WebAssemblyConfig {
     #[serde(default)]
     pub float: WasmFloat,
     #[serde(default)]
+    pub string: WasmString,
+    #[serde(default)]
     pub opt_level: WasmOptLevel,
 }
 
@@ -818,6 +820,15 @@ pub enum WasmFloat {
     #[serde(rename = "F64")]
     #[default]
     F64,
+}
+
+/// The representation of `String`.
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy, Default)]
+pub enum WasmString {
+    /// A view over an array of UTF-8 bytes.
+    #[serde(rename = "UTF8")]
+    #[default]
+    Utf8,
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy, Default)]

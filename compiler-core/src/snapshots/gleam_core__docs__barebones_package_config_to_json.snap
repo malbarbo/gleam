@@ -50,6 +50,7 @@ version = "1.0.0"
     "webassembly": {
       "int": "I32",
       "float": "F64",
+      "string": "UTF8",
       "opt_level": "0"
     },
     "target": "erlang",
