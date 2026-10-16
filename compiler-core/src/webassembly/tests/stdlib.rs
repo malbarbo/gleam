@@ -252,6 +252,8 @@ const STRING: &str = r#"
 fn byte_size(a: String) -> Int
 @external(webassembly, "builtins", "_string_byte_slice")
 fn byte_slice(a: String, start: Int, length: Int) -> String
+@external(webassembly, "builtins", "_string_codeunit_slice")
+fn codeunit_slice(a: String, start: Int, length: Int) -> String
 @external(webassembly, "builtins", "_string_pop_codeunit")
 fn pop_codeunit(a: String) -> #(Int, String)
 @external(webassembly, "builtins", "_string_starts_with")
@@ -283,6 +285,8 @@ pub fn main() {{
     let assert 6 = byte_size("héllo")
     let assert "ll" = byte_slice("hello", 2, 2)
     let assert "" = byte_slice("hello", 5, 0)
+    // the code units are the bytes
+    let assert "á" = codeunit_slice("olá", 2, 2)
     let assert #(104, "ello") = pop_codeunit("hello")
     let assert #(0, "") = pop_codeunit("")
     let assert True = starts_with("hello", "he")

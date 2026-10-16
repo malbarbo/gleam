@@ -49,9 +49,10 @@ export async function instantiate(url) {
     builtins: ["js-string"],
     importedStringConstants: "'",
   });
-  // The builtins that the runtime provides are not imports, so these are
-  // left only when it does not have them.
-  if (WebAssembly.Module.imports(module).some((i) => i.module === "wasm:js-string")) {
+  // The builtins and the string literals that the runtime provides are not
+  // imports, so these are left only when it does not have them.
+  const builtins = ["wasm:js-string", "'"];
+  if (WebAssembly.Module.imports(module).some((i) => builtins.includes(i.module))) {
     throw new Error(
       'This module was compiled with string = "JSString" and needs a runtime ' +
         "with the JavaScript string builtins of WebAssembly, " +

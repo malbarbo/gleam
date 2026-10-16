@@ -90,7 +90,7 @@ impl JsString {
             &[EXTERNREF, units_vt, i32],
             &[i32],
         );
-        let utf8_len = code_utf8_len(module, length, code_point_at);
+        let utf8_len = code_utf8_len(module, length, char_code_at);
         let to_utf8 = code_to_utf8(module, bytes, units, length, into_char_code_array);
         let from_utf8 = code_from_utf8(module, bytes, units, from_char_code_array);
         let from_bytes = {
@@ -146,55 +146,81 @@ fn utf8_width(seq: &mut InstrSeqBuilder<'_>, c: LocalId) {
     }
 }
 
+/// Sets `total` to the number of UTF-8 bytes of the `n` units that `unit`
+/// pushes for the index in `i`: 1 to 3 for each unit, but 4 for a high
+/// surrogate followed by a low one, as `_string_to_utf8` encodes them.
+#[allow(clippy::too_many_arguments)]
+fn utf8_count(
+    seq: &mut InstrSeqBuilder<'_>,
+    n: LocalId,
+    i: LocalId,
+    c: LocalId,
+    prev: LocalId,
+    total: LocalId,
+    unit: impl Fn(&mut InstrSeqBuilder<'_>),
+) {
+    let _ = seq.block(InstrSeqType::Simple(None), |block_s| {
+        let block_id = block_s.id();
+        let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
+            let loop_id = loop_s.id();
+            let _ = loop_s
+                .local_get(i)
+                .local_get(n)
+                .binop(BinaryOp::I32GeU)
+                .br_if(block_id);
+            unit(loop_s);
+            let _ = loop_s.local_set(c).local_get(total);
+            utf8_width(loop_s, c);
+            #[rustfmt::skip]
+            let _ = loop_s
+                .binop(BinaryOp::I32Add)
+                // a low surrogate after a high one: 4 bytes for both
+                .local_get(c)
+                .i32_const(0xFC00)
+                .binop(BinaryOp::I32And)
+                .i32_const(0xDC00)
+                .binop(BinaryOp::I32Eq)
+                .local_get(prev)
+                .i32_const(0xFC00)
+                .binop(BinaryOp::I32And)
+                .i32_const(0xD800)
+                .binop(BinaryOp::I32Eq)
+                .binop(BinaryOp::I32And)
+                .i32_const(1)
+                .binop(BinaryOp::I32Shl)
+                .binop(BinaryOp::I32Sub)
+                .local_set(total)
+                .local_get(c)
+                .local_set(prev)
+                .local_get(i)
+                .i32_const(1)
+                .binop(BinaryOp::I32Add)
+                .local_set(i)
+                .br(loop_id);
+        });
+    });
+}
+
 /// `_string_utf8_len(s)`, without converting `s`.
 fn code_utf8_len(
     module: &mut walrus::Module,
     length: FunctionId,
-    code_point_at: FunctionId,
+    char_code_at: FunctionId,
 ) -> FunctionId {
     let s = module.locals.add(EXTERN);
     let n = module.locals.add(ValType::I32);
     let i = module.locals.add(ValType::I32);
     let c = module.locals.add(ValType::I32);
+    let prev = module.locals.add(ValType::I32);
     let total = module.locals.add(ValType::I32);
     let mut fb = FunctionBuilder::new(&mut module.types, &[EXTERN], &[ValType::I32]);
     let _ = fb.name("_string_utf8_len".into());
     let mut body = fb.func_body();
-    let _ = body
-        .local_get(s)
-        .call(length)
-        .local_set(n)
-        .block(InstrSeqType::Simple(None), |block_s| {
-            let block_id = block_s.id();
-            let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
-                let loop_id = loop_s.id();
-                let _ = loop_s
-                    .local_get(i)
-                    .local_get(n)
-                    .binop(BinaryOp::I32GeU)
-                    .br_if(block_id)
-                    .local_get(s)
-                    .local_get(i)
-                    .call(code_point_at)
-                    .local_set(c)
-                    .local_get(total);
-                utf8_width(loop_s, c);
-                let _ = loop_s
-                    .binop(BinaryOp::I32Add)
-                    .local_set(total)
-                    // a code point above U+FFFF takes two units
-                    .local_get(i)
-                    .i32_const(1)
-                    .binop(BinaryOp::I32Add)
-                    .local_get(c)
-                    .i32_const(0x10000)
-                    .binop(BinaryOp::I32GeU)
-                    .binop(BinaryOp::I32Add)
-                    .local_set(i)
-                    .br(loop_id);
-            });
-        })
-        .local_get(total);
+    let _ = body.local_get(s).call(length).local_set(n);
+    utf8_count(&mut body, n, i, c, prev, total, |seq| {
+        let _ = seq.local_get(s).local_get(i).call(char_code_at);
+    });
+    let _ = body.local_get(total);
     fb.finish(vec![s], &mut module.funcs)
 }
 
@@ -209,7 +235,7 @@ fn is_surrogate(seq: &mut InstrSeqBuilder<'_>, c: LocalId) {
 }
 
 /// `_string_to_utf8(s)`: the units of `s` are copied to an array, counted
-/// and encoded from there. A lone surrogate becomes U+FFFD, as with
+/// (with `utf8_count`) and encoded from there. A lone surrogate becomes U+FFFD, as with
 /// `TextEncoder`.
 fn code_to_utf8(
     module: &mut walrus::Module,
@@ -230,6 +256,7 @@ fn code_to_utf8(
     let j = module.locals.add(ValType::I32);
     let c = module.locals.add(ValType::I32);
     let d = module.locals.add(ValType::I32);
+    let prev = module.locals.add(ValType::I32);
     let total = module.locals.add(ValType::I32);
     let mut fb = FunctionBuilder::new(&mut module.types, &[EXTERN], &[bytes_vt]);
     let _ = fb.name("_string_to_utf8".into());
@@ -245,63 +272,12 @@ fn code_to_utf8(
         .local_get(a)
         .i32_const(0)
         .call(into_char_code_array)
-        .drop()
-        // the number of bytes: 1 to 3 for each unit, but 4 for a pair
-        .block(InstrSeqType::Simple(None), |block_s| {
-            let block_id = block_s.id();
-            let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
-                let loop_id = loop_s.id();
-                let _ = loop_s
-                    .local_get(i)
-                    .local_get(n)
-                    .binop(BinaryOp::I32GeU)
-                    .br_if(block_id)
-                    .local_get(a)
-                    .local_get(i)
-                    .array_get_u(units)
-                    .local_tee(c)
-                    .i32_const(0xFC00)
-                    .binop(BinaryOp::I32And)
-                    .i32_const(0xDC00)
-                    .binop(BinaryOp::I32Eq)
-                    .local_get(i)
-                    .if_else(
-                        ValType::I32,
-                        |then_s| {
-                            let _ = then_s
-                                .local_get(a)
-                                .local_get(i)
-                                .i32_const(1)
-                                .binop(BinaryOp::I32Sub)
-                                .array_get_u(units)
-                                .i32_const(0xFC00)
-                                .binop(BinaryOp::I32And)
-                                .i32_const(0xD800)
-                                .binop(BinaryOp::I32Eq);
-                        },
-                        |else_s| {
-                            let _ = else_s.i32_const(0);
-                        },
-                    )
-                    .binop(BinaryOp::I32And)
-                    // a low surrogate after a high one: 4 bytes for both
-                    .i32_const(1)
-                    .binop(BinaryOp::I32Shl)
-                    .local_set(d)
-                    .local_get(total);
-                utf8_width(loop_s, c);
-                let _ = loop_s
-                    .binop(BinaryOp::I32Add)
-                    .local_get(d)
-                    .binop(BinaryOp::I32Sub)
-                    .local_set(total)
-                    .local_get(i)
-                    .i32_const(1)
-                    .binop(BinaryOp::I32Add)
-                    .local_set(i)
-                    .br(loop_id);
-            });
-        })
+        .drop();
+    utf8_count(&mut body, n, i, c, prev, total, |seq| {
+        let _ = seq.local_get(a).local_get(i).array_get_u(units);
+    });
+    #[rustfmt::skip]
+    let _ = body
         .local_get(total)
         .array_new_default(bytes.index)
         .local_set(out)
@@ -727,6 +703,8 @@ impl<'a> Generator<'a> {
     /// surrogate and a unit from 0xE000, which comes first as a code point.
     pub(super) fn code_js_string_less_than(&mut self, js: JsString) -> FunctionId {
         let i = self.wasm_local(ValType::I32);
+        let a_len = self.wasm_local(ValType::I32);
+        let b_len = self.wasm_local(ValType::I32);
         let x = self.wasm_local(ValType::I32);
         let y = self.wasm_local(ValType::I32);
         // Moves the surrogates after the units from 0xE000, which keeps the
@@ -762,20 +740,24 @@ impl<'a> Generator<'a> {
         self.code_js_string_binary("_string_less_than", BOOL_VALTYPE, |s, a, b| {
             #[rustfmt::skip]
             let _ = s
+                .local_get(a)
+                .call(js.length)
+                .local_set(a_len)
+                .local_get(b)
+                .call(js.length)
+                .local_set(b_len)
                 .loop_(InstrSeqType::Simple(None), |loop_s| {
                     let loop_id = loop_s.id();
                     let _ = loop_s
                         // the shorter string is less when it is a prefix
                         .local_get(i)
-                        .local_get(b)
-                        .call(js.length)
+                        .local_get(b_len)
                         .i32_ge_u()
                         .if_(InstrSeqType::Simple(None), |body| {
                             let _ = body.bool_const(false).return_();
                         })
                         .local_get(i)
-                        .local_get(a)
-                        .call(js.length)
+                        .local_get(a_len)
                         .i32_ge_u()
                         .if_(InstrSeqType::Simple(None), |body| {
                             let _ = body.bool_const(true).return_();
@@ -1040,7 +1022,6 @@ impl<'a> Generator<'a> {
         let len = self.wasm_local(ValType::I32);
         let window = self.wasm_local(ValType::I32);
         let w = self.wasm_local(ValType::I32);
-        let part = self.wasm_local(EXTERN);
         let part_len = self.wasm_local(ValType::I32);
         let n = self.wasm_local(ValType::I32);
         let mark = self.wasm_local(ValType::I32);
@@ -1090,12 +1071,9 @@ impl<'a> Generator<'a> {
                     .i32_const(0)
                     .local_get(w)
                     .call(js.substring)
-                    .local_tee(part)
-                    .local_get(part)
-                    .call(js.utf8_len)
-                    .local_tee(part_len)
+                    .i32_const(-1)
                     .call(lower_string)
-                    .local_get(part_len)
+                    .local_tee(part_len)
                     // complete when the window is the whole string
                     .local_get(w)
                     .local_get(len)

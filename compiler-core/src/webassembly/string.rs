@@ -975,15 +975,8 @@ impl<'a> Generator<'a> {
         let (name, params) = string_join_signature(with_separator, strings, separator);
         let mut function = Function::new(self, name, &params, &[string_vt]);
         let mut instructions = function.extend_instructions(self);
-        let for_each = |s: &mut Instructions<'_, '_>, body: &dyn Fn(&mut Instructions<'_, '_>)| {
-            let _ = s.string_list_for_each(cons, strings, l, item, body);
-        };
-        let separator_before =
-            |s: &mut Instructions<'_, '_>, body: &dyn Fn(&mut Instructions<'_, '_>)| {
-                let _ = s.separator_before(with_separator, seen, body);
-            };
-        for_each(&mut instructions, &|s| {
-            separator_before(s, &|s| {
+        let _ = instructions.string_list_for_each(cons, strings, l, item, &|s| {
+            let _ = s.separator_before(with_separator, seen, &|s| {
                 let _ = s
                     .local_get(total)
                     .local_get(separator)
@@ -1004,8 +997,8 @@ impl<'a> Generator<'a> {
             .local_set(r)
             .i32_const(0)
             .local_set(seen);
-        for_each(&mut instructions, &|s| {
-            separator_before(s, &|s| {
+        let _ = instructions.string_list_for_each(cons, strings, l, item, &|s| {
+            let _ = s.separator_before(with_separator, seen, &|s| {
                 let _ = s
                     .local_get(r)
                     .local_get(pos)
@@ -1091,7 +1084,6 @@ impl<'a> Generator<'a> {
                     .local_get(s)
                     .local_get(window)
                     .call(lower_string)
-                    .local_get(window)
                     // complete when the window is the whole string
                     .local_get(window)
                     .local_get(len)
