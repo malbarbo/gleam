@@ -152,6 +152,16 @@ pub fn unaligned_27_test() {
   assert a == 70_821_197_049_655
 }
 
+// The value doesn't fit in the 64-bit `Int` of WebAssembly.
+@target(erlang)
+pub fn unaligned_28_test() {
+  let assert <<_:14, a:71-big-signed, _:bits>> = <<
+    250, 72, 223, 189, 41, 97, 165, 0, 0, 0, 0, 177,
+  >>
+  assert a == 515_906_807_693_217_628_160
+}
+
+@target(javascript)
 pub fn unaligned_28_test() {
   let assert <<_:14, a:71-big-signed, _:bits>> = <<
     250, 72, 223, 189, 41, 97, 165, 0, 0, 0, 0, 177,

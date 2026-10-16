@@ -16,3 +16,6 @@ allow_read = [
   "gleam.toml",
   "test"
 ]
+
+[webassembly]
+int = "I64"
