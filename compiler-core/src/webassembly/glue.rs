@@ -257,7 +257,7 @@ impl<'a> Generator<'a> {
     /// arena.
     fn code_lower_string(&mut self) -> FunctionId {
         let string_vt = self.string.val_type();
-        let bytes_vt = self.string.bytes_val_type();
+        let bytes_vt = self.bytes.val_type();
         let cabi_realloc = self.rust_function(CABI_REALLOC);
         // params
         let s = self.wasm_local(string_vt); // String
@@ -459,7 +459,7 @@ impl<'a> Generator<'a> {
         let ptr = self.wasm_local(ValType::I32);
         let len = self.wasm_local(ValType::I32);
         let i = self.wasm_local(ValType::I32);
-        let r = self.wasm_local(self.string.bytes_val_type());
+        let r = self.wasm_local(self.bytes.val_type());
         let mut function = Function::new(self, "_lift_string", &[addr], &[string_vt]);
         #[rustfmt::skip]
         let _ = function

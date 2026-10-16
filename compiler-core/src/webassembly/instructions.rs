@@ -37,6 +37,7 @@ impl Function {
             repr: Representations {
                 int: generator.int,
                 float: generator.float,
+                bytes: generator.bytes,
                 string: generator.string,
                 cell: generator.cell,
                 memory: generator.memory,
@@ -62,6 +63,7 @@ pub(super) struct Instructions<'a, 'b> {
 pub(super) struct Representations {
     pub(super) int: IntType,
     pub(super) float: FloatType,
+    pub(super) bytes: BytesType,
     pub(super) string: StringType,
     /// The `Cell` of the runtime, see `Generator::cell`.
     pub(super) cell: TypeId,
@@ -325,17 +327,22 @@ impl<'a, 'b> Instructions<'a, 'b> {
 
     /// `[len] -> [bytes]`: a zeroed byte array to build a string.
     pub(super) fn bytes_new(&mut self) -> &mut Self {
-        self.array_new_default(self.repr.string.bytes_index)
+        self.array_new_default(self.repr.bytes.index)
     }
 
     /// `[bytes, i, byte] -> []`.
     pub(super) fn bytes_set(&mut self) -> &mut Self {
-        self.array_set(self.repr.string.bytes_index)
+        self.array_set(self.repr.bytes.index)
     }
 
     /// `[bytes, i] -> [byte]`.
     pub(super) fn bytes_get(&mut self) -> &mut Self {
-        self.array_get_u(self.repr.string.bytes_index)
+        self.array_get_u(self.repr.bytes.index)
+    }
+
+    /// `[dst: bytes, dst_off, src: bytes, src_off, len] -> []`.
+    pub(super) fn bytes_copy(&mut self) -> &mut Self {
+        self.array_copy(self.repr.bytes.index, self.repr.bytes.index)
     }
 
     /// `[dst: bytes, dst_off, src: String, src_off, len] -> []`.
@@ -1140,8 +1147,6 @@ pub(super) const STRING_SLICE_COPY_MAX: i32 = 64;
 pub(super) struct StringType {
     /// The `String` struct.
     pub(super) type_index: TypeId,
-    /// The byte array of strings.
-    pub(super) bytes_index: TypeId,
     /// `(s: String, i: i32) -> i32`: the byte at `i`.
     byte_at: FunctionId,
     /// `(bytes) -> String`: a string with all of `bytes`.
@@ -1153,17 +1158,38 @@ pub(super) struct StringType {
     slice: FunctionId,
 }
 
-impl StringType {
-    pub(super) fn new(module: &mut walrus::Module) -> StringType {
-        let bytes_index = module.types.add_array(FieldType {
+/// The byte array of strings and bit arrays, the `Bytes` of the runtime.
+#[derive(Clone, Copy)]
+pub(super) struct BytesType {
+    pub(super) index: TypeId,
+}
+
+impl BytesType {
+    pub(super) fn new(module: &mut walrus::Module) -> BytesType {
+        let index = module.types.add_array(FieldType {
             element_type: StorageType::I8,
             mutable: true,
         });
-        module.types.get_mut(bytes_index).name = Some("Bytes".into());
-        let bytes_vt = ValType::Ref(RefType {
-            heap_type: HeapType::Concrete(bytes_index),
+        module.types.get_mut(index).name = Some("Bytes".into());
+        BytesType { index }
+    }
+
+    pub(super) fn wasm_type() -> WasmType {
+        WasmType::array(StorageType::I8)
+    }
+
+    pub(super) fn val_type(&self) -> ValType {
+        ValType::Ref(RefType {
+            heap_type: HeapType::Concrete(self.index),
             nullable: false,
-        });
+        })
+    }
+}
+
+impl StringType {
+    pub(super) fn new(module: &mut walrus::Module, bytes: BytesType) -> StringType {
+        let bytes_index = bytes.index;
+        let bytes_vt = bytes.val_type();
         let immutable = |val_type| FieldType {
             element_type: StorageType::Val(val_type),
             mutable: false,
@@ -1311,16 +1337,11 @@ impl StringType {
 
         StringType {
             type_index,
-            bytes_index,
             byte_at,
             from_bytes,
             copy_to_bytes,
             slice,
         }
-    }
-
-    pub(super) fn wasm_type() -> WasmType {
-        WasmType::array(StorageType::I8)
     }
 
     pub(super) fn val_type(&self) -> ValType {
@@ -1339,12 +1360,5 @@ impl StringType {
 
     pub(super) fn heap_type(&self) -> HeapType {
         HeapType::Concrete(self.type_index)
-    }
-
-    pub(super) fn bytes_val_type(&self) -> ValType {
-        ValType::Ref(RefType {
-            heap_type: HeapType::Concrete(self.bytes_index),
-            nullable: false,
-        })
     }
 }

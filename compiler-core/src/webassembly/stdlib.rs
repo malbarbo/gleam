@@ -36,9 +36,7 @@ impl Instructions<'_, '_> {
             B::BytesSize => self.array_len().i32_to_int(),
             B::BytesGet => self.bytes_get().i32_to_int(),
             B::BytesSet => self.bytes_set().i32_const(0),
-            B::BytesCopy => self
-                .array_copy(self.repr.string.bytes_index, self.repr.string.bytes_index)
-                .i32_const(0),
+            B::BytesCopy => self.bytes_copy().i32_const(0),
             B::StringBytes => self.string_bytes(),
             B::StringOffset => self.string_off().i32_to_int(),
             B::BytesToString => self.struct_new(self.repr.string.type_index),
@@ -531,7 +529,7 @@ impl<'a> Generator<'a> {
         let total = self.wasm_local(ValType::I32); // I32
         let pos = self.wasm_local(ValType::I32); // I32
         let seen = self.wasm_local(ValType::I32); // Bool
-        let r = self.wasm_local(self.string.bytes_val_type());
+        let r = self.wasm_local(self.bytes.val_type());
         let (name, params) = if with_separator {
             ("_string_join", vec![strings, separator])
         } else {

@@ -371,7 +371,7 @@ impl<'a> Generator<'a> {
         let _ = instructions
             .i32_const(0)
             .i32_const(length)
-            .array_new_data(self.string.bytes_index, data);
+            .array_new_data(self.bytes.index, data);
     }
 
     /// Creates the constants of the module. It is generated before the start
@@ -500,7 +500,7 @@ impl<'a> Generator<'a> {
         let len_a = self.wasm_local(ValType::I32); // I32
         let len_b = self.wasm_local(ValType::I32); // I32
         // result bytes
-        let r = self.wasm_local(self.string.bytes_val_type());
+        let r = self.wasm_local(self.bytes.val_type());
         let mut function = Function::new(self, "_string_concat", &[a, b], &[string_vt]);
         let mut instructions = function.extend_instructions(self);
         #[rustfmt::skip]
@@ -2185,7 +2185,7 @@ impl<'a> Generator<'a> {
         // locals
         let i = self.wasm_local(ValType::I32); // I32
         // result bytes
-        let s = self.wasm_local(self.string.bytes_val_type());
+        let s = self.wasm_local(self.bytes.val_type());
         let mut function = Function::new(self, "_memory_to_string", &[src, len], &[string_vt]);
         let mut instructions = function.extend_instructions(self);
         #[rustfmt::skip]

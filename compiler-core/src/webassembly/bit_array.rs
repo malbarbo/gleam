@@ -517,7 +517,7 @@ impl Generator<'_> {
         }
 
         let bytes_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bytes", vec![]);
-        let bytes = self.wasm_local(self.string.bytes_val_type());
+        let bytes = self.wasm_local(self.bytes.val_type());
         // The size of the segments, after the extended bit array if any.
         let constant: u64 = parts
             .iter()

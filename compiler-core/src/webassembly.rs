@@ -828,6 +828,7 @@ struct Generator<'a> {
     globals: Rc<RefCell<Vec<Id>>>,
     int: IntType,
     float: FloatType,
+    bytes: BytesType,
     string: StringType,
     /// The `Cell` of the runtime, `(struct (field (mut i64)))`: an `Int`
     /// that can be changed.
@@ -873,14 +874,15 @@ impl<'a> Generator<'a> {
             let memory = Some(linker.memory());
             (wasm_module, memory, Linking::Stubs(linker))
         };
-        let string = StringType::new(&mut wasm_module);
+        let bytes = BytesType::new(&mut wasm_module);
+        let string = StringType::new(&mut wasm_module, bytes);
         let cell = wasm_module.types.add_struct(vec![FieldType {
             element_type: StorageType::Val(ValType::I64),
             mutable: true,
         }]);
         wasm_module.types.get_mut(cell).name = Some("Cell".into());
         let mut wasm_types = IndexMap::new();
-        let _ = wasm_types.insert(StringType::wasm_type(), string.bytes_index);
+        let _ = wasm_types.insert(BytesType::wasm_type(), bytes.index);
         Generator {
             wasm_module,
             memory,
@@ -919,6 +921,7 @@ impl<'a> Generator<'a> {
                 WasmFloat::F32 => FloatType::F32,
                 WasmFloat::F64 => FloatType::F64,
             },
+            bytes,
             string,
             cell,
             module,
@@ -1437,7 +1440,7 @@ impl<'a> Generator<'a> {
             "F32" => Some((ValType::F32, Some(F32_TO_STR))),
             "F64" => Some((ValType::F64, Some(F64_TO_STR))),
             "AnyRef" => Some((ANYREF, None)),
-            "Bytes" => Some((self.string.bytes_val_type(), None)),
+            "Bytes" => Some((self.bytes.val_type(), None)),
             "Cell" => Some((self.val_type_ref(self.cell), None)),
             _ => None,
         }

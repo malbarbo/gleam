@@ -244,7 +244,7 @@ impl<'a> Generator<'a> {
     /// FNV-1a over the bytes, then mixed.
     fn code_string_hash(&mut self) -> FunctionId {
         let string_vt = self.string.val_type();
-        let bytes_vt = self.string.bytes_val_type();
+        let bytes_vt = self.bytes.val_type();
         let mix = self.function_hash_mix();
         // params
         let s = self.wasm_local(string_vt);
