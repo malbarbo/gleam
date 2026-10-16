@@ -1797,7 +1797,7 @@ pub fn main() {
 /// variables as `Nil`, also when they are inside of a function result.
 #[test]
 fn public_generic_function_without_arguments_returning_a_constructor() {
-    let result = super::run_wasm(
+    let result = run_wasm(
         r#"
 pub type Effect(r) {
     Done(r)
