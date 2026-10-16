@@ -260,19 +260,20 @@ impl Instructions<'_, '_> {
         }
     }
 
-    /// `[s, i] -> [byte]`.
+    /// `[s, i] -> [unit]`: the code unit `i` of `s`, a byte with UTF8 and a
+    /// UTF-16 unit with JSString.
     pub(super) fn string_get(&mut self) -> &mut Self {
         match self.repr.string {
             StringType::Utf8(utf8) => self.call(utf8.byte_at),
-            StringType::Js(_) => unreachable!("a JavaScript string has no bytes"),
+            StringType::Js(js) => self.call(js.char_code_at),
         }
     }
 
-    /// `[s] -> [len]`.
+    /// `[s] -> [len]`: the number of code units of `s`.
     pub(super) fn string_len(&mut self) -> &mut Self {
         match self.repr.string {
             StringType::Utf8(utf8) => self.struct_get(utf8.type_index, 2),
-            StringType::Js(_) => unreachable!("a JavaScript string has no bytes"),
+            StringType::Js(js) => self.call(js.length),
         }
     }
 
@@ -335,27 +336,21 @@ impl Instructions<'_, '_> {
         }
     }
 
-    /// `[s, start, len] -> [String]`, sharing the bytes of `s` when the slice
-    /// is big.
+    /// `[s, start, len] -> [String]`: the `len` code units from `start`,
+    /// sharing the bytes of `s` when the slice is big with UTF8.
     pub(super) fn string_slice(&mut self) -> &mut Self {
         match self.repr.string {
             StringType::Utf8(utf8) => self.call(utf8.slice),
-            StringType::Js(_) => unreachable!("a JavaScript string has no bytes"),
+            StringType::Js(js) => self.call(js.slice),
         }
     }
 
     /// `[] -> [rest]`: `s` without `prefix`, which it starts with.
     pub(super) fn string_drop_prefix(&mut self, s: LocalId, prefix: &str) -> &mut Self {
-        if let StringType::Js(js) = self.repr.string {
-            let prefix_len = prefix.encode_utf16().count() as i32;
-            return self
-                .local_get(s)
-                .i32_const(prefix_len)
-                .local_get(s)
-                .call(js.length)
-                .call(js.substring);
-        }
-        let prefix_len = prefix.len() as i32;
+        let prefix_len = match self.repr.string {
+            StringType::Utf8(_) => prefix.len(),
+            StringType::Js(_) => prefix.encode_utf16().count(),
+        } as i32;
         self.local_get(s)
             .i32_const(prefix_len)
             .local_get(s)
@@ -631,9 +626,6 @@ impl<'a> Generator<'a> {
     }
 
     pub(super) fn code_string_starts_with(&mut self) -> FunctionId {
-        if let StringType::Js(js) = self.string {
-            return self.code_js_string_affix(js, true);
-        }
         let string_vt = self.string.val_type();
         // params
         let a = self.wasm_local(string_vt); // String
@@ -699,17 +691,21 @@ impl<'a> Generator<'a> {
     /// `_string_byte_slice(s, start, length)`: the caller guarantees the
     /// bounds. A view over `s` unless the slice is small.
     pub(super) fn code_string_byte_slice(&mut self) -> FunctionId {
-        if let StringType::Js(js) = self.string {
-            return self.code_js_string_byte_slice(js);
+        match self.string {
+            StringType::Utf8(_) => self.code_string_slice("_string_byte_slice"),
+            StringType::Js(js) => self.code_js_string_byte_slice(js),
         }
+    }
+
+    /// `name(s, start, length)`: `string_slice` with `Int` arguments.
+    fn code_string_slice(&mut self, name: &str) -> FunctionId {
         let string_vt = self.string.val_type();
         let int_vt = self.int.val_type();
         // params
         let s = self.wasm_local(string_vt); // String
         let start = self.wasm_local(int_vt); // Int
         let len = self.wasm_local(int_vt); // Int
-        let mut function =
-            Function::new(self, "_string_byte_slice", &[s, start, len], &[string_vt]);
+        let mut function = Function::new(self, name, &[s, start, len], &[string_vt]);
         let _ = function
             .extend_instructions(self)
             .local_get(s)
@@ -730,29 +726,28 @@ impl<'a> Generator<'a> {
             StringType::Utf8(_) => {
                 self.get_function_builtin_external(BuiltinFunctionExternal::StringByteSlice)
             }
-            StringType::Js(js) => self.code_js_string_codeunit_slice(js),
+            StringType::Js(_) => self.code_string_slice("_string_codeunit_slice"),
         }
     }
 
     /// `_string_pop_codeunit(s)`: the first code unit of `s`, as
     /// `_string_codeunit_slice` counts them, and the rest.
     pub(super) fn code_string_pop_codeunit(&mut self) -> FunctionId {
-        if let StringType::Js(js) = self.string {
-            return self.code_js_string_pop_codeunit(js);
-        }
         let string_vt = self.string.val_type();
         let tuple = type_::tuple(vec![type_::int(), type_::string()]);
         let tuple_vt = self.val_type(&tuple);
         let tuple_index = self.type_index(&tuple);
-        let slice = self.get_function_builtin_external(BuiltinFunctionExternal::StringByteSlice);
         // params
         let s = self.wasm_local(string_vt); // String
+        // locals
+        let len = self.wasm_local(ValType::I32);
         let mut function = Function::new(self, "_string_pop_codeunit", &[s], &[tuple_vt]);
         #[rustfmt::skip]
         let _ = function
             .extend_instructions(self)
             .local_get(s)
             .string_len()
+            .local_tee(len)
             .if_else(
                 tuple_vt,
                 |then_s| {
@@ -762,13 +757,11 @@ impl<'a> Generator<'a> {
                         .string_get()
                         .i32_to_int()
                         .local_get(s)
-                        .int_const(&1.into())
-                        .local_get(s)
-                        .string_len()
+                        .i32_const(1)
+                        .local_get(len)
                         .i32_const(1)
                         .i32_sub()
-                        .i32_to_int()
-                        .call(slice)
+                        .string_slice()
                         .struct_new(tuple_index);
                 },
                 |else_s| {
@@ -783,9 +776,6 @@ impl<'a> Generator<'a> {
     }
 
     pub(super) fn code_string_ends_with(&mut self) -> FunctionId {
-        if let StringType::Js(js) = self.string {
-            return self.code_js_string_affix(js, false);
-        }
         let string_vt = self.string.val_type();
         // params
         let a = self.wasm_local(string_vt); // String
@@ -793,6 +783,7 @@ impl<'a> Generator<'a> {
         // locals
         let i = self.wasm_local(ValType::I32); // I32
         let offset = self.wasm_local(ValType::I32); // I32
+        let b_len = self.wasm_local(ValType::I32); // I32
         let mut function = Function::new(self, "_string_ends_with", &[a, b], &[BOOL_VALTYPE]);
         #[rustfmt::skip]
         let _ = function
@@ -802,6 +793,7 @@ impl<'a> Generator<'a> {
             .string_len()
             .local_get(b)
             .string_len()
+            .local_tee(b_len)
             .i32_sub()
             .local_tee(offset)
             .i32_const(0)
@@ -813,8 +805,7 @@ impl<'a> Generator<'a> {
                 let loop_id = loop_s.id();
                 let _ = loop_s
                     .local_get(i)
-                    .local_get(b)
-                    .string_len()
+                    .local_get(b_len)
                     .i32_ge_u()
                     .if_(InstrSeqType::Simple(None), |body| {
                         let _ = body.bool_const(true).return_();
@@ -843,16 +834,12 @@ impl<'a> Generator<'a> {
     /// `_string_remove_prefix` and `_string_remove_suffix`: the string without
     /// the affix, or the string itself when it does not match.
     pub(super) fn code_string_remove_affix(&mut self, prefix: bool) -> FunctionId {
-        if let StringType::Js(js) = self.string {
-            return self.code_js_string_remove_affix(js, prefix);
-        }
         let string_vt = self.string.val_type();
         let matches = if prefix {
             self.function_string_starts_with()
         } else {
             self.get_function_builtin_external(BuiltinFunctionExternal::StringEndsWith)
         };
-        let slice = self.get_function_builtin_external(BuiltinFunctionExternal::StringByteSlice);
         // params
         let s = self.wasm_local(string_vt); // String
         let affix = self.wasm_local(string_vt); // String
@@ -873,9 +860,9 @@ impl<'a> Generator<'a> {
                 |then_s| {
                     let _ = then_s.local_get(s);
                     let _ = if prefix {
-                        then_s.local_get(affix).string_len().i32_to_int()
+                        then_s.local_get(affix).string_len()
                     } else {
-                        then_s.int_const(&0.into())
+                        then_s.i32_const(0)
                     };
                     let _ = then_s
                         .local_get(s)
@@ -883,8 +870,7 @@ impl<'a> Generator<'a> {
                         .local_get(affix)
                         .string_len()
                         .i32_sub()
-                        .i32_to_int()
-                        .call(slice);
+                        .string_slice();
                 },
                 |else_s| {
                     let _ = else_s.local_get(s);
@@ -894,37 +880,79 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    /// Byte-wise comparison, like Erlang binaries.
+    /// In the order of the code points, as on Erlang: byte-wise with UTF8.
+    /// With JSString, the order of the UTF-16 units differs from it when the
+    /// first different units are a surrogate and a unit from 0xE000, which
+    /// comes first as a code point.
     pub(super) fn code_string_less_than(&mut self) -> FunctionId {
-        if let StringType::Js(js) = self.string {
-            return self.code_js_string_less_than(js);
-        }
+        let utf16 = matches!(self.string, StringType::Js(_));
         let string_vt = self.string.val_type();
         // params
         let a = self.wasm_local(string_vt); // String
         let b = self.wasm_local(string_vt); // String
         // locals
         let i = self.wasm_local(ValType::I32); // I32
+        let a_len = self.wasm_local(ValType::I32); // I32
+        let b_len = self.wasm_local(ValType::I32); // I32
         let x = self.wasm_local(ValType::I32); // I32
         let y = self.wasm_local(ValType::I32); // I32
+        // Pushes `unit`, with the surrogates moved after the units from
+        // 0xE000 with UTF-16, which keeps the order of the code points of
+        // different units.
+        let code_point_order = |s: &mut Instructions<'_, '_>, unit: LocalId| {
+            if !utf16 {
+                let _ = s.local_get(unit);
+                return;
+            }
+            #[rustfmt::skip]
+            let _ = s
+                .local_get(unit)
+                .i32_const(0xE000)
+                .i32_ge_u()
+                .if_else(
+                    ValType::I32,
+                    |then_s| {
+                        let _ = then_s.local_get(unit).i32_const(0x800).i32_sub();
+                    },
+                    |else_s| {
+                        let _ = else_s
+                            .local_get(unit)
+                            .i32_const(0xD800)
+                            .i32_ge_u()
+                            .if_else(
+                                ValType::I32,
+                                |then_s| {
+                                    let _ = then_s.local_get(unit).i32_const(0x2000).i32_add();
+                                },
+                                |else_s| {
+                                    let _ = else_s.local_get(unit);
+                                },
+                            );
+                    },
+                );
+        };
         let mut function = Function::new(self, "_string_less_than", &[a, b], &[BOOL_VALTYPE]);
         #[rustfmt::skip]
         let _ = function
             .extend_instructions(self)
+            .local_get(a)
+            .string_len()
+            .local_set(a_len)
+            .local_get(b)
+            .string_len()
+            .local_set(b_len)
             .loop_(InstrSeqType::Simple(None), |loop_s| {
                 let loop_id = loop_s.id();
                 let _ = loop_s
                     // the shorter string is less when it is a prefix
                     .local_get(i)
-                    .local_get(b)
-                    .string_len()
+                    .local_get(b_len)
                     .i32_ge_u()
                     .if_(InstrSeqType::Simple(None), |body| {
                         let _ = body.bool_const(false).return_();
                     })
                     .local_get(i)
-                    .local_get(a)
-                    .string_len()
+                    .local_get(a_len)
                     .i32_ge_u()
                     .if_(InstrSeqType::Simple(None), |body| {
                         let _ = body.bool_const(true).return_();
@@ -939,11 +967,9 @@ impl<'a> Generator<'a> {
                     .local_tee(y)
                     .i32_ne()
                     .if_(InstrSeqType::Simple(None), |body| {
-                        let _ = body
-                            .local_get(x)
-                            .local_get(y)
-                            .i32_lt_u()
-                            .return_();
+                        code_point_order(body, x);
+                        code_point_order(body, y);
+                        let _ = body.i32_lt_u().return_();
                     })
                     .i32_inc(i)
                     .br(loop_id);
@@ -1082,7 +1108,9 @@ impl<'a> Generator<'a> {
                         let _ = then_s.local_get(len).local_set(window);
                     })
                     .local_get(s)
+                    .i32_const(0)
                     .local_get(window)
+                    .string_slice()
                     .call(lower_string)
                     // complete when the window is the whole string
                     .local_get(window)

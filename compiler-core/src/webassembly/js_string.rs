@@ -40,6 +40,9 @@ pub(super) struct JsString {
     pub(super) concat: FunctionId,
     /// `(s, start, end) -> String`: the units from `start` to `end`.
     pub(super) substring: FunctionId,
+    /// `(s, start, len) -> String`: the `len` units from `start`, as
+    /// `string_slice`.
+    pub(super) slice: FunctionId,
     /// `(a, b) -> i32`.
     pub(super) equals: FunctionId,
     /// `(externref) -> i32`: whether the value is a string.
@@ -90,6 +93,22 @@ impl JsString {
             &[EXTERNREF, units_vt, i32],
             &[i32],
         );
+        let slice = {
+            let s = module.locals.add(EXTERN);
+            let start = module.locals.add(i32);
+            let len = module.locals.add(i32);
+            let mut fb = FunctionBuilder::new(&mut module.types, &[EXTERN, i32, i32], &[EXTERN]);
+            let _ = fb.name("_string_slice".into());
+            let _ = fb
+                .func_body()
+                .local_get(s)
+                .local_get(start)
+                .local_get(start)
+                .local_get(len)
+                .binop(BinaryOp::I32Add)
+                .call(substring);
+            fb.finish(vec![s, start, len], &mut module.funcs)
+        };
         let utf8_len = code_utf8_len(module, length, char_code_at);
         let to_utf8 = code_to_utf8(module, bytes, units, length, into_char_code_array);
         let from_utf8 = code_from_utf8(module, bytes, units, from_char_code_array);
@@ -113,6 +132,7 @@ impl JsString {
             code_point_at,
             concat,
             substring,
+            slice,
             equals,
             test,
             utf8_len,
@@ -149,16 +169,16 @@ fn utf8_width(seq: &mut InstrSeqBuilder<'_>, c: LocalId) {
 /// Sets `total` to the number of UTF-8 bytes of the `n` units that `unit`
 /// pushes for the index in `i`: 1 to 3 for each unit, but 4 for a high
 /// surrogate followed by a low one, as `_string_to_utf8` encodes them.
-#[allow(clippy::too_many_arguments)]
 fn utf8_count(
     seq: &mut InstrSeqBuilder<'_>,
+    locals: &mut walrus::ModuleLocals,
     n: LocalId,
     i: LocalId,
-    c: LocalId,
-    prev: LocalId,
     total: LocalId,
     unit: impl Fn(&mut InstrSeqBuilder<'_>),
 ) {
+    let c = locals.add(ValType::I32);
+    let prev = locals.add(ValType::I32);
     let _ = seq.block(InstrSeqType::Simple(None), |block_s| {
         let block_id = block_s.id();
         let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
@@ -210,14 +230,12 @@ fn code_utf8_len(
     let s = module.locals.add(EXTERN);
     let n = module.locals.add(ValType::I32);
     let i = module.locals.add(ValType::I32);
-    let c = module.locals.add(ValType::I32);
-    let prev = module.locals.add(ValType::I32);
     let total = module.locals.add(ValType::I32);
     let mut fb = FunctionBuilder::new(&mut module.types, &[EXTERN], &[ValType::I32]);
     let _ = fb.name("_string_utf8_len".into());
     let mut body = fb.func_body();
     let _ = body.local_get(s).call(length).local_set(n);
-    utf8_count(&mut body, n, i, c, prev, total, |seq| {
+    utf8_count(&mut body, &mut module.locals, n, i, total, |seq| {
         let _ = seq.local_get(s).local_get(i).call(char_code_at);
     });
     let _ = body.local_get(total);
@@ -256,7 +274,6 @@ fn code_to_utf8(
     let j = module.locals.add(ValType::I32);
     let c = module.locals.add(ValType::I32);
     let d = module.locals.add(ValType::I32);
-    let prev = module.locals.add(ValType::I32);
     let total = module.locals.add(ValType::I32);
     let mut fb = FunctionBuilder::new(&mut module.types, &[EXTERN], &[bytes_vt]);
     let _ = fb.name("_string_to_utf8".into());
@@ -273,7 +290,7 @@ fn code_to_utf8(
         .i32_const(0)
         .call(into_char_code_array)
         .drop();
-    utf8_count(&mut body, n, i, c, prev, total, |seq| {
+    utf8_count(&mut body, &mut module.locals, n, i, total, |seq| {
         let _ = seq.local_get(a).local_get(i).array_get_u(units);
     });
     #[rustfmt::skip]
@@ -698,123 +715,6 @@ impl<'a> Generator<'a> {
         })
     }
 
-    /// The order of the code points, as with UTF8 and on Erlang, not of the
-    /// UTF-16 units: they differ when the first different units are a
-    /// surrogate and a unit from 0xE000, which comes first as a code point.
-    pub(super) fn code_js_string_less_than(&mut self, js: JsString) -> FunctionId {
-        let i = self.wasm_local(ValType::I32);
-        let a_len = self.wasm_local(ValType::I32);
-        let b_len = self.wasm_local(ValType::I32);
-        let x = self.wasm_local(ValType::I32);
-        let y = self.wasm_local(ValType::I32);
-        // Moves the surrogates after the units from 0xE000, which keeps the
-        // order of the code points of different units.
-        let fix = |s: &mut Instructions<'_, '_>, unit: LocalId| {
-            #[rustfmt::skip]
-            let _ = s
-                .local_get(unit)
-                .i32_const(0xE000)
-                .i32_ge_u()
-                .if_else(
-                    ValType::I32,
-                    |then_s| {
-                        let _ = then_s.local_get(unit).i32_const(0x800).i32_sub();
-                    },
-                    |else_s| {
-                        let _ = else_s
-                            .local_get(unit)
-                            .i32_const(0xD800)
-                            .i32_ge_u()
-                            .if_else(
-                                ValType::I32,
-                                |then_s| {
-                                    let _ = then_s.local_get(unit).i32_const(0x2000).i32_add();
-                                },
-                                |else_s| {
-                                    let _ = else_s.local_get(unit);
-                                },
-                            );
-                    },
-                );
-        };
-        self.code_js_string_binary("_string_less_than", BOOL_VALTYPE, |s, a, b| {
-            #[rustfmt::skip]
-            let _ = s
-                .local_get(a)
-                .call(js.length)
-                .local_set(a_len)
-                .local_get(b)
-                .call(js.length)
-                .local_set(b_len)
-                .loop_(InstrSeqType::Simple(None), |loop_s| {
-                    let loop_id = loop_s.id();
-                    let _ = loop_s
-                        // the shorter string is less when it is a prefix
-                        .local_get(i)
-                        .local_get(b_len)
-                        .i32_ge_u()
-                        .if_(InstrSeqType::Simple(None), |body| {
-                            let _ = body.bool_const(false).return_();
-                        })
-                        .local_get(i)
-                        .local_get(a_len)
-                        .i32_ge_u()
-                        .if_(InstrSeqType::Simple(None), |body| {
-                            let _ = body.bool_const(true).return_();
-                        })
-                        .local_get(a)
-                        .local_get(i)
-                        .call(js.char_code_at)
-                        .local_tee(x)
-                        .local_get(b)
-                        .local_get(i)
-                        .call(js.char_code_at)
-                        .local_tee(y)
-                        .i32_ne()
-                        .if_(InstrSeqType::Simple(None), |body| {
-                            fix(body, x);
-                            fix(body, y);
-                            let _ = body.i32_lt_u().return_();
-                        })
-                        .i32_inc(i)
-                        .br(loop_id);
-                })
-                .unreachable();
-        })
-    }
-
-    /// Whether `a` starts with `b`, or ends with it unless `prefix`.
-    pub(super) fn code_js_string_affix(&mut self, js: JsString, prefix: bool) -> FunctionId {
-        let name = if prefix {
-            "_string_starts_with"
-        } else {
-            "_string_ends_with"
-        };
-        let n = self.wasm_local(ValType::I32);
-        let len = self.wasm_local(ValType::I32);
-        self.code_js_string_binary(name, BOOL_VALTYPE, |s, a, b| {
-            #[rustfmt::skip]
-            let _ = s
-                .local_get(a)
-                .call(js.length)
-                .local_tee(len)
-                .local_get(b)
-                .call(js.length)
-                .local_tee(n)
-                .i32_lt_u()
-                .if_(InstrSeqType::Simple(None), |then_s| {
-                    let _ = then_s.bool_const(false).return_();
-                })
-                .local_get(a);
-            let _ = if prefix {
-                s.i32_const(0).local_get(n)
-            } else {
-                s.local_get(len).local_get(n).i32_sub().local_get(len)
-            };
-            let _ = s.call(js.substring).local_get(b).call(js.equals);
-        })
-    }
-
     /// A function of two strings `a` and `b`, which `body` pushes the result
     /// of.
     fn code_js_string_binary(
@@ -831,52 +731,6 @@ impl<'a> Generator<'a> {
         body(&mut instructions, a, b);
         let _ = instructions.end();
         function.finish(self)
-    }
-
-    /// `_string_remove_prefix` and `_string_remove_suffix`.
-    pub(super) fn code_js_string_remove_affix(&mut self, js: JsString, prefix: bool) -> FunctionId {
-        let matches = if prefix {
-            self.function_string_starts_with()
-        } else {
-            self.get_function_builtin_external(BuiltinFunctionExternal::StringEndsWith)
-        };
-        let name = if prefix {
-            "_string_remove_prefix"
-        } else {
-            "_string_remove_suffix"
-        };
-        let len = self.wasm_local(ValType::I32);
-        self.code_js_string_binary(name, EXTERN, |s, string, affix| {
-            #[rustfmt::skip]
-            let _ = s
-                .local_get(string)
-                .local_get(affix)
-                .call(matches)
-                .if_else(
-                    EXTERN,
-                    |then_s| {
-                        let _ = then_s
-                            .local_get(string)
-                            .call(js.length)
-                            .local_set(len)
-                            .local_get(string);
-                        let _ = if prefix {
-                            then_s.local_get(affix).call(js.length).local_get(len)
-                        } else {
-                            then_s
-                                .i32_const(0)
-                                .local_get(len)
-                                .local_get(affix)
-                                .call(js.length)
-                                .i32_sub()
-                        };
-                        let _ = then_s.call(js.substring);
-                    },
-                    |else_s| {
-                        let _ = else_s.local_get(string);
-                    },
-                );
-        })
     }
 
     /// `_string_byte_slice(s, start, length)`, through the UTF-8 bytes.
@@ -939,70 +793,6 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    /// `_string_codeunit_slice(s, start, length)`, in UTF-16 units.
-    pub(super) fn code_js_string_codeunit_slice(&mut self, js: JsString) -> FunctionId {
-        let int_vt = self.int.val_type();
-        // params
-        let s = self.wasm_local(EXTERN);
-        let start = self.wasm_local(int_vt);
-        let len = self.wasm_local(int_vt);
-        let mut function =
-            Function::new(self, "_string_codeunit_slice", &[s, start, len], &[EXTERN]);
-        let _ = function
-            .extend_instructions(self)
-            .local_get(s)
-            .local_get(start)
-            .int_to_i32()
-            .local_get(start)
-            .local_get(len)
-            .int_add()
-            .int_to_i32()
-            .call(js.substring)
-            .end();
-        function.finish(self)
-    }
-
-    /// `_string_pop_codeunit(s)`: the first UTF-16 unit and the rest.
-    pub(super) fn code_js_string_pop_codeunit(&mut self, js: JsString) -> FunctionId {
-        let tuple = type_::tuple(vec![type_::int(), type_::string()]);
-        let tuple_vt = self.val_type(&tuple);
-        let tuple_index = self.type_index(&tuple);
-        // params
-        let s = self.wasm_local(EXTERN);
-        // locals
-        let len = self.wasm_local(ValType::I32);
-        let mut function = Function::new(self, "_string_pop_codeunit", &[s], &[tuple_vt]);
-        #[rustfmt::skip]
-        let _ = function
-            .extend_instructions(self)
-            .local_get(s)
-            .call(js.length)
-            .local_tee(len)
-            .if_else(
-                tuple_vt,
-                |then_s| {
-                    let _ = then_s
-                        .local_get(s)
-                        .i32_const(0)
-                        .call(js.char_code_at)
-                        .i32_to_int()
-                        .local_get(s)
-                        .i32_const(1)
-                        .local_get(len)
-                        .call(js.substring)
-                        .struct_new(tuple_index);
-                },
-                |else_s| {
-                    let _ = else_s
-                        .int_const(&0.into())
-                        .local_get(s)
-                        .struct_new(tuple_index);
-                },
-            )
-            .end();
-        function.finish(self)
-    }
-
     /// `_string_pop_grapheme(s)`, like the UTF-8 version, with the window in
     /// units: only the window is converted for Rust, and the length in bytes
     /// of the grapheme is converted back to units.
@@ -1022,7 +812,6 @@ impl<'a> Generator<'a> {
         let len = self.wasm_local(ValType::I32);
         let window = self.wasm_local(ValType::I32);
         let w = self.wasm_local(ValType::I32);
-        let part_len = self.wasm_local(ValType::I32);
         let n = self.wasm_local(ValType::I32);
         let mark = self.wasm_local(ValType::I32);
         let c = self.wasm_local(ValType::I32);
@@ -1071,9 +860,7 @@ impl<'a> Generator<'a> {
                     .i32_const(0)
                     .local_get(w)
                     .call(js.substring)
-                    .i32_const(-1)
                     .call(lower_string)
-                    .local_tee(part_len)
                     // complete when the window is the whole string
                     .local_get(w)
                     .local_get(len)

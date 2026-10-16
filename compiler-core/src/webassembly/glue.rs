@@ -180,10 +180,7 @@ impl<'a> Generator<'a> {
                 Abi::Float => instructions.local_get(*local).float_to_f64(),
                 Abi::I32 => instructions.local_get(*local),
                 Abi::Nil => &mut instructions,
-                Abi::String => instructions
-                    .local_get(*local)
-                    .i32_const(-1)
-                    .call(lower_string),
+                Abi::String => instructions.local_get(*local).call(lower_string),
                 Abi::List(_) => instructions
                     .local_get(*local)
                     .call(lower_list.expect("list lowering")),
@@ -245,50 +242,36 @@ impl<'a> Generator<'a> {
         index
     }
 
-    /// `_lower_string(s, n) -> (ptr, len)`: copies the bytes of `s` to the
+    /// `_lower_string(s) -> (ptr, len)`: copies the bytes of `s` to the
     /// arena.
     pub(super) fn function_lower_string(&mut self) -> FunctionId {
         self.glue_function("_lower_string".into(), |s| s.code_lower_string())
     }
 
-    /// `_lower_string(s, n) -> (ptr, len)`: copies the first `len` UTF-8
-    /// bytes of `s` to the arena, `n` or all of them when there are fewer
-    /// (`n` is unsigned, so -1 copies all), converting a JSString only once.
+    /// `_lower_string(s) -> (ptr, len)`: copies the `len` UTF-8 bytes of `s`
+    /// to the arena, converting a JSString only once.
     fn code_lower_string(&mut self) -> FunctionId {
         let string_vt = self.string.val_type();
         let bytes_vt = self.bytes.val_type();
         let cabi_realloc = self.rust_function(CABI_REALLOC);
         // params
         let s = self.wasm_local(string_vt); // String
-        let n = self.wasm_local(ValType::I32);
         // locals
         let bytes = self.wasm_local(bytes_vt);
         let off = self.wasm_local(ValType::I32);
         let len = self.wasm_local(ValType::I32);
         let ptr = self.wasm_local(ValType::I32);
         let i = self.wasm_local(ValType::I32);
-        let mut function = Function::new(
-            self,
-            "_lower_string",
-            &[s, n],
-            &[ValType::I32, ValType::I32],
-        );
+        let mut function =
+            Function::new(self, "_lower_string", &[s], &[ValType::I32, ValType::I32]);
         #[rustfmt::skip]
         let _ = function
             .extend_instructions(self)
             .string_utf8_view(s, bytes, off, len)
-            // n = min(n, len)
-            .local_get(n)
-            .local_get(len)
-            .local_get(n)
-            .local_get(len)
-            .i32_lt_u()
-            .select(None)
-            .local_set(n)
             .i32_const(0)
             .i32_const(0)
             .i32_const(1)
-            .local_get(n)
+            .local_get(len)
             .call(cabi_realloc)
             .local_set(ptr)
             .block_(InstrSeqType::Simple(None), |block_s| {
@@ -297,7 +280,7 @@ impl<'a> Generator<'a> {
                     let loop_id = loop_s.id();
                     let _ = loop_s
                         .local_get(i)
-                        .local_get(n)
+                        .local_get(len)
                         .i32_ge_u()
                         .br_if(block_id)
                         // ptr[i] = bytes[off + i]
@@ -315,7 +298,7 @@ impl<'a> Generator<'a> {
                 });
             })
             .local_get(ptr)
-            .local_get(n)
+            .local_get(len)
             .end();
         function.finish(self)
     }
@@ -442,7 +425,6 @@ impl<'a> Generator<'a> {
             Abi::String => instructions
                 .local_get(addr)
                 .local_get(value)
-                .i32_const(-1)
                 .call(lower_string)
                 .local_set(len)
                 .i32_store(mem_arg(0))
