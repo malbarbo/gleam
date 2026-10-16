@@ -879,12 +879,12 @@ impl<'a> Generator<'a> {
             (wasm_module, memory, Linking::Stubs(linker))
         };
         let bytes = BytesType::new(&mut wasm_module);
-        let string = StringType::new(&mut wasm_module, bytes, config.string);
         let cell = wasm_module.types.add_struct(vec![FieldType {
             element_type: StorageType::Val(ValType::I64),
             mutable: true,
         }]);
         wasm_module.types.get_mut(cell).name = Some("Cell".into());
+        let string = StringType::new(&mut wasm_module, bytes, cell, config.string);
         let mut wasm_types = IndexMap::new();
         let _ = wasm_types.insert(BytesType::wasm_type(), bytes.index);
         Generator {

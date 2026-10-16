@@ -687,6 +687,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
 
     unop!(i32_eqz, I32Eqz);
     unop!(i32_wrap_i64, I32WrapI64);
+    unop!(i64_extend_i32_u, I64ExtendUI32);
     unop!(f64_reinterpret_i64, F64ReinterpretI64);
     unop!(f32_reinterpret_i32, F32ReinterpretI32);
 }

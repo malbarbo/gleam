@@ -114,6 +114,41 @@ pub fn main() {
 }
 
 #[test]
+fn string_concat_in_place() {
+    run_ok(
+        r#"
+fn repeat(s: String, n: Int, acc: String) -> String {
+    case n {
+        0 -> acc
+        _ -> repeat(s, n - 1, acc <> s)
+    }
+}
+
+pub fn main() {
+    // `c` is written after `a`, in its bytes, and `d` is not
+    let a = "a" <> "b"
+    let c = a <> "c"
+    let d = a <> "d"
+    let assert "abc" = c
+    let assert "abd" = d
+    let assert "ab" = a
+    let assert "abcx" = c <> "x"
+    let assert "abce" = c <> "e"
+    let assert "abdy" = d <> "y"
+    // a big slice that ends where the bytes are written
+    let long = repeat("0123456789", 100, "")
+    let assert "0123456789" <> rest = long
+    let r = rest <> "!"
+    let l = long <> "?"
+    let assert True = r == repeat("0123456789", 99, "") <> "!"
+    let assert True = l == repeat("0123456789", 100, "") <> "?"
+    let assert True = rest == repeat("0123456789", 99, "")
+}
+"#,
+    );
+}
+
+#[test]
 fn string_comparison() {
     run_ok(
         r#"

@@ -17,9 +17,14 @@ pub(super) enum StringType {
 }
 
 impl StringType {
-    pub(super) fn new(module: &mut walrus::Module, bytes: BytesType, string: WasmString) -> Self {
+    pub(super) fn new(
+        module: &mut walrus::Module,
+        bytes: BytesType,
+        cell: TypeId,
+        string: WasmString,
+    ) -> Self {
         match string {
-            WasmString::Utf8 => StringType::Utf8(Utf8String::new(module, bytes)),
+            WasmString::Utf8 => StringType::Utf8(Utf8String::new(module, bytes, cell)),
             WasmString::JsString => StringType::Js(JsString::new(module, bytes)),
         }
     }
@@ -59,10 +64,19 @@ impl StringType {
 /// array they come from, are copied: tokens never retain big strings and a
 /// view retains at most 4 times its size, while consuming a string from the
 /// start stays linear (the copies form a geometric series).
+///
+/// A string made by `_string_concat` also has the `Cell` of its bytes, with
+/// the end of the bytes written so far, as a bit array (see
+/// `runtime/bit_array.gleam`): a string that ends there is extended by
+/// writing after it, in the same bytes, which makes `acc <> s` in a loop
+/// linear. The other strings have no `Cell`, and are copied to bytes of
+/// their exact size, so a single `<>` does not take twice its memory.
 #[derive(Clone, Copy)]
 pub(super) struct Utf8String {
-    /// The `String` struct.
+    /// The `String` struct, `{ bytes, off, len, written: (ref null Cell) }`.
     type_index: TypeId,
+    /// The `Cell` of the runtime.
+    cell: TypeId,
     /// `(s: String, i: i32) -> i32`: the byte at `i`.
     byte_at: FunctionId,
     /// `(bytes) -> String`: a string with all of `bytes`.
@@ -75,7 +89,7 @@ pub(super) struct Utf8String {
 }
 
 impl Utf8String {
-    fn new(module: &mut walrus::Module, bytes: BytesType) -> Utf8String {
+    fn new(module: &mut walrus::Module, bytes: BytesType, cell: TypeId) -> Utf8String {
         let bytes_index = bytes.index;
         let bytes_vt = bytes.val_type();
         let immutable = |val_type| FieldType {
@@ -86,6 +100,10 @@ impl Utf8String {
             immutable(bytes_vt),
             immutable(ValType::I32),
             immutable(ValType::I32),
+            immutable(ValType::Ref(RefType {
+                heap_type: HeapType::Concrete(cell),
+                nullable: true,
+            })),
         ]);
         module.types.get_mut(type_index).name = Some("String".into());
         let string_vt = ValType::Ref(RefType {
@@ -124,6 +142,10 @@ impl Utf8String {
                 .i32_const(0)
                 .local_get(bytes)
                 .array_len()
+                .ref_null(RefType {
+                    heap_type: HeapType::Concrete(cell),
+                    nullable: true,
+                })
                 .struct_new(type_index);
             fb.finish(vec![bytes], &mut module.funcs)
         };
@@ -207,6 +229,10 @@ impl Utf8String {
                             .local_get(copy)
                             .i32_const(0)
                             .local_get(len)
+                            .ref_null(RefType {
+                                heap_type: HeapType::Concrete(cell),
+                                nullable: true,
+                            })
                             .struct_new(type_index);
                     },
                     |else_s| {
@@ -217,6 +243,8 @@ impl Utf8String {
                             .local_get(start)
                             .binop(BinaryOp::I32Add)
                             .local_get(len)
+                            .local_get(s)
+                            .struct_get(type_index, 3)
                             .struct_new(type_index);
                     },
                 );
@@ -225,6 +253,7 @@ impl Utf8String {
 
         Utf8String {
             type_index,
+            cell,
             byte_at,
             from_bytes,
             copy_to_bytes,
@@ -255,7 +284,9 @@ impl Instructions<'_, '_> {
     /// `bytes[off..off + len]`, which must not be changed afterwards.
     pub(super) fn string_from_utf8(&mut self) -> &mut Self {
         match self.repr.string {
-            StringType::Utf8(utf8) => self.struct_new(utf8.type_index),
+            StringType::Utf8(utf8) => self
+                .ref_null(HeapType::Concrete(utf8.cell))
+                .struct_new(utf8.type_index),
             StringType::Js(js) => self.call(js.from_utf8),
         }
     }
@@ -470,17 +501,29 @@ impl<'a> Generator<'a> {
         id
     }
 
+    /// `a <> b`, written after `a` in its bytes when `a` ends where they are
+    /// written and they have room, and otherwise in new bytes, with room for
+    /// as many bytes more when `a` has a `Cell` (see `Utf8String`).
     pub(super) fn code_string_concat(&mut self) -> FunctionId {
-        if let StringType::Js(js) = self.string {
-            return self.code_js_string_concat(js);
-        }
+        let utf8 = match self.string {
+            StringType::Utf8(utf8) => utf8,
+            StringType::Js(js) => return self.code_js_string_concat(js),
+        };
         let string_vt = self.string.val_type();
+        let cell_vt = ValType::Ref(RefType {
+            heap_type: HeapType::Concrete(utf8.cell),
+            nullable: true,
+        });
         // params
         let a = self.wasm_local(string_vt); // String
         let b = self.wasm_local(string_vt); // String
         // locals
         let len_a = self.wasm_local(ValType::I32); // I32
         let len_b = self.wasm_local(ValType::I32); // I32
+        let end = self.wasm_local(ValType::I32); // I32: where a ends
+        let written = self.wasm_local(cell_vt); // the Cell of a
+        let bytes = self.wasm_local(self.bytes.val_type()); // the bytes of a
+        let len = self.wasm_local(ValType::I32); // I32: len_a + len_b
         // result bytes
         let r = self.wasm_local(self.bytes.val_type());
         let mut function = Function::new(self, "_string_concat", &[a, b], &[string_vt]);
@@ -490,15 +533,89 @@ impl<'a> Generator<'a> {
             // len_a = a.len
             .local_get(a)
             .string_len()
-            .local_set(len_a)
+            .local_tee(len_a)
+            // if len_a == 0: return b
+            .i32_eqz()
+            .if_(InstrSeqType::Simple(None), |then_s| {
+                let _ = then_s.local_get(b).return_();
+            })
             // len_b = b.len
             .local_get(b)
             .string_len()
-            .local_set(len_b)
-            // r = array.new_default(len_a + len_b)
+            .local_tee(len_b)
+            // if len_b == 0: return a
+            .i32_eqz()
+            .if_(InstrSeqType::Simple(None), |then_s| {
+                let _ = then_s.local_get(a).return_();
+            })
             .local_get(len_a)
             .local_get(len_b)
             .i32_add()
+            .local_set(len)
+            // bytes = a.bytes; end = a.off + len_a; written = a.written
+            .local_get(a)
+            .struct_get(utf8.type_index, 0)
+            .local_set(bytes)
+            .local_get(a)
+            .struct_get(utf8.type_index, 1)
+            .local_get(len_a)
+            .i32_add()
+            .local_set(end)
+            .local_get(a)
+            .struct_get(utf8.type_index, 3)
+            .local_tee(written)
+            .ref_is_null()
+            .i32_eqz()
+            .if_(InstrSeqType::Simple(None), |then_s| {
+                let _ = then_s
+                    // written.value == end
+                    .local_get(written)
+                    .struct_get(utf8.cell, 0)
+                    .i32_wrap_i64()
+                    .local_get(end)
+                    .i32_eq()
+                    // len_b <= bytes.len - end
+                    .local_get(len_b)
+                    .local_get(bytes)
+                    .array_len()
+                    .local_get(end)
+                    .i32_sub()
+                    .i32_le_u()
+                    .i32_and()
+                    .if_(InstrSeqType::Simple(None), |then_s| {
+                        let _ = then_s
+                            // bytes[end..] = b
+                            .local_get(bytes)
+                            .local_get(end)
+                            .local_get(b)
+                            .i32_const(0)
+                            .local_get(len_b)
+                            .bytes_copy_from_string()
+                            // written.value = end + len_b
+                            .local_get(written)
+                            .local_get(end)
+                            .local_get(len_b)
+                            .i32_add()
+                            .i64_extend_i32_u()
+                            .struct_set(utf8.cell, 0)
+                            // return { bytes, a.off, len, written }
+                            .local_get(bytes)
+                            .local_get(a)
+                            .struct_get(utf8.type_index, 1)
+                            .local_get(len)
+                            .local_get(written)
+                            .struct_new(utf8.type_index)
+                            .return_();
+                    });
+            })
+            // r = array.new_default(len), or 2 * len when a has a Cell
+            .local_get(len)
+            .local_get(len)
+            .i32_const(1)
+            .i32_shl()
+            .local_get(written)
+            .ref_is_null()
+            .select(None)
             .bytes_new()
             .local_set(r)
             // r[0..] = a
@@ -515,8 +632,14 @@ impl<'a> Generator<'a> {
             .i32_const(0)
             .local_get(len_b)
             .bytes_copy_from_string()
+            // { r, 0, len, Cell(len) }
             .local_get(r)
-            .string_from_bytes()
+            .i32_const(0)
+            .local_get(len)
+            .local_get(len)
+            .i64_extend_i32_u()
+            .struct_new(utf8.cell)
+            .struct_new(utf8.type_index)
             .end();
         function.finish(self)
     }
