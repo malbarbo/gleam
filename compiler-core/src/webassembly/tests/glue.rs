@@ -121,6 +121,37 @@ pub fn main() {{
     ));
 }
 
+/// The builtins that read the UTF-8 bytes of a string start at the offset of
+/// a view.
+#[test]
+fn utf8_of_views() {
+    run_ok(&format!(
+        r#"{RUST}
+@external(webassembly, "builtins", "_string_get_byte")
+fn get_byte(a: String, i: Int) -> Result(Int, Nil)
+@external(webassembly, "builtins", "_parse_int")
+fn parse_int(a: String) -> Result(Int, Nil)
+@external(webassembly, "builtins", "_inspect")
+fn inspect(a: a) -> String
+@external(webassembly, "builtins", "_hash")
+fn hash(a: a) -> Int
+
+pub fn main() {{
+    let s = "ABCDEFGHIJ0000000000000000000000000000000000000000000000000000000000000000000000042KLMNOPQRSTUVWXYZ"
+    let number = byte_slice(s, 10, 73)
+    let assert Ok(42) = parse_int(number)
+    let assert Ok(48) = get_byte(number, 0)
+    let assert Ok(50) = get_byte(number, 72)
+    let assert Error(Nil) = get_byte(number, 73)
+    let assert True = hash(number) == hash("0000000000000000000000000000000000000000000000000000000000000000000000042")
+    let s = "ABCDEFGHIJ\u{{0085}}\"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+    let view = byte_slice(s, 10, 80)
+    let assert "\"\\u{{0085}}\\\"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxy\"" = inspect(view)
+}}
+"#
+    ));
+}
+
 #[test]
 fn pop_grapheme() {
     run_ok(

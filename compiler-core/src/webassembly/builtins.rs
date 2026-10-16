@@ -542,6 +542,9 @@ impl<'a> Generator<'a> {
         // params
         let s = self.wasm_local(string_vt); // String
         let i = self.wasm_local(int_vt); // Index
+        // locals
+        let bytes = self.wasm_local(self.bytes.val_type());
+        let off = self.wasm_local(ValType::I32);
         // return Int
         let result = type_::result(type_::int(), type_::nil());
         let result_vt = self.val_type(&result);
@@ -553,7 +556,7 @@ impl<'a> Generator<'a> {
         let _ = instructions
             .local_get(i)
             .local_get(s)
-            .string_len()
+            .string_utf8_len()
             .i32_to_int()
             .int_lt()
             .local_get(i)
@@ -564,10 +567,13 @@ impl<'a> Generator<'a> {
                 result_vt,
                 |then_s| {
                     let _ = then_s
-                        .local_get(s)
+                        .string_utf8_view(s, bytes, off)
+                        .local_get(bytes)
+                        .local_get(off)
                         .local_get(i)
                         .int_to_i32()
-                        .string_get()
+                        .i32_add()
+                        .bytes_get()
                         .i32_to_int()
                         .call(ok_index);
                 },
@@ -1334,6 +1340,8 @@ impl<'a> Generator<'a> {
         let s = self.wasm_local(string_vt); // String
         let ptr = self.wasm_local(ValType::I32); // I32
         // locals
+        let bytes = self.wasm_local(self.bytes.val_type());
+        let off = self.wasm_local(ValType::I32); // I32
         let len = self.wasm_local(ValType::I32); // I32
         let i = self.wasm_local(ValType::I32); // I32
         let s_i = self.wasm_local(ValType::I32); // I32
@@ -1347,10 +1355,11 @@ impl<'a> Generator<'a> {
         let mut instructions = function.extend_instructions(self);
         #[rustfmt::skip]
         let _ = instructions
+            .string_utf8_view(s, bytes, off)
             // max output = ptr + 2 + len * 8, as a byte can become `\u{00XX}`
             .local_get(ptr)
             .local_get(s)
-            .string_len()
+            .string_utf8_len()
             .i32_const(8)
             .i32_mul()
             .i32_add()
@@ -1362,7 +1371,7 @@ impl<'a> Generator<'a> {
             .byte_store(b'"')
             .i32_inc(dest)
             .local_get(s)
-            .string_len()
+            .string_utf8_len()
             .local_set(len)
             .i32_const(0)
             .local_set(i)
@@ -1376,9 +1385,11 @@ impl<'a> Generator<'a> {
                     .if_(InstrSeqType::Simple(None), |body| {
                         // value = s[i]
                         let _ = body
-                            .local_get(s)
+                            .local_get(bytes)
+                            .local_get(off)
                             .local_get(i)
-                            .string_get()
+                            .i32_add()
+                            .bytes_get()
                             .local_set(s_i)
                             .block_(InstrSeqType::Simple(None), |b| {
                                 let block_id = b.id();
@@ -1436,11 +1447,13 @@ impl<'a> Generator<'a> {
                                         ValType::I32,
                                         |then_s| {
                                             let _ = then_s
-                                                .local_get(s)
+                                                .local_get(bytes)
+                                                .local_get(off)
                                                 .local_get(i)
+                                                .i32_add()
                                                 .i32_const(1)
                                                 .i32_add()
-                                                .string_get()
+                                                .bytes_get()
                                                 .local_tee(next)
                                                 .i32_const(0x80)
                                                 .i32_sub()
@@ -2131,6 +2144,8 @@ impl<'a> Generator<'a> {
         let s = self.wasm_local(string_vt); // String
         let dest = self.wasm_local(ValType::I32); // I32
         // locals
+        let bytes = self.wasm_local(self.bytes.val_type());
+        let off = self.wasm_local(ValType::I32); // I32
         let len = self.wasm_local(ValType::I32); // I32
         let i = self.wasm_local(ValType::I32); // I32
         let needed = self.wasm_local(ValType::I32); // I32
@@ -2139,8 +2154,9 @@ impl<'a> Generator<'a> {
         let mut instructions = function.extend_instructions(self);
         #[rustfmt::skip]
         let _ = instructions
+            .string_utf8_view(s, bytes, off)
             .local_get(s)
-            .string_len()
+            .string_utf8_len()
             .local_set(len)
             .local_get(dest)
             .local_get(len)
@@ -2159,9 +2175,11 @@ impl<'a> Generator<'a> {
                         let _ = body
                             .local_get(dest)
                             // value
-                            .local_get(s)
+                            .local_get(bytes)
+                            .local_get(off)
                             .local_get(i)
-                            .string_get()
+                            .i32_add()
+                            .bytes_get()
                             // store
                             .i32_store8(MemArg { offset: 0, align: 0 })
                             .i32_inc(dest)

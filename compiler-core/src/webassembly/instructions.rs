@@ -372,14 +372,37 @@ impl<'a, 'b> Instructions<'a, 'b> {
         self.struct_get(self.repr.string.type_index, 2)
     }
 
-    /// `[s] -> [bytes]`: the underlying array, indexed from `string_off`.
-    pub(super) fn string_bytes(&mut self) -> &mut Self {
+    /// `[s] -> [bytes]`: the array of the UTF-8 bytes of `s`, which start at
+    /// `string_utf8_off` and are `string_utf8_len` long. It must not be
+    /// changed.
+    pub(super) fn string_utf8_bytes(&mut self) -> &mut Self {
         self.struct_get(self.repr.string.type_index, 0)
     }
 
     /// `[s] -> [off]`.
-    pub(super) fn string_off(&mut self) -> &mut Self {
+    pub(super) fn string_utf8_off(&mut self) -> &mut Self {
         self.struct_get(self.repr.string.type_index, 1)
+    }
+
+    /// `[s] -> [len]`: the number of UTF-8 bytes of `s`.
+    pub(super) fn string_utf8_len(&mut self) -> &mut Self {
+        self.string_len()
+    }
+
+    /// `[] -> []`: sets `bytes` and `off` to `string_utf8_bytes` and
+    /// `string_utf8_off` of `s`.
+    pub(super) fn string_utf8_view(
+        &mut self,
+        s: LocalId,
+        bytes: LocalId,
+        off: LocalId,
+    ) -> &mut Self {
+        self.local_get(s)
+            .string_utf8_bytes()
+            .local_set(bytes)
+            .local_get(s)
+            .string_utf8_off()
+            .local_set(off)
     }
 
     /// `[s, start, len] -> [String]`, sharing the bytes of `s` when the slice

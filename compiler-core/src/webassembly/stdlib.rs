@@ -31,14 +31,14 @@ impl Instructions<'_, '_> {
             B::FloatToF32 => self.float_to_f32(),
             B::F64ToFloat => self.f64_to_float(),
             B::FloatToF64 => self.float_to_f64(),
-            B::StringNumBytes | B::StringByteSize => self.string_len().i32_to_int(),
+            B::StringNumBytes | B::StringByteSize => self.string_utf8_len().i32_to_int(),
             B::BytesNew => self.bytes_new(),
             B::BytesSize => self.array_len().i32_to_int(),
             B::BytesGet => self.bytes_get().i32_to_int(),
             B::BytesSet => self.bytes_set().i32_const(0),
             B::BytesCopy => self.bytes_copy().i32_const(0),
-            B::StringBytes => self.string_bytes(),
-            B::StringOffset => self.string_off().i32_to_int(),
+            B::StringBytes => self.string_utf8_bytes(),
+            B::StringOffset => self.string_utf8_off().i32_to_int(),
             B::BytesToString => self.string_from_utf8(),
             B::Float64Byte => self
                 .i64_shr_u()

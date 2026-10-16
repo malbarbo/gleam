@@ -741,7 +741,7 @@ impl Generator<'_> {
             (Write::Utf8, _) => {
                 let _ = instructions
                     .local_get(value)
-                    .string_len()
+                    .string_utf8_len()
                     .i32_to_int()
                     .int_const(&8.into())
                     .int_mul();

@@ -183,10 +183,10 @@ impl<'a> Generator<'a> {
                 Abi::String => instructions
                     .local_get(*local)
                     .local_get(*local)
-                    .string_len()
+                    .string_utf8_len()
                     .call(lower_string)
                     .local_get(*local)
-                    .string_len(),
+                    .string_utf8_len(),
                 Abi::List(_) => instructions
                     .local_get(*local)
                     .call(lower_list.expect("list lowering")),
@@ -253,8 +253,8 @@ impl<'a> Generator<'a> {
         self.glue_function("_lower_string".into(), |s| s.code_lower_string())
     }
 
-    /// `_lower_string(s, n) -> ptr`: copies the first `n` bytes of `s` to the
-    /// arena.
+    /// `_lower_string(s, n) -> ptr`: copies the first `n` UTF-8 bytes of `s`
+    /// to the arena.
     fn code_lower_string(&mut self) -> FunctionId {
         let string_vt = self.string.val_type();
         let bytes_vt = self.bytes.val_type();
@@ -271,12 +271,7 @@ impl<'a> Generator<'a> {
         #[rustfmt::skip]
         let _ = function
             .extend_instructions(self)
-            .local_get(s)
-            .string_bytes()
-            .local_set(bytes)
-            .local_get(s)
-            .string_off()
-            .local_set(off)
+            .string_utf8_view(s, bytes, off)
             .i32_const(0)
             .i32_const(0)
             .i32_const(1)
@@ -432,12 +427,12 @@ impl<'a> Generator<'a> {
                 .local_get(addr)
                 .local_get(value)
                 .local_get(value)
-                .string_len()
+                .string_utf8_len()
                 .call(lower_string)
                 .i32_store(mem_arg(0))
                 .local_get(addr)
                 .local_get(value)
-                .string_len()
+                .string_utf8_len()
                 .i32_store(mem_arg(4)),
             Abi::List(_) | Abi::Tuple(_) | Abi::Result(_, _) => {
                 panic!("unsupported list element type for a rust param: {type_:?}")
