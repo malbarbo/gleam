@@ -143,11 +143,6 @@ configured width (`_config`).
 | `string_trim` | `fn(String) -> String` | Pattern_White_Space on both ends: U+0009..U+000D, U+0020, U+0085, U+200E, U+200F, U+2028, U+2029 (not U+00A0 nor U+3000) |
 | `string_trim_start` | `fn(String) -> String` | |
 | `string_trim_end` | `fn(String) -> String` | |
-| `string_contains` | `fn(String, String) -> Bool` | byte search (`memchr` for the first byte, then compare) |
-| `string_crop` | `fn(String, String) -> String` | from the first match of the second string; unchanged if absent |
-| `string_split` | `fn(String, String) -> List(String)` | empty separator gives the graphemes (`[]` for `""`); otherwise byte search, non overlapping, `[""]` for `""` |
-| `string_split_once` | `fn(String, String) -> Result(#(String, String), Nil)` | |
-| `string_replace` | `fn(String, String, String) -> String` | empty pattern returns the input |
 | `string_reverse` | `fn(String) -> String` | grapheme order |
 | `string_to_graphemes` | `fn(String) -> List(String)` | |
 | `string_slice` | `fn(String, Int, Int) -> String` | `(start, length)`; negative `start` counts from the end; out of range gives `""`, like `string.slice` |
@@ -238,6 +233,8 @@ comes from, is copied; a bigger one shares the array.
 | `_string_byte_slice` | `fn(String, Int, Int) -> String` | `(start, length)` in bytes, caller guarantees bounds |
 | `_string_codeunit_slice` | `fn(String, Int, Int) -> String` | `(start, length)` in code units (bytes, or UTF-16 units with `string = "JSString"`), caller guarantees bounds |
 | `_string_pop_codeunit` | `fn(String) -> #(Int, String)` | first code unit and rest; `#(0, "")` for `""` |
+| `_string_codeunit_size` | `fn(String) -> Int` | in code units |
+| `_string_find` | `fn(String, String, Int) -> Int` | index of the first match of the second string from the given index, or -1, in code units; caller guarantees the index is in bounds; an empty string matches at the index |
 | `_string_starts_with` / `_string_ends_with` | `fn(String, String) -> Bool` | |
 | `_string_remove_prefix` / `_string_remove_suffix` | `fn(String, String) -> String` | unchanged when it does not match |
 | `_string_less_than` | `fn(String, String) -> Bool` | byte-wise, so in the order of the code points (also with `string = "JSString"`, where a lone surrogate from the host is ordered as itself, not as the U+FFFD of its UTF-8 bytes) |
@@ -320,6 +317,13 @@ the text of `string.inspect` of these types are not structural: they call
 hooks of the runtime (`dict_equal`, `dict_hash`, `dict_inspect`, and the same
 for `string_tree`, `bit_array` and `dynamic`), also when they are nested in
 other values.
+
+The module `builtins/string` has the functions of `gleam/string` that search
+a string for another (`string_contains`, `string_crop`, `string_split`,
+`string_split_once` and `string_replace`), written with `_string_find` and
+`_string_codeunit_slice`, so the parts are views and not copies.
+`string_split` with an empty separator gives the graphemes (`[]` for `""`)
+and `string_replace` with an empty pattern returns the input.
 
 **Dynamic**
 

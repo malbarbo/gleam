@@ -349,44 +349,6 @@ mod exports {
     str_fn!(uri_percent_encode, codec::percent_encode);
 
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn string_contains(p1: i32, l1: i32, p2: i32, l2: i32) -> i32 {
-        let (a, b) = unsafe { (str_arg(p1, l1), str_arg(p2, l2)) };
-        text::contains(a, b) as i32
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn string_crop(p1: i32, l1: i32, p2: i32, l2: i32, ret: i32) {
-        let (a, b) = unsafe { (str_arg(p1, l1), str_arg(p2, l2)) };
-        Out::new(ret).str(text::crop(a, b))
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn string_split(p1: i32, l1: i32, p2: i32, l2: i32, ret: i32) {
-        let (a, b) = unsafe { (str_arg(p1, l1), str_arg(p2, l2)) };
-        str_list_out(Out::new(ret), text::split(a, b))
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn string_split_once(p1: i32, l1: i32, p2: i32, l2: i32, ret: i32) {
-        let (a, b) = unsafe { (str_arg(p1, l1), str_arg(p2, l2)) };
-        Out::new(ret).result(text::split_once(a, b), pair_out)
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn string_replace(
-        p1: i32,
-        l1: i32,
-        p2: i32,
-        l2: i32,
-        p3: i32,
-        l3: i32,
-        ret: i32,
-    ) {
-        let (a, b, c) = unsafe { (str_arg(p1, l1), str_arg(p2, l2), str_arg(p3, l3)) };
-        Out::new(ret).string(text::replace(a, b, c))
-    }
-
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn string_to_graphemes(ptr: i32, len: i32, ret: i32) {
         let s = unsafe { str_arg(ptr, len) };
         str_list_out(Out::new(ret), text::to_graphemes(s))

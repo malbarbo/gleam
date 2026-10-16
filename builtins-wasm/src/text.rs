@@ -42,56 +42,6 @@ pub fn trim_end(s: &str) -> &str {
     s.trim_end_matches(is_whitespace)
 }
 
-/// Byte offset of the first occurrence of `needle`.
-fn find(haystack: &str, needle: &str) -> Option<usize> {
-    memchr::memmem::find(haystack.as_bytes(), needle.as_bytes())
-}
-
-pub fn contains(haystack: &str, needle: &str) -> bool {
-    find(haystack, needle).is_some()
-}
-
-pub fn crop<'a>(s: &'a str, prefix: &str) -> &'a str {
-    match find(s, prefix) {
-        Some(i) => &s[i..],
-        None => s,
-    }
-}
-
-pub fn split<'a>(s: &'a str, sep: &str) -> Vec<&'a str> {
-    if sep.is_empty() {
-        return to_graphemes(s);
-    }
-    let mut parts = Vec::new();
-    let mut rest = s;
-    while let Some(i) = find(rest, sep) {
-        parts.push(&rest[..i]);
-        rest = &rest[i + sep.len()..];
-    }
-    parts.push(rest);
-    parts
-}
-
-pub fn split_once<'a>(s: &'a str, sep: &str) -> Option<(&'a str, &'a str)> {
-    let i = find(s, sep)?;
-    Some((&s[..i], &s[i + sep.len()..]))
-}
-
-pub fn replace(s: &str, pattern: &str, replacement: &str) -> String {
-    if pattern.is_empty() {
-        return String::from(s);
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(i) = find(rest, pattern) {
-        out.push_str(&rest[..i]);
-        out.push_str(replacement);
-        rest = &rest[i + pattern.len()..];
-    }
-    out.push_str(rest);
-    out
-}
-
 pub fn reverse(s: &str) -> String {
     s.graphemes(true).rev().collect()
 }
@@ -256,78 +206,6 @@ mod tests {
         assert_eq!(trim("\u{200B}a"), "\u{200B}a");
         assert_eq!(trim("   "), "");
         assert_eq!(trim(""), "");
-    }
-
-    #[test]
-    fn searching() {
-        assert!(contains("hello", "ll"));
-        assert!(contains("hello", ""));
-        assert!(contains("", ""));
-        assert!(!contains("hello", "lo!"));
-        assert!(!contains("", "a"));
-        assert_eq!(crop("The Lone Gunmen", "Lone"), "Lone Gunmen");
-        assert_eq!(crop("abc", "x"), "abc");
-        assert_eq!(crop("abc", ""), "abc");
-        assert_eq!(crop("abcbc", "bc"), "bcbc");
-    }
-
-    #[test]
-    fn find_matches_std() {
-        // every haystack of up to 7 letters from {a, b} against every needle
-        // of up to 3 letters
-        let words = |max: u32| {
-            (0..=max).flat_map(|n| {
-                (0..1u32 << n).map(move |v| {
-                    (0..n)
-                        .map(|i| if v >> i & 1 == 1 { 'a' } else { 'b' })
-                        .collect::<String>()
-                })
-            })
-        };
-        for h in words(7) {
-            for n in words(3) {
-                assert_eq!(find(&h, &n), h.find(&n), "{h:?} {n:?}");
-            }
-        }
-        assert_eq!(find("aé🎉é", "é"), Some(1));
-        assert_eq!(find("aé🎉é", "🎉é"), Some(3));
-    }
-
-    #[test]
-    fn splitting() {
-        let cases: &[(&str, &str, &[&str])] = &[
-            ("a,b,c", ",", &["a", "b", "c"]),
-            ("a,,b", ",", &["a", "", "b"]),
-            (",a,", ",", &["", "a", ""]),
-            ("abc", ",", &["abc"]),
-            ("", ",", &[""]),
-            ("", "", &[]),
-            ("ae\u{301}", "", &["a", "e\u{301}"]),
-            ("aaa", "aa", &["", "a"]),
-            ("a::b::", "::", &["a", "b", ""]),
-            (
-                "home/gleam/desktop/",
-                "/",
-                &["home", "gleam", "desktop", ""],
-            ),
-        ];
-        for &(s, sep, expected) in cases {
-            assert_eq!(split(s, sep), expected, "{s:?} {sep:?}");
-        }
-        assert_eq!(split_once("a=b=c", "="), Some(("a", "b=c")));
-        assert_eq!(split_once("abc", "="), None);
-        assert_eq!(split_once("abc", ""), Some(("", "abc")));
-        assert_eq!(split_once("=", "="), Some(("", "")));
-    }
-
-    #[test]
-    fn replacing() {
-        assert_eq!(replace("www.example.com", ".", "-"), "www-example-com");
-        assert_eq!(replace("aaa", "aa", "b"), "ba");
-        assert_eq!(replace("abc", "", "x"), "abc");
-        assert_eq!(replace("abc", "abc", ""), "");
-        assert_eq!(replace("", "a", "b"), "");
-        assert_eq!(replace("aXbXc", "X", "YY"), "aYYbYYc");
     }
 
     #[test]

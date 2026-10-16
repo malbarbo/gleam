@@ -32,6 +32,7 @@ impl Instructions<'_, '_> {
             B::F64ToFloat => self.f64_to_float(),
             B::FloatToF64 => self.float_to_f64(),
             B::StringNumBytes | B::StringByteSize => self.string_utf8_len().i32_to_int(),
+            B::StringCodeunitSize => self.string_len().i32_to_int(),
             B::BytesNew => self.bytes_new(),
             B::BytesSize => self.array_len().i32_to_int(),
             B::BytesGet => self.bytes_get().i32_to_int(),
@@ -67,6 +68,7 @@ impl Instructions<'_, '_> {
             | B::StringByteSlice
             | B::StringCodeunitSlice
             | B::StringPopCodeunit
+            | B::StringFind
             | B::StringBits
             | B::BytesCopyShifted
             | B::StringStartsWith

@@ -756,6 +756,111 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
+    /// `_string_find(haystack, needle, from)`: the index of the first match
+    /// of `needle` in `haystack` from `from`, or -1, in the code units of
+    /// `_string_codeunit_slice`. A match of valid UTF-8 or UTF-16 starts at
+    /// the start of a code point, so comparing code units is enough. The
+    /// caller guarantees that `from` is in the bounds.
+    pub(super) fn code_string_find(&mut self) -> FunctionId {
+        let string_vt = self.string.val_type();
+        let int_vt = self.int.val_type();
+        // params
+        let haystack = self.wasm_local(string_vt); // String
+        let needle = self.wasm_local(string_vt); // String
+        let from = self.wasm_local(int_vt); // Int
+        // locals
+        let i = self.wasm_local(ValType::I32);
+        let j = self.wasm_local(ValType::I32);
+        let needle_len = self.wasm_local(ValType::I32);
+        let last = self.wasm_local(ValType::I32); // the last start of a match
+        let first = self.wasm_local(ValType::I32); // needle[0]
+        let mut function =
+            Function::new(self, "_string_find", &[haystack, needle, from], &[int_vt]);
+        #[rustfmt::skip]
+        let _ = function
+            .extend_instructions(self)
+            .local_get(from)
+            .int_to_i32()
+            .local_set(i)
+            .local_get(needle)
+            .string_len()
+            .local_tee(needle_len)
+            .i32_eqz()
+            .if_(InstrSeqType::Simple(None), |body| {
+                let _ = body
+                    .local_get(from)
+                    .return_();
+            })
+            .local_get(haystack)
+            .string_len()
+            .local_get(needle_len)
+            .i32_sub()
+            .local_set(last)
+            .local_get(needle)
+            .i32_const(0)
+            .string_get()
+            .local_set(first)
+            .loop_(InstrSeqType::Simple(None), |outer| {
+                let outer_id = outer.id();
+                let _ = outer
+                    // if i > last
+                    .local_get(i)
+                    .local_get(last)
+                    .i32_gt_s()
+                    .if_(InstrSeqType::Simple(None), |body| {
+                        let _ = body
+                            .int_const(&(-1).into())
+                            .return_();
+                    })
+                    // if haystack[i] == first
+                    .local_get(haystack)
+                    .local_get(i)
+                    .string_get()
+                    .local_get(first)
+                    .i32_eq()
+                    .if_(InstrSeqType::Simple(None), |then_s| {
+                        let _ = then_s
+                            .i32_const(1)
+                            .local_set(j)
+                            .block_(InstrSeqType::Simple(None), |block_s| {
+                                let block_id = block_s.id();
+                                let _ = block_s.loop_(InstrSeqType::Simple(None), |inner| {
+                                    let inner_id = inner.id();
+                                    let _ = inner
+                                        // if j >= needle_len
+                                        .local_get(j)
+                                        .local_get(needle_len)
+                                        .i32_ge_u()
+                                        .if_(InstrSeqType::Simple(None), |body| {
+                                            let _ = body
+                                                .local_get(i)
+                                                .i32_to_int()
+                                                .return_();
+                                        })
+                                        // haystack[i + j] != needle[j]
+                                        .local_get(haystack)
+                                        .local_get(i)
+                                        .local_get(j)
+                                        .i32_add()
+                                        .string_get()
+                                        .local_get(needle)
+                                        .local_get(j)
+                                        .string_get()
+                                        .i32_ne()
+                                        .br_if(block_id)
+                                        .i32_inc(j)
+                                        .br(inner_id);
+                                });
+                            });
+                    })
+                    .i32_inc(i)
+                    .br(outer_id);
+            })
+            .unreachable()
+            .end();
+        function.finish(self)
+    }
+
     pub(super) fn code_string_ends_with(&mut self) -> FunctionId {
         let string_vt = self.string.val_type();
         // params

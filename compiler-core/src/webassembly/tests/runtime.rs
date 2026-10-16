@@ -896,3 +896,135 @@ pub fn main() {
 "#,
     );
 }
+
+/// The functions of `builtins/string`. The results don't depend on the code
+/// units of the representation, so the program runs with both.
+const STRING_SEARCH: &str = r#"
+@external(webassembly, "builtins", "string_contains")
+fn contains(a: String, b: String) -> Bool
+@external(webassembly, "builtins", "string_crop")
+fn crop(a: String, b: String) -> String
+@external(webassembly, "builtins", "string_split")
+fn split(a: String, b: String) -> List(String)
+@external(webassembly, "builtins", "string_split_once")
+fn split_once(a: String, b: String) -> Result(#(String, String), Nil)
+@external(webassembly, "builtins", "string_replace")
+fn replace(a: String, b: String, c: String) -> String
+@external(webassembly, "builtins", "_string_find")
+fn find(a: String, b: String, from: Int) -> Int
+@external(webassembly, "builtins", "_string_codeunit_size")
+fn size(a: String) -> Int
+@external(webassembly, "builtins", "_string_codeunit_slice")
+fn slice(a: String, start: Int, length: Int) -> String
+@external(webassembly, "builtins", "_string_starts_with")
+fn starts_with(a: String, b: String) -> Bool
+
+pub fn main() {
+  let assert True = contains("hello", "ll")
+  let assert True = contains("hello", "")
+  let assert True = contains("", "")
+  let assert False = contains("hello", "lo!")
+  let assert False = contains("", "a")
+  let assert "Lone Gunmen" = crop("The Lone Gunmen", "Lone")
+  let assert "abc" = crop("abc", "x")
+  let assert "abc" = crop("abc", "")
+  let assert "bcbc" = crop("abcbc", "bc")
+  let assert ["a", "b", "c"] = split("a,b,c", ",")
+  let assert ["a", "", "b"] = split("a,,b", ",")
+  let assert ["", "a", ""] = split(",a,", ",")
+  let assert ["abc"] = split("abc", ",")
+  let assert [""] = split("", ",")
+  let assert [] = split("", "")
+  let assert ["a", "e\u{0301}"] = split("ae\u{0301}", "")
+  let assert ["", "a"] = split("aaa", "aa")
+  let assert ["a", "b", ""] = split("a::b::", "::")
+  let assert ["a", "😀", "é"] = split("a🎉😀🎉é", "🎉")
+  let assert Ok(#("a", "b=c")) = split_once("a=b=c", "=")
+  let assert Error(Nil) = split_once("abc", "=")
+  let assert Ok(#("", "abc")) = split_once("abc", "")
+  let assert Ok(#("", "")) = split_once("=", "=")
+  let assert Ok(#("é", "😀")) = split_once("é🎉😀", "🎉")
+  let assert "www-example-com" = replace("www.example.com", ".", "-")
+  let assert "ba" = replace("aaa", "aa", "b")
+  let assert "abc" = replace("abc", "", "x")
+  let assert "" = replace("abc", "abc", "")
+  let assert "" = replace("", "a", "b")
+  let assert "aYYbYYc" = replace("aXbXc", "X", "YY")
+  let assert "a😀b😀" = replace("aébé", "é", "😀")
+  // parts of a big string, which are views with UTF8
+  let big = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ,abcdefghijklmnopqrstuvwxyz,0123456789abcdefghijklmnopqrstuvwxyz"
+  let assert Ok(#(_, rest)) = split_once(big, ",")
+  let assert ["abcdefghijklmnopqrstuvwxyz", "0123456789abcdefghijklmnopqrstuvwxyz"] = split(rest, ",")
+  let assert "abcdefghijklmnopqrstuvwxyz" <> _ = crop(big, "abc")
+  // every haystack of up to 6 letters from {a, b} against every needle of up
+  // to 3 letters, from every index
+  let assert True = all(words(6), fn(h) {
+    all(words(3), fn(n) { all(range(0, size(h)), fn(i) { find(h, n, i) == naive_find(h, n, i) }) })
+  })
+}
+
+fn naive_find(h: String, n: String, i: Int) -> Int {
+  case i > size(h) {
+    True -> -1
+    False -> case starts_with(slice(h, i, size(h) - i), n) {
+      True -> i
+      False -> naive_find(h, n, i + 1)
+    }
+  }
+}
+
+fn words(max: Int) -> List(String) {
+  case max {
+    0 -> [""]
+    _ -> ["", ..flat_map(words(max - 1), fn(w) { ["a" <> w, "b" <> w] })]
+  }
+}
+
+fn flat_map(l: List(a), f: fn(a) -> List(b)) -> List(b) {
+  case l {
+    [] -> []
+    [x, ..rest] -> append(f(x), flat_map(rest, f))
+  }
+}
+
+fn append(a: List(a), b: List(a)) -> List(a) {
+  case a {
+    [] -> b
+    [x, ..rest] -> [x, ..append(rest, b)]
+  }
+}
+
+fn all(l: List(a), f: fn(a) -> Bool) -> Bool {
+  case l {
+    [] -> True
+    [x, ..rest] -> f(x) && all(rest, f)
+  }
+}
+
+fn range(from: Int, to: Int) -> List(Int) {
+  case from > to {
+    True -> []
+    False -> [from, ..range(from + 1, to)]
+  }
+}
+"#;
+
+#[test]
+fn string_search() {
+    let result = run_wasm(STRING_SEARCH, vec![]);
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+#[test]
+fn string_search_js_string() {
+    let result = super::run_wasm_js(STRING_SEARCH, &[]);
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}

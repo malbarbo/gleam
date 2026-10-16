@@ -5993,6 +5993,7 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::StringByteSlice => self.code_string_byte_slice(),
             BuiltinFunctionExternal::StringCodeunitSlice => self.code_string_codeunit_slice(),
             BuiltinFunctionExternal::StringPopCodeunit => self.code_string_pop_codeunit(),
+            BuiltinFunctionExternal::StringFind => self.code_string_find(),
             BuiltinFunctionExternal::StringStartsWith => self.function_string_starts_with(),
             BuiltinFunctionExternal::StringEndsWith => self.code_string_ends_with(),
             BuiltinFunctionExternal::StringRemovePrefix => self.code_string_remove_affix(true),
@@ -6005,6 +6006,7 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::BytesCopyShifted => self.code_bytes_copy_shifted(),
             BuiltinFunctionExternal::StringNumBytes
             | BuiltinFunctionExternal::StringByteSize
+            | BuiltinFunctionExternal::StringCodeunitSize
             | BuiltinFunctionExternal::I32ToInt
             | BuiltinFunctionExternal::IntToI32
             | BuiltinFunctionExternal::I64ToInt

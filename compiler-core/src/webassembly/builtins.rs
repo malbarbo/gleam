@@ -145,6 +145,10 @@ pub(super) enum BuiltinFunctionExternal {
     StringCodeunitSlice,
     #[strum(serialize = "_string_pop_codeunit")]
     StringPopCodeunit,
+    #[strum(serialize = "_string_codeunit_size")]
+    StringCodeunitSize,
+    #[strum(serialize = "_string_find")]
+    StringFind,
     #[strum(serialize = "_string_starts_with")]
     StringStartsWith,
     #[strum(serialize = "_string_ends_with")]
@@ -253,6 +257,8 @@ impl BuiltinFunctionExternal {
             B::StringByteSize => (vec![string()], int()),
             B::StringByteSlice | B::StringCodeunitSlice => (vec![string(), int(), int()], string()),
             B::StringPopCodeunit => (vec![string()], tuple(vec![int(), string()])),
+            B::StringCodeunitSize => (vec![string()], int()),
+            B::StringFind => (vec![string(), string(), int()], int()),
             B::StringStartsWith | B::StringEndsWith | B::StringLessThan => {
                 (vec![string(), string()], bool())
             }

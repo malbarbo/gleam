@@ -48,6 +48,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("builtins/base", include_str!("runtime/base.gleam")),
     ("builtins/array", include_str!("runtime/array.gleam")),
     ("builtins/dict", include_str!("runtime/dict.gleam")),
+    ("builtins/string", include_str!("runtime/string.gleam")),
     (
         "builtins/string_tree",
         include_str!("runtime/string_tree.gleam"),
