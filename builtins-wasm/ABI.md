@@ -240,7 +240,7 @@ comes from, is copied; a bigger one shares the array.
 | `_string_pop_codeunit` | `fn(String) -> #(Int, String)` | first code unit and rest; `#(0, "")` for `""` |
 | `_string_starts_with` / `_string_ends_with` | `fn(String, String) -> Bool` | |
 | `_string_remove_prefix` / `_string_remove_suffix` | `fn(String, String) -> String` | unchanged when it does not match |
-| `_string_less_than` | `fn(String, String) -> Bool` | byte-wise |
+| `_string_less_than` | `fn(String, String) -> Bool` | byte-wise, so in the order of the code points (also with `string = "JSString"`) |
 | `_string_concat_list` | `fn(List(String)) -> String` | one allocation |
 | `_string_join` | `fn(List(String), String) -> String` | one allocation |
 | `_string_pop_grapheme` | `fn(String) -> Result(#(String, String), Nil)` | windowed call to `_grapheme_prefix_len` (64 bytes, doubling) |

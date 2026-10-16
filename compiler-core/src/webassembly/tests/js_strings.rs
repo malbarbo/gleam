@@ -123,6 +123,11 @@ pub fn main() {{
     let assert True = less_than("a", "ab")
     let assert False = less_than("b", "a")
     let assert False = less_than("a", "a")
+    // in the order of the code points, not of the UTF-16 units
+    let assert True = less_than("\u{{FF61}}", "😀")
+    let assert False = less_than("😀", "\u{{FF61}}")
+    let assert True = less_than("a😀", "a😁")
+    let assert True = less_than("\u{{D7FF}}", "😀")
     let assert "a😀bc" = concat(["a", "😀", "b", "c"])
     let assert "" = concat([])
     let assert "a, 😀, b" = join(["a", "😀", "b"], ", ")

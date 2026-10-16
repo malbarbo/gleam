@@ -42,8 +42,6 @@ pub(super) struct JsString {
     pub(super) substring: FunctionId,
     /// `(a, b) -> i32`.
     pub(super) equals: FunctionId,
-    /// `(a, b) -> i32`: -1, 0 or 1, in the order of the code units.
-    pub(super) compare: FunctionId,
     /// `(externref) -> i32`: whether the value is a string.
     pub(super) test: FunctionId,
     /// `(externref) -> String`.
@@ -81,7 +79,6 @@ impl JsString {
         let concat = import(module, "concat", &[EXTERNREF, EXTERNREF], &[EXTERN]);
         let substring = import(module, "substring", &[EXTERNREF, i32, i32], &[EXTERN]);
         let equals = import(module, "equals", &[EXTERNREF, EXTERNREF], &[i32]);
-        let compare = import(module, "compare", &[EXTERNREF, EXTERNREF], &[i32]);
         let test = import(module, "test", &[EXTERNREF], &[i32]);
         let cast = import(module, "cast", &[EXTERNREF], &[EXTERN]);
         let from_char_code_array = import(
@@ -120,7 +117,6 @@ impl JsString {
             concat,
             substring,
             equals,
-            compare,
             test,
             cast,
             utf8_len,
@@ -674,15 +670,82 @@ impl<'a> Generator<'a> {
         })
     }
 
-    /// The order of the UTF-16 code units, as on JavaScript.
+    /// The order of the code points, as with UTF8 and on Erlang, not of the
+    /// UTF-16 units: they differ when the first different units are a
+    /// surrogate and a unit from 0xE000, which comes first as a code point.
     pub(super) fn code_js_string_less_than(&mut self, js: JsString) -> FunctionId {
-        self.code_js_string_binary("_string_less_than", BOOL_VALTYPE, |s, a, b| {
+        let i = self.wasm_local(ValType::I32);
+        let x = self.wasm_local(ValType::I32);
+        let y = self.wasm_local(ValType::I32);
+        // Moves the surrogates after the units from 0xE000, which keeps the
+        // order of the code points of different units.
+        let fix = |s: &mut Instructions<'_, '_>, unit: LocalId| {
+            #[rustfmt::skip]
             let _ = s
-                .local_get(a)
-                .local_get(b)
-                .call(js.compare)
-                .i32_const(0)
-                .i32_lt_s();
+                .local_get(unit)
+                .i32_const(0xE000)
+                .i32_ge_u()
+                .if_else(
+                    ValType::I32,
+                    |then_s| {
+                        let _ = then_s.local_get(unit).i32_const(0x800).i32_sub();
+                    },
+                    |else_s| {
+                        let _ = else_s
+                            .local_get(unit)
+                            .i32_const(0xD800)
+                            .i32_ge_u()
+                            .if_else(
+                                ValType::I32,
+                                |then_s| {
+                                    let _ = then_s.local_get(unit).i32_const(0x2000).i32_add();
+                                },
+                                |else_s| {
+                                    let _ = else_s.local_get(unit);
+                                },
+                            );
+                    },
+                );
+        };
+        self.code_js_string_binary("_string_less_than", BOOL_VALTYPE, |s, a, b| {
+            #[rustfmt::skip]
+            let _ = s
+                .loop_(InstrSeqType::Simple(None), |loop_s| {
+                    let loop_id = loop_s.id();
+                    let _ = loop_s
+                        // the shorter string is less when it is a prefix
+                        .local_get(i)
+                        .local_get(b)
+                        .call(js.length)
+                        .i32_ge_u()
+                        .if_(InstrSeqType::Simple(None), |body| {
+                            let _ = body.bool_const(false).return_();
+                        })
+                        .local_get(i)
+                        .local_get(a)
+                        .call(js.length)
+                        .i32_ge_u()
+                        .if_(InstrSeqType::Simple(None), |body| {
+                            let _ = body.bool_const(true).return_();
+                        })
+                        .local_get(a)
+                        .local_get(i)
+                        .call(js.char_code_at)
+                        .local_tee(x)
+                        .local_get(b)
+                        .local_get(i)
+                        .call(js.char_code_at)
+                        .local_tee(y)
+                        .i32_ne()
+                        .if_(InstrSeqType::Simple(None), |body| {
+                            fix(body, x);
+                            fix(body, y);
+                            let _ = body.i32_lt_u().return_();
+                        })
+                        .i32_inc(i)
+                        .br(loop_id);
+                })
+                .unreachable();
         })
     }
 
