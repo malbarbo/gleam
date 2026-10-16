@@ -76,6 +76,7 @@ use crate::{
         TypedStatement,
         visit::{self, Visit},
     },
+    config::{WasmFloat, WasmInt, WebAssemblyConfig},
     type_::{
         self, Deprecation, ModuleValueConstructor, PRELUDE_MODULE_NAME, Type, TypeVar,
         ValueConstructor, ValueConstructorVariant,
@@ -231,20 +232,17 @@ impl Error {
 pub(crate) fn validate_module(
     module: &TypedModule,
     all_modules: &HashMap<EcoString, &TypedModule>,
-    int: crate::config::WasmInt,
-    float: crate::config::WasmFloat,
+    config: WebAssemblyConfig,
 ) -> Result<(), Error> {
     let line_numbers = LineNumbers::new("");
     let all_line_numbers = HashMap::new();
-    let mut generator = Generator::new(module, &line_numbers, all_modules, &all_line_numbers);
-    generator.int = match int {
-        crate::config::WasmInt::I32 => IntType::I32,
-        crate::config::WasmInt::I64 => IntType::I64,
-    };
-    generator.float = match float {
-        crate::config::WasmFloat::F32 => FloatType::F32,
-        crate::config::WasmFloat::F64 => FloatType::F64,
-    };
+    let generator = Generator::new(
+        module,
+        &line_numbers,
+        all_modules,
+        &all_line_numbers,
+        config,
+    );
     generator.validate_numeric_literals()
 }
 
@@ -254,8 +252,7 @@ pub fn module(
     all_modules: &HashMap<EcoString, &TypedModule>,
     all_line_numbers: &HashMap<EcoString, LineNumbers>,
     runtime: &[RuntimeModule],
-    int: crate::config::WasmInt,
-    float: crate::config::WasmFloat,
+    config: WebAssemblyConfig,
 ) -> Result<Vec<u8>, Error> {
     let mut all_modules = all_modules.clone();
     for runtime_module in runtime {
@@ -267,16 +264,9 @@ pub fn module(
             return Err(Error::ReservedModuleName { name: name.clone() });
         }
     }
-    let mut generator = Generator::new(module, line_numbers, &all_modules, all_line_numbers);
+    let mut generator =
+        Generator::new(module, line_numbers, &all_modules, all_line_numbers, config);
     generator.runtime = runtime;
-    generator.int = match int {
-        crate::config::WasmInt::I32 => IntType::I32,
-        crate::config::WasmInt::I64 => IntType::I64,
-    };
-    generator.float = match float {
-        crate::config::WasmFloat::F32 => FloatType::F32,
-        crate::config::WasmFloat::F64 => FloatType::F64,
-    };
     generator.compile()
 }
 
@@ -860,6 +850,7 @@ impl<'a> Generator<'a> {
         line_numbers: &'a LineNumbers,
         all_modules: &'a HashMap<EcoString, &'a TypedModule>,
         all_line_numbers: &'a HashMap<EcoString, LineNumbers>,
+        config: WebAssemblyConfig,
     ) -> Self {
         let (mut wasm_module, memory, linking) = if link::walrus() {
             let wasm_module = walrus::Module::from_buffer(BUILTINS_WASM)
@@ -920,8 +911,14 @@ impl<'a> Generator<'a> {
             bit_array_from_bytes: None,
             consts: vec![],
             globals: Rc::default(),
-            int: IntType::I32,
-            float: FloatType::F64,
+            int: match config.int {
+                WasmInt::I32 => IntType::I32,
+                WasmInt::I64 => IntType::I64,
+            },
+            float: match config.float {
+                WasmFloat::F32 => FloatType::F32,
+                WasmFloat::F64 => FloatType::F64,
+            },
             string,
             cell,
             module,

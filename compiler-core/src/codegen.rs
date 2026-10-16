@@ -357,23 +357,14 @@ mod tests {
 #[derive(Debug)]
 pub struct WebAssembly<'a> {
     output_directory: &'a Utf8Path,
-    int: crate::config::WasmInt,
-    float: crate::config::WasmFloat,
-    opt_level: crate::config::WasmOptLevel,
+    config: crate::config::WebAssemblyConfig,
 }
 
 impl<'a> WebAssembly<'a> {
-    pub fn new(
-        output_directory: &'a Utf8Path,
-        int: crate::config::WasmInt,
-        float: crate::config::WasmFloat,
-        opt_level: crate::config::WasmOptLevel,
-    ) -> Self {
+    pub fn new(output_directory: &'a Utf8Path, config: crate::config::WebAssemblyConfig) -> Self {
         Self {
             output_directory,
-            int,
-            float,
-            opt_level,
+            config,
         }
     }
 
@@ -445,8 +436,7 @@ impl<'a> WebAssembly<'a> {
             all_modules,
             all_line_numbers,
             runtime,
-            self.int,
-            self.float,
+            self.config,
         )
         .map_err(|error| {
             // The location of the error may be in another module.
@@ -463,7 +453,7 @@ impl<'a> WebAssembly<'a> {
         tracing::debug!(name = ?name, "Generated WebAssembly module");
         writer.write_bytes(&path, &output)?;
 
-        if self.opt_level.is_enabled() {
+        if self.config.opt_level.is_enabled() {
             self.run_wasm_opt(&path)?;
         }
 
@@ -471,7 +461,7 @@ impl<'a> WebAssembly<'a> {
     }
 
     fn run_wasm_opt(&self, path: &Utf8Path) -> Result<()> {
-        let flag = self.opt_level.as_flag();
+        let flag = self.config.opt_level.as_flag();
         let result = std::process::Command::new("wasm-opt")
             .args([
                 flag,

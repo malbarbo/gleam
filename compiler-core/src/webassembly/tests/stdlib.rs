@@ -153,8 +153,7 @@ pub fn main() {
 }
 "#,
         vec![],
-        crate::config::WasmInt::I32,
-        crate::config::WasmFloat::F32,
+        super::wasm_config(crate::config::WasmInt::I32, crate::config::WasmFloat::F32),
     );
     assert!(result.status.success(), "{}", result.stderr);
 }

@@ -68,9 +68,7 @@ pub fn command(options: CompilePackage) -> Result<()> {
                 .ok_or_else(|| Error::JavaScriptPreludeRequired)?,
         },
         Target::WebAssembly => TargetCodegenConfiguration::WebAssembly {
-            int: config.webassembly.int,
-            float: config.webassembly.float,
-            opt_level: config.webassembly.opt_level,
+            config: config.webassembly,
             programs: true,
         },
     };

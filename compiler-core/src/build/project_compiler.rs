@@ -616,9 +616,7 @@ where
                 prelude_location: Utf8PathBuf::from("../prelude.mjs"),
             },
             Target::WebAssembly => super::TargetCodegenConfiguration::WebAssembly {
-                int: self.config.webassembly.int,
-                float: self.config.webassembly.float,
-                opt_level: self.config.webassembly.opt_level,
+                config: self.config.webassembly,
                 programs: is_root,
             },
         };

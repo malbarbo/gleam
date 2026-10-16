@@ -360,12 +360,9 @@ where
                 cached_module_names,
                 app_file.as_ref(),
             ),
-            TargetCodegenConfiguration::WebAssembly {
-                int,
-                float,
-                opt_level,
-                programs,
-            } => self.perform_webassembly_codegen(modules, *int, *float, *opt_level, *programs),
+            TargetCodegenConfiguration::WebAssembly { config, programs } => {
+                self.perform_webassembly_codegen(modules, *config, *programs)
+            }
         }
     }
 
@@ -496,9 +493,7 @@ where
     fn perform_webassembly_codegen(
         &mut self,
         modules: &[Module],
-        int: crate::config::WasmInt,
-        float: crate::config::WasmFloat,
-        opt_level: crate::config::WasmOptLevel,
+        config: crate::config::WebAssemblyConfig,
         programs: bool,
     ) -> Result<(), Error> {
         // The FFI modules of the host, like on JavaScript.
@@ -508,11 +503,7 @@ where
             tracing::debug!("skipping_native_file_copying");
         }
         let modules = if programs { modules } else { &[] };
-        WebAssembly::new(self.out, int, float, opt_level).render(
-            &self.io,
-            modules,
-            self.webassembly_dependencies,
-        )
+        WebAssembly::new(self.out, config).render(&self.io, modules, self.webassembly_dependencies)
     }
 
     /// Link the module source .gleam file to the output directory.

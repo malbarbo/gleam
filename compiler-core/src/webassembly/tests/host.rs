@@ -20,7 +20,12 @@ fn function_imports(wasm: &[u8]) -> Vec<(String, String)> {
 }
 
 fn host_imports(src: &str, deps: Vec<(&str, &str, &str)>) -> Vec<(String, String)> {
-    let wasm = super::compile_wasm_in("thepackage", src, deps, WasmInt::I32, WasmFloat::F64);
+    let wasm = super::compile_wasm_in(
+        "thepackage",
+        src,
+        deps,
+        super::wasm_config(WasmInt::I32, WasmFloat::F64),
+    );
     function_imports(&wasm)
         .into_iter()
         .filter(|(module, _)| module != "wasi_snapshot_preview1")

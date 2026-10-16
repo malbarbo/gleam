@@ -17,7 +17,13 @@ fn with_generator(test: impl FnOnce(&mut Generator<'_>)) {
     let line_numbers = LineNumbers::new(src);
     let all_modules = HashMap::from([(module.name.clone(), &module)]);
     let all_line_numbers = HashMap::from([(module.name.clone(), line_numbers.clone())]);
-    let mut generator = Generator::new(&module, &line_numbers, &all_modules, &all_line_numbers);
+    let mut generator = Generator::new(
+        &module,
+        &line_numbers,
+        &all_modules,
+        &all_line_numbers,
+        Default::default(),
+    );
     generator.types_prelude();
     test(&mut generator);
     let wasm = generator.wasm_module.emit_wasm();

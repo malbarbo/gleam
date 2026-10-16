@@ -329,8 +329,7 @@ fn range(i: Int, acc: List(Int)) -> List(Int) {
             (RUNTIME_PACKAGE, "dict", DICT),
             (RUNTIME_PACKAGE, "dynamic", DYNAMIC),
         ],
-        crate::config::WasmInt::I32,
-        crate::config::WasmFloat::F64,
+        super::wasm_config(crate::config::WasmInt::I32, crate::config::WasmFloat::F64),
     );
     assert!(
         result.status.success(),
@@ -494,8 +493,7 @@ fn run_dict_i64(src: &str) {
     let result = super::run_wasm_with_config(
         &format!("{DICT_INTERNALS}\n{src}"),
         vec![(super::TEST_PACKAGE, "dict", DICT)],
-        crate::config::WasmInt::I64,
-        crate::config::WasmFloat::F64,
+        super::wasm_config(crate::config::WasmInt::I64, crate::config::WasmFloat::F64),
     );
     assert!(
         result.status.success(),
@@ -666,8 +664,7 @@ fn module_with_the_name_of_a_runtime_module() {
         &all_modules,
         &std::collections::HashMap::new(),
         &crate::webassembly::runtime_modules(),
-        crate::config::WasmInt::I32,
-        crate::config::WasmFloat::F64,
+        super::wasm_config(crate::config::WasmInt::I32, crate::config::WasmFloat::F64),
     )
     .expect_err("a reserved module name");
     assert_eq!(

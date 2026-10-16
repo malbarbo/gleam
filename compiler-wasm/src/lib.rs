@@ -207,9 +207,7 @@ fn do_compile_package(project: Project, target: Target) -> Result<(), Error> {
             prelude_location: Utf8PathBuf::from("./gleam_prelude.mjs"),
         },
         Target::WebAssembly => TargetCodegenConfiguration::WebAssembly {
-            int: config.webassembly.int,
-            float: config.webassembly.float,
-            opt_level: config.webassembly.opt_level,
+            config: config.webassembly,
             programs: true,
         },
     };

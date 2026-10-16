@@ -183,9 +183,7 @@ pub enum TargetCodegenConfiguration {
         output: ErlangOutput,
     },
     WebAssembly {
-        int: crate::config::WasmInt,
-        float: crate::config::WasmFloat,
-        opt_level: crate::config::WasmOptLevel,
+        config: crate::config::WebAssemblyConfig,
         /// Whether a program is generated for each module. A program is
         /// whole, so only the modules of the root package are generated,
         /// with the dependencies inside them.

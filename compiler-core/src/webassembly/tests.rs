@@ -8,7 +8,7 @@ use crate::{
     analyse::TargetSupport,
     ast::TypedModule,
     build::{Origin, Target},
-    config::PackageConfig,
+    config::{PackageConfig, WasmFloat, WasmInt, WebAssemblyConfig},
     type_::PRELUDE_MODULE_NAME,
     uid::UniqueIdGenerator,
     warning::{TypeWarningEmitter, WarningEmitter},
@@ -22,6 +22,15 @@ static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// The package of the module of a test: the standard library, which reaches
 /// the builtins, so the tests can declare them.
 pub const TEST_PACKAGE: &str = crate::STDLIB_PACKAGE_NAME;
+
+/// The configuration with `int` and `float`, the defaults otherwise.
+pub fn wasm_config(int: WasmInt, float: WasmFloat) -> WebAssemblyConfig {
+    WebAssemblyConfig {
+        int,
+        float,
+        ..WebAssemblyConfig::default()
+    }
+}
 
 pub fn compile(
     src: &str,
@@ -107,21 +116,15 @@ pub fn compile_in(
 }
 
 pub fn compile_wasm(src: &str, deps: Vec<(&str, &str, &str)>) -> Vec<u8> {
-    compile_wasm_with_config(
-        src,
-        deps,
-        crate::config::WasmInt::I32,
-        crate::config::WasmFloat::F64,
-    )
+    compile_wasm_with_config(src, deps, WebAssemblyConfig::default())
 }
 
 pub fn compile_wasm_with_config(
     src: &str,
     deps: Vec<(&str, &str, &str)>,
-    int: crate::config::WasmInt,
-    float: crate::config::WasmFloat,
+    config: WebAssemblyConfig,
 ) -> Vec<u8> {
-    compile_wasm_in(TEST_PACKAGE, src, deps, int, float)
+    compile_wasm_in(TEST_PACKAGE, src, deps, config)
 }
 
 /// Like `compile_wasm_with_config`, with the module in `package`.
@@ -129,18 +132,16 @@ pub fn compile_wasm_in(
     package: &str,
     src: &str,
     deps: Vec<(&str, &str, &str)>,
-    int: crate::config::WasmInt,
-    float: crate::config::WasmFloat,
+    config: WebAssemblyConfig,
 ) -> Vec<u8> {
-    codegen_in(package, src, deps, int, float).expect("wasm codegen failed")
+    codegen_in(package, src, deps, config).expect("wasm codegen failed")
 }
 
 fn codegen_in(
     package: &str,
     src: &str,
     deps: Vec<(&str, &str, &str)>,
-    int: crate::config::WasmInt,
-    float: crate::config::WasmFloat,
+    config: WebAssemblyConfig,
 ) -> Result<Vec<u8>, crate::webassembly::Error> {
     let mut all_line_numbers: HashMap<EcoString, LineNumbers> = deps
         .iter()
@@ -160,8 +161,7 @@ fn codegen_in(
         &all_modules,
         &all_line_numbers,
         &crate::webassembly::runtime_modules(),
-        int,
-        float,
+        config,
     )
 }
 
@@ -330,26 +330,14 @@ pub fn compile_wasm_error_with(
     src: &str,
     deps: Vec<(&str, &str, &str)>,
 ) -> crate::webassembly::Error {
-    codegen_in(
-        TEST_PACKAGE,
-        src,
-        deps,
-        crate::config::WasmInt::I32,
-        crate::config::WasmFloat::F64,
-    )
-    .expect_err("expected codegen error")
+    codegen_in(TEST_PACKAGE, src, deps, WebAssemblyConfig::default())
+        .expect_err("expected codegen error")
 }
 
 /// Like `compile_wasm_error`, with the module in `package`.
 pub fn compile_wasm_error_in(package: &str, src: &str) -> crate::webassembly::Error {
-    codegen_in(
-        package,
-        src,
-        vec![],
-        crate::config::WasmInt::I32,
-        crate::config::WasmFloat::F64,
-    )
-    .expect_err("expected codegen error")
+    codegen_in(package, src, vec![], WebAssemblyConfig::default())
+        .expect_err("expected codegen error")
 }
 
 pub struct WasmOutput {
@@ -360,21 +348,15 @@ pub struct WasmOutput {
 }
 
 pub fn run_wasm(src: &str, deps: Vec<(&str, &str, &str)>) -> WasmOutput {
-    run_wasm_with_config(
-        src,
-        deps,
-        crate::config::WasmInt::I32,
-        crate::config::WasmFloat::F64,
-    )
+    run_wasm_with_config(src, deps, WebAssemblyConfig::default())
 }
 
 pub fn run_wasm_with_config(
     src: &str,
     deps: Vec<(&str, &str, &str)>,
-    int: crate::config::WasmInt,
-    float: crate::config::WasmFloat,
+    config: WebAssemblyConfig,
 ) -> WasmOutput {
-    run_wasm_in(TEST_PACKAGE, src, deps, int, float)
+    run_wasm_in(TEST_PACKAGE, src, deps, config)
 }
 
 /// Like `run_wasm_with_config`, with the module in `package`.
@@ -382,10 +364,9 @@ pub fn run_wasm_in(
     package: &str,
     src: &str,
     deps: Vec<(&str, &str, &str)>,
-    int: crate::config::WasmInt,
-    float: crate::config::WasmFloat,
+    config: WebAssemblyConfig,
 ) -> WasmOutput {
-    let wasm_bytes = compile_wasm_in(package, src, deps, int, float);
+    let wasm_bytes = compile_wasm_in(package, src, deps, config);
     let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("gleam_wasm_test_{id}.wasm"));
     std::fs::write(&tmp, &wasm_bytes).expect("failed to write temp wasm file");
@@ -418,12 +399,7 @@ pub fn run_ok(src: &str) {
 /// Compile and run WASM with I64 int type, assert it succeeds.
 #[track_caller]
 pub fn run_ok_i64(src: &str) {
-    let result = run_wasm_with_config(
-        src,
-        vec![],
-        crate::config::WasmInt::I64,
-        crate::config::WasmFloat::F64,
-    );
+    let result = run_wasm_with_config(src, vec![], wasm_config(WasmInt::I64, WasmFloat::F64));
     assert!(
         result.status.success(),
         "WASM (I64) execution failed:\n{}",
@@ -481,15 +457,11 @@ macro_rules! assert_wasm_error {
     }};
 }
 
-pub fn compile_validate_error(
-    src: &str,
-    int: crate::config::WasmInt,
-    float: crate::config::WasmFloat,
-) -> crate::webassembly::Error {
+pub fn compile_validate_error(src: &str, config: WebAssemblyConfig) -> crate::webassembly::Error {
     let (main_module, _) = compile(src, vec![]);
     let main_ref: &TypedModule = &main_module;
     let all_modules = HashMap::from([(main_module.name.clone(), main_ref)]);
-    crate::webassembly::validate_module(&main_module, &all_modules, int, float)
+    crate::webassembly::validate_module(&main_module, &all_modules, config)
         .expect_err("expected validation error")
 }
 
@@ -497,7 +469,7 @@ macro_rules! assert_wasm_validate_error {
     ($src:expr, $int:expr, $float:expr $(,)?) => {{
         let int = $int;
         let float = $float;
-        let error = super::compile_validate_error($src, int, float);
+        let error = super::compile_validate_error($src, super::wasm_config(int, float));
         let output = format!(
             "----- SOURCE CODE\n{}\n\n----- CONFIG\nint={:?} float={:?}\n\n----- ERROR\n{:?}",
             $src, int, float, error

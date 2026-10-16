@@ -56,8 +56,7 @@ fn run_array(src: &str) -> String {
         RUNTIME_PACKAGE,
         src,
         vec![(RUNTIME_PACKAGE, "array", ARRAY)],
-        WasmInt::I32,
-        WasmFloat::F64,
+        super::wasm_config(WasmInt::I32, WasmFloat::F64),
     );
     assert!(
         result.status.success(),
@@ -73,8 +72,7 @@ fn run_array_i64(src: &str) {
         RUNTIME_PACKAGE,
         src,
         vec![(RUNTIME_PACKAGE, "array", ARRAY)],
-        WasmInt::I64,
-        WasmFloat::F64,
+        super::wasm_config(WasmInt::I64, WasmFloat::F64),
     );
     assert!(
         result.status.success(),
@@ -260,8 +258,7 @@ pub fn main() {{
 "#
         ),
         vec![(RUNTIME_PACKAGE, "array", ARRAY)],
-        int,
-        WasmFloat::F64,
+        super::wasm_config(int, WasmFloat::F64),
     );
     assert!(!result.status.success(), "{}", result.stderr);
     assert!(result.stderr.contains("unreachable"), "{}", result.stderr);

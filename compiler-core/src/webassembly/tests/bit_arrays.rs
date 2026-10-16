@@ -84,7 +84,7 @@ fn run_with(src: &str, modules: Vec<(&str, &str)>) -> String {
                 .iter()
                 .map(|(name, src)| (TEST_PACKAGE, *name, *src)),
         );
-        let result = run_wasm_with_config(src, deps, int, WasmFloat::F64);
+        let result = run_wasm_with_config(src, deps, super::wasm_config(int, WasmFloat::F64));
         assert!(
             result.status.success(),
             "WASM execution failed ({int:?}):\n{}",
@@ -765,8 +765,7 @@ pub fn main() {
 }
 "#,
         vec![(TEST_PACKAGE, "bit_array", BIT_ARRAY)],
-        WasmInt::I64,
-        WasmFloat::F64,
+        super::wasm_config(WasmInt::I64, WasmFloat::F64),
     );
     assert!(result.status.success(), "{}", result.stderr);
 }
@@ -801,8 +800,7 @@ pub fn main() {
 }
 "#,
         vec![(TEST_PACKAGE, "bit_array", BIT_ARRAY)],
-        WasmInt::I32,
-        WasmFloat::F32,
+        super::wasm_config(WasmInt::I32, WasmFloat::F32),
     );
     assert!(result.status.success(), "{}", result.stderr);
 }
@@ -1303,8 +1301,7 @@ pub fn main() {
 }
 "##,
         vec![(TEST_PACKAGE, "bit_array", BIT_ARRAY)],
-        WasmInt::I64,
-        WasmFloat::F64,
+        super::wasm_config(WasmInt::I64, WasmFloat::F64),
     );
     assert!(result.status.success(), "{}", result.stderr);
 }
@@ -1329,8 +1326,7 @@ pub fn main() {
 }
 "##,
         vec![(TEST_PACKAGE, "bit_array", BIT_ARRAY)],
-        WasmInt::I32,
-        WasmFloat::F32,
+        super::wasm_config(WasmInt::I32, WasmFloat::F32),
     );
     assert!(result.status.success(), "{}", result.stderr);
 }
