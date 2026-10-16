@@ -831,9 +831,10 @@ pub enum WasmString {
     Utf8,
     /// A JavaScript string, operated with the JS String Builtins of the
     /// host, so the program runs only on a JavaScript host that has them,
-    /// like Node.js 24, Deno 2.9 and Bun 1.4. On an older host, a polyfill
-    /// has to provide the module `wasm:js-string` and the module `'` of the
-    /// string literals, whose imports are the strings of their names.
+    /// like Node.js 24, Deno 2.9 and Bun 1.4. The host that Gleam generates
+    /// refuses an older one; a host of its own can instead give a polyfill
+    /// of the module `wasm:js-string` and the module `'` of the string
+    /// literals, whose imports are the strings of their names.
     #[serde(rename = "JSString")]
     JsString,
 }
