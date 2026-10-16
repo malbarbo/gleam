@@ -141,6 +141,8 @@ pub(super) enum BuiltinFunctionExternal {
     StringByteSize,
     #[strum(serialize = "_string_byte_slice")]
     StringByteSlice,
+    #[strum(serialize = "_string_codeunit_slice")]
+    StringCodeunitSlice,
     #[strum(serialize = "_string_pop_codeunit")]
     StringPopCodeunit,
     #[strum(serialize = "_string_starts_with")]
@@ -249,7 +251,7 @@ impl BuiltinFunctionExternal {
             B::FloatFloor | B::FloatCeiling | B::FloatSquareRoot => (vec![float()], float()),
             B::FloatTruncate | B::FloatRound => (vec![float()], int()),
             B::StringByteSize => (vec![string()], int()),
-            B::StringByteSlice => (vec![string(), int(), int()], string()),
+            B::StringByteSlice | B::StringCodeunitSlice => (vec![string(), int(), int()], string()),
             B::StringPopCodeunit => (vec![string()], tuple(vec![int(), string()])),
             B::StringStartsWith | B::StringEndsWith | B::StringLessThan => {
                 (vec![string(), string()], bool())

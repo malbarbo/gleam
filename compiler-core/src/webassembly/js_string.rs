@@ -31,6 +31,8 @@ const EXTERN: ValType = ValType::Ref(RefType {
 pub(super) struct JsString {
     /// `(s) -> i32`: the number of UTF-16 code units of `s`.
     pub(super) length: FunctionId,
+    /// `(s, i) -> i32`: the code unit `i`.
+    pub(super) char_code_at: FunctionId,
     /// `(s, i) -> i32`: the code point at the unit `i`, or the unit itself
     /// when it is a lone surrogate.
     pub(super) code_point_at: FunctionId,
@@ -74,6 +76,7 @@ impl JsString {
         });
         let i32 = ValType::I32;
         let length = import(module, "length", &[EXTERNREF], &[i32]);
+        let char_code_at = import(module, "charCodeAt", &[EXTERNREF, i32], &[i32]);
         let code_point_at = import(module, "codePointAt", &[EXTERNREF, i32], &[i32]);
         let concat = import(module, "concat", &[EXTERNREF, EXTERNREF], &[EXTERN]);
         let substring = import(module, "substring", &[EXTERNREF, i32, i32], &[EXTERN]);
@@ -112,6 +115,7 @@ impl JsString {
         };
         JsString {
             length,
+            char_code_at,
             code_point_at,
             concat,
             substring,
@@ -799,7 +803,30 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    /// `_string_pop_codeunit(s)`, through the UTF-8 bytes.
+    /// `_string_codeunit_slice(s, start, length)`, in UTF-16 units.
+    pub(super) fn code_js_string_codeunit_slice(&mut self, js: JsString) -> FunctionId {
+        let int_vt = self.int.val_type();
+        // params
+        let s = self.wasm_local(EXTERN);
+        let start = self.wasm_local(int_vt);
+        let len = self.wasm_local(int_vt);
+        let mut function =
+            Function::new(self, "_string_codeunit_slice", &[s, start, len], &[EXTERN]);
+        let _ = function
+            .extend_instructions(self)
+            .local_get(s)
+            .local_get(start)
+            .int_to_i32()
+            .local_get(start)
+            .local_get(len)
+            .int_add()
+            .int_to_i32()
+            .call(js.substring)
+            .end();
+        function.finish(self)
+    }
+
+    /// `_string_pop_codeunit(s)`: the first UTF-16 unit and the rest.
     pub(super) fn code_js_string_pop_codeunit(&mut self, js: JsString) -> FunctionId {
         let tuple = type_::tuple(vec![type_::int(), type_::string()]);
         let tuple_vt = self.val_type(&tuple);
@@ -807,30 +834,26 @@ impl<'a> Generator<'a> {
         // params
         let s = self.wasm_local(EXTERN);
         // locals
-        let bytes = self.wasm_local(self.bytes.val_type());
+        let len = self.wasm_local(ValType::I32);
         let mut function = Function::new(self, "_string_pop_codeunit", &[s], &[tuple_vt]);
         #[rustfmt::skip]
         let _ = function
             .extend_instructions(self)
             .local_get(s)
             .call(js.length)
+            .local_tee(len)
             .if_else(
                 tuple_vt,
                 |then_s| {
                     let _ = then_s
                         .local_get(s)
-                        .call(js.to_utf8)
-                        .local_tee(bytes)
                         .i32_const(0)
-                        .bytes_get()
+                        .call(js.char_code_at)
                         .i32_to_int()
-                        .local_get(bytes)
+                        .local_get(s)
                         .i32_const(1)
-                        .local_get(bytes)
-                        .array_len()
-                        .i32_const(1)
-                        .i32_sub()
-                        .call(js.from_utf8)
+                        .local_get(len)
+                        .call(js.substring)
                         .struct_new(tuple_index);
                 },
                 |else_s| {

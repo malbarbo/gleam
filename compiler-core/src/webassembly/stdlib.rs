@@ -67,6 +67,7 @@ impl Instructions<'_, '_> {
             | B::IntBitwiseShiftRight
             | B::FloatRound
             | B::StringByteSlice
+            | B::StringCodeunitSlice
             | B::StringPopCodeunit
             | B::StringStartsWith
             | B::StringEndsWith

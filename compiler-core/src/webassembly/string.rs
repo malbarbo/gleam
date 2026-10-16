@@ -626,6 +626,20 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
+    /// `_string_codeunit_slice(s, start, length)`, in the code units of the
+    /// representation: the bytes with UTF8, so it is `_string_byte_slice`,
+    /// and the UTF-16 units with JSString. The caller guarantees the bounds.
+    pub(super) fn code_string_codeunit_slice(&mut self) -> FunctionId {
+        match self.string {
+            StringType::Utf8(_) => {
+                self.get_function_builtin_external(BuiltinFunctionExternal::StringByteSlice)
+            }
+            StringType::Js(js) => self.code_js_string_codeunit_slice(js),
+        }
+    }
+
+    /// `_string_pop_codeunit(s)`: the first code unit of `s`, as
+    /// `_string_codeunit_slice` counts them, and the rest.
     pub(super) fn code_string_pop_codeunit(&mut self) -> FunctionId {
         if let StringType::Js(js) = self.string {
             return self.code_js_string_pop_codeunit(js);

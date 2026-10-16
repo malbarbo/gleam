@@ -236,7 +236,8 @@ comes from, is copied; a bigger one shares the array.
 |---|---|---|
 | `_string_byte_size` | `fn(String) -> Int` | |
 | `_string_byte_slice` | `fn(String, Int, Int) -> String` | `(start, length)` in bytes, caller guarantees bounds |
-| `_string_pop_codeunit` | `fn(String) -> #(Int, String)` | first byte and rest; `#(0, "")` for `""` |
+| `_string_codeunit_slice` | `fn(String, Int, Int) -> String` | `(start, length)` in code units (bytes, or UTF-16 units with `string = "JSString"`), caller guarantees bounds |
+| `_string_pop_codeunit` | `fn(String) -> #(Int, String)` | first code unit and rest; `#(0, "")` for `""` |
 | `_string_starts_with` / `_string_ends_with` | `fn(String, String) -> Bool` | |
 | `_string_remove_prefix` / `_string_remove_suffix` | `fn(String, String) -> String` | unchanged when it does not match |
 | `_string_less_than` | `fn(String, String) -> Bool` | byte-wise |

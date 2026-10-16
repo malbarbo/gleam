@@ -23,6 +23,8 @@ const BUILTINS: &str = r#"
 fn byte_size(a: String) -> Int
 @external(webassembly, "builtins", "_string_byte_slice")
 fn byte_slice(a: String, start: Int, len: Int) -> String
+@external(webassembly, "builtins", "_string_codeunit_slice")
+fn codeunit_slice(a: String, start: Int, len: Int) -> String
 @external(webassembly, "builtins", "_string_pop_codeunit")
 fn pop_codeunit(a: String) -> #(Int, String)
 @external(webassembly, "builtins", "_string_get_byte")
@@ -130,6 +132,12 @@ pub fn main() {{
     let assert "é" = byte_slice(s, 5, 2)
     let assert #(97, "😀é") = pop_codeunit(s)
     let assert #(0, "") = pop_codeunit("")
+    // the code units are UTF-16 units, so a pair is split
+    let assert #(0xE9, "") = pop_codeunit("é")
+    let assert #(0xD83D, rest) = pop_codeunit("😀é")
+    let assert #(0xDE00, "é") = pop_codeunit(rest)
+    let assert "😀" = codeunit_slice(s, 1, 2)
+    let assert "é" = codeunit_slice(s, 3, 1)
     let assert Ok(0xF0) = get_byte(s, 1)
     let assert Error(Nil) = get_byte(s, 7)
     let assert Ok(-42) = parse_int("-42")

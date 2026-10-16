@@ -5954,6 +5954,7 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::IntBitwiseShiftRight => self.code_int_shift(false),
             BuiltinFunctionExternal::FloatRound => self.code_float_round(),
             BuiltinFunctionExternal::StringByteSlice => self.code_string_byte_slice(),
+            BuiltinFunctionExternal::StringCodeunitSlice => self.code_string_codeunit_slice(),
             BuiltinFunctionExternal::StringPopCodeunit => self.code_string_pop_codeunit(),
             BuiltinFunctionExternal::StringStartsWith => self.function_string_starts_with(),
             BuiltinFunctionExternal::StringEndsWith => self.code_string_ends_with(),
