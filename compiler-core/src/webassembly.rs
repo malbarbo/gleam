@@ -4305,7 +4305,8 @@ impl<'a> Generator<'a> {
                     }
                 }
                 Statement::Assignment(assignment)
-                    if matches!(assignment.kind, AssignmentKind::Assert { .. }) =>
+                    if matches!(assignment.kind, AssignmentKind::Assert { .. })
+                        || self.pattern_can_fail(&assignment.pattern) =>
                 {
                     self.assignment_assert(locals, scope, instructions, assignment, rest, tail);
                     return;
@@ -5286,6 +5287,36 @@ impl<'a> Generator<'a> {
             let _ = instructions.pattern(self, locals, &mut scope, &assignment.pattern, body_id);
         }
         scope
+    }
+
+    /// Whether matching `pattern` can fail. A `let` without `assert` can
+    /// match one variant of a type with several, when the variant of the
+    /// value is inferred, and the checks of the pattern need the failure
+    /// target of a `let assert`.
+    fn pattern_can_fail(&self, pattern: &TypedPattern) -> bool {
+        match pattern {
+            Pattern::Variable { .. } | Pattern::Discard { .. } => false,
+            Pattern::Assign { pattern, .. } => self.pattern_can_fail(pattern),
+            Pattern::Tuple { elements, .. } => elements.iter().any(|e| self.pattern_can_fail(e)),
+            Pattern::Constructor {
+                type_, arguments, ..
+            } => {
+                let one_variant = match self.custom_type(type_) {
+                    Some((CustomType::Struct { .. }, _)) => true,
+                    Some((CustomType::Enum { values }, _)) => values.len() == 1,
+                    _ => false,
+                };
+                !one_variant || arguments.iter().any(|a| self.pattern_can_fail(&a.value))
+            }
+            Pattern::Int { .. }
+            | Pattern::Float { .. }
+            | Pattern::String { .. }
+            | Pattern::BitArraySize(_)
+            | Pattern::List { .. }
+            | Pattern::BitArray { .. }
+            | Pattern::StringPrefix { .. }
+            | Pattern::Invalid { .. } => true,
+        }
     }
 
     /// Generates a case-like structure for `let assert` assignments.

@@ -1305,3 +1305,38 @@ pub fn main() {
         result.stderr
     );
 }
+
+/// A `let` without `assert` can match one variant of a type with several
+/// when the variant of the value is inferred, also inside other patterns and
+/// as the last statement.
+#[test]
+fn let_with_an_inferred_variant() {
+    run_ok(
+        r#"
+pub type K {
+    Lax
+    Strict
+}
+
+pub type E {
+    A(Int)
+    C(Int, String)
+}
+
+fn last() -> E {
+    let C(_, _) as e = C(3, "c")
+}
+
+pub fn main() {
+    let k = Lax
+    let Lax = k
+    let C(n, s) = C(1, "on")
+    let #(C(m, _), _) = #(C(2, "off"), Strict)
+    let assert 1 = n
+    let assert "on" = s
+    let assert 2 = m
+    let assert C(3, "c") = last()
+}
+"#,
+    );
+}
