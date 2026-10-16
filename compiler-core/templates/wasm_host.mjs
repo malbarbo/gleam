@@ -41,7 +41,14 @@ export async function instantiate(url) {
       return 0;
     },
   };
-  const module = await WebAssembly.compile(readFileSync(url));
+  // The JavaScript strings of a module compiled with `string = "JSString"`
+  // are the strings of the host, operated by its builtins, and its string
+  // literals are imported from the module "'" with the literal as the name.
+  // A module that does not import them is not affected.
+  const module = await WebAssembly.compile(readFileSync(url), {
+    builtins: ["js-string"],
+    importedStringConstants: "'",
+  });
   const imports = { wasi_snapshot_preview1: wasi };
   for (const { module: name } of WebAssembly.Module.imports(module)) {
     if (!(name in imports) && /\.m?js$/.test(name)) {
