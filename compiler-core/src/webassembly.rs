@@ -5968,6 +5968,7 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::StringJoin => self.code_string_join(true),
             BuiltinFunctionExternal::StringPopGrapheme => self.code_string_pop_grapheme(),
             BuiltinFunctionExternal::StringBits => self.code_string_bits(),
+            BuiltinFunctionExternal::BytesCopyShifted => self.code_bytes_copy_shifted(),
             BuiltinFunctionExternal::StringNumBytes
             | BuiltinFunctionExternal::StringByteSize
             | BuiltinFunctionExternal::I32ToInt

@@ -284,6 +284,7 @@ builtins are emitted in place of their calls.
 | `_bytes_get` | `fn(Bytes, Int) -> Int` | `array.get_u`, traps out of range |
 | `_bytes_set` | `fn(Bytes, Int, Int) -> Nil` | `array.set` of the low 8 bits |
 | `_bytes_copy` | `fn(Bytes, Int, Bytes, Int, Int) -> Nil` | `(dst, at, src, from, count)`, `array.copy` |
+| `_bytes_copy_shifted` | `fn(Bytes, Int, Bytes, Int, Int, Int) -> Nil` | `(dst, at, src, from, shift, count)`: `count` bytes from the bit `shift` (1 to 7) of the byte `from` |
 | `_string_bits` | `fn(String) -> Bits` | the UTF-8 bytes of the string, shared, made by `bit_array_from_utf8` |
 | `_bytes_to_string` | `fn(Bytes, Int, Int) -> String` | `(start, size)`, sharing the bytes, which are UTF-8 |
 

@@ -658,6 +658,64 @@ impl Generator<'_> {
         function.finish(self)
     }
 
+    /// `_bytes_copy_shifted(dst, at, src, from, shift, count)`: writes
+    /// `count` bytes to `dst` from `at`, each one made of the bits of the
+    /// bytes `i` and `i + 1` of `src` from the bit `shift` (1 to 7) of byte
+    /// `i`, for `i` from `from`. A loop of `i32`s that reads each byte once.
+    pub(super) fn code_bytes_copy_shifted(&mut self) -> FunctionId {
+        let bytes_vt = self.bytes.val_type();
+        let int_vt = self.int.val_type();
+        // params
+        let dst = self.wasm_local(bytes_vt);
+        let at_int = self.wasm_local(int_vt);
+        let src = self.wasm_local(bytes_vt);
+        let from_int = self.wasm_local(int_vt);
+        let shift_int = self.wasm_local(int_vt);
+        let count_int = self.wasm_local(int_vt);
+        // locals
+        let at = self.wasm_local(ValType::I32);
+        let i = self.wasm_local(ValType::I32);
+        let end = self.wasm_local(ValType::I32);
+        let shift = self.wasm_local(ValType::I32);
+        // The bytes `i` and `i + 1` in the low 16 bits.
+        let window = self.wasm_local(ValType::I32);
+        let nil = self.val_type(&type_::nil());
+        let mut function = Function::new(
+            self,
+            "_bytes_copy_shifted",
+            &[dst, at_int, src, from_int, shift_int, count_int],
+            &[nil],
+        );
+        #[rustfmt::skip]
+        let _ = function
+            .extend_instructions(self)
+            .local_get(at_int).int_to_i32().local_set(at)
+            .local_get(from_int).int_to_i32().local_set(i)
+            .local_get(i).local_get(count_int).int_to_i32().i32_add().local_set(end)
+            .i32_const(8).local_get(shift_int).int_to_i32().i32_sub().local_set(shift)
+            .local_get(src).local_get(i).bytes_get().local_set(window)
+            .block_(InstrSeqType::Simple(None), |block_s| {
+                let block_id = block_s.id();
+                let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
+                    let loop_id = loop_s.id();
+                    let _ = loop_s
+                        .local_get(i).local_get(end).i32_ge_u().br_if(block_id)
+                        .i32_inc(i)
+                        .local_get(window).i32_const(8).i32_shl()
+                        .local_get(src).local_get(i).bytes_get()
+                        .i32_or().local_set(window)
+                        .local_get(dst).local_get(at)
+                        .local_get(window).local_get(shift).i32_shr_u()
+                        .bytes_set()
+                        .i32_inc(at)
+                        .br(loop_id);
+                });
+            })
+            .i32_const(0)
+            .end();
+        function.finish(self)
+    }
+
     /// Pushes the number of bits of the `Bits` of `bits`.
     fn push_bit_size(&mut self, instructions: &mut Instructions<'_, '_>, bits: LocalId) {
         let _ = instructions.local_get(bits);

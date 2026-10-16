@@ -175,6 +175,8 @@ pub(super) enum BuiltinFunctionExternal {
     BytesSet,
     #[strum(serialize = "_bytes_copy")]
     BytesCopy,
+    #[strum(serialize = "_bytes_copy_shifted")]
+    BytesCopyShifted,
     #[strum(serialize = "_string_bits")]
     StringBits,
     #[strum(serialize = "_bytes_to_string")]
@@ -274,6 +276,17 @@ impl BuiltinFunctionExternal {
                     ext("Bytes"),
                     int().into(),
                     ext("Bytes"),
+                    int().into(),
+                    int().into(),
+                ];
+                return (params, nil().into());
+            }
+            B::BytesCopyShifted => {
+                let params = vec![
+                    ext("Bytes"),
+                    int().into(),
+                    ext("Bytes"),
+                    int().into(),
                     int().into(),
                     int().into(),
                 ];

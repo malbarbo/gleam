@@ -1647,12 +1647,12 @@ fn copy_bits(dst: Bytes, at: Int, src: Bytes, from: Int, count: Int) -> Nil {
   let _ = case bitwise_and(from, 7) {
     0 -> bytes_copy(dst, index, src, bitwise_shift_right(from, 3), whole)
     shift ->
-      copy_shifted(
+      bytes_copy_shifted(
         dst,
         index,
         src,
         bitwise_shift_right(from, 3),
-        bitwise_shift_left(1, shift),
+        shift,
         whole,
       )
   }
@@ -1671,29 +1671,6 @@ fn copy_few_bits(
   case count {
     0 -> Nil
     _ -> or_bits(dst, at, bits_at(src, from, count), count)
-  }
-}
-
-/// Writes `count` bytes to `dst` from `index`, each one made of the bits of
-/// the bytes `i` and `i + 1` of `src` from the bit log2(`scale`) of byte `i`.
-/// The bits are shifted by multiplying by `scale`, which is cheaper than a
-/// shift by a variable.
-fn copy_shifted(
-  dst: Bytes,
-  index: Int,
-  src: Bytes,
-  i: Int,
-  scale: Int,
-  count: Int,
-) -> Nil {
-  case count {
-    0 -> Nil
-    _ -> {
-      let window = bytes_get(src, i) * 256 + bytes_get(src, i + 1)
-      let byte = bitwise_and(bitwise_shift_right(window * scale, 8), 0xFF)
-      let _ = bytes_set(dst, index, byte)
-      copy_shifted(dst, index + 1, src, i + 1, scale, count - 1)
-    }
   }
 }
 
@@ -1770,6 +1747,20 @@ fn bytes_set(bytes: Bytes, index: Int, byte: Int) -> Nil
 /// bytes the caller has just created, or after the bits written to them.
 @external(webassembly, "builtins", "_bytes_copy")
 fn bytes_copy(dst: Bytes, at: Int, src: Bytes, from: Int, count: Int) -> Nil
+
+/// Writes `count` bytes to `dst` from `at`, each one made of the bits of the
+/// bytes `i` and `i + 1` of `src` from the bit `shift` (1 to 7) of byte `i`,
+/// for `i` from `from`. Only on the bytes the caller has just created, or
+/// after the bits written to them.
+@external(webassembly, "builtins", "_bytes_copy_shifted")
+fn bytes_copy_shifted(
+  dst: Bytes,
+  at: Int,
+  src: Bytes,
+  from: Int,
+  shift: Int,
+  count: Int,
+) -> Nil
 
 @external(webassembly, "builtins", "_cell_new")
 fn cell_new(value: Int) -> Cell

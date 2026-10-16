@@ -895,7 +895,8 @@ pub fn main() {{
 }
 
 /// The builtins of `Bytes` and of the bits of floats are emitted in place
-/// of their calls, so the module has no function for them.
+/// of their calls, so the module has no function for them, except the loop
+/// of `_bytes_copy_shifted`.
 #[test]
 fn bytes_builtins_are_inlined() {
     let wasm = compile_wasm(
@@ -926,16 +927,16 @@ fn read_floats(bits: BitArray) -> Float {
     let builtins = names
         .iter()
         .filter(|name| {
-            [
-                "_bytes",
-                "_string_offset",
-                "_float64_byte",
-                "_float32_byte",
-                "_float64_from_bits",
-                "_float32_from_bits",
-            ]
-            .iter()
-            .any(|builtin| name.starts_with(builtin))
+            *name != "_bytes_copy_shifted"
+                && [
+                    "_bytes",
+                    "_float64_byte",
+                    "_float32_byte",
+                    "_float64_from_bits",
+                    "_float32_from_bits",
+                ]
+                .iter()
+                .any(|builtin| name.starts_with(builtin))
         })
         .collect::<Vec<_>>();
     assert!(builtins.is_empty(), "{builtins:?}");

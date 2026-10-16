@@ -68,6 +68,7 @@ impl Instructions<'_, '_> {
             | B::StringCodeunitSlice
             | B::StringPopCodeunit
             | B::StringBits
+            | B::BytesCopyShifted
             | B::StringStartsWith
             | B::StringEndsWith
             | B::StringRemovePrefix
