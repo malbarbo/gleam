@@ -471,10 +471,7 @@ impl<'a> Generator<'a> {
             return *id;
         }
         let val_type = self.string.val_type_nullable();
-        let init = ConstExpr::RefNull(RefType {
-            nullable: true,
-            heap_type: self.string.heap_type(),
-        });
+        let init = self.string.null_const();
         let id = self
             .wasm_module
             .globals

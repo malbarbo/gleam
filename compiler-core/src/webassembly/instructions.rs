@@ -356,6 +356,12 @@ impl<'a, 'b> Instructions<'a, 'b> {
         self.call(self.repr.string.from_bytes)
     }
 
+    /// `[bytes, off, len] -> [String]`: the string of the UTF-8 bytes
+    /// `bytes[off..off + len]`, which must not be changed afterwards.
+    pub(super) fn string_from_utf8(&mut self) -> &mut Self {
+        self.struct_new(self.repr.string.type_index)
+    }
+
     /// `[s, i] -> [byte]`.
     pub(super) fn string_get(&mut self) -> &mut Self {
         self.call(self.repr.string.byte_at)
@@ -1360,5 +1366,13 @@ impl StringType {
 
     pub(super) fn heap_type(&self) -> HeapType {
         HeapType::Concrete(self.type_index)
+    }
+
+    /// The initial value of a string global, set by the start function.
+    pub(super) fn null_const(&self) -> ConstExpr {
+        ConstExpr::RefNull(RefType {
+            nullable: true,
+            heap_type: self.heap_type(),
+        })
     }
 }

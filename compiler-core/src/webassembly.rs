@@ -2295,7 +2295,7 @@ impl<'a> Generator<'a> {
         if let Some(representation) = self.representation(type_) {
             self.type_index(&representation)
         } else if type_.is_string() {
-            self.string.type_index
+            panic!("a string has no type index")
         } else if let Some(types) = type_.tuple_types() {
             self.tuple_type_index(types)
         } else if let Some((params, return_)) = type_.fn_types() {
@@ -3190,7 +3190,7 @@ impl<'a> Generator<'a> {
                 let id = self.add_const(
                     const_name,
                     self.string.val_type_nullable(),
-                    const_expr_ref_null(self.string.type_index),
+                    self.string.null_const(),
                     export,
                     true,
                 );
@@ -3362,6 +3362,8 @@ impl<'a> Generator<'a> {
                     (ConstExpr::Value(Value::I32(0)), val_type)
                 } else if let Some((CustomType::Enum { .. }, _)) = self.custom_type(type_) {
                     (ConstExpr::Value(Value::I32(0)), ValType::I32)
+                } else if type_.is_string() {
+                    (self.string.null_const(), self.string.val_type_nullable())
                 } else {
                     let type_index = self.type_index(type_);
                     (
@@ -3412,7 +3414,7 @@ impl<'a> Generator<'a> {
                 let id = self.add_const(
                     const_name,
                     self.string.val_type_nullable(),
-                    const_expr_ref_null(self.string.type_index),
+                    self.string.null_const(),
                     export,
                     true,
                 );

@@ -39,7 +39,7 @@ impl Instructions<'_, '_> {
             B::BytesCopy => self.bytes_copy().i32_const(0),
             B::StringBytes => self.string_bytes(),
             B::StringOffset => self.string_off().i32_to_int(),
-            B::BytesToString => self.struct_new(self.repr.string.type_index),
+            B::BytesToString => self.string_from_utf8(),
             B::Float64Byte => self
                 .i64_shr_u()
                 .i32_wrap_i64()
