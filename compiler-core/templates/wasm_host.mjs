@@ -49,6 +49,15 @@ export async function instantiate(url) {
     builtins: ["js-string"],
     importedStringConstants: "'",
   });
+  // The builtins that the runtime provides are not imports, so these are
+  // left only when it does not have them.
+  if (WebAssembly.Module.imports(module).some((i) => i.module === "wasm:js-string")) {
+    throw new Error(
+      'This module was compiled with string = "JSString" and needs a runtime ' +
+        "with the JavaScript string builtins of WebAssembly, " +
+        "like Node.js 24, Deno 2.9 or Bun 1.4",
+    );
+  }
   const imports = { wasi_snapshot_preview1: wasi };
   for (const { module: name } of WebAssembly.Module.imports(module)) {
     if (!(name in imports) && /\.m?js$/.test(name)) {
