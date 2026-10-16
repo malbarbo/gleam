@@ -166,9 +166,46 @@ fn utf8_width(seq: &mut InstrSeqBuilder<'_>, c: LocalId) {
     }
 }
 
+/// Advances `i` over the units below 0x80 that `unit` pushes for the index
+/// in `i`, before `n`, and calls `each` after setting `c` to each of them.
+fn ascii_prefix(
+    seq: &mut InstrSeqBuilder<'_>,
+    n: LocalId,
+    i: LocalId,
+    c: LocalId,
+    unit: &impl Fn(&mut InstrSeqBuilder<'_>),
+    each: impl Fn(&mut InstrSeqBuilder<'_>),
+) {
+    let _ = seq.block(InstrSeqType::Simple(None), |block_s| {
+        let block_id = block_s.id();
+        let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
+            let loop_id = loop_s.id();
+            let _ = loop_s
+                .local_get(i)
+                .local_get(n)
+                .binop(BinaryOp::I32GeU)
+                .br_if(block_id);
+            unit(loop_s);
+            let _ = loop_s
+                .local_tee(c)
+                .i32_const(0x80)
+                .binop(BinaryOp::I32GeU)
+                .br_if(block_id);
+            each(loop_s);
+            let _ = loop_s
+                .local_get(i)
+                .i32_const(1)
+                .binop(BinaryOp::I32Add)
+                .local_set(i)
+                .br(loop_id);
+        });
+    });
+}
+
 /// Sets `total` to the number of UTF-8 bytes of the `n` units that `unit`
-/// pushes for the index in `i`: 1 to 3 for each unit, but 4 for a high
-/// surrogate followed by a low one, as `_string_to_utf8` encodes them.
+/// pushes for the index in `i`, from 0: 1 to 3 for each unit, but 4 for a
+/// high surrogate followed by a low one, as `_string_to_utf8` encodes them.
+/// The ASCII prefix is counted first, in a simpler loop.
 fn utf8_count(
     seq: &mut InstrSeqBuilder<'_>,
     locals: &mut walrus::ModuleLocals,
@@ -179,6 +216,8 @@ fn utf8_count(
 ) {
     let c = locals.add(ValType::I32);
     let prev = locals.add(ValType::I32);
+    ascii_prefix(seq, n, i, c, &unit, |_| {});
+    let _ = seq.local_get(i).local_set(total);
     let _ = seq.block(InstrSeqType::Simple(None), |block_s| {
         let block_id = block_s.id();
         let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
@@ -290,16 +329,29 @@ fn code_to_utf8(
         .i32_const(0)
         .call(into_char_code_array)
         .drop();
-    utf8_count(&mut body, &mut module.locals, n, i, total, |seq| {
+    let unit = |seq: &mut InstrSeqBuilder<'_>| {
         let _ = seq.local_get(a).local_get(i).array_get_u(units);
-    });
+    };
+    utf8_count(&mut body, &mut module.locals, n, i, total, unit);
     #[rustfmt::skip]
     let _ = body
         .local_get(total)
         .array_new_default(bytes.index)
         .local_set(out)
         .i32_const(0)
-        .local_set(i)
+        .local_set(i);
+    // the ASCII prefix: the bytes are the units
+    ascii_prefix(&mut body, n, i, c, &unit, |seq| {
+        let _ = seq
+            .local_get(out)
+            .local_get(i)
+            .local_get(c)
+            .array_set(bytes.index);
+    });
+    #[rustfmt::skip]
+    let _ = body
+        .local_get(i)
+        .local_set(j)
         .block(InstrSeqType::Simple(None), |block_s| {
             let block_id = block_s.id();
             let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
@@ -317,61 +369,63 @@ fn code_to_utf8(
                     .local_get(i)
                     .i32_const(1)
                     .binop(BinaryOp::I32Add)
-                    .local_set(i)
-                    // a high surrogate followed by a low one is a pair
-                    .local_get(c)
-                    .i32_const(0xDC00)
-                    .binop(BinaryOp::I32LtU)
-                    .local_get(i)
-                    .local_get(n)
-                    .binop(BinaryOp::I32LtU)
-                    .binop(BinaryOp::I32And)
-                    .if_else(
-                        InstrSeqType::Simple(None),
-                        |then_s| {
-                            let _ = then_s
-                                .local_get(a)
-                                .local_get(i)
-                                .array_get_u(units)
-                                .local_tee(d)
-                                .i32_const(0xFC00)
-                                .binop(BinaryOp::I32And)
-                                .i32_const(0xDC00)
-                                .binop(BinaryOp::I32Eq)
-                                .local_get(c)
-                                .i32_const(0xD800)
-                                .binop(BinaryOp::I32GeU)
-                                .binop(BinaryOp::I32And)
-                                .if_else(
-                                    InstrSeqType::Simple(None),
-                                    |pair_s| {
-                                        // c = 0x10000 + (c - 0xD800) << 10 + (d - 0xDC00)
-                                        let _ = pair_s
-                                            .local_get(c)
-                                            .i32_const(0xD800)
-                                            .binop(BinaryOp::I32Sub)
-                                            .i32_const(10)
-                                            .binop(BinaryOp::I32Shl)
-                                            .local_get(d)
-                                            .i32_const(0xDC00 - 0x10000)
-                                            .binop(BinaryOp::I32Sub)
-                                            .binop(BinaryOp::I32Add)
-                                            .local_set(c)
-                                            .local_get(i)
-                                            .i32_const(1)
-                                            .binop(BinaryOp::I32Add)
-                                            .local_set(i);
-                                    },
-                                    |_| {},
-                                );
-                        },
-                        |_| {},
-                    );
+                    .local_set(i);
+                // a surrogate: with the next unit when it is a pair, and
+                // otherwise U+FFFD
                 is_surrogate(loop_s, c);
                 let _ = loop_s.if_else(
                     InstrSeqType::Simple(None),
                     |then_s| {
-                        let _ = then_s.i32_const(0xFFFD).local_set(c);
+                        #[rustfmt::skip]
+                        let _ = then_s
+                            .local_get(c)
+                            .i32_const(0xDC00)
+                            .binop(BinaryOp::I32LtU)
+                            .local_get(i)
+                            .local_get(n)
+                            .binop(BinaryOp::I32LtU)
+                            .binop(BinaryOp::I32And)
+                            .if_else(
+                                InstrSeqType::Simple(Some(ValType::I32)),
+                                |high_s| {
+                                    let _ = high_s
+                                        .local_get(a)
+                                        .local_get(i)
+                                        .array_get_u(units)
+                                        .local_tee(d)
+                                        .i32_const(0xFC00)
+                                        .binop(BinaryOp::I32And)
+                                        .i32_const(0xDC00)
+                                        .binop(BinaryOp::I32Eq);
+                                },
+                                |else_s| {
+                                    let _ = else_s.i32_const(0);
+                                },
+                            )
+                            .if_else(
+                                InstrSeqType::Simple(None),
+                                |pair_s| {
+                                    // c = 0x10000 + (c - 0xD800) << 10 + (d - 0xDC00)
+                                    let _ = pair_s
+                                        .local_get(c)
+                                        .i32_const(0xD800)
+                                        .binop(BinaryOp::I32Sub)
+                                        .i32_const(10)
+                                        .binop(BinaryOp::I32Shl)
+                                        .local_get(d)
+                                        .i32_const(0xDC00 - 0x10000)
+                                        .binop(BinaryOp::I32Sub)
+                                        .binop(BinaryOp::I32Add)
+                                        .local_set(c)
+                                        .local_get(i)
+                                        .i32_const(1)
+                                        .binop(BinaryOp::I32Add)
+                                        .local_set(i);
+                                },
+                                |lone_s| {
+                                    let _ = lone_s.i32_const(0xFFFD).local_set(c);
+                                },
+                            );
                     },
                     |_| {},
                 );

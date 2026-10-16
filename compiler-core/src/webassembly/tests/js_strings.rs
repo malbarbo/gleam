@@ -269,6 +269,7 @@ fn lone_surrogate() {
     let host = r#"
 export function lone() { return "a\uD800b"; }
 export function mixed() { return "\uD800\uD83D\uDE00\uDE00"; }
+export function last() { return "ab\uD83D"; }
 "#;
     let _ = run_ok(
         &format!(
@@ -277,12 +278,16 @@ export function mixed() { return "\uD800\uD83D\uDE00\uDE00"; }
 fn lone() -> String
 @external(webassembly, "./host_strings.mjs", "mixed")
 fn mixed() -> String
+@external(webassembly, "./host_strings.mjs", "last")
+fn last() -> String
 
 pub fn main() {{
     let assert 5 = byte_size(lone())
     let assert "a\u{{FFFD}}b" = byte_slice(lone(), 0, 5)
     let assert 10 = byte_size(mixed())
     let assert "\u{{FFFD}}😀\u{{FFFD}}" = byte_slice(mixed(), 0, 10)
+    let assert 5 = byte_size(last())
+    let assert "ab\u{{FFFD}}" = byte_slice(last(), 0, 5)
 }}
 "#
         ),
