@@ -241,7 +241,9 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// FNV-1a over the bytes, then mixed.
+    /// FNV-1a over the code units, then mixed: over the bytes of the view
+    /// with UTF8, and over the UTF-16 units with JSString, which are not
+    /// converted.
     fn code_string_hash(&mut self) -> FunctionId {
         let string_vt = self.string.val_type();
         let bytes_vt = self.bytes.val_type();
@@ -253,17 +255,22 @@ impl<'a> Generator<'a> {
         let i = self.wasm_local(ValType::I32);
         let end = self.wasm_local(ValType::I32);
         let h = self.wasm_local(ValType::I32);
+        let utf8 = matches!(self.string, StringType::Utf8(_));
         let mut function = Function::new(self, "_hash_string", &[s], &[ValType::I32]);
+        let mut instructions = function.extend_instructions(self);
+        let _ = instructions.i32_const(0x811c_9dc5_u32 as i32).local_set(h);
+        let _ = if utf8 {
+            instructions
+                .string_utf8_view(s, bytes, i, end)
+                .local_get(i)
+                .local_get(end)
+                .i32_add()
+                .local_set(end)
+        } else {
+            instructions.local_get(s).string_len().local_set(end)
+        };
         #[rustfmt::skip]
-        let _ = function
-            .extend_instructions(self)
-            .i32_const(0x811c_9dc5_u32 as i32)
-            .local_set(h)
-            .string_utf8_view(s, bytes, i, end)
-            .local_get(i)
-            .local_get(end)
-            .i32_add()
-            .local_set(end)
+        let _ = instructions
             .block_(InstrSeqType::Simple(None), |block_s| {
                 let block_id = block_s.id();
                 let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
@@ -273,10 +280,13 @@ impl<'a> Generator<'a> {
                         .local_get(end)
                         .i32_ge_u()
                         .br_if(block_id)
-                        .local_get(h)
-                        .local_get(bytes)
-                        .local_get(i)
-                        .bytes_get()
+                        .local_get(h);
+                    let _ = if utf8 {
+                        loop_s.local_get(bytes).local_get(i).bytes_get()
+                    } else {
+                        loop_s.local_get(s).local_get(i).string_get()
+                    };
+                    let _ = loop_s
                         .i32_xor()
                         .i32_const(MULTIPLIER)
                         .i32_mul()
