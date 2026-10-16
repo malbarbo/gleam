@@ -1201,7 +1201,10 @@ impl<'a> Generator<'a> {
                 .chain(iter::once(&result))
                 .zip(types)
                 .all(|(expected, type_)| match expected {
-                    BuiltinType::Gleam(expected) => expected.same_as(type_),
+                    // `BitArray` is `Bits` in the runtime
+                    BuiltinType::Gleam(expected) => {
+                        self.represent(expected).same_as(&self.represent(type_))
+                    }
                     BuiltinType::External(name) => {
                         self.external_val_type(type_)
                             == self.wasm_external(name).map(|(val_type, _)| val_type)
@@ -5964,6 +5967,7 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::StringConcatList => self.code_string_join(false),
             BuiltinFunctionExternal::StringJoin => self.code_string_join(true),
             BuiltinFunctionExternal::StringPopGrapheme => self.code_string_pop_grapheme(),
+            BuiltinFunctionExternal::StringBits => self.code_string_bits(),
             BuiltinFunctionExternal::StringNumBytes
             | BuiltinFunctionExternal::StringByteSize
             | BuiltinFunctionExternal::I32ToInt
@@ -5990,8 +5994,6 @@ impl<'a> Generator<'a> {
             | BuiltinFunctionExternal::BytesGet
             | BuiltinFunctionExternal::BytesSet
             | BuiltinFunctionExternal::BytesCopy
-            | BuiltinFunctionExternal::StringBytes
-            | BuiltinFunctionExternal::StringOffset
             | BuiltinFunctionExternal::BytesToString
             | BuiltinFunctionExternal::Float64Byte
             | BuiltinFunctionExternal::Float32Byte

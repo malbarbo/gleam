@@ -37,8 +37,6 @@ impl Instructions<'_, '_> {
             B::BytesGet => self.bytes_get().i32_to_int(),
             B::BytesSet => self.bytes_set().i32_const(0),
             B::BytesCopy => self.bytes_copy().i32_const(0),
-            B::StringBytes => self.string_utf8_bytes(),
-            B::StringOffset => self.string_utf8_off().i32_to_int(),
             B::BytesToString => self.string_from_utf8(),
             B::Float64Byte => self
                 .i64_shr_u()
@@ -69,6 +67,7 @@ impl Instructions<'_, '_> {
             | B::StringByteSlice
             | B::StringCodeunitSlice
             | B::StringPopCodeunit
+            | B::StringBits
             | B::StringStartsWith
             | B::StringEndsWith
             | B::StringRemovePrefix

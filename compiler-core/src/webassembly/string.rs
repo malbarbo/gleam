@@ -277,25 +277,6 @@ impl Instructions<'_, '_> {
         }
     }
 
-    /// `[s] -> [bytes]`: the array of the UTF-8 bytes of `s`, which start at
-    /// `string_utf8_off` and are `string_utf8_len` long. It must not be
-    /// changed.
-    pub(super) fn string_utf8_bytes(&mut self) -> &mut Self {
-        match self.repr.string {
-            StringType::Utf8(utf8) => self.struct_get(utf8.type_index, 0),
-            StringType::Js(js) => self.call(js.to_utf8),
-        }
-    }
-
-    /// `[s] -> [off]`.
-    pub(super) fn string_utf8_off(&mut self) -> &mut Self {
-        match self.repr.string {
-            StringType::Utf8(utf8) => self.struct_get(utf8.type_index, 1),
-            // a new array with only the bytes of the string
-            StringType::Js(_) => self.drop().i32_const(0),
-        }
-    }
-
     /// `[s] -> [len]`: the number of UTF-8 bytes of `s`.
     pub(super) fn string_utf8_len(&mut self) -> &mut Self {
         match self.repr.string {
@@ -304,9 +285,9 @@ impl Instructions<'_, '_> {
         }
     }
 
-    /// `[] -> []`: sets `bytes`, `off` and `len` to `string_utf8_bytes`,
-    /// `string_utf8_off` and `string_utf8_len` of `s`, converting a
-    /// JavaScript string only once.
+    /// `[] -> []`: sets `len` to the number of UTF-8 bytes of `s`, which are
+    /// in `bytes` from `off` and must not be changed, converting a JavaScript
+    /// string only once, to a new array.
     pub(super) fn string_utf8_view(
         &mut self,
         s: LocalId,
@@ -315,12 +296,12 @@ impl Instructions<'_, '_> {
         len: LocalId,
     ) -> &mut Self {
         match self.repr.string {
-            StringType::Utf8(_) => self
+            StringType::Utf8(utf8) => self
                 .local_get(s)
-                .string_utf8_bytes()
+                .struct_get(utf8.type_index, 0)
                 .local_set(bytes)
                 .local_get(s)
-                .string_utf8_off()
+                .struct_get(utf8.type_index, 1)
                 .local_set(off)
                 .local_get(s)
                 .string_len()

@@ -284,8 +284,7 @@ builtins are emitted in place of their calls.
 | `_bytes_get` | `fn(Bytes, Int) -> Int` | `array.get_u`, traps out of range |
 | `_bytes_set` | `fn(Bytes, Int, Int) -> Nil` | `array.set` of the low 8 bits |
 | `_bytes_copy` | `fn(Bytes, Int, Bytes, Int, Int) -> Nil` | `(dst, at, src, from, count)`, `array.copy` |
-| `_string_bytes` | `fn(String) -> Bytes` | the bytes of the string, which start at `_string_offset` |
-| `_string_offset` | `fn(String) -> Int` | |
+| `_string_bits` | `fn(String) -> Bits` | the UTF-8 bytes of the string, shared, made by `bit_array_from_utf8` |
 | `_bytes_to_string` | `fn(Bytes, Int, Int) -> String` | `(start, size)`, sharing the bytes, which are UTF-8 |
 
 **Cell** (`@external(webassembly, "builtins", "Cell") type Cell`, an `Int`

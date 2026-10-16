@@ -47,9 +47,13 @@ pub fn bit_array_from_bytes(bytes: Bytes, size: Int) -> Bits {
 
 /// The bytes of `string`, shared.
 pub fn bit_array_from_string(string: String) -> Bits {
-  let start = string_offset(string) * 8
-  let end = start + string_byte_size(string) * 8
-  Bits(string_bytes(string), start, end, cell_new(-1))
+  string_bits(string)
+}
+
+/// The `size` bytes of `bytes` from `start`, shared. The compiler creates
+/// the bit array of a string with it (see `string_bits`).
+pub fn bit_array_from_utf8(bytes: Bytes, start: Int, size: Int) -> Bits {
+  Bits(bytes, start * 8, { start + size } * 8, cell_new(-1))
 }
 
 /// `bits` followed by `size` bits, which are zero, to be written after
@@ -175,9 +179,8 @@ pub fn bit_array_utf32_size(string: String) -> Int {
 /// The size of the UTF-16 or UTF-32 (`unit` 16 or 32) code units of
 /// `string`.
 fn unicode_size(string: String, unit: Int) -> Int {
-  let start = string_offset(string)
-  let end = start + string_byte_size(string)
-  unicode_size_loop(string_bytes(string), start, end, unit, 0)
+  let bits = string_bits(string)
+  unicode_size_loop(bits.bytes, bits.start / 8, bits.end / 8, unit, 0)
 }
 
 /// The size of the code units of the UTF-8 bytes from `index` to `end`.
@@ -411,9 +414,9 @@ pub fn bit_array_write_bits(
 }
 
 pub fn bit_array_write_utf8(bytes: Bytes, at: Int, string: String) -> Int {
-  let size = string_byte_size(string) * 8
-  let _ =
-    copy_bits(bytes, at, string_bytes(string), string_offset(string) * 8, size)
+  let bits = string_bits(string)
+  let size = bits.end - bits.start
+  let _ = copy_bits(bytes, at, bits.bytes, bits.start, size)
   at + size
 }
 
@@ -444,9 +447,9 @@ fn write_unicode(
   unit: Int,
   little: Bool,
 ) -> Int {
-  let start = string_offset(string)
-  let end = start + string_byte_size(string)
-  write_unicode_loop(bytes, at, string_bytes(string), start, end, unit, little)
+  let bits = string_bits(string)
+  let start = bits.start / 8
+  write_unicode_loop(bytes, at, bits.bytes, start, bits.end / 8, unit, little)
 }
 
 /// Writes the code points of the UTF-8 bytes of `string` from `index` to
@@ -1255,14 +1258,15 @@ pub fn bit_array_base64_url_decode(encoded: String) -> Result(Bits, Nil) {
 }
 
 fn base64_decode(encoded: String, url: Bool) -> Result(Bits, Nil) {
-  let start = string_offset(encoded)
-  let size = string_byte_size(encoded)
+  let bits = string_bits(encoded)
+  let start = bits.start / 8
+  let size = bits.end / 8 - start
   let missing = case size % 4 {
     0 -> 0
     rest -> 4 - rest
   }
   let out = bytes_new({ size + missing } / 4 * 3)
-  let decoder = Base64Decoder(string_bytes(encoded), start + size, out, url)
+  let decoder = Base64Decoder(bits.bytes, start + size, out, url)
   case base64_decode_loop(decoder, start, start + size + missing, 0, 0, 0, 0) {
     Ok(at) -> Ok(bit_array_from_bytes(out, at * 8))
     Error(Nil) -> Error(Nil)
@@ -1406,13 +1410,13 @@ fn hex_digit(value: Int) -> Int {
 
 /// Accepts uppercase and lowercase digits.
 pub fn bit_array_base16_decode(encoded: String) -> Result(Bits, Nil) {
-  let size = string_byte_size(encoded)
+  let bits = string_bits(encoded)
+  let start = bits.start / 8
+  let size = bits.end / 8 - start
   case bitwise_and(size, 1) {
     0 -> {
-      let start = string_offset(encoded)
       let out = bytes_new(size / 2)
-      let bytes = string_bytes(encoded)
-      case base16_decode_loop(bytes, start, start + size, out, 0) {
+      case base16_decode_loop(bits.bytes, start, start + size, out, 0) {
         True -> Ok(bit_array_from_bytes(out, size * 4))
         False -> Error(Nil)
       }
@@ -1776,12 +1780,10 @@ fn cell_get(cell: Cell) -> Int
 @external(webassembly, "builtins", "_cell_set")
 fn cell_set(cell: Cell, value: Int) -> Nil
 
-/// The bytes of `string`, which start at `string_offset(string)`.
-@external(webassembly, "builtins", "_string_bytes")
-fn string_bytes(string: String) -> Bytes
-
-@external(webassembly, "builtins", "_string_offset")
-fn string_offset(string: String) -> Int
+/// The bit array of the UTF-8 bytes of `string`, shared: with
+/// `bit_array_from_utf8`, converting a JavaScript string only once.
+@external(webassembly, "builtins", "_string_bits")
+fn string_bits(string: String) -> Bits
 
 /// The string of the `size` bytes of `bytes` from `start`, which are UTF-8.
 @external(webassembly, "builtins", "_bytes_to_string")

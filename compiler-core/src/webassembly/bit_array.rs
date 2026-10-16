@@ -629,6 +629,35 @@ impl Generator<'_> {
         id
     }
 
+    /// `_string_bits(s)`: the bit array of the UTF-8 bytes of `s`, shared,
+    /// with the bytes converted only once.
+    pub(super) fn code_string_bits(&mut self) -> FunctionId {
+        let s = self.wasm_local(self.string.val_type());
+        let bytes = self.wasm_local(self.bytes.val_type());
+        let off = self.wasm_local(ValType::I32);
+        let len = self.wasm_local(ValType::I32);
+        let bytes_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bytes", vec![]);
+        let from_utf8 = self.runtime_function_id(
+            BIT_ARRAY_MODULE,
+            "bit_array_from_utf8",
+            vec![bytes_type, type_::int(), type_::int()],
+            type_::bit_array(),
+        );
+        let result = self.val_type(&type_::bit_array());
+        let mut function = Function::new(self, "_string_bits", &[s], &[result]);
+        let _ = function
+            .extend_instructions(self)
+            .string_utf8_view(s, bytes, off, len)
+            .local_get(bytes)
+            .local_get(off)
+            .i32_to_int()
+            .local_get(len)
+            .i32_to_int()
+            .call(from_utf8)
+            .end();
+        function.finish(self)
+    }
+
     /// Pushes the number of bits of the `Bits` of `bits`.
     fn push_bit_size(&mut self, instructions: &mut Instructions<'_, '_>, bits: LocalId) {
         let _ = instructions.local_get(bits);

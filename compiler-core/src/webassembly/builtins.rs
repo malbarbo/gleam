@@ -175,10 +175,8 @@ pub(super) enum BuiltinFunctionExternal {
     BytesSet,
     #[strum(serialize = "_bytes_copy")]
     BytesCopy,
-    #[strum(serialize = "_string_bytes")]
-    StringBytes,
-    #[strum(serialize = "_string_offset")]
-    StringOffset,
+    #[strum(serialize = "_string_bits")]
+    StringBits,
     #[strum(serialize = "_bytes_to_string")]
     BytesToString,
     #[strum(serialize = "_float64_byte")]
@@ -217,7 +215,7 @@ impl BuiltinFunctionExternal {
     /// The type of the params and of the result.
     pub(super) fn type_(&self) -> (Vec<BuiltinType>, BuiltinType) {
         use BuiltinFunctionExternal as B;
-        use type_::{bool, float, int, list, nil, result, string, tuple, utf_codepoint};
+        use type_::{bit_array, bool, float, int, list, nil, result, string, tuple, utf_codepoint};
         let ext = BuiltinType::External;
         let (params, result) = match self {
             B::StringConcat => (vec![string(), string()], string()),
@@ -281,8 +279,7 @@ impl BuiltinFunctionExternal {
                 ];
                 return (params, nil().into());
             }
-            B::StringBytes => return (vec![string().into()], ext("Bytes")),
-            B::StringOffset => (vec![string()], int()),
+            B::StringBits => (vec![string()], bit_array()),
             B::BytesToString => {
                 return (
                     vec![ext("Bytes"), int().into(), int().into()],
