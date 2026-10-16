@@ -1,7 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-use super::{run_ok, run_ok_i64};
+use super::{run_ok_i64, run_wasm, run_wasm_js};
+
+/// Runs `src` with UTF8 and with JavaScript strings.
+#[track_caller]
+fn run_ok(src: &str) {
+    super::run_ok(src);
+    let result = run_wasm_js(src, &[]);
+    assert!(
+        result.status.success(),
+        "WASM execution failed (JSString):\n{}",
+        result.stderr
+    );
+}
 
 #[test]
 fn int_to_utf_codepoint() {
@@ -117,13 +129,13 @@ pub fn main() {
 
 #[test]
 fn string_escape() {
-    assert_wasm_echo!(
-        r#"
+    let src = r#"
 pub fn main() {
     echo "\" \n \r \t \f \\ "
 }
-"#,
-    );
+"#;
+    assert_wasm_echo!(src);
+    assert_eq!(run_wasm(src, vec![]).stderr, run_wasm_js(src, &[]).stderr);
 }
 
 #[test]

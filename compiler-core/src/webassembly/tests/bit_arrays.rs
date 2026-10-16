@@ -4,7 +4,10 @@
 //! Bit arrays: the literals, their construction from values, and the
 //! functions of the runtime module `builtins/bit_array`.
 
-use super::{TEST_PACKAGE, compile_wasm, for_each_operator, run_wasm, run_wasm_with_config};
+use super::{
+    TEST_PACKAGE, compile_wasm, for_each_operator, run_wasm, run_wasm_js_with_config,
+    run_wasm_with_config,
+};
 use crate::config::{WasmFloat, WasmInt};
 
 const BIT_ARRAY: &str = r#"
@@ -66,8 +69,8 @@ pub fn show(value: a) -> String
 pub fn hash(value: a) -> Int
 "#;
 
-/// Runs `src` with `Int` of 32 and of 64 bits, and returns what it writes to
-/// stderr with 32 bits.
+/// Runs `src` with `Int` of 32 and of 64 bits, and with JavaScript strings,
+/// and returns what it writes to stderr with 32 bits.
 #[track_caller]
 fn run(src: &str) -> String {
     run_with(src, vec![])
@@ -76,15 +79,16 @@ fn run(src: &str) -> String {
 /// Like `run`, with the modules `modules` of the test package.
 #[track_caller]
 fn run_with(src: &str, modules: Vec<(&str, &str)>) -> String {
+    let mut deps = vec![(TEST_PACKAGE, "bit_array", BIT_ARRAY)];
+    deps.extend(
+        modules
+            .iter()
+            .map(|(name, src)| (TEST_PACKAGE, *name, *src)),
+    );
     let mut stderr = vec![];
     for int in [WasmInt::I32, WasmInt::I64] {
-        let mut deps = vec![(TEST_PACKAGE, "bit_array", BIT_ARRAY)];
-        deps.extend(
-            modules
-                .iter()
-                .map(|(name, src)| (TEST_PACKAGE, *name, *src)),
-        );
-        let result = run_wasm_with_config(src, deps, super::wasm_config(int, WasmFloat::F64));
+        let config = super::wasm_config(int, WasmFloat::F64);
+        let result = run_wasm_with_config(src, deps.clone(), config);
         assert!(
             result.status.success(),
             "WASM execution failed ({int:?}):\n{}",
@@ -92,7 +96,15 @@ fn run_with(src: &str, modules: Vec<(&str, &str)>) -> String {
         );
         stderr.push(result.stderr);
     }
+    let config = super::wasm_config(WasmInt::I64, WasmFloat::F64);
+    let result = run_wasm_js_with_config(src, deps, config, &[]);
+    assert!(
+        result.status.success(),
+        "WASM execution failed (JSString):\n{}",
+        result.stderr
+    );
     assert_eq!(stderr[0], stderr[1]);
+    assert_eq!(stderr[0], result.stderr);
     stderr.swap_remove(0)
 }
 

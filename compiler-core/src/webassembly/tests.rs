@@ -388,11 +388,22 @@ pub fn run_wasm_in(
 /// Like `run_wasm`, with `string = "JSString"`, in Node.js with the host of
 /// `HOST`, next to the JavaScript modules `files` (as `(name, source)`).
 pub fn run_wasm_js(src: &str, files: &[(&str, &str)]) -> WasmOutput {
+    run_wasm_js_with_config(src, vec![], WebAssemblyConfig::default(), files)
+}
+
+/// Like `run_wasm_js`, with the dependencies `deps` and the `config`, whose
+/// `string` becomes `JSString`.
+pub fn run_wasm_js_with_config(
+    src: &str,
+    deps: Vec<(&str, &str, &str)>,
+    config: WebAssemblyConfig,
+    files: &[(&str, &str)],
+) -> WasmOutput {
     let config = WebAssemblyConfig {
         string: crate::config::WasmString::JsString,
-        ..WebAssemblyConfig::default()
+        ..config
     };
-    let wasm_bytes = compile_wasm_in(TEST_PACKAGE, src, vec![], config);
+    let wasm_bytes = compile_wasm_in(TEST_PACKAGE, src, deps, config);
     let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("gleam_wasm_js_test_{id}"));
     std::fs::create_dir_all(&dir).expect("failed to create the test directory");
