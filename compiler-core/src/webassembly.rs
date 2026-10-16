@@ -10,6 +10,7 @@ mod dynamic;
 mod glue;
 mod hash;
 mod instructions;
+mod js_string;
 mod link;
 mod liveness;
 mod monomorphize;
@@ -30,6 +31,7 @@ use dynamic::*;
 use glue::*;
 use hash::*;
 use instructions::*;
+use js_string::*;
 use monomorphize::*;
 use runtime::{Hooks, RUNTIME_PACKAGE};
 pub use runtime::{RuntimeModule, modules as runtime_modules};
@@ -4206,11 +4208,18 @@ impl<'a> Generator<'a> {
         }
         let (params, return_) = type_.fn_types().expect("an external function");
         let params = self.val_types(params);
-        let results = self.val_types(iter::once(return_));
-        let wasm_type = self.wasm_module.types.add(&params, &results);
-        let (index, _) = self
-            .wasm_module
-            .add_import_func(&host_module, name, wasm_type);
+        let index = match self.string {
+            StringType::Js(js) if return_.is_string() => {
+                self.js_string_host_function(js, &host_module, name, &params)
+            }
+            StringType::Utf8(_) | StringType::Js(_) => {
+                let results = self.val_types(iter::once(return_));
+                let wasm_type = self.wasm_module.types.add(&params, &results);
+                self.wasm_module
+                    .add_import_func(&host_module, name, wasm_type)
+                    .0
+            }
+        };
         self.add_function_to_globals(import_name, index)
     }
 

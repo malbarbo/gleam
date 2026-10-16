@@ -13,12 +13,14 @@ pub(super) const STRING_SLICE_COPY_MAX: i32 = 64;
 #[derive(Clone, Copy)]
 pub(super) enum StringType {
     Utf8(Utf8String),
+    Js(JsString),
 }
 
 impl StringType {
     pub(super) fn new(module: &mut walrus::Module, bytes: BytesType, string: WasmString) -> Self {
         match string {
             WasmString::Utf8 => StringType::Utf8(Utf8String::new(module, bytes)),
+            WasmString::JsString => StringType::Js(JsString::new(module, bytes)),
         }
     }
 
@@ -39,6 +41,7 @@ impl StringType {
     pub(super) fn heap_type(&self) -> HeapType {
         match self {
             StringType::Utf8(utf8) => HeapType::Concrete(utf8.type_index),
+            StringType::Js(_) => HeapType::Abstract(walrus::AbstractHeapType::Extern),
         }
     }
 
@@ -235,6 +238,7 @@ impl Instructions<'_, '_> {
     pub(super) fn bytes_copy_from_string(&mut self) -> &mut Self {
         match self.repr.string {
             StringType::Utf8(utf8) => self.call(utf8.copy_to_bytes),
+            StringType::Js(_) => unreachable!("a JavaScript string has no bytes"),
         }
     }
 
@@ -243,6 +247,7 @@ impl Instructions<'_, '_> {
     pub(super) fn string_from_bytes(&mut self) -> &mut Self {
         match self.repr.string {
             StringType::Utf8(utf8) => self.call(utf8.from_bytes),
+            StringType::Js(js) => self.call(js.from_bytes),
         }
     }
 
@@ -251,6 +256,7 @@ impl Instructions<'_, '_> {
     pub(super) fn string_from_utf8(&mut self) -> &mut Self {
         match self.repr.string {
             StringType::Utf8(utf8) => self.struct_new(utf8.type_index),
+            StringType::Js(js) => self.call(js.from_utf8),
         }
     }
 
@@ -258,6 +264,7 @@ impl Instructions<'_, '_> {
     pub(super) fn string_get(&mut self) -> &mut Self {
         match self.repr.string {
             StringType::Utf8(utf8) => self.call(utf8.byte_at),
+            StringType::Js(_) => unreachable!("a JavaScript string has no bytes"),
         }
     }
 
@@ -265,6 +272,7 @@ impl Instructions<'_, '_> {
     pub(super) fn string_len(&mut self) -> &mut Self {
         match self.repr.string {
             StringType::Utf8(utf8) => self.struct_get(utf8.type_index, 2),
+            StringType::Js(_) => unreachable!("a JavaScript string has no bytes"),
         }
     }
 
@@ -274,6 +282,7 @@ impl Instructions<'_, '_> {
     pub(super) fn string_utf8_bytes(&mut self) -> &mut Self {
         match self.repr.string {
             StringType::Utf8(utf8) => self.struct_get(utf8.type_index, 0),
+            StringType::Js(js) => self.call(js.to_utf8),
         }
     }
 
@@ -281,12 +290,17 @@ impl Instructions<'_, '_> {
     pub(super) fn string_utf8_off(&mut self) -> &mut Self {
         match self.repr.string {
             StringType::Utf8(utf8) => self.struct_get(utf8.type_index, 1),
+            // a new array with only the bytes of the string
+            StringType::Js(_) => self.drop().i32_const(0),
         }
     }
 
     /// `[s] -> [len]`: the number of UTF-8 bytes of `s`.
     pub(super) fn string_utf8_len(&mut self) -> &mut Self {
-        self.string_len()
+        match self.repr.string {
+            StringType::Utf8(_) => self.string_len(),
+            StringType::Js(js) => self.call(js.utf8_len),
+        }
     }
 
     /// `[] -> []`: sets `bytes` and `off` to `string_utf8_bytes` and
@@ -297,12 +311,21 @@ impl Instructions<'_, '_> {
         bytes: LocalId,
         off: LocalId,
     ) -> &mut Self {
-        self.local_get(s)
-            .string_utf8_bytes()
-            .local_set(bytes)
-            .local_get(s)
-            .string_utf8_off()
-            .local_set(off)
+        match self.repr.string {
+            StringType::Utf8(_) => self
+                .local_get(s)
+                .string_utf8_bytes()
+                .local_set(bytes)
+                .local_get(s)
+                .string_utf8_off()
+                .local_set(off),
+            StringType::Js(js) => self
+                .local_get(s)
+                .call(js.to_utf8)
+                .local_set(bytes)
+                .i32_const(0)
+                .local_set(off),
+        }
     }
 
     /// `[s, start, len] -> [String]`, sharing the bytes of `s` when the slice
@@ -310,11 +333,21 @@ impl Instructions<'_, '_> {
     pub(super) fn string_slice(&mut self) -> &mut Self {
         match self.repr.string {
             StringType::Utf8(utf8) => self.call(utf8.slice),
+            StringType::Js(_) => unreachable!("a JavaScript string has no bytes"),
         }
     }
 
     /// `[] -> [rest]`: `s` without `prefix`, which it starts with.
     pub(super) fn string_drop_prefix(&mut self, s: LocalId, prefix: &str) -> &mut Self {
+        if let StringType::Js(js) = self.repr.string {
+            let prefix_len = prefix.encode_utf16().count() as i32;
+            return self
+                .local_get(s)
+                .i32_const(prefix_len)
+                .local_get(s)
+                .call(js.length)
+                .call(js.substring);
+        }
         let prefix_len = prefix.len() as i32;
         self.local_get(s)
             .i32_const(prefix_len)
@@ -329,6 +362,9 @@ impl Instructions<'_, '_> {
 impl<'a> Generator<'a> {
     /// Sets the globals of the string literals, see `string_index`.
     pub(super) fn code_string_literals(&mut self, instructions: &mut Instructions<'_, '_>) {
+        if let StringType::Js(_) = self.string {
+            return;
+        }
         for (string, index) in self.strings.clone() {
             self.push_bytes(instructions, string.as_bytes().to_vec());
             let _ = instructions.string_from_bytes().global_set(index);
@@ -340,12 +376,16 @@ impl<'a> Generator<'a> {
         if let Some(id) = self.strings.get(string.as_str()) {
             return *id;
         }
-        let val_type = self.string.val_type_nullable();
-        let init = self.string.null_const();
-        let id = self
-            .wasm_module
-            .globals
-            .add_local(val_type, true, false, init);
+        let id = match self.string {
+            StringType::Utf8(_) => {
+                let val_type = self.string.val_type_nullable();
+                let init = self.string.null_const();
+                self.wasm_module
+                    .globals
+                    .add_local(val_type, true, false, init)
+            }
+            StringType::Js(_) => self.js_string_literal(&string),
+        };
         // Named after the text it holds. A module carries one of these per
         // distinct literal and they are otherwise identical, so a disassembly
         // reading `global.set 7` says nothing about which literal that is.
@@ -359,6 +399,9 @@ impl<'a> Generator<'a> {
     }
 
     pub(super) fn code_string_concat(&mut self) -> FunctionId {
+        if let StringType::Js(js) = self.string {
+            return self.code_js_string_concat(js);
+        }
         let string_vt = self.string.val_type();
         // params
         let a = self.wasm_local(string_vt); // String
@@ -407,6 +450,9 @@ impl<'a> Generator<'a> {
     }
 
     pub(super) fn code_string_eq(&mut self) -> FunctionId {
+        if let StringType::Js(js) = self.string {
+            return self.code_js_string_eq(js);
+        }
         let string_vt = self.string.val_type();
         // params
         let a = self.wasm_local(string_vt); // String
@@ -489,6 +535,9 @@ impl<'a> Generator<'a> {
     }
 
     pub(super) fn code_string_starts_with(&mut self) -> FunctionId {
+        if let StringType::Js(js) = self.string {
+            return self.code_js_string_affix(js, true);
+        }
         let string_vt = self.string.val_type();
         // params
         let a = self.wasm_local(string_vt); // String
@@ -554,6 +603,9 @@ impl<'a> Generator<'a> {
     /// `_string_byte_slice(s, start, length)`: the caller guarantees the
     /// bounds. A view over `s` unless the slice is small.
     pub(super) fn code_string_byte_slice(&mut self) -> FunctionId {
+        if let StringType::Js(js) = self.string {
+            return self.code_js_string_byte_slice(js);
+        }
         let string_vt = self.string.val_type();
         let int_vt = self.int.val_type();
         // params
@@ -575,6 +627,9 @@ impl<'a> Generator<'a> {
     }
 
     pub(super) fn code_string_pop_codeunit(&mut self) -> FunctionId {
+        if let StringType::Js(js) = self.string {
+            return self.code_js_string_pop_codeunit(js);
+        }
         let string_vt = self.string.val_type();
         let tuple = type_::tuple(vec![type_::int(), type_::string()]);
         let tuple_vt = self.val_type(&tuple);
@@ -618,6 +673,9 @@ impl<'a> Generator<'a> {
     }
 
     pub(super) fn code_string_ends_with(&mut self) -> FunctionId {
+        if let StringType::Js(js) = self.string {
+            return self.code_js_string_affix(js, false);
+        }
         let string_vt = self.string.val_type();
         // params
         let a = self.wasm_local(string_vt); // String
@@ -675,6 +733,9 @@ impl<'a> Generator<'a> {
     /// `_string_remove_prefix` and `_string_remove_suffix`: the string without
     /// the affix, or the string itself when it does not match.
     pub(super) fn code_string_remove_affix(&mut self, prefix: bool) -> FunctionId {
+        if let StringType::Js(js) = self.string {
+            return self.code_js_string_remove_affix(js, prefix);
+        }
         let string_vt = self.string.val_type();
         let matches = if prefix {
             self.function_string_starts_with()
@@ -725,6 +786,9 @@ impl<'a> Generator<'a> {
 
     /// Byte-wise comparison, like Erlang binaries.
     pub(super) fn code_string_less_than(&mut self) -> FunctionId {
+        if let StringType::Js(js) = self.string {
+            return self.code_js_string_less_than(js);
+        }
         let string_vt = self.string.val_type();
         // params
         let a = self.wasm_local(string_vt); // String
@@ -800,6 +864,14 @@ impl<'a> Generator<'a> {
         let pos = self.wasm_local(ValType::I32); // I32
         let seen = self.wasm_local(ValType::I32); // Bool
         let r = self.wasm_local(self.bytes.val_type());
+        let js = match self.string {
+            StringType::Utf8(_) => None,
+            StringType::Js(js) => Some((
+                js,
+                self.string_index(&"".into()),
+                self.wasm_local(string_vt),
+            )),
+        };
         let (name, params) = if with_separator {
             ("_string_join", vec![strings, separator])
         } else {
@@ -844,6 +916,27 @@ impl<'a> Generator<'a> {
                         .local_set(seen);
                 }
             };
+        // A JavaScript string is a rope, so the strings are concatenated one
+        // after the other.
+        if let Some((js, empty, joined)) = js {
+            let _ = instructions.global_as_non_null(empty).local_set(joined);
+            for_each(&mut instructions, &|s| {
+                separator_before(s, &|s| {
+                    let _ = s
+                        .local_get(joined)
+                        .local_get(separator)
+                        .call(js.concat)
+                        .local_set(joined);
+                });
+                let _ = s
+                    .local_get(joined)
+                    .local_get(item)
+                    .call(js.concat)
+                    .local_set(joined);
+            });
+            let _ = instructions.local_get(joined).end();
+            return function.finish(self);
+        }
         for_each(&mut instructions, &|s| {
             separator_before(s, &|s| {
                 let _ = s
@@ -905,6 +998,9 @@ impl<'a> Generator<'a> {
     /// grapheme could continue past it, so the cost is O(grapheme) and not
     /// O(string). Both parts are slices of `s`.
     pub(super) fn code_string_pop_grapheme(&mut self) -> FunctionId {
+        if let StringType::Js(js) = self.string {
+            return self.code_js_string_pop_grapheme(js);
+        }
         let string_vt = self.string.val_type();
         let pair = type_::tuple(vec![type_::string(), type_::string()]);
         let pair_index = self.type_index(&pair);
@@ -988,7 +1084,7 @@ impl<'a> Generator<'a> {
     }
 }
 
-const GRAPHEME_PREFIX_LEN: &str = "_grapheme_prefix_len";
+pub(super) const GRAPHEME_PREFIX_LEN: &str = "_grapheme_prefix_len";
 
 /// The first window of `_string_pop_grapheme`, in bytes.
-const GRAPHEME_WINDOW: i32 = 64;
+pub(super) const GRAPHEME_WINDOW: i32 = 64;

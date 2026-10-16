@@ -385,6 +385,41 @@ pub fn run_wasm_in(
     }
 }
 
+/// Like `run_wasm`, with `string = "JSString"`, in Node.js with the host of
+/// `HOST`, next to the JavaScript modules `files` (as `(name, source)`).
+pub fn run_wasm_js(src: &str, files: &[(&str, &str)]) -> WasmOutput {
+    let config = WebAssemblyConfig {
+        string: crate::config::WasmString::JsString,
+        ..WebAssemblyConfig::default()
+    };
+    let wasm_bytes = compile_wasm_in(TEST_PACKAGE, src, vec![], config);
+    let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("gleam_wasm_js_test_{id}"));
+    std::fs::create_dir_all(&dir).expect("failed to create the test directory");
+    let run = r#"import { run } from "./host.mjs";
+await run(new URL("./main.wasm", import.meta.url));
+"#;
+    let files = [("host.mjs", crate::webassembly::HOST), ("run.mjs", run)]
+        .into_iter()
+        .chain(files.iter().copied());
+    for (name, source) in files {
+        std::fs::write(dir.join(name), source).expect("failed to write a test file");
+    }
+    std::fs::write(dir.join("main.wasm"), &wasm_bytes).expect("failed to write the wasm file");
+    let output = std::process::Command::new("node")
+        .arg(dir.join("run.mjs"))
+        .output()
+        .expect("node not found — install it to run the WASM tests of JavaScript strings");
+    if output.status.success() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    WasmOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        status: output.status,
+    }
+}
+
 /// Compile and run WASM, assert it succeeds.
 #[track_caller]
 pub fn run_ok(src: &str) {
@@ -493,6 +528,7 @@ mod function_fields;
 mod functions;
 mod glue;
 mod host;
+mod js_strings;
 mod link;
 mod lists;
 mod local_closures;
