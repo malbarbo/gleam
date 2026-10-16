@@ -262,21 +262,27 @@ pub fn main() {
     );
 }
 
-/// A lone surrogate from the host becomes U+FFFD in the UTF-8 bytes.
+/// A lone surrogate from the host becomes U+FFFD in the UTF-8 bytes, and a
+/// high surrogate followed by a low one is a pair.
 #[test]
 fn lone_surrogate() {
     let host = r#"
 export function lone() { return "a\uD800b"; }
+export function mixed() { return "\uD800\uD83D\uDE00\uDE00"; }
 "#;
     let _ = run_ok(
         &format!(
             r#"{BUILTINS}
 @external(webassembly, "./host_strings.mjs", "lone")
 fn lone() -> String
+@external(webassembly, "./host_strings.mjs", "mixed")
+fn mixed() -> String
 
 pub fn main() {{
     let assert 5 = byte_size(lone())
     let assert "a\u{{FFFD}}b" = byte_slice(lone(), 0, 5)
+    let assert 10 = byte_size(mixed())
+    let assert "\u{{FFFD}}😀\u{{FFFD}}" = byte_slice(mixed(), 0, 10)
 }}
 "#
         ),

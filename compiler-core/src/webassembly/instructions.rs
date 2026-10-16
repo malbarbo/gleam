@@ -318,6 +318,12 @@ fn sub_seq(
 }
 
 impl<'a, 'b> Instructions<'a, 'b> {
+    /// The walrus builder, for code shared with the functions that are built
+    /// with it directly.
+    pub(super) fn builder(&mut self) -> &mut InstrSeqBuilder<'b> {
+        self.seq.as_mut()
+    }
+
     pub(super) fn i32_inc(&mut self, local: LocalId) -> &mut Self {
         self.local_get(local)
             .i32_const(1)

@@ -44,8 +44,6 @@ pub(super) struct JsString {
     pub(super) equals: FunctionId,
     /// `(externref) -> i32`: whether the value is a string.
     pub(super) test: FunctionId,
-    /// `(externref) -> String`.
-    pub(super) cast: FunctionId,
     /// `(s) -> i32`: the number of UTF-8 bytes of `s`.
     pub(super) utf8_len: FunctionId,
     /// `(s) -> bytes`: the UTF-8 bytes of `s`.
@@ -80,7 +78,6 @@ impl JsString {
         let substring = import(module, "substring", &[EXTERNREF, i32, i32], &[EXTERN]);
         let equals = import(module, "equals", &[EXTERNREF, EXTERNREF], &[i32]);
         let test = import(module, "test", &[EXTERNREF], &[i32]);
-        let cast = import(module, "cast", &[EXTERNREF], &[EXTERN]);
         let from_char_code_array = import(
             module,
             "fromCharCodeArray",
@@ -94,7 +91,7 @@ impl JsString {
             &[i32],
         );
         let utf8_len = code_utf8_len(module, length, code_point_at);
-        let to_utf8 = code_to_utf8(module, bytes, units, length, into_char_code_array, utf8_len);
+        let to_utf8 = code_to_utf8(module, bytes, units, length, into_char_code_array);
         let from_utf8 = code_from_utf8(module, bytes, units, from_char_code_array);
         let from_bytes = {
             let bytes_vt = bytes.val_type();
@@ -118,7 +115,6 @@ impl JsString {
             substring,
             equals,
             test,
-            cast,
             utf8_len,
             to_utf8,
             from_utf8,
@@ -212,15 +208,15 @@ fn is_surrogate(seq: &mut InstrSeqBuilder<'_>, c: LocalId) {
         .binop(BinaryOp::I32LtU);
 }
 
-/// `_string_to_utf8(s)`: the units of `s` are copied to an array and encoded
-/// from there. A lone surrogate becomes U+FFFD, as with `TextEncoder`.
+/// `_string_to_utf8(s)`: the units of `s` are copied to an array, counted
+/// and encoded from there. A lone surrogate becomes U+FFFD, as with
+/// `TextEncoder`.
 fn code_to_utf8(
     module: &mut walrus::Module,
     bytes: BytesType,
     units: TypeId,
     length: FunctionId,
     into_char_code_array: FunctionId,
-    utf8_len: FunctionId,
 ) -> FunctionId {
     let bytes_vt = bytes.val_type();
     let s = module.locals.add(EXTERN);
@@ -234,6 +230,7 @@ fn code_to_utf8(
     let j = module.locals.add(ValType::I32);
     let c = module.locals.add(ValType::I32);
     let d = module.locals.add(ValType::I32);
+    let total = module.locals.add(ValType::I32);
     let mut fb = FunctionBuilder::new(&mut module.types, &[EXTERN], &[bytes_vt]);
     let _ = fb.name("_string_to_utf8".into());
     let mut body = fb.func_body();
@@ -249,10 +246,67 @@ fn code_to_utf8(
         .i32_const(0)
         .call(into_char_code_array)
         .drop()
-        .local_get(s)
-        .call(utf8_len)
+        // the number of bytes: 1 to 3 for each unit, but 4 for a pair
+        .block(InstrSeqType::Simple(None), |block_s| {
+            let block_id = block_s.id();
+            let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
+                let loop_id = loop_s.id();
+                let _ = loop_s
+                    .local_get(i)
+                    .local_get(n)
+                    .binop(BinaryOp::I32GeU)
+                    .br_if(block_id)
+                    .local_get(a)
+                    .local_get(i)
+                    .array_get_u(units)
+                    .local_tee(c)
+                    .i32_const(0xFC00)
+                    .binop(BinaryOp::I32And)
+                    .i32_const(0xDC00)
+                    .binop(BinaryOp::I32Eq)
+                    .local_get(i)
+                    .if_else(
+                        ValType::I32,
+                        |then_s| {
+                            let _ = then_s
+                                .local_get(a)
+                                .local_get(i)
+                                .i32_const(1)
+                                .binop(BinaryOp::I32Sub)
+                                .array_get_u(units)
+                                .i32_const(0xFC00)
+                                .binop(BinaryOp::I32And)
+                                .i32_const(0xD800)
+                                .binop(BinaryOp::I32Eq);
+                        },
+                        |else_s| {
+                            let _ = else_s.i32_const(0);
+                        },
+                    )
+                    .binop(BinaryOp::I32And)
+                    // a low surrogate after a high one: 4 bytes for both
+                    .i32_const(1)
+                    .binop(BinaryOp::I32Shl)
+                    .local_set(d)
+                    .local_get(total);
+                utf8_width(loop_s, c);
+                let _ = loop_s
+                    .binop(BinaryOp::I32Add)
+                    .local_get(d)
+                    .binop(BinaryOp::I32Sub)
+                    .local_set(total)
+                    .local_get(i)
+                    .i32_const(1)
+                    .binop(BinaryOp::I32Add)
+                    .local_set(i)
+                    .br(loop_id);
+            });
+        })
+        .local_get(total)
         .array_new_default(bytes.index)
         .local_set(out)
+        .i32_const(0)
+        .local_set(i)
         .block(InstrSeqType::Simple(None), |block_s| {
             let block_id = block_s.id();
             let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
@@ -592,10 +646,7 @@ fn get_utf8(
 impl Instructions<'_, '_> {
     /// `[] -> [n]`, see `utf8_width`.
     fn js_utf8_width(&mut self, c: LocalId) -> &mut Self {
-        let _ = self.i32_const(1);
-        for limit in [0x80, 0x800, 0x10000] {
-            let _ = self.local_get(c).i32_const(limit).i32_ge_u().i32_add();
-        }
+        utf8_width(self.builder(), c);
         self
     }
 }
@@ -644,7 +695,8 @@ impl<'a> Generator<'a> {
             .if_else(
                 EXTERN,
                 |then_s| {
-                    let _ = then_s.local_get(value).call(js.cast);
+                    // a string, so not null
+                    let _ = then_s.local_get(value).ref_as_non_null();
                 },
                 |else_s| {
                     let _ = else_s
@@ -862,6 +914,45 @@ impl<'a> Generator<'a> {
             .local_get(len)
             .int_to_i32()
             .call(js.from_utf8)
+            .end();
+        function.finish(self)
+    }
+
+    /// `_string_concat_list(strings)` and `_string_join(strings, separator)`:
+    /// a JavaScript string is a rope, so the strings are concatenated one
+    /// after the other.
+    pub(super) fn code_js_string_join(&mut self, js: JsString, with_separator: bool) -> FunctionId {
+        let cons = self.string_list_cons();
+        let empty = self.string_index(&"".into());
+        // params
+        let strings = self.wasm_local(cons.list_vt);
+        let separator = self.wasm_local(EXTERN);
+        // locals
+        let l = self.wasm_local(cons.list_vt);
+        let item = self.wasm_local(EXTERN);
+        let seen = self.wasm_local(ValType::I32);
+        let joined = self.wasm_local(EXTERN);
+        let (name, params) = string_join_signature(with_separator, strings, separator);
+        let mut function = Function::new(self, name, &params, &[EXTERN]);
+        let _ = function
+            .extend_instructions(self)
+            .global_as_non_null(empty)
+            .local_set(joined)
+            .string_list_for_each(cons, strings, l, item, &|s| {
+                let _ = s
+                    .separator_before(with_separator, seen, &|s| {
+                        let _ = s
+                            .local_get(joined)
+                            .local_get(separator)
+                            .call(js.concat)
+                            .local_set(joined);
+                    })
+                    .local_get(joined)
+                    .local_get(item)
+                    .call(js.concat)
+                    .local_set(joined);
+            })
+            .local_get(joined)
             .end();
         function.finish(self)
     }

@@ -166,6 +166,7 @@ impl<'a> Generator<'a> {
             })
             .collect_vec();
         let mark = self.wasm_local(ValType::I32);
+        let len = self.wasm_local(ValType::I32);
         let ret = self.wasm_local(ValType::I32);
         let result = self.wasm_local(return_vt);
         let lift = self.lift_function(&return_abi);
@@ -184,9 +185,9 @@ impl<'a> Generator<'a> {
                     .local_get(*local)
                     .local_get(*local)
                     .string_utf8_len()
+                    .local_tee(len)
                     .call(lower_string)
-                    .local_get(*local)
-                    .string_utf8_len(),
+                    .local_get(len),
                 Abi::List(_) => instructions
                     .local_get(*local)
                     .call(lower_list.expect("list lowering")),
@@ -265,13 +266,14 @@ impl<'a> Generator<'a> {
         // locals
         let bytes = self.wasm_local(bytes_vt);
         let off = self.wasm_local(ValType::I32);
+        let len = self.wasm_local(ValType::I32);
         let ptr = self.wasm_local(ValType::I32);
         let i = self.wasm_local(ValType::I32);
         let mut function = Function::new(self, "_lower_string", &[s, n], &[ValType::I32]);
         #[rustfmt::skip]
         let _ = function
             .extend_instructions(self)
-            .string_utf8_view(s, bytes, off)
+            .string_utf8_view(s, bytes, off, len)
             .i32_const(0)
             .i32_const(0)
             .i32_const(1)
@@ -404,6 +406,8 @@ impl<'a> Generator<'a> {
         // params
         let addr = self.wasm_local(ValType::I32);
         let value = self.wasm_local(value_vt);
+        // locals
+        let len = self.wasm_local(ValType::I32);
         let name = format!("_store({})", self.type_pretty_name(type_));
         let mut function = Function::new(self, &name, &[addr, value], &[]);
         let mut instructions = function.extend_instructions(self);
@@ -428,11 +432,11 @@ impl<'a> Generator<'a> {
                 .local_get(value)
                 .local_get(value)
                 .string_utf8_len()
+                .local_tee(len)
                 .call(lower_string)
                 .i32_store(mem_arg(0))
                 .local_get(addr)
-                .local_get(value)
-                .string_utf8_len()
+                .local_get(len)
                 .i32_store(mem_arg(4)),
             Abi::List(_) | Abi::Tuple(_) | Abi::Result(_, _) => {
                 panic!("unsupported list element type for a rust param: {type_:?}")

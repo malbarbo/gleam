@@ -303,13 +303,15 @@ impl Instructions<'_, '_> {
         }
     }
 
-    /// `[] -> []`: sets `bytes` and `off` to `string_utf8_bytes` and
-    /// `string_utf8_off` of `s`.
+    /// `[] -> []`: sets `bytes`, `off` and `len` to `string_utf8_bytes`,
+    /// `string_utf8_off` and `string_utf8_len` of `s`, converting a
+    /// JavaScript string only once.
     pub(super) fn string_utf8_view(
         &mut self,
         s: LocalId,
         bytes: LocalId,
         off: LocalId,
+        len: LocalId,
     ) -> &mut Self {
         match self.repr.string {
             StringType::Utf8(_) => self
@@ -318,11 +320,16 @@ impl Instructions<'_, '_> {
                 .local_set(bytes)
                 .local_get(s)
                 .string_utf8_off()
-                .local_set(off),
+                .local_set(off)
+                .local_get(s)
+                .string_len()
+                .local_set(len),
             StringType::Js(js) => self
                 .local_get(s)
                 .call(js.to_utf8)
-                .local_set(bytes)
+                .local_tee(bytes)
+                .array_len()
+                .local_set(len)
                 .i32_const(0)
                 .local_set(off),
         }
@@ -357,9 +364,98 @@ impl Instructions<'_, '_> {
             .i32_sub()
             .string_slice()
     }
+
+    /// `[] -> []`: runs `body` for each element of the list `strings`, in
+    /// `item`, walking it with `l`.
+    pub(super) fn string_list_for_each(
+        &mut self,
+        cons: StringListCons,
+        strings: LocalId,
+        l: LocalId,
+        item: LocalId,
+        body: &dyn Fn(&mut Instructions<'_, '_>),
+    ) -> &mut Self {
+        self.local_get(strings)
+            .local_set(l)
+            .block_(InstrSeqType::Simple(None), |block_s| {
+                let block_id = block_s.id();
+                let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
+                    let loop_id = loop_s.id();
+                    let _ = loop_s
+                        .local_get(l)
+                        .ref_is_null()
+                        .br_if(block_id)
+                        .local_get(l)
+                        .variant_field_get(cons.index, cons.first_field)
+                        .local_set(item);
+                    body(loop_s);
+                    let _ = loop_s
+                        .local_get(l)
+                        .ref_cast_non_null(HeapType::Concrete(cons.index))
+                        .struct_get(cons.index, cons.rest_field)
+                        .local_set(l)
+                        .br(loop_id);
+                });
+            })
+    }
+
+    /// `[] -> []`: runs `body` when `with_separator` and an element was
+    /// `seen`, so that the separator goes before every element but the
+    /// first.
+    pub(super) fn separator_before(
+        &mut self,
+        with_separator: bool,
+        seen: LocalId,
+        body: &dyn Fn(&mut Instructions<'_, '_>),
+    ) -> &mut Self {
+        if !with_separator {
+            return self;
+        }
+        self.local_get(seen)
+            .if_(InstrSeqType::Simple(None), |then_s| body(then_s))
+            .i32_const(1)
+            .local_set(seen)
+    }
+}
+
+/// The cons of `List(String)`, which `_string_join` walks.
+#[derive(Clone, Copy)]
+pub(super) struct StringListCons {
+    pub(super) list_vt: ValType,
+    index: TypeId,
+    rest_field: u32,
+    first_field: Option<u32>,
+}
+
+/// The name and the parameters of `_string_join`, or of
+/// `_string_concat_list` without a separator.
+pub(super) fn string_join_signature(
+    with_separator: bool,
+    strings: LocalId,
+    separator: LocalId,
+) -> (&'static str, Vec<LocalId>) {
+    if with_separator {
+        ("_string_join", vec![strings, separator])
+    } else {
+        ("_string_concat_list", vec![strings])
+    }
 }
 
 impl<'a> Generator<'a> {
+    pub(super) fn string_list_cons(&mut self) -> StringListCons {
+        let list_type = type_::list(type_::string());
+        let list_vt = self.val_type(&list_type);
+        let (custom_type, cons, _, args) = self.list_type_cons(&list_type);
+        let (_, index, _) = self.mono_union_subtype_index(&list_type, &custom_type, &cons, &args);
+        let (rest_field, first_field) = self.list_cons_fields(&list_type);
+        StringListCons {
+            list_vt,
+            index,
+            rest_field,
+            first_field,
+        }
+    }
+
     /// Sets the globals of the string literals, see `string_index`.
     pub(super) fn code_string_literals(&mut self, instructions: &mut Instructions<'_, '_>) {
         if let StringType::Js(_) = self.string {
@@ -861,96 +957,31 @@ impl<'a> Generator<'a> {
     /// one pass to size the result and another to copy, so the cost is linear
     /// in the total size instead of quadratic as with repeated `<>`.
     pub(super) fn code_string_join(&mut self, with_separator: bool) -> FunctionId {
+        if let StringType::Js(js) = self.string {
+            return self.code_js_string_join(js, with_separator);
+        }
         let string_vt = self.string.val_type();
-        let list_type = type_::list(type_::string());
-        let list_vt = self.val_type(&list_type);
-        let (custom_type, cons, _, args) = self.list_type_cons(&list_type);
-        let (_, cons_index, _) =
-            self.mono_union_subtype_index(&list_type, &custom_type, &cons, &args);
-        let (rest_field, first_field) = self.list_cons_fields(&list_type);
+        let cons = self.string_list_cons();
         // params
-        let strings = self.wasm_local(list_vt); // List(String)
+        let strings = self.wasm_local(cons.list_vt); // List(String)
         let separator = self.wasm_local(string_vt); // String
         // locals
-        let l = self.wasm_local(list_vt); // List(String)
+        let l = self.wasm_local(cons.list_vt); // List(String)
         let item = self.wasm_local(string_vt); // String
         let total = self.wasm_local(ValType::I32); // I32
         let pos = self.wasm_local(ValType::I32); // I32
         let seen = self.wasm_local(ValType::I32); // Bool
         let r = self.wasm_local(self.bytes.val_type());
-        let js = match self.string {
-            StringType::Utf8(_) => None,
-            StringType::Js(js) => Some((
-                js,
-                self.string_index(&"".into()),
-                self.wasm_local(string_vt),
-            )),
-        };
-        let (name, params) = if with_separator {
-            ("_string_join", vec![strings, separator])
-        } else {
-            ("_string_concat_list", vec![strings])
-        };
+        let (name, params) = string_join_signature(with_separator, strings, separator);
         let mut function = Function::new(self, name, &params, &[string_vt]);
         let mut instructions = function.extend_instructions(self);
-        // Iterates `l` from `strings`, with the current element in `item`.
         let for_each = |s: &mut Instructions<'_, '_>, body: &dyn Fn(&mut Instructions<'_, '_>)| {
-            let _ =
-                s.local_get(strings)
-                    .local_set(l)
-                    .block_(InstrSeqType::Simple(None), |block_s| {
-                        let block_id = block_s.id();
-                        let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
-                            let loop_id = loop_s.id();
-                            let _ = loop_s
-                                .local_get(l)
-                                .ref_is_null()
-                                .br_if(block_id)
-                                .local_get(l)
-                                .variant_field_get(cons_index, first_field)
-                                .local_set(item);
-                            body(loop_s);
-                            let _ = loop_s
-                                .local_get(l)
-                                .ref_cast_non_null(HeapType::Concrete(cons_index))
-                                .struct_get(cons_index, rest_field)
-                                .local_set(l)
-                                .br(loop_id);
-                        });
-                    });
+            let _ = s.string_list_for_each(cons, strings, l, item, body);
         };
-        // The separator goes before every element but the first.
         let separator_before =
             |s: &mut Instructions<'_, '_>, body: &dyn Fn(&mut Instructions<'_, '_>)| {
-                if with_separator {
-                    let _ = s
-                        .local_get(seen)
-                        .if_(InstrSeqType::Simple(None), |then_s| body(then_s))
-                        .i32_const(1)
-                        .local_set(seen);
-                }
+                let _ = s.separator_before(with_separator, seen, body);
             };
-        // A JavaScript string is a rope, so the strings are concatenated one
-        // after the other.
-        if let Some((js, empty, joined)) = js {
-            let _ = instructions.global_as_non_null(empty).local_set(joined);
-            for_each(&mut instructions, &|s| {
-                separator_before(s, &|s| {
-                    let _ = s
-                        .local_get(joined)
-                        .local_get(separator)
-                        .call(js.concat)
-                        .local_set(joined);
-                });
-                let _ = s
-                    .local_get(joined)
-                    .local_get(item)
-                    .call(js.concat)
-                    .local_set(joined);
-            });
-            let _ = instructions.local_get(joined).end();
-            return function.finish(self);
-        }
         for_each(&mut instructions, &|s| {
             separator_before(s, &|s| {
                 let _ = s

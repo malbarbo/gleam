@@ -472,6 +472,7 @@ impl<'a> Generator<'a> {
         // locals
         let bytes = self.wasm_local(self.bytes.val_type());
         let off = self.wasm_local(ValType::I32);
+        let len = self.wasm_local(ValType::I32);
         // return Int
         let result = type_::result(type_::int(), type_::nil());
         let result_vt = self.val_type(&result);
@@ -481,9 +482,9 @@ impl<'a> Generator<'a> {
         let mut instructions = function.extend_instructions(self);
         #[rustfmt::skip]
         let _ = instructions
+            .string_utf8_view(s, bytes, off, len)
             .local_get(i)
-            .local_get(s)
-            .string_utf8_len()
+            .local_get(len)
             .i32_to_int()
             .int_lt()
             .local_get(i)
@@ -494,7 +495,6 @@ impl<'a> Generator<'a> {
                 result_vt,
                 |then_s| {
                     let _ = then_s
-                        .string_utf8_view(s, bytes, off)
                         .local_get(bytes)
                         .local_get(off)
                         .local_get(i)
@@ -1137,11 +1137,10 @@ impl<'a> Generator<'a> {
         let mut instructions = function.extend_instructions(self);
         #[rustfmt::skip]
         let _ = instructions
-            .string_utf8_view(s, bytes, off)
+            .string_utf8_view(s, bytes, off, len)
             // max output = ptr + 2 + len * 8, as a byte can become `\u{00XX}`
             .local_get(ptr)
-            .local_get(s)
-            .string_utf8_len()
+            .local_get(len)
             .i32_const(8)
             .i32_mul()
             .i32_add()
@@ -1152,9 +1151,6 @@ impl<'a> Generator<'a> {
             .local_tee(dest)
             .byte_store(b'"')
             .i32_inc(dest)
-            .local_get(s)
-            .string_utf8_len()
-            .local_set(len)
             .i32_const(0)
             .local_set(i)
             // while i <= len
@@ -1936,10 +1932,7 @@ impl<'a> Generator<'a> {
         let mut instructions = function.extend_instructions(self);
         #[rustfmt::skip]
         let _ = instructions
-            .string_utf8_view(s, bytes, off)
-            .local_get(s)
-            .string_utf8_len()
-            .local_set(len)
+            .string_utf8_view(s, bytes, off, len)
             .local_get(dest)
             .local_get(len)
             .i32_add()

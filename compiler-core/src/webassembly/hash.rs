@@ -259,10 +259,9 @@ impl<'a> Generator<'a> {
             .extend_instructions(self)
             .i32_const(0x811c_9dc5_u32 as i32)
             .local_set(h)
-            .string_utf8_view(s, bytes, i)
+            .string_utf8_view(s, bytes, i, end)
             .local_get(i)
-            .local_get(s)
-            .string_utf8_len()
+            .local_get(end)
             .i32_add()
             .local_set(end)
             .block_(InstrSeqType::Simple(None), |block_s| {
