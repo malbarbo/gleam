@@ -894,6 +894,14 @@ pub fn main() {{
     }
 }
 
+/// The externals of the runtime are checked with its types, so a module
+/// that declares them, like `gleam/bit_array` in the tests of the standard
+/// library, compiles on its own.
+#[test]
+fn runtime_externals_compile_on_their_own() {
+    let _ = compile_wasm(BIT_ARRAY, vec![]);
+}
+
 /// The builtins of `Bytes` and of the bits of floats are emitted in place
 /// of their calls, so the module has no function for them, except the loop
 /// of `_bytes_copy_shifted`.

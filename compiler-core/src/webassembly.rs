@@ -1157,10 +1157,13 @@ impl<'a> Generator<'a> {
 
         // External types, like I32, must come first because of the external function type checking.
         // Externals functions come first because of the indexes in the builtin wasm file.
+        // The types of the runtime come before them too, as an external of
+        // the runtime is checked with its types, like the `Bits` of a
+        // `BitArray`.
         self.types_external()?;
-        let builtins = self.functions_external()?;
         self.types_prelude();
         self.types_runtime();
+        let builtins = self.functions_external()?;
         self.functions_builtins(builtins);
         self.types();
         self.types_imported();
