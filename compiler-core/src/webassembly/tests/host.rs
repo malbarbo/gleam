@@ -874,6 +874,51 @@ export const fold = (dict, state, fun) =>
     );
 }
 
+/// A `panic`, `todo`, `let assert` or `assert` throws the `Error` of the
+/// JavaScript target, which the host can catch.
+#[test]
+fn host_catches_errors() {
+    run_with_host(
+        r#"
+@external(webassembly, "./ffi.mjs", "rescue")
+fn rescue(f: fn() -> a) -> String
+
+fn fails(n: Int) -> Int {
+    case n {
+        0 -> panic as "boom"
+        1 -> todo
+        2 -> {
+            let assert Ok(m) = Error(n) as "not ok"
+            m
+        }
+        _ -> {
+            assert n == 4
+            n
+        }
+    }
+}
+
+pub fn main() {
+    let assert "panic src/my/mod.gleam my/mod fails 7 boom" = rescue(fn() { fails(0) })
+    let assert "todo src/my/mod.gleam my/mod fails 8 `todo` expression evaluated. This code has not yet been implemented." = rescue(fn() { fails(1) })
+    let assert "let_assert src/my/mod.gleam my/mod fails 10 not ok" = rescue(fn() { fails(2) })
+    let assert "assert src/my/mod.gleam my/mod fails 14 Assertion failed." = rescue(fn() { fails(3) })
+    let assert "" = rescue(fn() { fails(4) })
+}
+"#,
+        r#"
+export function rescue(f) {
+  try {
+    f();
+    return "";
+  } catch (e) {
+    return [e.gleam_error, e.file, e.module, e.function, e.line, e.message].join(" ");
+  }
+}
+"#,
+    );
+}
+
 /// A value that the host returns as a `List`, a `Result`, a `BitArray` or a
 /// custom type with variants is checked to be one.
 #[test]

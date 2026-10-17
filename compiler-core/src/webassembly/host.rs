@@ -148,7 +148,11 @@ impl<'a> Generator<'a> {
 
     /// The function that converts a value of type `type_` in `direction`,
     /// unless it crosses as it is.
-    fn conversion_call(&mut self, type_: &Arc<Type>, direction: Direction) -> Option<FunctionId> {
+    pub(super) fn conversion_call(
+        &mut self,
+        type_: &Arc<Type>,
+        direction: Direction,
+    ) -> Option<FunctionId> {
         if self.crosses_as_is(type_, direction) {
             None
         } else {
@@ -1032,7 +1036,7 @@ impl<'a> Generator<'a> {
 
     /// The import of the function `name` of the host module `module`, with
     /// params `params` and results `results`.
-    fn host_import(
+    pub(super) fn host_import(
         &mut self,
         module: &str,
         name: &str,
@@ -1226,7 +1230,7 @@ impl<'a> Generator<'a> {
 
     /// The wasm type of a value of the host type `type_` in JavaScript: the
     /// one of `type_` when it crosses as it is, an `externref` otherwise.
-    fn js_val_type(&mut self, type_: &Arc<Type>, direction: Direction) -> ValType {
+    pub(super) fn js_val_type(&mut self, type_: &Arc<Type>, direction: Direction) -> ValType {
         if self.crosses_as_is(type_, direction) {
             self.val_type(type_)
         } else {
@@ -1247,7 +1251,7 @@ fn js_function_capture(generator: &Generator<'_>) -> Capture {
 
 /// The module of the functions of the host that create and call JavaScript
 /// values, see `runtime/js.gleam`.
-const GLEAM_JS: &str = "gleam:js";
+pub(super) const GLEAM_JS: &str = "gleam:js";
 
 /// The representation of a JavaScript function that calls a wasm function.
 const FUNCREF: ValType = ValType::Ref(RefType {

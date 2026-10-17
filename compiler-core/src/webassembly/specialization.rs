@@ -495,8 +495,7 @@ impl<'a> Generator<'a> {
         let variables = Variables::of(&function.arguments, &function.body);
         self.bind_lets(&mut mono, &variables, &callee.module);
         let local_functions = collect_local_functions(&variables, specialization, &mono);
-        let mut function = mono.function(function);
-        set_function_name(&mut function, name.clone());
+        let function = mono.function(function);
         let known_arguments = function
             .arguments
             .iter()

@@ -14,6 +14,7 @@ import {
   Ok,
   UtfCodepoint,
   isEqual,
+  makeError,
   toList,
 } from "./prelude.mjs";
 
@@ -122,6 +123,11 @@ export async function instantiate(url) {
     },
     entries: (fold, dict) =>
       fold(dict, [], (entries, key, value) => (entries.push(key, value), entries)),
+    // The error of a `panic`, `todo`, `let assert` or `assert`, as on
+    // JavaScript.
+    panic(kind, file, module, fn, line, message) {
+      throw makeError(kind, file, module, Number(line), fn, message, {});
+    },
     unknown_variant(value) {
       throw new TypeError(`Not a variant of the custom type: ${inspect(value)}`);
     },
@@ -228,12 +234,18 @@ function inspect(value, seen = new Set()) {
   return text;
 }
 
-// Runs the `main` function of the module at `url` and exits.
+// Runs the `main` function of the module at `url` and exits. The error of a
+// `panic`, `todo`, `let assert` or `assert` is shown as in a program that
+// does not run in JavaScript.
 export async function run(url) {
   const instance = await instantiate(url);
   try {
     instance.exports._start();
   } catch (error) {
+    if (error?.gleam_error !== undefined) {
+      writeSync(2, `${error.gleam_error} at ${error.file}:${error.line}\n  ${error.message}\n`);
+      process.exit(1);
+    }
     if (!(error instanceof Exit)) throw error;
     process.exit(error.code);
   }

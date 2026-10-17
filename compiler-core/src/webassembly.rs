@@ -15,6 +15,7 @@ mod js_string;
 mod link;
 mod liveness;
 mod monomorphize;
+mod panic;
 mod runtime;
 mod scope;
 mod specialization;
@@ -854,6 +855,10 @@ struct Generator<'a> {
     runtime: &'a [RuntimeModule],
     /// The module currently being compiled (may differ from self.module for imports).
     current_module_name: EcoString,
+    /// The function currently being compiled, for the errors, see `panic`.
+    current_function_name: EcoString,
+    /// `_panic`, when it is called, see `panic`.
+    panic: Option<FunctionId>,
 }
 
 impl<'a> Generator<'a> {
@@ -952,6 +957,8 @@ impl<'a> Generator<'a> {
             all_line_numbers,
             runtime: &[],
             current_module_name: module.name.clone(),
+            current_function_name: EcoString::new(),
+            panic: None,
         }
     }
 
@@ -1178,6 +1185,7 @@ impl<'a> Generator<'a> {
         self.functions();
         let constants = self.function_constants();
         let start = self.function_start(constants);
+        self.code_panic();
         match self.error.take() {
             Some(error) => Err(error),
             None => Ok(start),
@@ -3822,6 +3830,10 @@ impl<'a> Generator<'a> {
         let saved_specialization = std::mem::replace(&mut self.specialization, specialization);
         let saved_known_arguments =
             std::mem::replace(&mut self.specializations.known_arguments, known_arguments);
+        let saved_function_name = std::mem::replace(
+            &mut self.current_function_name,
+            function_name(&function).clone(),
+        );
         let locals = Locals::new(self, &function.arguments, &function.body);
         let param_ids = locals.param_ids();
         let mut code = Function::new(self, &name, &param_ids, &results);
@@ -3842,6 +3854,7 @@ impl<'a> Generator<'a> {
         self.local_functions = saved_local_functions;
         self.specialization = saved_specialization;
         self.specializations.known_arguments = saved_known_arguments;
+        self.current_function_name = saved_function_name;
         let _ = instructions.end();
 
         for (local_id, lname) in locals.names() {
@@ -3894,8 +3907,7 @@ impl<'a> Generator<'a> {
         let module = self.current_module_name.clone();
         self.bind_lets(&mut mono, &variables, &module);
         let local_functions = collect_local_functions(&variables, specialization, &mono);
-        let mut function = mono.function(function);
-        set_function_name(&mut function, name.clone());
+        let function = mono.function(function);
         self._function(
             function,
             name,
@@ -4395,16 +4407,6 @@ impl<'a> Generator<'a> {
         assert: &crate::ast::Assert<TypedExpr>,
     ) {
         assert!(assert.value.type_().is_bool());
-        let prefix = self.string_index(&"Assertion failed at ".into());
-        let (mod_name, line) = self.source_location(assert.location.start);
-        let location: EcoString = format!("src/{mod_name}.gleam:{line}.\n").into();
-        let location = self.string_index(&location);
-        let string_to_memory =
-            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
-        let heap_base = self.find_global_expect(HEAP_BASE).func_id();
-        let print = self.find_global_expect(PRINT).func_id();
-        let exit = self.find_global_expect(EXIT).func_id();
-        #[rustfmt::skip]
         let _ = instructions
             .expression(self, locals, scope.clone(), &assert.value)
             .if_else(
@@ -4413,11 +4415,14 @@ impl<'a> Generator<'a> {
                     let _ = then_s.bool_const(true);
                 },
                 |else_s| {
-                    let _ = else_s
-                        .show_error_message(prefix, location, string_to_memory, heap_base, print)
-                        .i32_const(1)
-                        .call(exit)
-                        .unreachable();
+                    self.panic(
+                        else_s,
+                        locals,
+                        scope.clone(),
+                        "assert",
+                        assert.location.start,
+                        assert.message.as_ref(),
+                    );
                 },
             );
     }
@@ -4904,42 +4909,19 @@ impl<'a> Generator<'a> {
         expression: &TypedExpr,
         message: &Option<Box<TypedExpr>>,
     ) {
-        let prefix = self.string_index(&if expression.is_panic() {
-            "panic at ".into()
+        let kind = if expression.is_panic() {
+            "panic"
         } else {
-            "todo at ".into()
-        });
-        let (mod_name, line) = self.source_location(expression.location().start);
-        let suffix = if message.is_none() { ".\n" } else { "\n  " };
-        let location: EcoString = format!("src/{mod_name}.gleam:{line}{suffix}").into();
-        let location = self.string_index(&location);
-        let string_to_memory =
-            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
-        let heap_base = self.find_global_expect(HEAP_BASE).func_id();
-        let print = self.find_global_expect(PRINT).func_id();
-        let exit = self.find_global_expect(EXIT).func_id();
-
-        let _ =
-            instructions.show_error_message(prefix, location, string_to_memory, heap_base, print);
-
-        if let Some(message) = message {
-            assert!(message.type_().is_string());
-            let _ = instructions
-                .i32_const(STDERR)
-                .call(heap_base)
-                .expression(self, locals, scope, message)
-                .call(heap_base)
-                .call(string_to_memory)
-                .call(print)
-                .call(heap_base)
-                .byte_store(b'\n')
-                .i32_const(STDERR)
-                .call(heap_base)
-                .i32_const(1)
-                .call(print);
-        }
-
-        let _ = instructions.i32_const(1).call(exit).unreachable();
+            "todo"
+        };
+        self.panic(
+            instructions,
+            locals,
+            scope,
+            kind,
+            expression.location().start,
+            message.as_deref(),
+        );
     }
 
     fn expression_bin_op(
@@ -5373,17 +5355,12 @@ impl<'a> Generator<'a> {
             .map_or(assignment.value.type_(), |s| s.type_());
         let result_type = self.val_type(&last_type);
 
-        let prefix =
-            self.string_index(&"Pattern match failed, no pattern matched the value at ".into());
-        let (mod_name, line) = self.source_location(assignment.location.start);
-        let location: EcoString = format!("src/{mod_name}.gleam:{line}.\n").into();
-        let location = self.string_index(&location);
-        let string_to_memory =
-            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
-        let heap_base = self.find_global_expect(HEAP_BASE).func_id();
-        let print = self.find_global_expect(PRINT).func_id();
-        let exit = self.find_global_expect(EXIT).func_id();
-
+        let message = match &assignment.kind {
+            AssignmentKind::Assert { message, .. } => message.as_ref(),
+            AssignmentKind::Let | AssignmentKind::Generated => None,
+        };
+        // The message does not see the variables of the pattern.
+        let message_scope = scope.clone();
         let mut scope = scope;
         let _ = instructions.block_(result_type, |skip_b| {
             let skip_id = skip_b.id();
@@ -5404,12 +5381,14 @@ impl<'a> Generator<'a> {
                 }
                 let _ = fail_b.br(skip_id);
             });
-            // error handler (dead path — unreachable tells validator)
-            let _ = skip_b
-                .show_error_message(prefix, location, string_to_memory, heap_base, print)
-                .i32_const(1)
-                .call(exit)
-                .unreachable();
+            self.panic(
+                skip_b,
+                locals,
+                message_scope,
+                "let_assert",
+                assignment.location.start,
+                message,
+            );
         });
     }
 
@@ -6581,10 +6560,6 @@ fn function_params_types(function: &TypedFunction) -> Vec<Arc<Type>> {
 
 fn function_name(function: &TypedFunction) -> &EcoString {
     &function.name.as_ref().expect("function to have a name").1
-}
-
-fn set_function_name(function: &mut TypedFunction, name: EcoString) {
-    function.name.as_mut().expect("function to have a name").1 = name;
 }
 
 /// A few characters of a string literal, safe to put in a wasm name. The
