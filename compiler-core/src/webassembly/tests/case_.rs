@@ -370,3 +370,24 @@ pub fn main() {
 "#,
     );
 }
+
+/// A constant of a guard of a generic function has the types of each use.
+#[test]
+fn guard_constant_in_generic_function() {
+    run_ok(
+        r#"
+fn is_empty(list: List(a)) -> Bool {
+    case list {
+        _ if list != [] -> False
+        _ -> True
+    }
+}
+
+pub fn main() {
+    assert is_empty([])
+    assert !is_empty([1])
+    assert !is_empty(["a"])
+}
+"#,
+    );
+}

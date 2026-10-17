@@ -648,7 +648,7 @@ impl Monomorphizer {
 
     fn guard(&self, guard: &mut TypedClauseGuard) {
         match guard {
-            ClauseGuard::Constant(_) => {}
+            ClauseGuard::Constant(constant) => self.constant_types(constant),
             ClauseGuard::Block { value, .. } => self.guard(value),
             ClauseGuard::BinaryOperator { left, right, .. } => {
                 self.guard(left);
