@@ -31,6 +31,11 @@ pub(super) enum BuiltinFunction {
     /// back, with the representation of `T` (see `host.rs`).
     ToJs(ValType, EcoString),
     FromJs(ValType, EcoString),
+    /// The function that JavaScript calls to call a closure of the function
+    /// type `T`, and the code of the closures of `T` that call a JavaScript
+    /// function, with their params and result (see `host.rs`).
+    JsTrampoline(Vec<ValType>, ValType, EcoString),
+    JsCall(Vec<ValType>, ValType, EcoString),
     /// A function of `Array`, with its params, result and element type.
     Array {
         function: ArrayFunction,
@@ -68,6 +73,8 @@ impl BuiltinFunction {
             BuiltinFunction::DynamicInspect(_, name) => format!("_dynamic_inspect({name})").into(),
             BuiltinFunction::ToJs(_, name) => format!("_to_js({name})").into(),
             BuiltinFunction::FromJs(_, name) => format!("_from_js({name})").into(),
+            BuiltinFunction::JsTrampoline(_, _, name) => format!("_js_trampoline({name})").into(),
+            BuiltinFunction::JsCall(_, _, name) => format!("_js_call({name})").into(),
             BuiltinFunction::Array {
                 function, element, ..
             } => format!("{}({element})", function.name()).into(),

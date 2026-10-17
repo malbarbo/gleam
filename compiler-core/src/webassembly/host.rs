@@ -12,10 +12,11 @@
 //! a custom type is an instance of the class of its variant, created and
 //! read with the functions of the JavaScript target for its type, from the
 //! module of the custom types of its module (see `javascript::types_module`).
-//! A value whose type is a type variable of the declaration is not
-//! converted: the host only keeps it, like `fn id(a: a) -> a`. A value of
-//! another type, like a function or a type of the runtime, is also kept as
-//! it is, for now.
+//! A function is a JavaScript function that calls it with its arguments
+//! converted back, and converts its result. A value whose type is a type
+//! variable of the declaration is not converted: the host only keeps it,
+//! like `fn id(a: a) -> a`. A value of another type, like a type of the
+//! runtime, is also kept as it is, for now.
 //!
 //! The values of the external types cross as they are, like a JavaScript
 //! string when `string = "JSString"`.
@@ -164,6 +165,20 @@ impl<'a> Generator<'a> {
                     .collect(),
                 inferred_variant: *inferred_variant,
             }),
+            (
+                Type::Fn {
+                    arguments: declared,
+                    return_: declared_return,
+                },
+                Type::Fn { arguments, return_ },
+            ) if declared.len() == arguments.len() => Arc::new(Type::Fn {
+                arguments: declared
+                    .iter()
+                    .zip(arguments)
+                    .map(|(declared, argument)| self.host_type(declared, argument))
+                    .collect(),
+                return_: self.host_type(declared_return, return_),
+            }),
             (Type::Tuple { elements: declared }, Type::Tuple { elements }) => {
                 Arc::new(Type::Tuple {
                     elements: declared
@@ -210,6 +225,8 @@ impl<'a> Generator<'a> {
         self.get_function_builtin(builtin, |s| {
             if s.is_class_type(&type_) {
                 s.code_class_conversion(&type_, direction)
+            } else if type_.fn_types().is_some() {
+                s.code_function_conversion(&type_, direction)
             } else {
                 s.code_conversion(&type_, direction)
             }
@@ -671,13 +688,7 @@ impl<'a> Generator<'a> {
         };
         let js_vts: Vec<_> = types
             .iter()
-            .map(|type_| {
-                if self.crosses_as_is(type_, direction) {
-                    self.val_type(&unmarked(type_))
-                } else {
-                    EXTERNREF
-                }
-            })
+            .map(|type_| self.js_val_type(type_, direction))
             .collect();
         let variant_name = format!("{}.{constructor}", qualified_type_name(type_));
         match direction {
@@ -778,16 +789,206 @@ impl<'a> Generator<'a> {
     ) -> FunctionId {
         let file = module.rsplit('/').next().expect("a module name");
         let path = self.host_module_path(&ecow::eco_format!("./{file}.mjs"), module);
-        let import_name = ecow::eco_format!("{path}#{name}");
+        self.host_import(&path, name, params, result)
+    }
+
+    /// The import of the function `name` of the host module `module`, with
+    /// params `params` and result `result`.
+    fn host_import(
+        &mut self,
+        module: &str,
+        name: &str,
+        params: &[ValType],
+        result: ValType,
+    ) -> FunctionId {
+        let import_name = ecow::eco_format!("{module}#{name}{params:?}{result:?}");
         if let Some(id) = self.find_global(&import_name) {
             return id.func_id();
         }
         let type_ = self.wasm_module.types.add(params, &[result]);
-        let (import, _) = self.wasm_module.add_import_func(&path, name, type_);
+        let (import, _) = self.wasm_module.add_import_func(module, name, type_);
         let _ = self.add_function_to_globals(import_name, import);
         import
     }
 }
+
+impl<'a> Generator<'a> {
+    /// Converts a function to a JavaScript function that calls its
+    /// trampoline (see `function_js_trampoline`), and a JavaScript function
+    /// back to a closure that calls it, converting the arguments and the
+    /// result of each call.
+    fn code_function_conversion(&mut self, type_: &Arc<Type>, direction: Direction) -> FunctionId {
+        let value_type = unmarked(type_);
+        let closure_vt = self.val_type(&value_type);
+        match direction {
+            Direction::ToJs => {
+                let trampoline = self.function_js_trampoline(type_);
+                let function =
+                    self.host_import(GLEAM_JS, "function", &[EXTERNREF, FUNCREF], EXTERNREF);
+                // params
+                let value = self.wasm_local(closure_vt);
+                let mut function_ = Function::new(self, "_to_js", &[value], &[EXTERNREF]);
+                let _ = function_
+                    .extend_instructions(self)
+                    .local_get(value)
+                    .extern_convert_any()
+                    .ref_func(trampoline)
+                    .call(function)
+                    .end();
+                function_.finish(self)
+            }
+            Direction::FromJs => {
+                let (params, return_) = value_type.fn_types().expect("a function type");
+                let closure = self.closure_type(params, return_);
+                let capture = js_function_capture(self);
+                let code = self.function_js_call(type_);
+                // params
+                let value = self.wasm_local(EXTERNREF);
+                let mut function = Function::new(self, "_from_js", &[value], &[closure_vt]);
+                let mut instructions = function.extend_instructions(self);
+                self.closure_new(&mut instructions, &closure, code, &[capture], [value]);
+                let _ = instructions.end();
+                function.finish(self)
+            }
+        }
+    }
+
+    /// The function that a JavaScript function calls with the closure of the
+    /// function type `type_` and its arguments: it calls the closure with the
+    /// arguments converted back, and converts its result to JavaScript.
+    fn function_js_trampoline(&mut self, type_: &Arc<Type>) -> FunctionId {
+        let (params, return_) = type_.fn_types().expect("a function type");
+        let js_params: Vec<_> = iter::once(EXTERNREF)
+            .chain(
+                params
+                    .iter()
+                    .map(|param| self.js_val_type(param, Direction::FromJs)),
+            )
+            .collect();
+        let js_result = self.js_val_type(&return_, Direction::ToJs);
+        let builtin =
+            BuiltinFunction::JsTrampoline(js_params.clone(), js_result, qualified_type_name(type_));
+        let type_ = type_.clone();
+        self.get_function_builtin(builtin, move |s| {
+            let value_type = unmarked(&type_);
+            let (value_params, value_return) = value_type.fn_types().expect("a function type");
+            let closure = s.closure_type(value_params, value_return);
+            let from_js: Vec<_> = params
+                .iter()
+                .map(|param| s.conversion_call(param, Direction::FromJs))
+                .collect();
+            let to_js = s.conversion_call(&return_, Direction::ToJs);
+            // params
+            let js_params: Vec<_> = js_params.iter().map(|vt| s.wasm_local(*vt)).collect();
+            // locals
+            let closure_local = s.wasm_local(s.val_type_ref(closure.type_index));
+            let mut function = Function::new(s, "_js_trampoline", &js_params, &[js_result]);
+            let mut instructions = function.extend_instructions(s);
+            let (value, arguments) = js_params.split_first().expect("the closure");
+            let _ = instructions
+                .local_get(*value)
+                .any_convert_extern()
+                .ref_cast_non_null(HeapType::Concrete(closure.type_index))
+                .local_tee(closure_local);
+            for (argument, from_js) in arguments.iter().zip(from_js) {
+                let _ = instructions.local_get(*argument);
+                if let Some(from_js) = from_js {
+                    let _ = instructions.call(from_js);
+                }
+            }
+            let _ = instructions
+                .local_get(closure_local)
+                .struct_get(closure.type_index, 0)
+                .call_ref(closure.code_type_index);
+            if let Some(to_js) = to_js {
+                let _ = instructions.call(to_js);
+            }
+            let _ = instructions.end();
+            function.finish(s)
+        })
+    }
+
+    /// The code of the closures of the function type `type_` that call the
+    /// JavaScript function of their environment, with the arguments converted
+    /// to JavaScript, and convert its result back.
+    fn function_js_call(&mut self, type_: &Arc<Type>) -> FunctionId {
+        let value_type = unmarked(type_);
+        let (params, return_) = type_.fn_types().expect("a function type");
+        let (value_params, value_return) = value_type.fn_types().expect("a function type");
+        let closure = self.closure_type(value_params.clone(), value_return.clone());
+        let param_vts: Vec<_> = iter::once(self.val_type_ref(closure.type_index))
+            .chain(value_params.iter().map(|param| self.val_type(param)))
+            .collect();
+        let result_vt = self.val_type(&value_return);
+        let builtin =
+            BuiltinFunction::JsCall(param_vts.clone(), result_vt, qualified_type_name(type_));
+        self.get_function_builtin(builtin, move |s| {
+            let to_js: Vec<_> = params
+                .iter()
+                .map(|param| s.conversion_call(param, Direction::ToJs))
+                .collect();
+            let from_js = s.conversion_call(&return_, Direction::FromJs);
+            let js_params: Vec<_> = iter::once(EXTERNREF)
+                .chain(
+                    params
+                        .iter()
+                        .map(|param| s.js_val_type(param, Direction::ToJs)),
+                )
+                .collect();
+            let js_result = s.js_val_type(&return_, Direction::FromJs);
+            let call = s.host_import(GLEAM_JS, "call", &js_params, js_result);
+            let capture = js_function_capture(s);
+            // params
+            let params: Vec<_> = param_vts.iter().map(|vt| s.wasm_local(*vt)).collect();
+            let mut function = Function::new(s, "_js_call", &params, &[result_vt]);
+            let mut instructions = function.extend_instructions(s);
+            let (closure_param, arguments) = params.split_first().expect("the closure");
+            s.closure_environment_values(&mut instructions, &closure, *closure_param, &[capture]);
+            for (argument, to_js) in arguments.iter().zip(to_js) {
+                let _ = instructions.local_get(*argument);
+                if let Some(to_js) = to_js {
+                    let _ = instructions.call(to_js);
+                }
+            }
+            let _ = instructions.call(call);
+            if let Some(from_js) = from_js {
+                let _ = instructions.call(from_js);
+            }
+            let _ = instructions.end();
+            function.finish(s)
+        })
+    }
+
+    /// The wasm type of a value of the host type `type_` in JavaScript: the
+    /// one of `type_` when it crosses as it is, an `externref` otherwise.
+    fn js_val_type(&mut self, type_: &Arc<Type>, direction: Direction) -> ValType {
+        if self.crosses_as_is(type_, direction) {
+            self.val_type(&unmarked(type_))
+        } else {
+            EXTERNREF
+        }
+    }
+}
+
+/// The capture of the JavaScript function of the closures that call it.
+fn js_function_capture(generator: &Generator<'_>) -> Capture {
+    Capture {
+        name: "function".into(),
+        type_: generator.runtime_named_type(JS_MODULE, "JsValue", vec![]),
+        definition: SrcSpan::default(),
+        is_value: true,
+    }
+}
+
+/// The module of the functions of the host that create and call JavaScript
+/// values, see `runtime/js.gleam`.
+const GLEAM_JS: &str = "gleam:js";
+
+/// The representation of a JavaScript function that calls a wasm function.
+const FUNCREF: ValType = ValType::Ref(RefType {
+    nullable: true,
+    heap_type: HeapType::Abstract(walrus::AbstractHeapType::Func),
+});
 
 /// The name of the type that marks a type as opaque in a host type: its
 /// values cross as references that the host only keeps. It is not a type
@@ -834,7 +1035,11 @@ fn unmarked(type_: &Arc<Type>) -> Arc<Type> {
         Type::Tuple { elements } => Arc::new(Type::Tuple {
             elements: elements.iter().map(unmarked).collect(),
         }),
-        Type::Fn { .. } | Type::Var { .. } => type_.clone(),
+        Type::Fn { arguments, return_ } => Arc::new(Type::Fn {
+            arguments: arguments.iter().map(unmarked).collect(),
+            return_: unmarked(return_),
+        }),
+        Type::Var { .. } => type_.clone(),
     }
 }
 

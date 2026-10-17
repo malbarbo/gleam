@@ -512,6 +512,60 @@ export const origin = () => ({ x: 0, y: 0 });
     );
 }
 
+/// A function is a JavaScript function, which converts its arguments and its
+/// result, and a JavaScript function is a function.
+#[test]
+fn host_functions() {
+    run_with_host(
+        r#"
+pub type Point {
+    Point(x: Int, y: Int)
+}
+
+@external(webassembly, "./ffi.mjs", "apply")
+fn apply(f: fn(Int, String) -> String, a: Int, b: String) -> String
+@external(webassembly, "./ffi.mjs", "map")
+fn map(list: List(a), f: fn(a) -> b) -> List(b)
+@external(webassembly, "./ffi.mjs", "adder")
+fn adder(n: Int) -> fn(Int) -> Int
+@external(webassembly, "./ffi.mjs", "id")
+fn id(f: fn(Point) -> Point) -> fn(Point) -> Point
+@external(webassembly, "./ffi.mjs", "twice")
+fn twice(f: fn() -> Nil) -> Nil
+
+pub fn main() {
+    let assert "3 a" = apply(fn(a, b) { to_string(a + 1) <> " " <> b }, 2, "a")
+    let assert [2, 4, 6] = map([1, 2, 3], fn(x) { x * 2 })
+    let assert [#(1, "a")] = map([1], fn(x) { #(x, "a") })
+    let add = adder(10)
+    let assert 15 = add(5)
+    let assert 20 = adder(10)(10)
+    let move = id(fn(p: Point) { Point(..p, x: p.x + 1) })
+    let assert Point(2, 1) = move(Point(1, 1))
+    twice(fn() { Nil })
+}
+
+fn to_string(n: Int) -> String {
+    case n {
+        3 -> "3"
+        _ -> "?"
+    }
+}
+"#,
+        r#"
+import { toList } from "../gleam.mjs";
+export const apply = (f, a, b) => f(a, b);
+export const map = (list, f) => toList(list.toArray().map(f));
+export const adder = (n) => (m) => n + m;
+export const id = (f) => f;
+export function twice(f) {
+  f();
+  f();
+}
+"#,
+    );
+}
+
 /// A value that the host returns as a `String`, a `List`, a `Result`, a
 /// `BitArray` or a custom type with variants is checked to be one.
 #[test]
