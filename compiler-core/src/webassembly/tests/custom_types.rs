@@ -1382,3 +1382,32 @@ pub fn main() {
         .collect::<Vec<_>>();
     assert_eq!(union_supertype_groups, [1]);
 }
+
+#[test]
+fn module_select_constructor_shadowed_by_local_constructor() {
+    run_ok(
+        r#"
+import gleam
+
+pub type Level {
+    Info
+    Error
+}
+
+pub fn parse(level: String) -> Result(Level, Nil) {
+    case level {
+        "error" -> Ok(Error)
+        "info" -> Ok(Info)
+        _ -> gleam.Error(Nil)
+    }
+}
+
+pub fn main() {
+    let error = gleam.Error
+    assert parse("error") == Ok(Error)
+    assert parse("x") == gleam.Error(Nil)
+    assert error(1) == gleam.Error(1)
+}
+"#,
+    );
+}

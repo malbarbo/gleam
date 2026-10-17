@@ -3761,9 +3761,10 @@ impl<'a> Generator<'a> {
     }
 
     fn var_id(&mut self, scope: &Scope, name: &EcoString, type_: &Arc<Type>) -> Id {
-        if let Some(id) = scope.find(name) {
-            id
-        } else if let Some(variant) = {
+        // A constructor is looked up in the module of its type first, as the
+        // scope may have a constructor with the same name of another module,
+        // like `Error` of a custom type and `gleam.Error`.
+        if let Some(variant) = {
             let return_type = type_.fn_types().map_or(type_.clone(), |(_, r)| r);
             return_type
                 .named_type_information()
@@ -3775,6 +3776,8 @@ impl<'a> Generator<'a> {
                 self.variant_constructor(vec![], type_.clone(), variant)
             };
             Id::func(name.clone(), id)
+        } else if let Some(id) = scope.find(name) {
+            id
         } else {
             self.var(name, type_)
         }
