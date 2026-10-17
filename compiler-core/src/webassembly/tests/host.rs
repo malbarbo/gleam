@@ -601,8 +601,16 @@ fn classify(data: Dynamic) -> String
 fn inspect(a: a) -> String
 @external(webassembly, "./ffi.mjs", "object")
 fn object(a: Int) -> Dynamic
+@external(webassembly, "./ffi.mjs", "thrown")
+fn thrown(a: Int) -> Exception
+
+pub type Exception {
+    Thrown(Dynamic)
+}
 
 pub fn main() {
+    let assert Thrown(value) = thrown(1)
+    let assert True = value == object(1)
     let assert "Object" = classify(object(1))
     let assert "//js({ \"a\": 1 })" = inspect(object(1))
     let assert True = object(1) == object(1)
@@ -610,7 +618,9 @@ pub fn main() {
 }
 "#,
         r#"
+import { Thrown } from "./mod.mjs";
 export const object = (a) => ({ a });
+export const thrown = (a) => new Thrown({ a });
 "#,
     );
 }

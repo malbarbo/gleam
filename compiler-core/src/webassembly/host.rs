@@ -696,6 +696,9 @@ impl<'a> Generator<'a> {
                 panic!("a custom type with variants")
             }
         };
+        // The fields of external types represented by the runtime are converted
+        // as their representation, like the params of the function.
+        let types: Vec<_> = types.iter().map(|type_| self.represent(type_)).collect();
         let js_vts: Vec<_> = types
             .iter()
             .map(|type_| self.js_val_type(type_, direction))
