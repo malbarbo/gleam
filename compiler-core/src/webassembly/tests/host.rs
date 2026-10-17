@@ -587,6 +587,34 @@ export function twice(f) {
     );
 }
 
+/// A value of the host is a `Dynamic` of a value of the host, which is
+/// compared and shown as on JavaScript.
+#[test]
+fn host_dynamic_values() {
+    run_with_host(
+        r#"
+@external(webassembly, "builtins", "Dynamic")
+pub type Dynamic
+@external(webassembly, "builtins", "dynamic_classify")
+fn classify(data: Dynamic) -> String
+@external(webassembly, "builtins", "_inspect")
+fn inspect(a: a) -> String
+@external(webassembly, "./ffi.mjs", "object")
+fn object(a: Int) -> Dynamic
+
+pub fn main() {
+    let assert "Object" = classify(object(1))
+    let assert "//js({ \"a\": 1 })" = inspect(object(1))
+    let assert True = object(1) == object(1)
+    let assert False = object(1) == object(2)
+}
+"#,
+        r#"
+export const object = (a) => ({ a });
+"#,
+    );
+}
+
 /// A value that the host returns as a `List`, a `Result`, a `BitArray` or a
 /// custom type with variants is checked to be one.
 #[test]

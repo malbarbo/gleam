@@ -370,6 +370,15 @@ impl<'a> Generator<'a> {
             .map(|(module, name, _)| (module.as_str(), name.as_str()))
         {
             call(self, "js_bit_array")
+        } else if direction == Direction::FromJs
+            && let Some((DYNAMIC_MODULE, "Dynamic")) = type_
+                .named_type_information()
+                .as_ref()
+                .map(|(module, name, _)| (module.as_str(), name.as_str()))
+        {
+            // A value of the host, which is compared, hashed and shown by the
+            // host, see `type_hooks`.
+            Conversion::Call(self.function_dynamic_cast(&js_value))
         } else if let Some(item) = type_.list_type() {
             self.conversion_with(type_, "js_list", &[item], direction)
         } else if let Some((ok, error)) = type_.result_types() {
