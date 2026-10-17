@@ -68,7 +68,8 @@ export async function instantiate(url) {
   // JavaScript functions, see `function`.
   const functions = new WeakMap();
   const closures = new WeakMap();
-  const decoder = new TextDecoder();
+  // A string keeps a byte order mark at its start.
+  const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
   const encoder = new TextEncoder();
   const js = {
     number: (value) => value,
@@ -215,7 +216,11 @@ export async function instantiate(url) {
     if (!(name in imports)) {
       // A module of a package is relative to the program, like on JavaScript,
       // where a module of the runtime, like `node:process`, is not.
-      imports[name] = await import(/\.m?js$/.test(name) ? new URL(name, url) : name);
+      const specifier = /\.m?js$/.test(name) ? new URL(name, url).href : import.meta.resolve(name);
+      // It is imported through a module that exports it as `ns`, as `import`
+      // takes a module that exports a function `then` for a promise.
+      const source = `export * as ns from ${JSON.stringify(specifier)};`;
+      imports[name] = (await import(`data:text/javascript,${encodeURIComponent(source)}`)).ns;
     }
   }
   const instance = await WebAssembly.instantiate(module, imports);

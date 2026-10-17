@@ -697,6 +697,29 @@ export const thrown = (a) => new Thrown({ a });
     );
 }
 
+/// A module of the host can export a function `then`, and the strings
+/// that cross keep a byte order mark at their start.
+#[test]
+fn host_module_with_then() {
+    run_with_host(
+        r#"
+@external(webassembly, "./ffi.mjs", "then")
+fn then(a: Int) -> Int
+@external(webassembly, "./ffi.mjs", "bom")
+fn bom() -> String
+
+pub fn main() {
+    let assert 2 = then(1)
+    let assert "\u{FEFF}a" = bom()
+}
+"#,
+        r#"
+export const then = (a) => a + 1;
+export const bom = () => "﻿a";
+"#,
+    );
+}
+
 /// The output of the program is written to `process.stdout` and
 /// `process.stderr`, as on JavaScript.
 #[test]
