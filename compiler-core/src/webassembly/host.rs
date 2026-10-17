@@ -790,23 +790,23 @@ impl<'a> Generator<'a> {
     ) -> FunctionId {
         let file = module.rsplit('/').next().expect("a module name");
         let path = self.host_module_path(&ecow::eco_format!("./{file}.mjs"), module);
-        self.host_import(&path, name, params, result)
+        self.host_import(&path, name, params, &[result])
     }
 
     /// The import of the function `name` of the host module `module`, with
-    /// params `params` and result `result`.
+    /// params `params` and results `results`.
     fn host_import(
         &mut self,
         module: &str,
         name: &str,
         params: &[ValType],
-        result: ValType,
+        results: &[ValType],
     ) -> FunctionId {
-        let import_name = ecow::eco_format!("{module}#{name}{params:?}{result:?}");
+        let import_name = ecow::eco_format!("{module}#{name}{params:?}{results:?}");
         if let Some(id) = self.find_global(&import_name) {
             return id.func_id();
         }
-        let type_ = self.wasm_module.types.add(params, &[result]);
+        let type_ = self.wasm_module.types.add(params, results);
         let (import, _) = self.wasm_module.add_import_func(module, name, type_);
         let _ = self.add_function_to_globals(import_name, import);
         import
@@ -817,7 +817,8 @@ impl<'a> Generator<'a> {
     /// Converts a function to a JavaScript function that calls its
     /// trampoline (see `function_js_trampoline`), and a JavaScript function
     /// back to a closure that calls it, converting the arguments and the
-    /// result of each call.
+    /// result of each call. The host keeps the pairs of closures and
+    /// functions, so each one crosses as the same value every time.
     fn code_function_conversion(&mut self, type_: &Arc<Type>, direction: Direction) -> FunctionId {
         let value_type = unmarked(type_);
         let closure_vt = self.val_type(&value_type);
@@ -825,7 +826,7 @@ impl<'a> Generator<'a> {
             Direction::ToJs => {
                 let trampoline = self.function_js_trampoline(type_);
                 let function =
-                    self.host_import(GLEAM_JS, "function", &[EXTERNREF, FUNCREF], EXTERNREF);
+                    self.host_import(GLEAM_JS, "function", &[EXTERNREF, FUNCREF], &[EXTERNREF]);
                 // params
                 let value = self.wasm_local(closure_vt);
                 let mut function_ = Function::new(self, "_to_js", &[value], &[EXTERNREF]);
@@ -843,12 +844,43 @@ impl<'a> Generator<'a> {
                 let closure = self.closure_type(params, return_);
                 let capture = js_function_capture(self);
                 let code = self.function_js_call(type_);
+                let closure_of =
+                    self.host_import(GLEAM_JS, "closure_of", &[EXTERNREF], &[EXTERNREF]);
+                let register = self.host_import(GLEAM_JS, "register", &[EXTERNREF, EXTERNREF], &[]);
                 // params
                 let value = self.wasm_local(EXTERNREF);
+                // locals
+                let found = self.wasm_local(EXTERNREF);
+                let new = self.wasm_local(closure_vt);
                 let mut function = Function::new(self, "_from_js", &[value], &[closure_vt]);
                 let mut instructions = function.extend_instructions(self);
-                self.closure_new(&mut instructions, &closure, code, &[capture], [value]);
-                let _ = instructions.end();
+                // A function of a closure is converted back to the closure,
+                // and a closure that calls a function is registered, so the
+                // function crosses back as the same function.
+                let _ = instructions
+                    .local_get(value)
+                    .call(closure_of)
+                    .local_tee(found)
+                    .ref_is_null()
+                    .if_else(
+                        closure_vt,
+                        |then| {
+                            self.closure_new(then, &closure, code, &[capture], [value]);
+                            let _ = then
+                                .local_tee(new)
+                                .extern_convert_any()
+                                .local_get(value)
+                                .call(register)
+                                .local_get(new);
+                        },
+                        |else_| {
+                            let _ = else_
+                                .local_get(found)
+                                .any_convert_extern()
+                                .ref_cast_non_null(HeapType::Concrete(closure.type_index));
+                        },
+                    )
+                    .end();
                 function.finish(self)
             }
         }
@@ -937,7 +969,7 @@ impl<'a> Generator<'a> {
                 )
                 .collect();
             let js_result = s.js_val_type(&return_, Direction::FromJs);
-            let call = s.host_import(GLEAM_JS, "call", &js_params, js_result);
+            let call = s.host_import(GLEAM_JS, "call", &js_params, &[js_result]);
             let capture = js_function_capture(s);
             // params
             let params: Vec<_> = param_vts.iter().map(|vt| s.wasm_local(*vt)).collect();

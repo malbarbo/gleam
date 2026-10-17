@@ -541,6 +541,10 @@ fn adder(n: Int) -> fn(Int) -> Int
 fn id(f: fn(Point) -> Point) -> fn(Point) -> Point
 @external(webassembly, "./ffi.mjs", "twice")
 fn twice(f: fn() -> Nil) -> Nil
+@external(webassembly, "./ffi.mjs", "id")
+fn same_function(f: fn(Int) -> Int) -> fn(Int) -> Int
+@external(webassembly, "./ffi.mjs", "same")
+fn same(f: fn(Int) -> Int, g: fn(Int) -> Int) -> Bool
 
 pub fn main() {
     let assert "3 a" = apply(fn(a, b) { to_string(a + 1) <> " " <> b }, 2, "a")
@@ -552,6 +556,13 @@ pub fn main() {
     let move = id(fn(p: Point) { Point(..p, x: p.x + 1) })
     let assert Point(2, 1) = move(Point(1, 1))
     twice(fn() { Nil })
+    // A function crosses as the same value every time.
+    let double = fn(x) { x * 2 }
+    let assert True = same_function(double) == double
+    let assert True = same(double, double)
+    let assert True = same_function(add) == add
+    let assert True = same(add, add)
+    let assert False = same(add, double)
 }
 
 fn to_string(n: Int) -> String {
@@ -567,6 +578,7 @@ export const apply = (f, a, b) => f(a, b);
 export const map = (list, f) => toList(list.toArray().map(f));
 export const adder = (n) => (m) => n + m;
 export const id = (f) => f;
+export const same = (f, g) => f === g;
 export function twice(f) {
   f();
   f();

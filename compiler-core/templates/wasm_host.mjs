@@ -38,6 +38,10 @@ export async function instantiate(url) {
     if (missing > 0) memory.grow(Math.ceil(missing / 65536));
     return new Uint8Array(memory.buffer, address, size);
   };
+  // The JavaScript functions of the closures, and the closures of the
+  // JavaScript functions, see `function`.
+  const functions = new WeakMap();
+  const closures = new WeakMap();
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   const js = {
@@ -88,7 +92,19 @@ export async function instantiate(url) {
       throw new TypeError(`Not a Result: ${value}`);
     },
     result_value: (value) => value[0],
-    function: (closure, trampoline) => (...args) => trampoline(closure, ...args),
+    function(closure, trampoline) {
+      let f = functions.get(closure);
+      if (f === undefined) {
+        f = (...args) => trampoline(closure, ...args);
+        js.register(closure, f);
+      }
+      return f;
+    },
+    closure_of: (f) => closures.get(f) ?? null,
+    register(closure, f) {
+      functions.set(closure, f);
+      closures.set(f, closure);
+    },
     call: (f, ...args) => f(...args),
     unknown_variant(value) {
       throw new TypeError(`Not a variant of the custom type: ${inspect(value)}`);
