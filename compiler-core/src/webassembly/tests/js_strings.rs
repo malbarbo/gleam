@@ -254,9 +254,8 @@ pub fn main() {
     );
     assert!(!result.status.success());
     assert!(
-        result
-            .stderr
-            .contains("External function did not return a String: ./host_strings.mjs.not_a_string"),
+        result.stderr.contains("Not a String: 42")
+            && result.stderr.contains("./host_strings.mjs.not_a_string"),
         "{}",
         result.stderr
     );

@@ -424,7 +424,7 @@ impl<'a> Generator<'a> {
 
     /// The struct that boxes the values of `type_` in an `anyref`, when they
     /// are not references.
-    fn dynamic_box(&mut self, type_: &Arc<Type>) -> Option<TypeId> {
+    pub(super) fn dynamic_box(&mut self, type_: &Arc<Type>) -> Option<TypeId> {
         match self.val_type(type_) {
             ValType::Ref(_) => None,
             val_type @ (ValType::I32
@@ -439,7 +439,11 @@ impl<'a> Generator<'a> {
     }
 
     /// `[anyref] -> [T]`, the inverse of the boxing of `dynamic_cast_other`.
-    fn unbox_instructions(&mut self, instructions: &mut Instructions<'_, '_>, type_: &Arc<Type>) {
+    pub(super) fn unbox_instructions(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        type_: &Arc<Type>,
+    ) {
         let _ = match (self.val_type(type_), self.dynamic_box(type_)) {
             (_, Some(box_)) => instructions
                 .ref_cast(false, HeapType::Concrete(box_))

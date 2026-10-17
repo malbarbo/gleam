@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-use crate::config::{WasmFloat, WasmInt};
+use crate::config::{WasmFloat, WasmInt, WasmString, WebAssemblyConfig};
 
 /// The function imports of `wasm`, as `(module, name)`.
 fn function_imports(wasm: &[u8]) -> Vec<(String, String)> {
@@ -28,7 +28,7 @@ fn host_imports(src: &str, deps: Vec<(&str, &str, &str)>) -> Vec<(String, String
     );
     function_imports(&wasm)
         .into_iter()
-        .filter(|(module, _)| module != "wasi_snapshot_preview1")
+        .filter(|(module, _)| module != "wasi_snapshot_preview1" && module != "gleam:js")
         .collect()
 }
 
@@ -120,4 +120,250 @@ pub fn main() {
         vec![],
     );
     assert_eq!(imports, vec![import("env", "id"), import("env", "id")]);
+}
+
+/// Runs `src` in Node.js next to the module `ffi.mjs` with the source `ffi`,
+/// with UTF-8 and JavaScript strings, and 64 and 32-bit ints.
+#[track_caller]
+fn run_with_host(src: &str, ffi: &str) {
+    for string in [WasmString::Utf8, WasmString::JsString] {
+        for int in [WasmInt::I64, WasmInt::I32] {
+            let config = WebAssemblyConfig {
+                string,
+                ..super::wasm_config(int, WasmFloat::F64)
+            };
+            let result = super::run_wasm_node(src, vec![], config, &[("ffi.mjs", ffi)]);
+            assert!(
+                result.status.success(),
+                "{string:?} {int:?}:\n{}",
+                result.stderr
+            );
+        }
+    }
+}
+
+/// An `Int` or a `Float` is a number, a `Bool` a boolean, `Nil` is
+/// `undefined` and a `UtfCodepoint` a `UtfCodepoint`, as on JavaScript.
+#[test]
+fn host_scalars() {
+    run_with_host(
+        r#"
+@external(webassembly, "./ffi.mjs", "add")
+fn add(a: Int, b: Int) -> Int
+@external(webassembly, "./ffi.mjs", "half")
+fn half(a: Float) -> Float
+@external(webassembly, "./ffi.mjs", "type_of")
+fn type_of_int(a: Int) -> String
+@external(webassembly, "./ffi.mjs", "type_of")
+fn type_of_bool(a: Bool) -> String
+@external(webassembly, "./ffi.mjs", "type_of")
+fn type_of_nil(a: Nil) -> String
+@external(webassembly, "./ffi.mjs", "not")
+fn not(a: Bool) -> Bool
+@external(webassembly, "./ffi.mjs", "nothing")
+fn nothing() -> Nil
+@external(webassembly, "./ffi.mjs", "next")
+fn next(a: UtfCodepoint) -> UtfCodepoint
+@external(webassembly, "./ffi.mjs", "nothing")
+fn undefined_int() -> Int
+
+pub fn main() {
+    let assert 5 = add(2, 3)
+    let assert -1 = add(2, -3)
+    let assert 1.25 = half(2.5)
+    let assert "number" = type_of_int(1)
+    let assert "boolean" = type_of_bool(True)
+    let assert "undefined" = type_of_nil(Nil)
+    let assert False = not(True)
+    let assert True = not(False)
+    let assert Nil = nothing()
+    let assert Ok(a) = utf_codepoint(97)
+    let assert Ok(b) = utf_codepoint(98)
+    let assert True = next(a) == b
+    let assert 0 = undefined_int()
+}
+
+@external(webassembly, "builtins", "_int_to_utf_codepoint")
+fn utf_codepoint(a: Int) -> Result(UtfCodepoint, Nil)
+"#,
+        r#"
+import { UtfCodepoint } from "./prelude.mjs";
+export const add = (a, b) => a + b;
+export const half = (a) => a / 2;
+export const type_of = (a) => typeof a;
+export const not = (a) => !a;
+export const nothing = () => undefined;
+export const next = (a) => new UtfCodepoint(a.value + 1);
+"#,
+    );
+}
+
+#[test]
+fn host_strings() {
+    run_with_host(
+        r#"
+@external(webassembly, "./ffi.mjs", "shout")
+fn shout(a: String) -> String
+@external(webassembly, "./ffi.mjs", "length")
+fn length(a: String) -> Int
+
+pub fn main() {
+    let assert "OLÁ 😀!" = shout("olá 😀")
+    let assert "!" = shout("")
+    let assert 3 = length("a😀")
+}
+"#,
+        r#"
+export const shout = (a) => a.toUpperCase() + "!";
+export const length = (a) => a.length;
+"#,
+    );
+}
+
+/// A list is a `List` of the prelude, a `Result` an `Ok` or an `Error`, and
+/// a tuple an array, with their items converted.
+#[test]
+fn host_lists_results_and_tuples() {
+    run_with_host(
+        r#"
+@external(webassembly, "./ffi.mjs", "reverse")
+fn reverse(a: List(Int)) -> List(Int)
+@external(webassembly, "./ffi.mjs", "parse")
+fn parse(a: String) -> Result(Int, String)
+@external(webassembly, "./ffi.mjs", "is_ok")
+fn is_ok(a: Result(Float, Nil)) -> Bool
+@external(webassembly, "./ffi.mjs", "swap")
+fn swap(a: #(Int, String, Nil)) -> #(Nil, String, Int)
+@external(webassembly, "./ffi.mjs", "nested")
+fn nested() -> List(Result(List(String), #(Bool, Int)))
+
+pub fn main() {
+    let assert [3, 2, 1] = reverse([1, 2, 3])
+    let assert [] = reverse([])
+    let assert Ok(12) = parse("12")
+    let assert Error("Not a number: x") = parse("x")
+    let assert True = is_ok(Ok(1.5))
+    let assert False = is_ok(Error(Nil))
+    let assert #(Nil, "a", 1) = swap(#(1, "a", Nil))
+    let assert [Ok(["a", "b"]), Error(#(True, 2)), Ok([])] = nested()
+}
+"#,
+        r#"
+import { Ok, Error, List, toList } from "./prelude.mjs";
+export const reverse = (a) => List.fromArray(a.toArray().reverse());
+export function parse(a) {
+  const n = Number(a);
+  return Number.isNaN(n) ? new Error(`Not a number: ${a}`) : new Ok(n);
+}
+export const is_ok = (a) => a instanceof Ok && a[0] === 1.5;
+export const swap = ([a, b, c]) => [c, b, a];
+export const nested = () =>
+  toList([new Ok(toList(["a", "b"])), new Error([true, 2]), new Ok(toList([]))]);
+"#,
+    );
+}
+
+/// A bit array is a `BitArray` of the prelude, with the offset of its first
+/// bit in its first byte.
+#[test]
+fn host_bit_arrays() {
+    run_with_host(
+        r#"
+@external(webassembly, "./ffi.mjs", "reverse")
+fn reverse(a: BitArray) -> BitArray
+@external(webassembly, "./ffi.mjs", "describe")
+fn describe(a: BitArray) -> #(Int, Int, List(Int))
+@external(webassembly, "./ffi.mjs", "same")
+fn same(a: BitArray) -> BitArray
+
+pub fn main() {
+    let assert <<3, 2, 1>> = reverse(<<1, 2, 3>>)
+    let assert <<>> = reverse(<<>>)
+    let assert <<_:4, rest:bits>> = <<0xAB, 0xCD>>
+    let assert #(12, 4, [0xAB, 0xCD]) = describe(rest)
+    let assert True = same(rest) == rest
+    let assert <<0xB:size(4), 0xCD>> = <<same(rest):bits>>
+    let assert #(16, 0, [0xAB, 0xCD]) = describe(<<0xAB, 0xCD>>)
+}
+"#,
+        r#"
+import { BitArray, toList } from "./prelude.mjs";
+export const reverse = (a) => new BitArray(a.rawBuffer.slice().reverse());
+export const describe = (a) => [a.bitSize, a.bitOffset, toList([...a.rawBuffer])];
+export const same = (a) => a;
+"#,
+    );
+}
+
+/// A value whose type is a type variable of the declaration is not
+/// converted, and the host can give it back.
+#[test]
+fn host_opaque_values() {
+    run_with_host(
+        r#"
+@external(webassembly, "./ffi.mjs", "id")
+fn id(a: a) -> a
+@external(webassembly, "./ffi.mjs", "type_of")
+fn type_of(a: a) -> String
+@external(webassembly, "./ffi.mjs", "first")
+fn first(a: List(a)) -> Result(a, Nil)
+
+type Point {
+    Point(x: Int, y: Int)
+}
+
+pub fn main() {
+    let assert 1 = id(1)
+    let assert 1.5 = id(1.5)
+    let assert True = id(True)
+    let assert "a" = id("a")
+    let assert [1, 2] = id([1, 2])
+    let assert Point(1, 2) = id(Point(1, 2))
+    let f = id(fn(x) { x + 1 })
+    let assert 2 = f(1)
+    let assert "object" = type_of([1])
+    let assert Ok(Point(3, 4)) = first([Point(3, 4)])
+    let assert Error(Nil) = first([])
+}
+"#,
+        r#"
+import { Ok, Error } from "./prelude.mjs";
+export const id = (a) => a;
+export const type_of = (a) => typeof a;
+export const first = (a) => (a.head === undefined ? new Error(undefined) : new Ok(a.head));
+"#,
+    );
+}
+
+/// A value that the host returns as a `String`, a `List` or a `Result` is
+/// checked to be one.
+#[test]
+fn host_wrong_values() {
+    let ffi = r#"export const wrong = () => 42;"#;
+    for (type_, expected) in [
+        ("String", "Not a String: 42"),
+        ("List(Int)", "Not a List: 42"),
+        ("Result(Int, Nil)", "Not a Result: 42"),
+        ("BitArray", "Not a BitArray: 42"),
+    ] {
+        for string in [WasmString::Utf8, WasmString::JsString] {
+            let src = format!(
+                r#"
+@external(webassembly, "./ffi.mjs", "wrong")
+fn wrong() -> {type_}
+
+pub fn main() {{
+    wrong()
+}}
+"#
+            );
+            let config = WebAssemblyConfig {
+                string,
+                ..WebAssemblyConfig::default()
+            };
+            let result = super::run_wasm_node(&src, vec![], config, &[("ffi.mjs", ffi)]);
+            assert!(!result.status.success());
+            assert!(result.stderr.contains(expected), "{}", result.stderr);
+        }
+    }
 }

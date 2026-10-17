@@ -309,11 +309,16 @@ where
             .paths
             .build_directory_for_target(self.mode(), self.target());
 
-        // The WebAssembly target has the host of its programs as prelude.
+        // The WebAssembly target has the host of its programs as prelude,
+        // and the JavaScript prelude for the values they pass to the host.
         if self.target() == Target::WebAssembly {
             let path = build.join(crate::webassembly::HOST_FILE);
             if !self.io.is_file(&path) {
                 self.io.write(&path, crate::webassembly::HOST)?;
+            }
+            let path = build.join("prelude.mjs");
+            if !self.io.is_file(&path) {
+                self.io.write(&path, crate::javascript::PRELUDE)?;
             }
             return Ok(());
         }

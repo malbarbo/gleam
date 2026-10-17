@@ -7,6 +7,14 @@
 
 import { readFileSync, writeSync } from "node:fs";
 import process from "node:process";
+import {
+  BitArray,
+  Error as GleamError,
+  List,
+  Ok,
+  UtfCodepoint,
+  toList,
+} from "./prelude.mjs";
 
 // Thrown by `proc_exit`, to stop running the module.
 export class Exit extends Error {
@@ -18,9 +26,71 @@ export class Exit extends Error {
 
 // Instantiates the module at `url` (a `file:` URL). The functions of the host
 // that it imports from a JavaScript module, declared with
-// `@external(webassembly, "./file.mjs", "name")`, are the exports of that module.
+// `@external(webassembly, "./file.mjs", "name")`, are the exports of that
+// module. They receive and return the values of the JavaScript target, which
+// the module converts with the functions of `gleam:js`.
 export async function instantiate(url) {
   let memory;
+  // Grows the memory to have `size` bytes from `address`, and gives them.
+  const bytesAt = (address, size) => {
+    const missing = address + size - memory.buffer.byteLength;
+    if (missing > 0) memory.grow(Math.ceil(missing / 65536));
+    return new Uint8Array(memory.buffer, address, size);
+  };
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  const js = {
+    number: (value) => value,
+    to_number: (value) => Number(value),
+    boolean: (value) => value !== 0,
+    truthy: (value) => (value ? 1 : 0),
+    undefined: () => undefined,
+    codepoint: (value) => new UtfCodepoint(value),
+    codepoint_value: (value) => value.value,
+    expect_string(value) {
+      if (typeof value !== "string") throw new TypeError(`Not a String: ${value}`);
+      return value;
+    },
+    string_from_memory: (address, size) =>
+      decoder.decode(new Uint8Array(memory.buffer, address, size)),
+    string_into_memory(value, address) {
+      js.expect_string(value);
+      // At most 3 bytes for each UTF-16 code unit.
+      return encoder.encodeInto(value, bytesAt(address, value.length * 3)).written;
+    },
+    bit_array_from_memory: (address, byteSize, size, offset) =>
+      new BitArray(
+        new Uint8Array(memory.buffer.slice(address, address + byteSize)),
+        size,
+        offset,
+      ),
+    bit_array_into_memory(value, address) {
+      if (!(value instanceof BitArray)) throw new TypeError(`Not a BitArray: ${value}`);
+      bytesAt(address, value.rawBuffer.length).set(value.rawBuffer);
+      return value.rawBuffer.length;
+    },
+    bit_array_offset: (value) => value.bitOffset,
+    bit_array_size: (value) => value.bitSize,
+    array_new: () => [],
+    array_push(array, item) {
+      array.push(item);
+    },
+    array_get: (array, index) => array[index],
+    array_length: (array) => array.length,
+    list_from_array: (array) => toList(array),
+    list_to_array(value) {
+      if (!(value instanceof List)) throw new TypeError(`Not a List: ${value}`);
+      return value.toArray();
+    },
+    ok: (value) => new Ok(value),
+    error: (value) => new GleamError(value),
+    result_is_ok(value) {
+      if (value instanceof Ok) return 1;
+      if (value instanceof GleamError) return 0;
+      throw new TypeError(`Not a Result: ${value}`);
+    },
+    result_value: (value) => value[0],
+  };
   const wasi = {
     fd_write(fd, iovs, iovs_len, nwritten) {
       const view = new DataView(memory.buffer);
@@ -59,7 +129,7 @@ export async function instantiate(url) {
         "like Node.js 24, Deno 2.9 or Bun 1.4",
     );
   }
-  const imports = { wasi_snapshot_preview1: wasi };
+  const imports = { wasi_snapshot_preview1: wasi, "gleam:js": js };
   for (const { module: name } of WebAssembly.Module.imports(module)) {
     if (!(name in imports) && /\.m?js$/.test(name)) {
       imports[name] = await import(new URL(name, url));

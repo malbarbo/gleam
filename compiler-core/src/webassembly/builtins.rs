@@ -27,6 +27,10 @@ pub(super) enum BuiltinFunction {
     DynamicEqual(EcoString),
     DynamicHash(ValType, EcoString),
     DynamicInspect(ValType, EcoString),
+    /// The conversion of a value of the host type `T` to JavaScript and
+    /// back, with the representation of `T` (see `host.rs`).
+    ToJs(ValType, EcoString),
+    FromJs(ValType, EcoString),
     /// A function of `Array`, with its params, result and element type.
     Array {
         function: ArrayFunction,
@@ -62,6 +66,8 @@ impl BuiltinFunction {
             BuiltinFunction::DynamicEqual(name) => format!("_dynamic_equal({name})").into(),
             BuiltinFunction::DynamicHash(_, name) => format!("_dynamic_hash({name})").into(),
             BuiltinFunction::DynamicInspect(_, name) => format!("_dynamic_inspect({name})").into(),
+            BuiltinFunction::ToJs(_, name) => format!("_to_js({name})").into(),
+            BuiltinFunction::FromJs(_, name) => format!("_from_js({name})").into(),
             BuiltinFunction::Array {
                 function, element, ..
             } => format!("{}({element})", function.name()).into(),
@@ -181,6 +187,10 @@ pub(super) enum BuiltinFunctionExternal {
     BytesCopy,
     #[strum(serialize = "_bytes_copy_shifted")]
     BytesCopyShifted,
+    #[strum(serialize = "_bytes_to_memory")]
+    BytesToMemory,
+    #[strum(serialize = "_bytes_from_memory")]
+    BytesFromMemory,
     #[strum(serialize = "_string_bits")]
     StringBits,
     #[strum(serialize = "_bytes_to_string")]
@@ -298,6 +308,11 @@ impl BuiltinFunctionExternal {
                 ];
                 return (params, nil().into());
             }
+            B::BytesToMemory => {
+                let params = vec![ext("Bytes"), int().into(), int().into(), ext("I32")];
+                return (params, nil().into());
+            }
+            B::BytesFromMemory => return (vec![ext("I32"), int().into()], ext("Bytes")),
             B::StringBits => (vec![string()], bit_array()),
             B::BytesToString => {
                 return (

@@ -403,6 +403,17 @@ pub fn run_wasm_js_with_config(
         string: crate::config::WasmString::JsString,
         ..config
     };
+    run_wasm_node(src, deps, config, files)
+}
+
+/// Runs `src`, compiled with `config`, in Node.js with the host of `HOST`,
+/// next to the JavaScript modules `files` (as `(name, source)`).
+pub fn run_wasm_node(
+    src: &str,
+    deps: Vec<(&str, &str, &str)>,
+    config: WebAssemblyConfig,
+    files: &[(&str, &str)],
+) -> WasmOutput {
     let wasm_bytes = compile_wasm_in(TEST_PACKAGE, src, deps, config);
     let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("gleam_wasm_js_test_{id}"));
@@ -410,9 +421,13 @@ pub fn run_wasm_js_with_config(
     let run = r#"import { run } from "./host.mjs";
 await run(new URL("./main.wasm", import.meta.url));
 "#;
-    let files = [("host.mjs", crate::webassembly::HOST), ("run.mjs", run)]
-        .into_iter()
-        .chain(files.iter().copied());
+    let files = [
+        ("host.mjs", crate::webassembly::HOST),
+        ("prelude.mjs", crate::javascript::PRELUDE),
+        ("run.mjs", run),
+    ]
+    .into_iter()
+    .chain(files.iter().copied());
     for (name, source) in files {
         std::fs::write(dir.join(name), source).expect("failed to write a test file");
     }

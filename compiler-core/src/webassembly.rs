@@ -9,6 +9,7 @@ mod captures;
 mod dynamic;
 mod glue;
 mod hash;
+mod host;
 mod instructions;
 mod js_string;
 mod link;
@@ -1306,6 +1307,8 @@ impl<'a> Generator<'a> {
             BuiltinFunction::DynamicEqual(_) => (vec![ANYREF, ANYREF], vec![BOOL_VALTYPE]),
             BuiltinFunction::DynamicHash(int, _) => (vec![ANYREF], vec![*int]),
             BuiltinFunction::DynamicInspect(string, _) => (vec![ANYREF], vec![*string]),
+            BuiltinFunction::ToJs(val_type, _) => (vec![*val_type], vec![EXTERNREF]),
+            BuiltinFunction::FromJs(val_type, _) => (vec![EXTERNREF], vec![*val_type]),
             BuiltinFunction::Array { params, result, .. } => (params.clone(), vec![*result]),
         }
     }
@@ -1430,11 +1433,11 @@ impl<'a> Generator<'a> {
     /// The representation of the external type `name` of `package` whose
     /// values are wasm values.
     fn wasm_external_type(&self, package: &str, name: &str) -> Option<CustomType> {
-        // `AnyRef`, `Bytes` and `Cell` are only for the runtime, which
-        // compares an `AnyRef` by the functions of its type, writes only the
-        // bytes it creates, and shares a cell by the bit arrays of the same
-        // bytes.
-        if package != RUNTIME_PACKAGE && matches!(name, "AnyRef" | "Bytes" | "Cell") {
+        // `AnyRef`, `Bytes`, `Cell` and `JsValue` are only for the runtime,
+        // which compares an `AnyRef` by the functions of its type, writes
+        // only the bytes it creates, shares a cell by the bit arrays of the
+        // same bytes, and converts the values of the host.
+        if package != RUNTIME_PACKAGE && matches!(name, "AnyRef" | "Bytes" | "Cell" | "JsValue") {
             return None;
         }
         let (val_type, to_str) = self.wasm_external(name)?;
@@ -1452,6 +1455,7 @@ impl<'a> Generator<'a> {
             "AnyRef" => Some((ANYREF, None)),
             "Bytes" => Some((self.bytes.val_type(), None)),
             "Cell" => Some((self.val_type_ref(self.cell), None)),
+            "JsValue" => Some((EXTERNREF, None)),
             _ => None,
         }
     }
@@ -4169,7 +4173,8 @@ impl<'a> Generator<'a> {
             .as_ref()
             .expect("an external function");
         if external_module != BUILTINS_MODULE {
-            return self.function_host(external_module, fname, module, required_type);
+            let declared = function_type(function);
+            return self.function_host(external_module, fname, module, &declared, required_type);
         }
         if let Some((runtime_module, _)) = self.runtime_function(fname) {
             return self.function_runtime(&runtime_module, fname, required_type);
@@ -4198,13 +4203,15 @@ impl<'a> Generator<'a> {
         self.find_global_expect(fname)
     }
 
-    /// The import of the function `name` of the host module `host_module`,
-    /// declared in the module `module`, used with type `type_`.
+    /// The function `name` of the host module `host_module`, declared in
+    /// the module `module` with type `declared`, used with type `type_`. It
+    /// is imported for each type it is used with, see `host.rs`.
     fn function_host(
         &mut self,
         host_module: &EcoString,
         name: &EcoString,
         module: &EcoString,
+        declared: &Arc<Type>,
         type_: &Arc<Type>,
     ) -> Id {
         let host_module = self.host_module_path(host_module, module);
@@ -4212,20 +4219,7 @@ impl<'a> Generator<'a> {
         if let Some(id) = self.find_global(&import_name) {
             return id;
         }
-        let (params, return_) = type_.fn_types().expect("an external function");
-        let params = self.val_types(params);
-        let index = match self.string {
-            StringType::Js(js) if return_.is_string() => {
-                self.js_string_host_function(js, &host_module, name, &params)
-            }
-            StringType::Utf8(_) | StringType::Js(_) => {
-                let results = self.val_types(iter::once(return_));
-                let wasm_type = self.wasm_module.types.add(&params, &results);
-                self.wasm_module
-                    .add_import_func(&host_module, name, wasm_type)
-                    .0
-            }
-        };
+        let index = self.function_host_call(&host_module, name, declared, type_);
         self.add_function_to_globals(import_name, index)
     }
 
@@ -6004,6 +5998,8 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::StringPopGrapheme => self.code_string_pop_grapheme(),
             BuiltinFunctionExternal::StringBits => self.code_string_bits(),
             BuiltinFunctionExternal::BytesCopyShifted => self.code_bytes_copy_shifted(),
+            BuiltinFunctionExternal::BytesToMemory => self.code_bytes_to_memory(),
+            BuiltinFunctionExternal::BytesFromMemory => self.code_bytes_from_memory(),
             BuiltinFunctionExternal::StringNumBytes
             | BuiltinFunctionExternal::StringByteSize
             | BuiltinFunctionExternal::StringCodeunitSize

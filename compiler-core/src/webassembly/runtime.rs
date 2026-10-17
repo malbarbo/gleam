@@ -58,6 +58,7 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("runtime/bit_array.gleam"),
     ),
     ("builtins/dynamic", include_str!("runtime/dynamic.gleam")),
+    ("builtins/js", include_str!("runtime/js.gleam")),
 ];
 
 /// The functions of the runtime that give `==`, `_hash` and the text of

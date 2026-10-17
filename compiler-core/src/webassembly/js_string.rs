@@ -12,7 +12,7 @@ const BUILTINS_MODULE: &str = "wasm:js-string";
 /// `wasm_host.mjs`: an import of this module is the string of its name.
 const CONSTANTS_MODULE: &str = "'";
 
-const EXTERNREF: ValType = ValType::Ref(RefType {
+pub(super) const EXTERNREF: ValType = ValType::Ref(RefType {
     nullable: true,
     heap_type: HeapType::Abstract(walrus::AbstractHeapType::Extern),
 });
@@ -45,8 +45,6 @@ pub(super) struct JsString {
     pub(super) slice: FunctionId,
     /// `(a, b) -> i32`.
     pub(super) equals: FunctionId,
-    /// `(externref) -> i32`: whether the value is a string.
-    pub(super) test: FunctionId,
     /// `(s) -> i32`: the number of UTF-8 bytes of `s`.
     pub(super) utf8_len: FunctionId,
     /// `(s) -> bytes`: the UTF-8 bytes of `s`.
@@ -80,7 +78,6 @@ impl JsString {
         let concat = import(module, "concat", &[EXTERNREF, EXTERNREF], &[EXTERN]);
         let substring = import(module, "substring", &[EXTERNREF, i32, i32], &[EXTERN]);
         let equals = import(module, "equals", &[EXTERNREF, EXTERNREF], &[i32]);
-        let test = import(module, "test", &[EXTERNREF], &[i32]);
         let from_char_code_array = import(
             module,
             "fromCharCodeArray",
@@ -134,7 +131,6 @@ impl JsString {
             substring,
             slice,
             equals,
-            test,
             utf8_len,
             to_utf8,
             from_utf8,
@@ -704,57 +700,6 @@ impl<'a> Generator<'a> {
         self.wasm_module
             .add_import_global(CONSTANTS_MODULE, string, EXTERN, false, false)
             .0
-    }
-
-    /// A function of the host that returns a `String`: the import returns an
-    /// `externref`, which is checked to be a string.
-    pub(super) fn js_string_host_function(
-        &mut self,
-        js: JsString,
-        host_module: &str,
-        name: &str,
-        params: &[ValType],
-    ) -> FunctionId {
-        let import_type = self.wasm_module.types.add(params, &[EXTERNREF]);
-        let (import, _) = self
-            .wasm_module
-            .add_import_func(host_module, name, import_type);
-        let prefix = self.string_index(&"External function did not return a String: ".into());
-        let location = self.string_index(&format!("{host_module}.{name}\n").into());
-        let string_to_memory =
-            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
-        let heap_base = self.find_global_expect(HEAP_BASE).func_id();
-        let print = self.find_global_expect(PRINT).func_id();
-        let exit = self.find_global_expect(EXIT).func_id();
-        let params: Vec<_> = params.iter().map(|vt| self.wasm_local(*vt)).collect();
-        let value = self.wasm_local(EXTERNREF);
-        let mut function =
-            Function::new(self, &format!("{host_module}.{name}"), &params, &[EXTERN]);
-        let mut instructions = function.extend_instructions(self);
-        for param in &params {
-            let _ = instructions.local_get(*param);
-        }
-        #[rustfmt::skip]
-        let _ = instructions
-            .call(import)
-            .local_tee(value)
-            .call(js.test)
-            .if_else(
-                EXTERN,
-                |then_s| {
-                    // a string, so not null
-                    let _ = then_s.local_get(value).ref_as_non_null();
-                },
-                |else_s| {
-                    let _ = else_s
-                        .show_error_message(prefix, location, string_to_memory, heap_base, print)
-                        .i32_const(1)
-                        .call(exit)
-                        .unreachable();
-                },
-            )
-            .end();
-        function.finish(self)
     }
 
     pub(super) fn code_js_string_concat(&mut self, js: JsString) -> FunctionId {

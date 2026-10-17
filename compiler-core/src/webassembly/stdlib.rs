@@ -71,6 +71,8 @@ impl Instructions<'_, '_> {
             | B::StringFind
             | B::StringBits
             | B::BytesCopyShifted
+            | B::BytesToMemory
+            | B::BytesFromMemory
             | B::StringStartsWith
             | B::StringEndsWith
             | B::StringRemovePrefix

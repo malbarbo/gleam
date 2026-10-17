@@ -407,11 +407,15 @@ impl<'a> WebAssembly<'a> {
     }
 
     /// Writes the `gleam.mjs` of the package, which gives its FFI modules the
-    /// host, like the prelude on JavaScript.
+    /// JavaScript prelude, with the classes of the values they receive and
+    /// return, and the host.
     fn write_prelude(&self, writer: &impl FileSystemWriter) -> Result<()> {
         let path = self.output_directory.join("gleam.mjs");
         if !writer.exists(&path) {
-            let reexport = format!("export * from \"../{}\";\n", webassembly::HOST_FILE);
+            let reexport = format!(
+                "export * from \"../prelude.mjs\";\nexport * from \"../{}\";\n",
+                webassembly::HOST_FILE
+            );
             writer.write(&path, &reexport)?;
         }
         Ok(())

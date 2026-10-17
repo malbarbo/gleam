@@ -174,6 +174,16 @@ impl<'a, 'b> Instructions<'a, 'b> {
         self
     }
 
+    pub(super) fn extern_convert_any(&mut self) -> &mut Self {
+        let _ = self.seq.as_mut().instr(walrus::ir::ExternConvertAny {});
+        self
+    }
+
+    pub(super) fn any_convert_extern(&mut self) -> &mut Self {
+        let _ = self.seq.as_mut().instr(walrus::ir::AnyConvertExtern {});
+        self
+    }
+
     pub(super) fn memory_size(&mut self) -> &mut Self {
         let memory = self.repr.memory.expect("memory available");
         let _ = self.seq.as_mut().memory_size(memory);
