@@ -2885,11 +2885,28 @@ impl<'a> Generator<'a> {
     /// types created before `first`. Returns the new id of `id`.
     fn rec_group_from(&mut self, first: TypeId, id: TypeId) -> TypeId {
         let types = &mut self.wasm_module.types;
-        let old: Vec<TypeId> = types
+        // Only the types that reference a type created after them, like the reserved ones, or a
+        // type moved before them, are moved, so a type shared by the program, like the supertype
+        // of the unions, stays in its own rec group, and so it is the same type as in the other
+        // programs.
+        let mut old: Vec<TypeId> = vec![];
+        for type_ in types
             .iter()
-            .map(|type_| type_.id())
-            .skip_while(|id| id.index() < first.index())
-            .collect();
+            .skip_while(|type_| type_.id().index() < first.index())
+        {
+            let referenced = RefCell::new(type_.supertype.into_iter().collect_vec());
+            let _ = remap_composite_type(type_.kind(), &|id| {
+                referenced.borrow_mut().push(id);
+                id
+            });
+            if referenced
+                .into_inner()
+                .iter()
+                .any(|id| id.index() >= type_.id().index() || old.contains(id))
+            {
+                old.push(type_.id());
+            }
+        }
         let definitions: Vec<_> = old
             .iter()
             .map(|id| {

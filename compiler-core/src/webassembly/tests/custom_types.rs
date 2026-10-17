@@ -1340,3 +1340,45 @@ pub fn main() {
 "#,
     );
 }
+
+#[test]
+fn recursive_type_rec_group_without_shared_types() {
+    // The supertype of Result is created first in the definition of S, but it is not moved to
+    // the rec group of S, so it is the same type as in the other programs, which can receive the
+    // values of this program through the host.
+    let wasm = compile_wasm(
+        r#"
+type S {
+    S(next: fn() -> S, result: Result(Int, Nil))
+}
+
+pub fn main() {
+    let s = S(fn() { S(fn() { panic }, Error(Nil)) }, Ok(1))
+    assert s.next().result == Error(Nil)
+    0
+}
+"#,
+        vec![],
+    );
+    let mut groups = vec![];
+    for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
+        if let Ok(wasmparser::Payload::TypeSection(reader)) = payload {
+            groups.extend(reader.into_iter().map(|group| group.expect("rec group")));
+        }
+    }
+    // The supertype of the unions with a nullable variant has no fields.
+    let is_union_supertype = |type_: &wasmparser::SubType| {
+        !type_.is_final
+            && type_.supertype_idx.is_none()
+            && matches!(
+                &type_.composite_type.inner,
+                wasmparser::CompositeInnerType::Struct(struct_) if struct_.fields.is_empty()
+            )
+    };
+    let union_supertype_groups = groups
+        .iter()
+        .filter(|group| group.types().any(is_union_supertype))
+        .map(|group| group.types().len())
+        .collect::<Vec<_>>();
+    assert_eq!(union_supertype_groups, [1]);
+}
