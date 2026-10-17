@@ -255,6 +255,30 @@ pub fn main() {
 }
 
 #[test]
+fn guard_shared_field_access() {
+    run_ok(
+        r#"
+pub type Shape {
+    Circle(name: String, radius: Int)
+    Square(name: String, side: Int)
+}
+
+pub fn is_named(shape: Shape, name: String) -> Bool {
+    case Nil {
+        _ if shape.name == name -> True
+        _ -> False
+    }
+}
+
+pub fn main() {
+    assert is_named(Circle("c", 1), "c")
+    assert !is_named(Square("s", 1), "c")
+}
+"#,
+    );
+}
+
+#[test]
 fn let_assert_union_ref_binding() {
     run_ok(
         r#"

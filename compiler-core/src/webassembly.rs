@@ -4810,31 +4810,14 @@ impl<'a> Generator<'a> {
                             .field_get(type_index, field);
                     }
                     CustomType::Union { custom_type, .. } => {
-                        let layout = self.union_layout(&record.type_());
-                        if let Some(variant) = record.type_().custom_type_inferred_variant() {
-                            let constructor = custom_type
-                                .constructors
-                                .get(variant as usize)
-                                .expect("constructor at index");
-                            let (_, type_index, _) = self.mono_union_subtype_index(
-                                &record.type_(),
-                                &custom_type,
-                                constructor,
-                                &args,
-                            );
-                            let field_index = layout.field(variant as usize, *index);
-                            let _ = instructions
-                                .expression(self, locals, scope, record)
-                                .variant_field_get(type_index, field_index);
-                        } else {
-                            // Shared field — access via supertype
-                            let supertype_index =
-                                self.mono_union_supertype_index(&record.type_(), &custom_type);
-                            let field_index = layout.shared_field(*index);
-                            let _ = instructions
-                                .expression(self, locals, scope, record)
-                                .field_get(supertype_index, field_index);
-                        }
+                        let _ = instructions.expression(self, locals, scope, record);
+                        self.union_field_get(
+                            instructions,
+                            &record.type_(),
+                            &custom_type,
+                            &args,
+                            *index,
+                        );
                     }
                     CustomType::External { .. }
                     | CustomType::Runtime { .. }
@@ -5756,6 +5739,34 @@ impl<'a> Generator<'a> {
         }
     }
 
+    /// Replaces the value of the union type `type_` on the stack by its field
+    /// `index`, from its variant, when `type_` infers it, or else from the
+    /// supertype, which has the fields shared by all the variants.
+    fn union_field_get(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        type_: &Arc<Type>,
+        custom_type: &TypedCustomType,
+        args: &[Arc<Type>],
+        index: u64,
+    ) {
+        let layout = self.union_layout(type_);
+        if let Some(variant) = type_.custom_type_inferred_variant() {
+            let constructor = custom_type
+                .constructors
+                .get(variant as usize)
+                .expect("constructor at index");
+            let (_, type_index, _) =
+                self.mono_union_subtype_index(type_, custom_type, constructor, args);
+            let field_index = layout.field(variant as usize, index);
+            let _ = instructions.variant_field_get(type_index, field_index);
+        } else {
+            let supertype_index = self.mono_union_supertype_index(type_, custom_type);
+            let field_index = layout.shared_field(index);
+            let _ = instructions.field_get(supertype_index, field_index);
+        }
+    }
+
     fn _clause_guard(
         &mut self,
         locals: &Locals,
@@ -5957,20 +5968,14 @@ impl<'a> Generator<'a> {
                             .field_get(type_index, field);
                     }
                     CustomType::Union { custom_type, .. } => {
-                        let layout = self.union_layout(&type_);
-                        let constructor = custom_type_inferred_constructor(&custom_type, &type_)
-                            .expect("inferred constructor");
-                        let variant = custom_type
-                            .constructors
-                            .iter()
-                            .position(|c| c.name == constructor.name)
-                            .expect("constructor in union");
-                        let (_, type_index, _) =
-                            self.mono_union_subtype_index(&type_, &custom_type, constructor, &args);
-                        let field_index = layout.field(variant, index as u64);
-                        let _ = instructions
-                            .clause_guard(self, locals, scope, container)
-                            .variant_field_get(type_index, field_index);
+                        let _ = instructions.clause_guard(self, locals, scope, container);
+                        self.union_field_get(
+                            instructions,
+                            &type_,
+                            &custom_type,
+                            &args,
+                            index.into(),
+                        );
                     }
                 }
             }
