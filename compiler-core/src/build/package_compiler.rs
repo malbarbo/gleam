@@ -498,6 +498,9 @@ where
     ) -> Result<(), Error> {
         // The FFI modules of the host, like on JavaScript.
         if self.copy_native_files {
+            // The priv directory is linked into the output directory, which the modules are not
+            // written to yet.
+            self.io.mkdir(self.out)?;
             self.copy_project_native_files(self.out, HashSet::new(), &mut HashSet::new())?;
         } else {
             tracing::debug!("skipping_native_file_copying");
