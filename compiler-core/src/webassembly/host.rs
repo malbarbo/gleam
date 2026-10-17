@@ -15,9 +15,10 @@
 //! A function is a JavaScript function that calls it with its arguments
 //! converted back, and converts its result. A value whose type is a type
 //! variable of the declaration is converted by the type it is used with, as
-//! the external is imported for each one. A `Dynamic` is the value it holds,
-//! read back as on JavaScript. A value of another type, like a type of the
-//! runtime, is kept as it is: the host only keeps it.
+//! the external is imported for each one. A dict is a `Dict` of the module
+//! `dict.mjs` of the stdlib, as on JavaScript. A `Dynamic` is the value it
+//! holds, read back as on JavaScript. A value of another type, like a type of
+//! the runtime, is kept as it is: the host only keeps it.
 //!
 //! The values of the external types cross as they are, like a JavaScript
 //! string when `string = "JSString"`.
@@ -25,6 +26,10 @@
 use super::*;
 
 pub(super) const JS_MODULE: &str = "builtins/js";
+
+/// The module of the stdlib whose `dict.mjs`, next to its directory, has the
+/// `Dict` of the JavaScript target.
+const STDLIB_DICT: &str = "gleam/dict";
 
 /// The direction in which a value crosses.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -39,8 +44,8 @@ enum Conversion {
     Same,
     /// Calls this function with the value.
     Call(FunctionId),
-    /// Calls `function` with the value and the closures that convert its
-    /// items.
+    /// Calls `function` with the value and the globals `closures`: values of
+    /// the host and the closures that convert its items.
     With {
         function: FunctionId,
         closures: Vec<GlobalId>,
@@ -383,9 +388,28 @@ impl<'a> Generator<'a> {
                 Direction::FromJs => self.dynamic_from_js(type_, &js_value, dynamic_box),
             }
         } else if let Some(item) = type_.list_type() {
-            self.conversion_with(type_, "js_list", &[item], direction)
+            self.conversion_with(type_, "js_list", &[], &[item], direction)
         } else if let Some((ok, error)) = type_.result_types() {
-            self.conversion_with(type_, "js_result", &[ok, error], direction)
+            self.conversion_with(type_, "js_result", &[], &[ok, error], direction)
+        } else if let Some((DICT_MODULE, "Dict", [key, value])) = type_
+            .named_type_information()
+            .as_ref()
+            .map(|(module, name, arguments)| (module.as_str(), name.as_str(), arguments.as_slice()))
+        {
+            let export = match direction {
+                Direction::ToJs => "from",
+                Direction::FromJs => "fold",
+            };
+            match self.js_dict_export(export) {
+                Some(export) => self.conversion_with(
+                    type_,
+                    "js_dict",
+                    &[export],
+                    &[key.clone(), value.clone()],
+                    direction,
+                ),
+                None => Conversion::Opaque(type_.clone()),
+            }
         } else if let Some(elements) = type_.tuple_types() {
             let type_index = self.tuple_type_index(elements.clone());
             let fields = self.field_indices(&elements);
@@ -506,16 +530,26 @@ impl<'a> Generator<'a> {
         let string = self.function_conversion(&type_::string(), Direction::ToJs);
         let item_type = type_::fn_(vec![dynamic.clone()], js_value.clone());
         let item = self.function_conversion(dynamic, Direction::ToJs);
+        let dict = self.runtime_named_type(DICT_MODULE, "Dict", vec![dynamic.clone(); 2]);
+        let dict_type = type_::fn_(vec![dict.clone()], js_value.clone());
+        let dict = self.function_conversion(&dict, Direction::ToJs);
         let boxed = self.function_dynamic_self_box(dynamic, dynamic_box);
         let closures = vec![
             self.closure_of(string, &string_type),
             self.closure_of(item, &item_type),
+            self.closure_of(dict, &dict_type),
             self.closure_of(boxed, &item_type),
         ];
         let function = self.runtime_function_id(
             JS_MODULE,
             "js_dynamic_with",
-            vec![dynamic.clone(), string_type, item_type.clone(), item_type],
+            vec![
+                dynamic.clone(),
+                string_type,
+                item_type.clone(),
+                dict_type,
+                item_type,
+            ],
             js_value.clone(),
         );
         Conversion::DynamicToJs {
@@ -558,14 +592,34 @@ impl<'a> Generator<'a> {
         // host, see `type_hooks`.
         let other_type = type_::fn_(vec![js_value.clone()], dynamic.clone());
         let other = self.function_dynamic_cast(js_value);
+        // The class of the dicts is `null` when the program has none.
+        let dict_class = self.js_dict_export("default").unwrap_or_else(|| {
+            let null = ConstExpr::RefNull(RefType {
+                nullable: true,
+                heap_type: HeapType::Abstract(walrus::AbstractHeapType::Extern),
+            });
+            self.add_const(&"_no_dict_class".into(), EXTERNREF, null, false, false)
+                .global_id()
+        });
+        let dict = self.runtime_named_type(DICT_MODULE, "Dict", vec![dynamic.clone(); 2]);
+        let dict_type = type_::fn_(vec![js_value.clone()], dict.clone());
+        let dict = self.function_conversion(&dict, Direction::FromJs);
         let closures = vec![
             self.closure_of(string, &string_type),
+            dict_class,
+            self.closure_of(dict, &dict_type),
             self.closure_of(other, &other_type),
         ];
         let function = self.runtime_function_id(
             JS_MODULE,
             "js_dynamic_from_with",
-            vec![js_value.clone(), string_type, other_type],
+            vec![
+                js_value.clone(),
+                string_type,
+                js_value.clone(),
+                dict_type,
+                other_type,
+            ],
             dynamic.clone(),
         );
         Conversion::DynamicFromJs {
@@ -576,18 +630,20 @@ impl<'a> Generator<'a> {
     }
 
     /// Converts a value of `type_` with the function `name` of the runtime
-    /// (`name_from` back), which takes the closures that convert `items`.
+    /// (`name_from` back), which takes the values of the host in the globals
+    /// `values` and the closures that convert `items`.
     fn conversion_with(
         &mut self,
         type_: &Arc<Type>,
         name: &str,
+        values: &[GlobalId],
         items: &[Arc<Type>],
         direction: Direction,
     ) -> Conversion {
         let js_value = self.runtime_named_type(JS_MODULE, "JsValue", vec![]);
         let value = type_.clone();
-        let mut closures = vec![];
-        let mut closure_types = vec![];
+        let mut closures = values.to_vec();
+        let mut closure_types = vec![js_value.clone(); values.len()];
         for item in items {
             let function = self.function_conversion(item, direction);
             let closure_type = match direction {
@@ -612,6 +668,22 @@ impl<'a> Generator<'a> {
             ),
         };
         Conversion::With { function, closures }
+    }
+
+    /// The export `name` of the module `dict.mjs` of the stdlib, imported as a
+    /// global, unless the program does not have the stdlib.
+    fn js_dict_export(&mut self, name: &str) -> Option<GlobalId> {
+        let _ = self.all_modules.get(STDLIB_DICT)?;
+        let module = self.host_module_path(&"../dict.mjs".into(), &STDLIB_DICT.into());
+        let key = ecow::eco_format!("{module}#{name}");
+        if let Some(id) = self.find_global(&key) {
+            return Some(id.global_id());
+        }
+        let (global, _) = self
+            .wasm_module
+            .add_import_global(&module, name, EXTERNREF, false, false);
+        self.globals.borrow_mut().push(Id::global(key, global));
+        Some(global)
     }
 }
 

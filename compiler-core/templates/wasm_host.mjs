@@ -109,7 +109,7 @@ export async function instantiate(url) {
       closures.set(f, closure);
     },
     call: (f, ...args) => f(...args),
-    kind(value) {
+    kind(value, dict) {
       if (typeof value === "number") return Number.isInteger(value) ? 1 : 2;
       if (typeof value === "string") return 3;
       if (typeof value === "boolean") return 4;
@@ -117,8 +117,11 @@ export async function instantiate(url) {
       if (value instanceof BitArray) return 6;
       if (value instanceof List) return 7;
       if (Array.isArray(value)) return 8;
+      if (dict !== null && value instanceof dict) return 9;
       return 0;
     },
+    entries: (fold, dict) =>
+      fold(dict, [], (entries, key, value) => (entries.push(key, value), entries)),
     unknown_variant(value) {
       throw new TypeError(`Not a variant of the custom type: ${inspect(value)}`);
     },

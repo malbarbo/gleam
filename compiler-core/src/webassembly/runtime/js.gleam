@@ -7,7 +7,8 @@
 //// The compiler converts a value with the functions of this module for its
 //// type, see `webassembly/host.rs`: an `Int` or a `Float` is a number, a
 //// `Bool` a boolean, `Nil` is `undefined`, a list is a `List` of the prelude,
-//// a `Result` an `Ok` or an `Error`, and a bit array a `BitArray`. The
+//// a `Result` an `Ok` or an `Error`, a bit array a `BitArray`, and a dict a
+//// `Dict` of the module `dict.mjs` of the stdlib. The
 //// values from the host are not checked, as on JavaScript, except to tell
 //// the variants apart, and a list or a bit array, whose items are read; a
 //// value that is not a string becomes one, as with `String(value)`.
@@ -15,12 +16,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-import builtins/bit_array.{type Bits, type Bytes, type Cell, Bits}
 import builtins/array.{array_to_list}
+import builtins/bit_array.{type Bits, type Bytes, type Cell, Bits}
+import builtins/dict.{type Dict, dict_fold, dict_insert, dict_new}
 import builtins/dynamic.{
-  type Dynamic, DArray, DBitArray, DBool, DFloat, DInt, DList, DNil, DString,
-  dynamic_array, dynamic_bit_array, dynamic_bool, dynamic_float, dynamic_int,
-  dynamic_list, dynamic_nil, dynamic_string,
+  type Dynamic, DArray, DBitArray, DBool, DDict, DFloat, DInt, DList, DNil,
+  DString, dynamic_array, dynamic_bit_array, dynamic_bool, dynamic_dict,
+  dynamic_float, dynamic_int, dynamic_list, dynamic_nil, dynamic_string,
 }
 
 /// A value of the host, an `externref`.
@@ -203,6 +205,65 @@ pub fn js_array_get(array: JsValue, index: Int) -> JsValue {
   array_get(array, int_to_i32(index))
 }
 
+// -- Dicts --------------------------------------------------------------------
+
+/// The `Dict` of the JavaScript target with the entries of `dict`, made by
+/// `from` of the module `dict.mjs` of the stdlib from an array with an array
+/// `[key, value]` for each entry, whose key is converted with `key` and whose
+/// value with `value`.
+pub fn js_dict_with(
+  dict: Dict(k, v),
+  from: JsValue,
+  key: fn(k) -> JsValue,
+  value: fn(v) -> JsValue,
+) -> JsValue {
+  let entries = js_array_new()
+  dict_fold(dict, Nil, fn(_, k, v) {
+    let entry = js_array_new()
+    js_array_push(entry, key(k))
+    js_array_push(entry, value(v))
+    js_array_push(entries, entry)
+  })
+  call(from, entries)
+}
+
+/// The dict with the entries of the `Dict` `dict` of the JavaScript target,
+/// read with `fold` of the module `dict.mjs` of the stdlib.
+pub fn js_dict_from_with(
+  dict: JsValue,
+  fold: JsValue,
+  key: fn(JsValue) -> k,
+  value: fn(JsValue) -> v,
+) -> Dict(k, v) {
+  let entries = entries(fold, dict)
+  insert_from(
+    entries,
+    i32_to_int(array_length(entries)) - 2,
+    dict_new(),
+    key,
+    value,
+  )
+}
+
+/// Inserts in `dict` the entries of `entries`, its keys and values one after
+/// the other, up to the one at `index`.
+fn insert_from(
+  entries: JsValue,
+  index: Int,
+  dict: Dict(k, v),
+  key: fn(JsValue) -> k,
+  value: fn(JsValue) -> v,
+) -> Dict(k, v) {
+  case index < 0 {
+    True -> dict
+    False -> {
+      let k = key(js_array_get(entries, index))
+      let v = value(js_array_get(entries, index + 1))
+      insert_from(entries, index - 2, dict_insert(dict, k, v), key, value)
+    }
+  }
+}
+
 /// Throws: `value` is not an instance of the class of a variant of the custom
 /// type it is converted to.
 pub fn js_unknown_variant(value: JsValue) -> Nil {
@@ -213,12 +274,13 @@ pub fn js_unknown_variant(value: JsValue) -> Nil {
 
 /// The JavaScript value of the `Dynamic` `value`, the one that
 /// `js_dynamic_from_with` reads back: a tuple or an array is an array, and
-/// its items are converted with `item`. `string` converts a string, and
-/// `other` any other value, like a dict or a value of another type.
+/// its items are converted with `item`. `string` converts a string, `dict` a
+/// dict, and `other` any other value, like a value of another type.
 pub fn js_dynamic_with(
   value: Dynamic,
   string: fn(String) -> JsValue,
   item: fn(Dynamic) -> JsValue,
+  dict: fn(Dict(Dynamic, Dynamic)) -> JsValue,
   other: fn(Dynamic) -> JsValue,
 ) -> JsValue {
   case value {
@@ -234,6 +296,7 @@ pub fn js_dynamic_with(
       push_all(array, array_to_list(items), item)
       array
     }
+    DDict(entries) -> dict(entries)
     _ -> other(value)
   }
 }
@@ -241,16 +304,19 @@ pub fn js_dynamic_with(
 /// The `Dynamic` of `value`, read as on JavaScript: a number is an `Int` when
 /// it is an integer and a `Float` otherwise, a string a `String`, a boolean a
 /// `Bool`, `undefined` is `Nil`, a `BitArray` a bit array, a `List` a list
-/// and an array a tuple, with their items read too. Any other value, like an
-/// instance of a custom type, is a value of the host, made by `other`.
-/// `string` converts a string.
+/// and an array a tuple, with their items read too, and an instance of
+/// `dict_class`, the `Dict` of the stdlib, a dict, converted with `dict`. Any
+/// other value, like an instance of a custom type, is a value of the host,
+/// made by `other`. `string` converts a string.
 pub fn js_dynamic_from_with(
   value: JsValue,
   string: fn(JsValue) -> String,
+  dict_class: JsValue,
+  dict: fn(JsValue) -> Dict(Dynamic, Dynamic),
   other: fn(JsValue) -> Dynamic,
 ) -> Dynamic {
-  let item = js_dynamic_from_with(_, string, other)
-  case i32_to_int(kind(value)) {
+  let item = js_dynamic_from_with(_, string, dict_class, dict, other)
+  case i32_to_int(kind(value, dict_class)) {
     1 -> dynamic_int(js_int_from(value))
     2 -> dynamic_float(js_float_from(value))
     3 -> dynamic_string(string(value))
@@ -265,6 +331,7 @@ pub fn js_dynamic_from_with(
         [],
         item,
       ))
+    9 -> dynamic_dict(dict(value))
     _ -> other(value)
   }
 }
@@ -374,9 +441,19 @@ fn result_value(value: JsValue) -> JsValue
 
 /// What `value` is read as by `js_dynamic_from_with`: 1 an integer, 2 another
 /// number, 3 a string, 4 a boolean, 5 `undefined`, 6 a `BitArray`, 7 a `List`,
-/// 8 an array and 0 another value.
+/// 8 an array, 9 an instance of `dict_class` (unless it is `null`, when the
+/// program has no dicts) and 0 another value.
 @external(webassembly, "gleam:js", "kind")
-fn kind(value: JsValue) -> I32
+fn kind(value: JsValue, dict_class: JsValue) -> I32
+
+/// The keys and values of the `Dict` `dict`, one after the other in an array,
+/// read with `fold` of the module `dict.mjs` of the stdlib.
+@external(webassembly, "gleam:js", "entries")
+fn entries(fold: JsValue, dict: JsValue) -> JsValue
+
+/// Calls the function `f` with `argument`.
+@external(webassembly, "gleam:js", "call")
+fn call(f: JsValue, argument: JsValue) -> JsValue
 
 @external(webassembly, "gleam:js", "unknown_variant")
 fn unknown_variant(value: JsValue) -> Nil

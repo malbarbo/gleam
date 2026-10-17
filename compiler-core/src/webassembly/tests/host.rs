@@ -133,14 +133,24 @@ fn run_with_host(src: &str, ffi: &str) {
 /// `deps`.
 #[track_caller]
 fn run_with_host_in(package: &str, src: &str, deps: Vec<(&str, &str, &str)>, ffi: &str) {
+    run_with_host_files(package, src, deps, &[("ffi.mjs", ffi)]);
+}
+
+/// Like `run_with_host_in`, with the files `files` next to the module.
+#[track_caller]
+fn run_with_host_files(
+    package: &str,
+    src: &str,
+    deps: Vec<(&str, &str, &str)>,
+    files: &[(&str, &str)],
+) {
     for string in [WasmString::Utf8, WasmString::JsString] {
         for int in [WasmInt::I64, WasmInt::I32] {
             let config = WebAssemblyConfig {
                 string,
                 ..super::wasm_config(int, WasmFloat::F64)
             };
-            let result =
-                super::run_wasm_node_in(package, src, deps.clone(), config, &[("ffi.mjs", ffi)]);
+            let result = super::run_wasm_node_in(package, src, deps.clone(), config, files);
             assert!(
                 result.status.success(),
                 "{string:?} {int:?}:\n{}",
@@ -776,6 +786,91 @@ pub fn main() {
 export const identity = (a) => a;
 export const type_of = (a) => typeof a;
 "#,
+    );
+}
+
+/// A dict is a `Dict` of the module `dict.mjs` of the stdlib, as on
+/// JavaScript, also as a `Dynamic`.
+#[test]
+fn host_dicts() {
+    run_with_host_files(
+        "app",
+        r#"
+import builtins.{type Dynamic, cast}
+import gleam/dict.{type Dict}
+
+@external(webassembly, "./ffi.mjs", "id")
+fn id(a: a) -> a
+@external(webassembly, "./ffi.mjs", "id")
+fn from(a: a) -> Dynamic
+@external(webassembly, "./ffi.mjs", "size")
+fn size(a: Dict(String, Int)) -> Int
+@external(webassembly, "./ffi.mjs", "make")
+fn make() -> Dict(String, List(Int))
+@external(webassembly, "./ffi.mjs", "class_name")
+fn class_name(a: Dynamic) -> String
+
+pub fn main() {
+    let a = dict.from_list([#("a", 1), #("b", 2)])
+    let assert 2 = size(a)
+    let assert True = id(a) == a
+    let assert [#("x", [1, 2])] = dict.to_list(make())
+    let assert True = from(a) == cast(a)
+    let assert True = from(make()) == cast(make())
+    let assert "Dict" = class_name(cast(a))
+    let assert True = id(cast(a)) == cast(a)
+}
+"#,
+        vec![
+            (
+                super::TEST_PACKAGE,
+                "builtins",
+                r#"
+@external(webassembly, "builtins", "Dynamic")
+pub type Dynamic
+@external(webassembly, "builtins", "_dynamic_cast")
+pub fn cast(a: a) -> Dynamic
+"#,
+            ),
+            (
+                "gleam_stdlib",
+                "gleam/dict",
+                r#"
+@external(webassembly, "builtins", "Dict")
+pub type Dict(k, v)
+@external(webassembly, "builtins", "dict_from_list")
+pub fn from_list(list: List(#(k, v))) -> Dict(k, v)
+@external(webassembly, "builtins", "dict_to_list")
+pub fn to_list(dict: Dict(k, v)) -> List(#(k, v))
+"#,
+            ),
+        ],
+        &[
+            (
+                "ffi.mjs",
+                r#"
+import Dict, { from } from "../../gleam_stdlib/dict.mjs";
+import { toList } from "../gleam.mjs";
+export const id = (a) => a;
+export const size = (dict) => (dict instanceof Dict ? dict.entries.length : -1);
+export const make = () => from([["x", toList([1, 2])]]);
+export const class_name = (a) => a.constructor.name;
+"#,
+            ),
+            (
+                "../../gleam_stdlib/dict.mjs",
+                r#"
+export default class Dict {
+  constructor(entries) {
+    this.entries = entries;
+  }
+}
+export const from = (entries) => new Dict([...entries]);
+export const fold = (dict, state, fun) =>
+  dict.entries.reduce((state, [key, value]) => fun(state, key, value), state);
+"#,
+            ),
+        ],
     );
 }
 

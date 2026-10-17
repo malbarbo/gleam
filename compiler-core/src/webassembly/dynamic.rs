@@ -17,7 +17,7 @@ use super::*;
 pub(super) const DYNAMIC_CAST: &str = "_dynamic_cast";
 
 pub(super) const DYNAMIC_MODULE: &str = "builtins/dynamic";
-const DICT_MODULE: &str = "builtins/dict";
+pub(super) const DICT_MODULE: &str = "builtins/dict";
 const STRING_TREE_MODULE: &str = "builtins/string_tree";
 const ARRAY_MODULE: &str = "builtins/array";
 
