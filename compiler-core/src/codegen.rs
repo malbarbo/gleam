@@ -368,15 +368,23 @@ impl<'a> WebAssembly<'a> {
         }
     }
 
-    /// Generates a WebAssembly module for each of `modules`. Each one is a
-    /// whole program, so the modules it imports from other packages must be
-    /// in `dependencies`.
+    /// Writes the JavaScript module of the custom types of each of `modules`
+    /// and, when `programs`, generates a WebAssembly module for each one. Each
+    /// one is a whole program, so the modules it imports from other packages
+    /// must be in `dependencies`.
     pub fn render(
         &self,
         writer: &impl FileSystemWriter,
         modules: &[Module],
         dependencies: &[Module],
+        programs: bool,
     ) -> Result<()> {
+        for module in modules {
+            self.types_module(writer, module)?;
+        }
+        if !programs {
+            return self.write_prelude(writer);
+        }
         let all_modules: HashMap<_, _> = dependencies
             .iter()
             .chain(modules)
@@ -394,7 +402,6 @@ impl<'a> WebAssembly<'a> {
             .collect();
         let runtime = webassembly::runtime_modules();
         for module in modules {
-            self.types_module(writer, module)?;
             self.wasm_module(
                 writer,
                 module,

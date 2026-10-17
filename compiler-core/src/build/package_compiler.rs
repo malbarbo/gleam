@@ -502,8 +502,12 @@ where
         } else {
             tracing::debug!("skipping_native_file_copying");
         }
-        let modules = if programs { modules } else { &[] };
-        WebAssembly::new(self.out, config).render(&self.io, modules, self.webassembly_dependencies)
+        WebAssembly::new(self.out, config).render(
+            &self.io,
+            modules,
+            self.webassembly_dependencies,
+            programs,
+        )
     }
 
     /// Link the module source .gleam file to the output directory.
