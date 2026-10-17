@@ -162,14 +162,25 @@ export async function instantiate(url) {
     inspect: (value) => inspect(value),
   };
   const wasi = {
+    // Writes the text to the stream of `fd` as the JavaScript target does, so
+    // a program that replaces `write` of `process.stdout` gets the output.
     fd_write(fd, iovs, iovs_len, nwritten) {
       const view = new DataView(memory.buffer);
+      const stream = fd === 1 ? process.stdout : fd === 2 ? process.stderr : undefined;
       let written = 0;
+      let text = "";
       for (let i = 0; i < iovs_len; i++) {
         const ptr = view.getUint32(iovs + i * 8, true);
         const len = view.getUint32(iovs + i * 8 + 4, true);
-        written += writeSync(fd, new Uint8Array(memory.buffer, ptr, len));
+        const bytes = new Uint8Array(memory.buffer, ptr, len);
+        if (stream === undefined) {
+          written += writeSync(fd, bytes);
+        } else {
+          text += decoder.decode(bytes);
+          written += len;
+        }
       }
+      if (text !== "") stream.write(text);
       view.setUint32(nwritten, written, true);
       return 0;
     },

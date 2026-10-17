@@ -697,6 +697,38 @@ export const thrown = (a) => new Thrown({ a });
     );
 }
 
+/// The output of the program is written to `process.stdout` and
+/// `process.stderr`, as on JavaScript.
+#[test]
+fn host_output_streams() {
+    run_with_host(
+        r#"
+@external(webassembly, "./ffi.mjs", "capture")
+fn capture(f: fn() -> Nil) -> String
+
+pub fn main() {
+    let assert "src/my/mod.gleam:7\n1\n" = capture(fn() {
+      echo 1
+      Nil
+    })
+}
+"#,
+        r#"
+export function capture(f) {
+  const chunks = [];
+  const write = process.stderr.write;
+  process.stderr.write = (chunk) => chunks.push(chunk);
+  try {
+    f();
+  } finally {
+    process.stderr.write = write;
+  }
+  return chunks.join("");
+}
+"#,
+    );
+}
+
 /// A value that crosses to the host as an opaque value crosses back as the
 /// same value, also through a `Dynamic`, like in the JavaScript target.
 #[test]
