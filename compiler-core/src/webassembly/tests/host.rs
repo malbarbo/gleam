@@ -625,6 +625,56 @@ export const thrown = (a) => new Thrown({ a });
     );
 }
 
+/// A value that crosses to the host as an opaque value crosses back as the
+/// same value, also through a `Dynamic`, like in the JavaScript target.
+#[test]
+fn host_values_back() {
+    run_with_host(
+        r#"
+@external(webassembly, "builtins", "Dynamic")
+pub type Dynamic
+@external(webassembly, "./ffi.mjs", "put")
+fn put(a: a) -> Nil
+@external(webassembly, "./ffi.mjs", "get")
+fn get() -> Dynamic
+@external(webassembly, "./ffi.mjs", "identity")
+fn to_list(a: Dynamic) -> List(String)
+@external(webassembly, "./ffi.mjs", "identity")
+fn to_color(a: Dynamic) -> Color
+@external(webassembly, "./ffi.mjs", "identity")
+fn to_function(a: Dynamic) -> fn(Int) -> Int
+@external(webassembly, "./ffi.mjs", "identity")
+fn to_dynamic(a: Dynamic) -> Dynamic
+@external(webassembly, "./ffi.mjs", "identity")
+fn to_int(a: Dynamic) -> Int
+
+pub type Color {
+    Red
+    Rgb(Int, Int, Int)
+}
+
+pub fn main() {
+    put(["a", "b"])
+    let assert ["a", "b"] = to_list(get())
+    put(10)
+    let assert 10 = to_int(get())
+    put(Rgb(1, 2, 3))
+    let assert Rgb(1, 2, 3) = to_color(get())
+    let add = fn(a) { a + 1 }
+    put(add)
+    let assert 2 = to_function(get())(1)
+    let assert True = to_dynamic(get()) == get()
+}
+"#,
+        r#"
+let value;
+export const put = (a) => { value = a; };
+export const get = () => value;
+export const identity = (a) => a;
+"#,
+    );
+}
+
 /// A value that the host returns as a `List`, a `Result`, a `BitArray` or a
 /// custom type with variants is checked to be one.
 #[test]

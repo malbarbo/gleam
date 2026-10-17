@@ -174,6 +174,11 @@ impl<'a, 'b> Instructions<'a, 'b> {
         self
     }
 
+    pub(super) fn ref_test(&mut self, nullable: bool, ht: HeapType) -> &mut Self {
+        let _ = self.seq.as_mut().ref_test(nullable, ht);
+        self
+    }
+
     pub(super) fn extern_convert_any(&mut self) -> &mut Self {
         let _ = self.seq.as_mut().instr(walrus::ir::ExternConvertAny {});
         self
