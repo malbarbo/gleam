@@ -414,7 +414,18 @@ pub fn run_wasm_node(
     config: WebAssemblyConfig,
     files: &[(&str, &str)],
 ) -> WasmOutput {
-    let wasm_bytes = compile_wasm_in(TEST_PACKAGE, src, deps, config);
+    run_wasm_node_in(TEST_PACKAGE, src, deps, config, files)
+}
+
+/// Like `run_wasm_node`, with the module in `package`.
+pub fn run_wasm_node_in(
+    package: &str,
+    src: &str,
+    deps: Vec<(&str, &str, &str)>,
+    config: WebAssemblyConfig,
+    files: &[(&str, &str)],
+) -> WasmOutput {
+    let wasm_bytes = compile_wasm_in(package, src, deps, config);
     let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("gleam_wasm_js_test_{id}"));
     std::fs::create_dir_all(&dir).expect("failed to create the test directory");

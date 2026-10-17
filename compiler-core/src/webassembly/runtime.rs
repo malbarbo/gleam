@@ -110,6 +110,16 @@ const HOOKS: &[(&str, &str, Hooks)] = &[
             inspect: "dynamic_inspect",
         },
     ),
+    // Also of the external types of values of the host, see `host`.
+    (
+        "builtins/js",
+        "JsValue",
+        Hooks {
+            equal: "js_equal",
+            hash: "js_hash",
+            inspect: "js_inspect",
+        },
+    ),
 ];
 
 /// The hooks of the type `name` of the module `module`.

@@ -126,13 +126,21 @@ pub fn main() {
 /// with UTF-8 and JavaScript strings, and 64 and 32-bit ints.
 #[track_caller]
 fn run_with_host(src: &str, ffi: &str) {
+    run_with_host_in(super::TEST_PACKAGE, src, vec![], ffi);
+}
+
+/// Like `run_with_host`, with the module in `package` and the modules
+/// `deps`.
+#[track_caller]
+fn run_with_host_in(package: &str, src: &str, deps: Vec<(&str, &str, &str)>, ffi: &str) {
     for string in [WasmString::Utf8, WasmString::JsString] {
         for int in [WasmInt::I64, WasmInt::I32] {
             let config = WebAssemblyConfig {
                 string,
                 ..super::wasm_config(int, WasmFloat::F64)
             };
-            let result = super::run_wasm_node(src, vec![], config, &[("ffi.mjs", ffi)]);
+            let result =
+                super::run_wasm_node_in(package, src, deps.clone(), config, &[("ffi.mjs", ffi)]);
             assert!(
                 result.status.success(),
                 "{string:?} {int:?}:\n{}",
@@ -331,6 +339,83 @@ import { Ok, Error } from "./prelude.mjs";
 export const id = (a) => a;
 export const type_of = (a) => typeof a;
 export const first = (a) => (a.head === undefined ? new Error(undefined) : new Ok(a.head));
+"#,
+    );
+}
+
+/// Outside the standard library, an external type without
+/// `@external(webassembly, ...)` is a type of values of the host, which are
+/// compared, hashed and shown by the host, as on JavaScript.
+#[test]
+fn host_external_types() {
+    run_with_host_in(
+        "app",
+        r#"
+import builtins.{cast, hash, inspect}
+import my/regex.{type Regex}
+
+@external(webassembly, "./ffi.mjs", "id")
+fn id(a: a) -> a
+
+type Holder {
+    Holder(regex: Regex, name: String)
+}
+
+pub fn main() {
+    let a = regex.new("a+")
+    let assert True = regex.matches(a, "caab")
+    let assert False = regex.matches(regex.new("b"), "caa")
+    let assert True = a == regex.new("a+")
+    let assert False = a == regex.new("b")
+    let assert True = Holder(a, "a") == Holder(regex.new("a+"), "a")
+    let assert True = hash(a) == hash(regex.new("a+"))
+    let assert "//js(/a+/)" = inspect(a)
+    let assert "Holder(//js(/a+/), \"a\")" = inspect(Holder(a, "a"))
+    let assert True = regex.matches(id(a), "a")
+    let assert [True, False] = regex.all([a, regex.new("x")], "a")
+    let assert True = cast(a) == cast(regex.new("a+"))
+    let assert False = cast(a) == cast(regex.new("b"))
+    let assert "//js(/a+/)" = inspect(cast(a))
+}
+"#,
+        vec![
+            (
+                super::TEST_PACKAGE,
+                "builtins",
+                r#"
+@external(webassembly, "builtins", "_inspect")
+pub fn inspect(a: a) -> String
+@external(webassembly, "builtins", "_hash")
+pub fn hash(a: a) -> Int
+@external(webassembly, "builtins", "Dynamic")
+pub type Dynamic
+@external(webassembly, "builtins", "_dynamic_cast")
+pub fn cast(a: a) -> Dynamic
+"#,
+            ),
+            (
+                "app",
+                "my/regex",
+                r#"
+pub type Regex
+
+@external(webassembly, "./ffi.mjs", "new_regex")
+pub fn new(source: String) -> Regex
+
+@external(webassembly, "./ffi.mjs", "matches")
+pub fn matches(regex: Regex, text: String) -> Bool
+
+@external(webassembly, "./ffi.mjs", "all")
+pub fn all(regexes: List(Regex), text: String) -> List(Bool)
+"#,
+            ),
+        ],
+        r#"
+import { toList } from "./prelude.mjs";
+export const id = (a) => a;
+export const new_regex = (source) => new RegExp(source);
+export const matches = (regex, text) => regex.test(text);
+export const all = (regexes, text) => toList(regexes.toArray().map((r) => r.test(text)));
 "#,
     );
 }

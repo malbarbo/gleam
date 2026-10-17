@@ -423,11 +423,12 @@ impl<'a> Generator<'a> {
     }
 
     /// The struct that boxes the values of `type_` in an `anyref`, when they
-    /// are not references.
+    /// are not references to wasm values: numbers and values of the host.
     pub(super) fn dynamic_box(&mut self, type_: &Arc<Type>) -> Option<TypeId> {
         match self.val_type(type_) {
-            ValType::Ref(_) => None,
-            val_type @ (ValType::I32
+            val_type @ ValType::Ref(_) if val_type != EXTERNREF => None,
+            val_type @ (ValType::Ref(_)
+            | ValType::I32
             | ValType::I64
             | ValType::F32
             | ValType::F64

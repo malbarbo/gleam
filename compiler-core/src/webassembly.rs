@@ -1361,6 +1361,15 @@ impl<'a> Generator<'a> {
                     // `@external(webassembly, ...)`, an external type is bound
                     // to the wasm type of its name.
                     type_
+                } else if custom_type.constructors.is_empty()
+                    && !reaches_builtins(&module.type_info.package)
+                {
+                    // Any other is a type of values of the host, which only
+                    // the functions of the host create, see `host`.
+                    CustomType::External {
+                        val_type: EXTERNREF,
+                        to_str: None,
+                    }
                 } else {
                     continue;
                 };
@@ -1510,6 +1519,13 @@ impl<'a> Generator<'a> {
     /// with hooks.
     fn type_hooks(&self, type_: &Arc<Type>) -> Option<(EcoString, &'static Hooks)> {
         let (module, name, _) = type_.named_type_information()?;
+        // The values of the host are compared, hashed and shown by the host,
+        // as the values of `JsValue`.
+        let (module, name) = if self.external_val_type(type_) == Some(EXTERNREF) {
+            (host::JS_MODULE.into(), "JsValue".into())
+        } else {
+            (module, name)
+        };
         runtime::hooks(&module, &name).map(|hooks| (module, hooks))
     }
 

@@ -195,6 +195,24 @@ pub fn js_array_get(array: JsValue, index: Int) -> JsValue {
   array_get(array, int_to_i32(index))
 }
 
+// -- Values of the host ------------------------------------------------------
+
+/// Whether `a` and `b` are equal, as on JavaScript: the hook of `==` of the
+/// external types of values of the host.
+pub fn js_equal(a: JsValue, b: JsValue) -> Bool {
+  i32_to_int(equal(a, b)) != 0
+}
+
+/// A hash of `value` consistent with `js_equal`.
+pub fn js_hash(value: JsValue) -> Int {
+  i32_to_int(hash(value))
+}
+
+/// The text of `value`, as on JavaScript.
+pub fn js_inspect(value: JsValue) -> String {
+  js_string_from(inspect(value))
+}
+
 // -- The functions of the host ------------------------------------------------
 
 @external(webassembly, "gleam:js", "number")
@@ -280,6 +298,15 @@ fn result_is_ok(value: JsValue) -> I32
 
 @external(webassembly, "gleam:js", "result_value")
 fn result_value(value: JsValue) -> JsValue
+
+@external(webassembly, "gleam:js", "equal")
+fn equal(a: JsValue, b: JsValue) -> I32
+
+@external(webassembly, "gleam:js", "hash")
+fn hash(value: JsValue) -> I32
+
+@external(webassembly, "gleam:js", "inspect")
+fn inspect(value: JsValue) -> JsValue
 
 // -- Builtins -----------------------------------------------------------------
 

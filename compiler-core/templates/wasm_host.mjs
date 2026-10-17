@@ -13,6 +13,7 @@ import {
   List,
   Ok,
   UtfCodepoint,
+  isEqual,
   toList,
 } from "./prelude.mjs";
 
@@ -90,6 +91,9 @@ export async function instantiate(url) {
       throw new TypeError(`Not a Result: ${value}`);
     },
     result_value: (value) => value[0],
+    equal: (a, b) => (isEqual(a, b) ? 1 : 0),
+    hash,
+    inspect: (value) => inspect(value),
   };
   const wasi = {
     fd_write(fd, iovs, iovs_len, nwritten) {
@@ -138,6 +142,51 @@ export async function instantiate(url) {
   const instance = await WebAssembly.instantiate(module, imports);
   memory = instance.exports.memory;
   return instance;
+}
+
+// A hash of `value` consistent with `isEqual`: of its text when it is not an
+// object, and of the name of its class otherwise.
+function hash(value) {
+  const text =
+    typeof value === "object" && value !== null
+      ? (Object.getPrototypeOf(value)?.constructor?.name ?? "")
+      : String(value);
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    hash = (Math.imul(hash, 31) + text.charCodeAt(i)) | 0;
+  }
+  return hash;
+}
+
+// The text of `value`, as `string.inspect` of the JavaScript target, with
+// the objects in `seen` being shown.
+function inspect(value, seen = new Set()) {
+  if (value === true) return "True";
+  if (value === false) return "False";
+  if (value === null) return "//js(null)";
+  if (value === undefined) return "Nil";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "bigint" || Number.isSafeInteger(value)) return value.toString();
+  if (typeof value === "number") return Number.isFinite(value) ? `${value}` : `//js(${value})`;
+  if (value instanceof RegExp) return `//js(${value})`;
+  if (value instanceof Date) return `//js(Date("${value.toISOString()}"))`;
+  if (value instanceof globalThis.Error) return `//js(${value})`;
+  if (typeof value === "function") return "//fn(...) { ... }";
+  if (seen.has(value)) return "//js(circular reference)";
+  seen.add(value);
+  let text;
+  if (Array.isArray(value)) {
+    text = `#(${value.map((item) => inspect(item, seen)).join(", ")})`;
+  } else {
+    const name = Object.getPrototypeOf(value)?.constructor?.name || "Object";
+    const props = Object.keys(value).map(
+      (key) => `${inspect(key, seen)}: ${inspect(value[key], seen)}`,
+    );
+    const body = props.length ? ` ${props.join(", ")} ` : "";
+    text = `//js(${name === "Object" ? "" : name + " "}{${body}})`;
+  }
+  seen.delete(value);
+  return text;
 }
 
 // Runs the `main` function of the module at `url` and exits.
