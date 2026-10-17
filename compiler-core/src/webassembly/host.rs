@@ -52,7 +52,7 @@ enum Conversion {
         new: FunctionId,
         array: FunctionId,
     },
-    /// A JavaScript string, checked to be one.
+    /// A JavaScript string, with the function that converts a value to one.
     JsString(FunctionId),
     /// A value of this type that the host only keeps, as an `externref`.
     Opaque(Arc<Type>),
@@ -295,9 +295,10 @@ impl<'a> Generator<'a> {
                 }
                 instructions.struct_new(type_index)
             }
-            Conversion::JsString(check) => {
-                instructions.local_get(value).call(check).ref_as_non_null()
-            }
+            Conversion::JsString(to_string) => instructions
+                .local_get(value)
+                .call(to_string)
+                .ref_as_non_null(),
             Conversion::Opaque(type_) if direction == Direction::ToJs => {
                 let _ = instructions.local_get(value);
                 if let Some(box_) = self.dynamic_box(&type_) {
@@ -358,7 +359,7 @@ impl<'a> Generator<'a> {
                 StringType::Utf8(_) => call(self, "js_string"),
                 StringType::Js(_) => Conversion::JsString(self.runtime_function_id(
                     JS_MODULE,
-                    "js_expect_string",
+                    "js_to_string",
                     vec![js_value.clone()],
                     js_value,
                 )),

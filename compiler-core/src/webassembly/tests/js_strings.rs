@@ -219,7 +219,7 @@ pub fn main() {
 }
 
 /// A string crosses to the host as is, and a value that the host returns as
-/// a `String` is checked to be one.
+/// a `String` becomes one.
 #[test]
 fn host() {
     let host = r#"
@@ -241,23 +241,17 @@ pub fn main() {
 "#,
         &[("host_strings.mjs", host)],
     );
-    let result = run_wasm_js(
+    // A value that is not a string becomes one, as on JavaScript.
+    let _ = run_ok(
         r#"
 @external(webassembly, "./host_strings.mjs", "not_a_string")
 fn not_a_string() -> String
 
 pub fn main() {
-    not_a_string()
+    let assert "42" = not_a_string()
 }
 "#,
         &[("host_strings.mjs", host)],
-    );
-    assert!(!result.status.success());
-    assert!(
-        result.stderr.contains("Not a String: 42")
-            && result.stderr.contains("./host_strings.mjs.not_a_string"),
-        "{}",
-        result.stderr
     );
 }
 

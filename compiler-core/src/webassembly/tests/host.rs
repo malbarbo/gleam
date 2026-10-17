@@ -214,16 +214,25 @@ fn host_strings() {
 fn shout(a: String) -> String
 @external(webassembly, "./ffi.mjs", "length")
 fn length(a: String) -> Int
+@external(webassembly, "./ffi.mjs", "nothing")
+fn nothing() -> String
+@external(webassembly, "./ffi.mjs", "number")
+fn number() -> String
 
 pub fn main() {
     let assert "OLÁ 😀!" = shout("olá 😀")
     let assert "!" = shout("")
     let assert 3 = length("a😀")
+    // A value that is not a string becomes one, as on JavaScript.
+    let assert "undefined" = nothing()
+    let assert "42" = number()
 }
 "#,
         r#"
 export const shout = (a) => a.toUpperCase() + "!";
 export const length = (a) => a.length;
+export const nothing = () => undefined;
+export const number = () => 42;
 "#,
     );
 }
@@ -566,13 +575,12 @@ export function twice(f) {
     );
 }
 
-/// A value that the host returns as a `String`, a `List`, a `Result`, a
-/// `BitArray` or a custom type with variants is checked to be one.
+/// A value that the host returns as a `List`, a `Result`, a `BitArray` or a
+/// custom type with variants is checked to be one.
 #[test]
 fn host_wrong_values() {
     let ffi = r#"export const wrong = () => 42;"#;
     for (type_, expected) in [
-        ("String", "Not a String: 42"),
         ("List(Int)", "Not a List: 42"),
         ("Result(Int, Nil)", "Not a Result: 42"),
         ("BitArray", "Not a BitArray: 42"),

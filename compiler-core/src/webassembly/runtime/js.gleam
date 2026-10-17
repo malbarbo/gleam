@@ -9,7 +9,8 @@
 //// `Bool` a boolean, `Nil` is `undefined`, a list is a `List` of the prelude,
 //// a `Result` an `Ok` or an `Error`, and a bit array a `BitArray`. The
 //// values from the host are not checked, as on JavaScript, except to tell
-//// the variants apart, and a string or a bit array, whose bytes are copied.
+//// the variants apart, and a list or a bit array, whose items are read; a
+//// value that is not a string becomes one, as with `String(value)`.
 
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
@@ -82,13 +83,14 @@ pub fn js_string(value: String) -> JsValue {
   string_from_memory(base, string_to_memory(value, base))
 }
 
-/// `value`, which must be a string. JavaScript strings are values of the
-/// host, and they are not copied.
-pub fn js_expect_string(value: JsValue) -> JsValue {
-  expect_string(value)
+/// The string of `value`, as `String(value)` of JavaScript. JavaScript
+/// strings are values of the host, and they are not copied.
+pub fn js_to_string(value: JsValue) -> JsValue {
+  to_string(value)
 }
 
-/// The bytes of the string `value`, copied through the linear memory.
+/// The bytes of the string of `value`, see `js_to_string`, copied through the
+/// linear memory.
 pub fn js_string_from(value: JsValue) -> String {
   let base = heap_base()
   memory_to_string(base, string_into_memory(value, base))
@@ -242,15 +244,14 @@ fn codepoint(value: JsValue) -> JsValue
 @external(webassembly, "gleam:js", "codepoint_value")
 fn codepoint_value(value: JsValue) -> JsValue
 
-/// `value`. Throws when it is not a string.
-@external(webassembly, "gleam:js", "expect_string")
-fn expect_string(value: JsValue) -> JsValue
+@external(webassembly, "gleam:js", "to_string")
+fn to_string(value: JsValue) -> JsValue
 
 @external(webassembly, "gleam:js", "string_from_memory")
 fn string_from_memory(address: I32, size: I32) -> JsValue
 
-/// Writes the bytes of the string `value` at `address`, and returns their
-/// number. Throws when `value` is not a string.
+/// Writes the bytes of the string of `value` at `address`, and returns their
+/// number.
 @external(webassembly, "gleam:js", "string_into_memory")
 fn string_into_memory(value: JsValue, address: I32) -> I32
 

@@ -48,16 +48,13 @@ export async function instantiate(url) {
     undefined: () => undefined,
     codepoint: (value) => new UtfCodepoint(value),
     codepoint_value: (value) => value.value,
-    expect_string(value) {
-      if (typeof value !== "string") throw new TypeError(`Not a String: ${value}`);
-      return value;
-    },
+    to_string: (value) => (typeof value === "string" ? value : String(value)),
     string_from_memory: (address, size) =>
       decoder.decode(new Uint8Array(memory.buffer, address, size)),
     string_into_memory(value, address) {
-      js.expect_string(value);
+      const string = js.to_string(value);
       // At most 3 bytes for each UTF-16 code unit.
-      return encoder.encodeInto(value, bytesAt(address, value.length * 3)).written;
+      return encoder.encodeInto(string, bytesAt(address, string.length * 3)).written;
     },
     bit_array_from_memory: (address, byteSize, size, offset) =>
       new BitArray(
