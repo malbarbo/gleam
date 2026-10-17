@@ -1399,14 +1399,14 @@ impl<'a> Generator<'a> {
         name: &EcoString,
         location: SrcSpan,
     ) -> Result<CustomType, Error> {
-        if !reaches_builtins(package) {
-            return Err(Error::ExternalOutsideStdlib { location });
-        }
         if module != BUILTINS_MODULE {
             return Err(Error::UnknownExternalModule {
                 location,
                 module: module.clone(),
             });
+        }
+        if !reaches_builtins(package) {
+            return Err(Error::ExternalOutsideStdlib { location });
         }
         if let Some(type_) = self.wasm_external_type(package, name) {
             return Ok(type_);

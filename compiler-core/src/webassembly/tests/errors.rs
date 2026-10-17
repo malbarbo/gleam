@@ -438,3 +438,25 @@ pub fn main() { Nil }
         "{error:?}"
     );
 }
+
+/// Outside the standard library, an external type of a module other than
+/// the builtins is reported as such, not as a use of the builtins.
+#[test]
+fn external_type_of_other_module_outside_the_stdlib() {
+    let error = super::compile_wasm_error_in(
+        "thepackage",
+        r#"
+@external(webassembly, "./signal.mjs", "AbortSignal")
+pub type AbortSignal
+
+pub fn main() { Nil }
+"#,
+    );
+    assert!(
+        matches!(
+            error,
+            crate::webassembly::Error::UnknownExternalModule { .. }
+        ),
+        "{error:?}"
+    );
+}
