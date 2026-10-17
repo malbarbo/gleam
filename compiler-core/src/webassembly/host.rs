@@ -14,9 +14,10 @@
 //! module of the custom types of its module (see `javascript::types_module`).
 //! A function is a JavaScript function that calls it with its arguments
 //! converted back, and converts its result. A value whose type is a type
-//! variable of the declaration is not converted: the host only keeps it,
-//! like `fn id(a: a) -> a`. A value of another type, like a type of the
-//! runtime, is also kept as it is, for now.
+//! variable of the declaration is converted by the type it is used with, as
+//! the external is imported for each one. A `Dynamic` is the value it holds,
+//! read back as on JavaScript. A value of another type, like a type of the
+//! runtime, is kept as it is: the host only keeps it.
 //!
 //! The values of the external types cross as they are, like a JavaScript
 //! string when `string = "JSString"`.
@@ -58,52 +59,46 @@ enum Conversion {
     Opaque(Arc<Type>),
     /// A `Dynamic` to JavaScript: the value of the host that it holds, which
     /// is the field `field` of the struct `other` of the variant `DOther`,
-    /// boxed in `box_`, or the value itself as an opaque value, in a
-    /// `dynamic_box`.
+    /// boxed in `box_`, or the value that `function` makes, with the
+    /// closures that convert a string, an item, and another value, which
+    /// crosses in a box (see `dynamic_self_box`).
     DynamicToJs {
         other: TypeId,
         field: u32,
         box_: TypeId,
-        dynamic_box: TypeId,
+        function: FunctionId,
+        closures: Vec<GlobalId>,
     },
     /// A value of the host to `Dynamic`: the `Dynamic` in a `dynamic_box`,
-    /// or the value of the host in a `Dynamic` made by `cast`.
+    /// or the `Dynamic` that `function` reads from the value of the host, with
+    /// the closures that convert a string and box another value.
     DynamicFromJs {
         dynamic_box: TypeId,
-        cast: FunctionId,
+        function: FunctionId,
+        closures: Vec<GlobalId>,
     },
 }
 
 impl<'a> Generator<'a> {
-    /// The function of the host `name` of the module `host_module`, declared
-    /// with type `declared` and used with type `type_`: its import, called
-    /// with the arguments converted to JavaScript and whose result is
-    /// converted back.
+    /// The function of the host `name` of the module `host_module`, used with
+    /// type `type_`: its import, called with the arguments converted to
+    /// JavaScript and whose result is converted back.
     pub(super) fn function_host_call(
         &mut self,
         host_module: &EcoString,
         name: &EcoString,
-        declared: &Arc<Type>,
         type_: &Arc<Type>,
     ) -> FunctionId {
-        let (declared_params, declared_return) = declared.fn_types().expect("a function");
         let (params, return_) = type_.fn_types().expect("a function");
-        let params: Vec<_> = declared_params
-            .iter()
-            .zip(&params)
-            .map(|(declared, param)| self.host_type(declared, &self.represent(param)))
-            .collect();
-        let return_ = self.host_type(&declared_return, &self.represent(&return_));
+        let params: Vec<_> = params.iter().map(|param| self.represent(param)).collect();
+        let return_ = self.represent(&return_);
         let to_js: Vec<_> = params
             .iter()
             .map(|param| self.conversion_call(param, Direction::ToJs))
             .collect();
         let from_js = self.conversion_call(&return_, Direction::FromJs);
-        let param_types: Vec<_> = params
-            .iter()
-            .map(|param| self.val_type(&unmarked(param)))
-            .collect();
-        let return_type = self.val_type(&unmarked(&return_));
+        let param_types: Vec<_> = params.iter().map(|param| self.val_type(param)).collect();
+        let return_type = self.val_type(&return_);
         let import_params: Vec<_> = param_types
             .iter()
             .zip(&to_js)
@@ -146,70 +141,8 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    /// `type_`, with the types at the positions of the type variables of
-    /// `declared` marked as opaque, see `opaque`.
-    fn host_type(&self, declared: &Arc<Type>, type_: &Arc<Type>) -> Arc<Type> {
-        match (declared.as_ref(), type_.as_ref()) {
-            (Type::Var { type_: var }, _) => match &*var.borrow() {
-                TypeVar::Link { type_: declared } => self.host_type(declared, type_),
-                TypeVar::Unbound { .. } | TypeVar::Generic { .. } => {
-                    self.runtime_named_type(JS_MODULE, OPAQUE, vec![type_.clone()])
-                }
-            },
-            (
-                Type::Named {
-                    arguments: declared,
-                    ..
-                },
-                Type::Named {
-                    publicity,
-                    package,
-                    module,
-                    name,
-                    arguments,
-                    inferred_variant,
-                },
-            ) if declared.len() == arguments.len() => Arc::new(Type::Named {
-                publicity: *publicity,
-                package: package.clone(),
-                module: module.clone(),
-                name: name.clone(),
-                arguments: declared
-                    .iter()
-                    .zip(arguments)
-                    .map(|(declared, argument)| self.host_type(declared, argument))
-                    .collect(),
-                inferred_variant: *inferred_variant,
-            }),
-            (
-                Type::Fn {
-                    arguments: declared,
-                    return_: declared_return,
-                },
-                Type::Fn { arguments, return_ },
-            ) if declared.len() == arguments.len() => Arc::new(Type::Fn {
-                arguments: declared
-                    .iter()
-                    .zip(arguments)
-                    .map(|(declared, argument)| self.host_type(declared, argument))
-                    .collect(),
-                return_: self.host_type(declared_return, return_),
-            }),
-            (Type::Tuple { elements: declared }, Type::Tuple { elements }) => {
-                Arc::new(Type::Tuple {
-                    elements: declared
-                        .iter()
-                        .zip(elements)
-                        .map(|(declared, element)| self.host_type(declared, element))
-                        .collect(),
-                })
-            }
-            _ => type_.clone(),
-        }
-    }
-
-    /// The function that converts a value of the host type `type_` (see
-    /// `host_type`) in `direction`, unless it crosses as it is.
+    /// The function that converts a value of type `type_` in `direction`,
+    /// unless it crosses as it is.
     fn conversion_call(&mut self, type_: &Arc<Type>, direction: Direction) -> Option<FunctionId> {
         if self.crosses_as_is(type_, direction) {
             None
@@ -220,7 +153,6 @@ impl<'a> Generator<'a> {
 
     /// Whether a value of the host type `type_` crosses as it is.
     fn crosses_as_is(&self, type_: &Arc<Type>, direction: Direction) -> bool {
-        let type_ = opaque(type_).unwrap_or(type_);
         matches!(
             self.custom_type(type_),
             Some((CustomType::External { .. }, _))
@@ -231,7 +163,7 @@ impl<'a> Generator<'a> {
 
     /// `fn(T) -> JsValue` to JavaScript, `fn(JsValue) -> T` back.
     fn function_conversion(&mut self, type_: &Arc<Type>, direction: Direction) -> FunctionId {
-        let val_type = self.val_type(&unmarked(type_));
+        let val_type = self.val_type(type_);
         let name = qualified_type_name(type_);
         let builtin = match direction {
             Direction::ToJs => BuiltinFunction::ToJs(val_type, name),
@@ -251,7 +183,7 @@ impl<'a> Generator<'a> {
 
     fn code_conversion(&mut self, type_: &Arc<Type>, direction: Direction) -> FunctionId {
         let conversion = self.conversion(type_, direction);
-        let value_vt = self.val_type(&unmarked(type_));
+        let value_vt = self.val_type(type_);
         let (param_vt, result_vt, name) = match direction {
             Direction::ToJs => (value_vt, EXTERNREF, "_to_js"),
             Direction::FromJs => (EXTERNREF, value_vt, "_from_js"),
@@ -269,7 +201,7 @@ impl<'a> Generator<'a> {
                 Conversion::Same | Conversion::Opaque(_) | Conversion::DynamicFromJs { .. }
             )
         {
-            self.return_wasm_value(&mut instructions, value, &unmarked(type_));
+            self.return_wasm_value(&mut instructions, value, type_);
         }
         let _ = match conversion {
             Conversion::Same => instructions.local_get(value),
@@ -340,42 +272,56 @@ impl<'a> Generator<'a> {
                 other,
                 field,
                 box_,
+                function,
+                closures,
+            } => {
+                let _ = instructions
+                    .local_get(value)
+                    .ref_test(false, HeapType::Concrete(other))
+                    .if_(InstrSeqType::Simple(None), |then| {
+                        let _ = then
+                            .local_get(value)
+                            .ref_cast_non_null(HeapType::Concrete(other))
+                            .struct_get(other, field)
+                            .local_tee(other_value)
+                            .ref_test(false, HeapType::Concrete(box_))
+                            .if_(InstrSeqType::Simple(None), |then| {
+                                let _ = then
+                                    .local_get(other_value)
+                                    .ref_cast_non_null(HeapType::Concrete(box_))
+                                    .struct_get(box_, 0)
+                                    .return_();
+                            });
+                    })
+                    .local_get(value);
+                for closure in closures {
+                    let _ = instructions.global_get(closure);
+                }
+                instructions.call(function)
+            }
+            Conversion::DynamicFromJs {
                 dynamic_box,
-            } => instructions
-                .local_get(value)
-                .ref_test(false, HeapType::Concrete(other))
-                .if_(InstrSeqType::Simple(None), |then| {
-                    let _ = then
-                        .local_get(value)
-                        .ref_cast_non_null(HeapType::Concrete(other))
-                        .struct_get(other, field)
-                        .local_tee(other_value)
-                        .ref_test(false, HeapType::Concrete(box_))
-                        .if_(InstrSeqType::Simple(None), |then| {
-                            let _ = then
-                                .local_get(other_value)
-                                .ref_cast_non_null(HeapType::Concrete(box_))
-                                .struct_get(box_, 0)
-                                .return_();
-                        });
-                })
-                .local_get(value)
-                .struct_new(dynamic_box)
-                .extern_convert_any(),
-            Conversion::DynamicFromJs { dynamic_box, cast } => instructions
-                .local_get(value)
-                .any_convert_extern()
-                .local_tee(other_value)
-                .ref_test(false, HeapType::Concrete(dynamic_box))
-                .if_(InstrSeqType::Simple(None), |then| {
-                    let _ = then
-                        .local_get(other_value)
-                        .ref_cast_non_null(HeapType::Concrete(dynamic_box))
-                        .struct_get(dynamic_box, 0)
-                        .return_();
-                })
-                .local_get(value)
-                .call(cast),
+                function,
+                closures,
+            } => {
+                let _ = instructions
+                    .local_get(value)
+                    .any_convert_extern()
+                    .local_tee(other_value)
+                    .ref_test(false, HeapType::Concrete(dynamic_box))
+                    .if_(InstrSeqType::Simple(None), |then| {
+                        let _ = then
+                            .local_get(other_value)
+                            .ref_cast_non_null(HeapType::Concrete(dynamic_box))
+                            .struct_get(dynamic_box, 0)
+                            .return_();
+                    })
+                    .local_get(value);
+                for closure in closures {
+                    let _ = instructions.global_get(closure);
+                }
+                instructions.call(function)
+            }
         };
         let _ = instructions.end();
         function.finish(self)
@@ -384,15 +330,6 @@ impl<'a> Generator<'a> {
     fn conversion(&mut self, type_: &Arc<Type>, direction: Direction) -> Conversion {
         if self.crosses_as_is(type_, direction) {
             return Conversion::Same;
-        }
-        if let Some(type_) = opaque(type_) {
-            // A JavaScript string is a value of the host, not a reference to
-            // a wasm value.
-            return if type_.is_string() && matches!(self.string, StringType::Js(_)) {
-                self.conversion(type_, direction)
-            } else {
-                Conversion::Opaque(type_.clone())
-            };
         }
         let js_value = self.runtime_named_type(JS_MODULE, "JsValue", vec![]);
         let call = |s: &mut Self, name: &str| {
@@ -443,21 +380,15 @@ impl<'a> Generator<'a> {
             let dynamic_box = self.dynamic_self_box(type_);
             match direction {
                 Direction::ToJs => self.dynamic_to_js(type_, &js_value, dynamic_box),
-                // A value of the host, which is compared, hashed and shown by
-                // the host, see `type_hooks`.
-                Direction::FromJs => Conversion::DynamicFromJs {
-                    dynamic_box,
-                    cast: self.function_dynamic_cast(&js_value),
-                },
+                Direction::FromJs => self.dynamic_from_js(type_, &js_value, dynamic_box),
             }
         } else if let Some(item) = type_.list_type() {
             self.conversion_with(type_, "js_list", &[item], direction)
         } else if let Some((ok, error)) = type_.result_types() {
             self.conversion_with(type_, "js_result", &[ok, error], direction)
         } else if let Some(elements) = type_.tuple_types() {
-            let unmarked_elements: Vec<_> = elements.iter().map(unmarked).collect();
-            let type_index = self.tuple_type_index(unmarked_elements.clone());
-            let fields = self.field_indices(&unmarked_elements);
+            let type_index = self.tuple_type_index(elements.clone());
+            let fields = self.field_indices(&elements);
             let elements = fields
                 .into_iter()
                 .zip(&elements)
@@ -571,11 +502,76 @@ impl<'a> Generator<'a> {
         let box_ = self
             .dynamic_box(js_value)
             .expect("a boxed JavaScript value");
+        let string_type = type_::fn_(vec![type_::string()], js_value.clone());
+        let string = self.function_conversion(&type_::string(), Direction::ToJs);
+        let item_type = type_::fn_(vec![dynamic.clone()], js_value.clone());
+        let item = self.function_conversion(dynamic, Direction::ToJs);
+        let boxed = self.function_dynamic_self_box(dynamic, dynamic_box);
+        let closures = vec![
+            self.closure_of(string, &string_type),
+            self.closure_of(item, &item_type),
+            self.closure_of(boxed, &item_type),
+        ];
+        let function = self.runtime_function_id(
+            JS_MODULE,
+            "js_dynamic_with",
+            vec![dynamic.clone(), string_type, item_type.clone(), item_type],
+            js_value.clone(),
+        );
         Conversion::DynamicToJs {
             other,
             field,
             box_,
+            function,
+            closures,
+        }
+    }
+
+    /// `fn(Dynamic) -> JsValue` that boxes a `Dynamic` in a `dynamic_box`.
+    fn function_dynamic_self_box(
+        &mut self,
+        dynamic: &Arc<Type>,
+        dynamic_box: TypeId,
+    ) -> FunctionId {
+        let dynamic_vt = self.val_type(dynamic);
+        let value = self.wasm_local(dynamic_vt);
+        let mut function = Function::new(self, "_dynamic_box", &[value], &[EXTERNREF]);
+        let mut instructions = function.extend_instructions(self);
+        let _ = instructions
+            .local_get(value)
+            .struct_new(dynamic_box)
+            .extern_convert_any()
+            .end();
+        function.finish(self)
+    }
+
+    /// `Conversion::DynamicFromJs` for the type `dynamic`.
+    fn dynamic_from_js(
+        &mut self,
+        dynamic: &Arc<Type>,
+        js_value: &Arc<Type>,
+        dynamic_box: TypeId,
+    ) -> Conversion {
+        let string_type = type_::fn_(vec![js_value.clone()], type_::string());
+        let string = self.function_conversion(&type_::string(), Direction::FromJs);
+        // A value of the host, which is compared, hashed and shown by the
+        // host, see `type_hooks`.
+        let other_type = type_::fn_(vec![js_value.clone()], dynamic.clone());
+        let other = self.function_dynamic_cast(js_value);
+        let closures = vec![
+            self.closure_of(string, &string_type),
+            self.closure_of(other, &other_type),
+        ];
+        let function = self.runtime_function_id(
+            JS_MODULE,
+            "js_dynamic_from_with",
+            vec![js_value.clone(), string_type, other_type],
+            dynamic.clone(),
+        );
+        Conversion::DynamicFromJs {
             dynamic_box,
+            function,
+            closures,
         }
     }
 
@@ -589,14 +585,14 @@ impl<'a> Generator<'a> {
         direction: Direction,
     ) -> Conversion {
         let js_value = self.runtime_named_type(JS_MODULE, "JsValue", vec![]);
-        let value = unmarked(type_);
+        let value = type_.clone();
         let mut closures = vec![];
         let mut closure_types = vec![];
         for item in items {
             let function = self.function_conversion(item, direction);
             let closure_type = match direction {
-                Direction::ToJs => type_::fn_(vec![unmarked(item)], js_value.clone()),
-                Direction::FromJs => type_::fn_(vec![js_value.clone()], unmarked(item)),
+                Direction::ToJs => type_::fn_(vec![item.clone()], js_value.clone()),
+                Direction::FromJs => type_::fn_(vec![js_value.clone()], item.clone()),
             };
             closures.push(self.closure_of(function, &closure_type));
             closure_types.push(closure_type);
@@ -628,8 +624,7 @@ impl<'a> Generator<'a> {
         let Some((module, _, _)) = type_.named_type_information() else {
             return false;
         };
-        opaque(type_).is_none()
-            && module != PRELUDE_MODULE_NAME
+        module != PRELUDE_MODULE_NAME
             && matches!(
                 self.custom_type(type_),
                 Some((
@@ -646,10 +641,9 @@ impl<'a> Generator<'a> {
     /// `Type$Variant$i`, which reads its fields. A record of a type with a
     /// single variant is read without checking its class.
     fn code_class_conversion(&mut self, type_: &Arc<Type>, direction: Direction) -> FunctionId {
-        let value_type = unmarked(type_);
-        let (custom_type, _) = self.custom_type(&value_type).expect("a custom type");
+        let (custom_type, _) = self.custom_type(type_).expect("a custom type");
         let (module, name, _) = type_.named_type_information().expect("a named type");
-        let value_vt = self.val_type(&value_type);
+        let value_vt = self.val_type(type_);
         let (param_vt, result_vt, function_name) = match direction {
             Direction::ToJs => (value_vt, EXTERNREF, "_to_js"),
             Direction::FromJs => (EXTERNREF, value_vt, "_from_js"),
@@ -692,8 +686,8 @@ impl<'a> Generator<'a> {
             .collect();
         let union = match &custom_type {
             CustomType::Union { custom_type } => Some((
-                self.union_layout(&value_type),
-                self.mono_union_supertype_index(&value_type, custom_type),
+                self.union_layout(type_),
+                self.mono_union_supertype_index(type_, custom_type),
             )),
             CustomType::Enum { .. }
             | CustomType::Struct { .. }
@@ -760,7 +754,7 @@ impl<'a> Generator<'a> {
                 let _ = instructions.local_get(value).return_call(conversion);
             }
             Direction::FromJs => {
-                self.return_wasm_value(&mut instructions, value, &value_type);
+                self.return_wasm_value(&mut instructions, value, type_);
                 for ((_, conversion), check) in variants.into_iter().zip(checks) {
                     let _ = instructions.local_get(value).call(check).if_(
                         InstrSeqType::Simple(None),
@@ -791,11 +785,10 @@ impl<'a> Generator<'a> {
         index: usize,
         direction: Direction,
     ) -> (Option<TypeId>, FunctionId) {
-        let value_type = unmarked(type_);
-        let (custom_type, args) = self.custom_type(&value_type).expect("a custom type");
-        let (module, name, marked_args) = type_.named_type_information().expect("a named type");
+        let (custom_type, args) = self.custom_type(type_).expect("a custom type");
+        let (module, name, _) = type_.named_type_information().expect("a named type");
         // The struct of the variant, the fields of its values and their
-        // types, marked as in `type_`.
+        // types.
         let (variant_type, value_vt, fields, types, constructor) = match &custom_type {
             CustomType::Enum { values } => {
                 let constructor = values.get(index).expect("an enum value").clone();
@@ -806,10 +799,9 @@ impl<'a> Generator<'a> {
                 constructor,
             } => {
                 let (type_index, types) =
-                    self.mono_struct_type_index(&value_type, custom_type, constructor, &args);
+                    self.mono_struct_type_index(type_, custom_type, constructor, &args);
                 let fields = self.field_indices(&types);
-                let types =
-                    Monomorphizer::variant_constructor(custom_type, constructor, &marked_args);
+                let types = Monomorphizer::variant_constructor(custom_type, constructor, &args);
                 (
                     None,
                     self.val_type_ref(type_index),
@@ -823,23 +815,22 @@ impl<'a> Generator<'a> {
             }
             CustomType::Union { custom_type } => {
                 let constructor = custom_type.constructors.get(index).expect("a variant");
-                let layout = self.union_layout(&value_type);
-                let types =
-                    Monomorphizer::variant_constructor(custom_type, constructor, &marked_args);
+                let layout = self.union_layout(type_);
+                let types = Monomorphizer::variant_constructor(custom_type, constructor, &args);
                 if layout.null_tag == Some(index) {
                     // Its fields are of unit types.
-                    let supertype = self.mono_union_supertype_index(&value_type, custom_type);
+                    let supertype = self.mono_union_supertype_index(type_, custom_type);
                     let fields = types.iter().map(|_| (supertype, None)).collect();
                     (
                         None,
-                        self.val_type(&value_type),
+                        self.val_type(type_),
                         fields,
                         types,
                         constructor.name.clone(),
                     )
                 } else {
                     let (_, type_index, _) =
-                        self.union_subtype_index(&value_type, custom_type, constructor, &args);
+                        self.union_subtype_index(type_, custom_type, constructor, &args);
                     let fields = layout
                         .fields(index)
                         .iter()
@@ -897,7 +888,7 @@ impl<'a> Generator<'a> {
                 // The fields are read only from the values that the program
                 // constructs, see `get_function_constructor`.
                 let function = if has_fields {
-                    self.get_function_constructor(builtin, &value_type, index, code)
+                    self.get_function_constructor(builtin, type_, index, code)
                 } else {
                     self.get_function_builtin(builtin, code)
                 };
@@ -927,14 +918,14 @@ impl<'a> Generator<'a> {
                     | CustomType::External { .. }
                     | CustomType::Runtime { .. }
                     | CustomType::Array => Some(self.variant_constructor(
-                        types.iter().map(unmarked).collect(),
-                        value_type.clone(),
+                        types.clone(),
+                        type_.clone(),
                         self.variant_expect(module.clone(), constructor),
                     )),
                 };
                 // params
                 let value = self.wasm_local(EXTERNREF);
-                let result_vt = self.val_type(&value_type);
+                let result_vt = self.val_type(type_);
                 let mut function = Function::new(self, "_from_js", &[value], &[result_vt]);
                 let mut instructions = function.extend_instructions(self);
                 for (getter, conversion) in getters.into_iter().zip(conversions) {
@@ -994,8 +985,7 @@ impl<'a> Generator<'a> {
     /// result of each call. The host keeps the pairs of closures and
     /// functions, so each one crosses as the same value every time.
     fn code_function_conversion(&mut self, type_: &Arc<Type>, direction: Direction) -> FunctionId {
-        let value_type = unmarked(type_);
-        let closure_vt = self.val_type(&value_type);
+        let closure_vt = self.val_type(type_);
         match direction {
             Direction::ToJs => {
                 let trampoline = self.function_js_trampoline(type_);
@@ -1014,7 +1004,7 @@ impl<'a> Generator<'a> {
                 function_.finish(self)
             }
             Direction::FromJs => {
-                let (params, return_) = value_type.fn_types().expect("a function type");
+                let (params, return_) = type_.fn_types().expect("a function type");
                 let closure = self.closure_type(params, return_);
                 let capture = js_function_capture(self);
                 let code = self.function_js_call(type_);
@@ -1028,7 +1018,7 @@ impl<'a> Generator<'a> {
                 let new = self.wasm_local(closure_vt);
                 let mut function = Function::new(self, "_from_js", &[value], &[closure_vt]);
                 let mut instructions = function.extend_instructions(self);
-                self.return_wasm_value(&mut instructions, value, &value_type);
+                self.return_wasm_value(&mut instructions, value, type_);
                 // A function of a closure is converted back to the closure,
                 // and a closure that calls a function is registered, so the
                 // function crosses back as the same function.
@@ -1076,11 +1066,8 @@ impl<'a> Generator<'a> {
         let js_result = self.js_val_type(&return_, Direction::ToJs);
         let builtin =
             BuiltinFunction::JsTrampoline(js_params.clone(), js_result, qualified_type_name(type_));
-        let type_ = type_.clone();
         self.get_function_builtin(builtin, move |s| {
-            let value_type = unmarked(&type_);
-            let (value_params, value_return) = value_type.fn_types().expect("a function type");
-            let closure = s.closure_type(value_params, value_return);
+            let closure = s.closure_type(params.clone(), return_.clone());
             let from_js: Vec<_> = params
                 .iter()
                 .map(|param| s.conversion_call(param, Direction::FromJs))
@@ -1120,14 +1107,12 @@ impl<'a> Generator<'a> {
     /// JavaScript function of their environment, with the arguments converted
     /// to JavaScript, and convert its result back.
     fn function_js_call(&mut self, type_: &Arc<Type>) -> FunctionId {
-        let value_type = unmarked(type_);
         let (params, return_) = type_.fn_types().expect("a function type");
-        let (value_params, value_return) = value_type.fn_types().expect("a function type");
-        let closure = self.closure_type(value_params.clone(), value_return.clone());
+        let closure = self.closure_type(params.clone(), return_.clone());
         let param_vts: Vec<_> = iter::once(self.val_type_ref(closure.type_index))
-            .chain(value_params.iter().map(|param| self.val_type(param)))
+            .chain(params.iter().map(|param| self.val_type(param)))
             .collect();
-        let result_vt = self.val_type(&value_return);
+        let result_vt = self.val_type(&return_);
         let builtin =
             BuiltinFunction::JsCall(param_vts.clone(), result_vt, qualified_type_name(type_));
         self.get_function_builtin(builtin, move |s| {
@@ -1171,7 +1156,7 @@ impl<'a> Generator<'a> {
     /// one of `type_` when it crosses as it is, an `externref` otherwise.
     fn js_val_type(&mut self, type_: &Arc<Type>, direction: Direction) -> ValType {
         if self.crosses_as_is(type_, direction) {
-            self.val_type(&unmarked(type_))
+            self.val_type(type_)
         } else {
             EXTERNREF
         }
@@ -1197,59 +1182,6 @@ const FUNCREF: ValType = ValType::Ref(RefType {
     nullable: true,
     heap_type: HeapType::Abstract(walrus::AbstractHeapType::Func),
 });
-
-/// The name of the type that marks a type as opaque in a host type: its
-/// values cross as references that the host only keeps. It is not a type
-/// of the runtime, it only names the conversions.
-const OPAQUE: &str = "Opaque";
-
-/// The type that `type_` marks as opaque.
-fn opaque(type_: &Arc<Type>) -> Option<&Arc<Type>> {
-    match type_.as_ref() {
-        Type::Named {
-            package,
-            module,
-            name,
-            arguments,
-            ..
-        } if package == RUNTIME_PACKAGE && module == JS_MODULE && name == OPAQUE => {
-            arguments.first()
-        }
-        Type::Named { .. } | Type::Fn { .. } | Type::Var { .. } | Type::Tuple { .. } => None,
-    }
-}
-
-/// `type_` without the marks of opaque types.
-fn unmarked(type_: &Arc<Type>) -> Arc<Type> {
-    if let Some(type_) = opaque(type_) {
-        return unmarked(type_);
-    }
-    match type_.as_ref() {
-        Type::Named {
-            publicity,
-            package,
-            module,
-            name,
-            arguments,
-            inferred_variant,
-        } => Arc::new(Type::Named {
-            publicity: *publicity,
-            package: package.clone(),
-            module: module.clone(),
-            name: name.clone(),
-            arguments: arguments.iter().map(unmarked).collect(),
-            inferred_variant: *inferred_variant,
-        }),
-        Type::Tuple { elements } => Arc::new(Type::Tuple {
-            elements: elements.iter().map(unmarked).collect(),
-        }),
-        Type::Fn { arguments, return_ } => Arc::new(Type::Fn {
-            arguments: arguments.iter().map(unmarked).collect(),
-            return_: unmarked(return_),
-        }),
-        Type::Var { .. } => type_.clone(),
-    }
-}
 
 impl<'a> Generator<'a> {
     /// `_bytes_to_memory(bytes, start, size, address)`: writes `size` bytes of

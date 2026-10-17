@@ -329,10 +329,10 @@ export const same = (a) => a;
     );
 }
 
-/// A value whose type is a type variable of the declaration is not
-/// converted, and the host can give it back.
+/// A value whose type is a type variable of the declaration is converted by
+/// the type it is used with, and the host can give it back.
 #[test]
-fn host_opaque_values() {
+fn host_generic_values() {
     run_with_host(
         r#"
 @external(webassembly, "./ffi.mjs", "id")
@@ -341,8 +341,12 @@ fn id(a: a) -> a
 fn type_of(a: a) -> String
 @external(webassembly, "./ffi.mjs", "first")
 fn first(a: List(a)) -> Result(a, Nil)
+@external(webassembly, "./ffi.mjs", "is_array")
+fn is_array(a: a) -> Bool
+@external(webassembly, "./ffi.mjs", "is_point")
+fn is_point(a: a) -> Bool
 
-type Point {
+pub type Point {
     Point(x: Int, y: Int)
 }
 
@@ -356,15 +360,23 @@ pub fn main() {
     let f = id(fn(x) { x + 1 })
     let assert 2 = f(1)
     let assert "object" = type_of([1])
+    let assert "number" = type_of(1)
+    let assert "string" = type_of("a")
+    let assert "function" = type_of(fn(x) { x })
+    let assert True = is_array(#(1, "a"))
+    let assert True = is_point(Point(1, 2))
     let assert Ok(Point(3, 4)) = first([Point(3, 4)])
     let assert Error(Nil) = first([])
 }
 "#,
         r#"
 import { Ok, Error } from "../gleam.mjs";
+import { Point } from "./mod.mjs";
 export const id = (a) => a;
 export const type_of = (a) => typeof a;
 export const first = (a) => (a.head === undefined ? new Error(undefined) : new Ok(a.head));
+export const is_array = (a) => Array.isArray(a) && a[0] === 1 && a[1] === "a";
+export const is_point = (a) => a instanceof Point && a.x === 1 && a.y === 2;
 "#,
     );
 }
@@ -723,6 +735,47 @@ pub fn main() {
 }
 "#,
         r#"export const identity = (a) => a;"#,
+    );
+}
+
+/// A value of the host is a `Dynamic` read as on JavaScript, and a `Dynamic`
+/// crosses as the value it holds.
+#[test]
+fn host_values_as_dynamic() {
+    run_with_host(
+        r#"
+@external(webassembly, "builtins", "Dynamic")
+pub type Dynamic
+@external(webassembly, "builtins", "_dynamic_cast")
+fn cast(a: a) -> Dynamic
+@external(webassembly, "./ffi.mjs", "identity")
+fn from(a: a) -> Dynamic
+@external(webassembly, "./ffi.mjs", "identity")
+fn to_strings(a: Dynamic) -> List(String)
+@external(webassembly, "./ffi.mjs", "identity")
+fn to_pair(a: Dynamic) -> #(Int, Bool)
+@external(webassembly, "./ffi.mjs", "type_of")
+fn type_of(a: Dynamic) -> String
+
+pub fn main() {
+    let assert True = from(1) == cast(1)
+    let assert True = from(1.5) == cast(1.5)
+    let assert True = from(2.0) == cast(2)
+    let assert True = from("a") == cast("a")
+    let assert True = from(True) == cast(True)
+    let assert True = from(Nil) == cast(Nil)
+    let assert True = from(<<1, 2>>) == cast(<<1, 2>>)
+    let assert True = from([[1], [2, 3]]) == cast([[1], [2, 3]])
+    let assert True = from(#(1, "a", [True])) == cast(#(1, "a", [True]))
+    let assert ["a", "b"] = to_strings(cast(["a", "b"]))
+    let assert #(1, False) = to_pair(cast(#(1, False)))
+    let assert "number" = type_of(cast(1))
+}
+"#,
+        r#"
+export const identity = (a) => a;
+export const type_of = (a) => typeof a;
+"#,
     );
 }
 

@@ -4217,8 +4217,7 @@ impl<'a> Generator<'a> {
             .as_ref()
             .expect("an external function");
         if external_module != BUILTINS_MODULE {
-            let declared = function_type(function);
-            return self.function_host(external_module, fname, module, &declared, required_type);
+            return self.function_host(external_module, fname, module, required_type);
         }
         if let Some((runtime_module, _)) = self.runtime_function(fname) {
             return self.function_runtime(&runtime_module, fname, required_type);
@@ -4248,14 +4247,13 @@ impl<'a> Generator<'a> {
     }
 
     /// The function `name` of the host module `host_module`, declared in
-    /// the module `module` with type `declared`, used with type `type_`. It
-    /// is imported for each type it is used with, see `host.rs`.
+    /// the module `module`, used with type `type_`. It is imported for each
+    /// type it is used with, see `host.rs`.
     fn function_host(
         &mut self,
         host_module: &EcoString,
         name: &EcoString,
         module: &EcoString,
-        declared: &Arc<Type>,
         type_: &Arc<Type>,
     ) -> Id {
         let host_module = self.host_module_path(host_module, module);
@@ -4263,7 +4261,7 @@ impl<'a> Generator<'a> {
         if let Some(id) = self.find_global(&import_name) {
             return id;
         }
-        let index = self.function_host_call(&host_module, name, declared, type_);
+        let index = self.function_host_call(&host_module, name, type_);
         self.add_function_to_globals(import_name, index)
     }
 

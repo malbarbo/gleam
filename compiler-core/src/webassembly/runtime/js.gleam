@@ -16,6 +16,12 @@
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
 import builtins/bit_array.{type Bits, type Bytes, type Cell, Bits}
+import builtins/array.{array_to_list}
+import builtins/dynamic.{
+  type Dynamic, DArray, DBitArray, DBool, DFloat, DInt, DList, DNil, DString,
+  dynamic_array, dynamic_bit_array, dynamic_bool, dynamic_float, dynamic_int,
+  dynamic_list, dynamic_nil, dynamic_string,
+}
 
 /// A value of the host, an `externref`.
 @external(webassembly, "builtins", "JsValue")
@@ -203,6 +209,66 @@ pub fn js_unknown_variant(value: JsValue) -> Nil {
   unknown_variant(value)
 }
 
+// -- Dynamic ------------------------------------------------------------------
+
+/// The JavaScript value of the `Dynamic` `value`, the one that
+/// `js_dynamic_from_with` reads back: a tuple or an array is an array, and
+/// its items are converted with `item`. `string` converts a string, and
+/// `other` any other value, like a dict or a value of another type.
+pub fn js_dynamic_with(
+  value: Dynamic,
+  string: fn(String) -> JsValue,
+  item: fn(Dynamic) -> JsValue,
+  other: fn(Dynamic) -> JsValue,
+) -> JsValue {
+  case value {
+    DInt(value) -> js_int(value)
+    DFloat(value) -> js_float(value)
+    DString(value) -> string(value)
+    DBool(value) -> js_bool(value)
+    DNil -> undefined()
+    DBitArray(value) -> js_bit_array(value)
+    DList(items) -> js_list_with(items, item)
+    DArray(items) -> {
+      let array = js_array_new()
+      push_all(array, array_to_list(items), item)
+      array
+    }
+    _ -> other(value)
+  }
+}
+
+/// The `Dynamic` of `value`, read as on JavaScript: a number is an `Int` when
+/// it is an integer and a `Float` otherwise, a string a `String`, a boolean a
+/// `Bool`, `undefined` is `Nil`, a `BitArray` a bit array, a `List` a list
+/// and an array a tuple, with their items read too. Any other value, like an
+/// instance of a custom type, is a value of the host, made by `other`.
+/// `string` converts a string.
+pub fn js_dynamic_from_with(
+  value: JsValue,
+  string: fn(JsValue) -> String,
+  other: fn(JsValue) -> Dynamic,
+) -> Dynamic {
+  let item = js_dynamic_from_with(_, string, other)
+  case i32_to_int(kind(value)) {
+    1 -> dynamic_int(js_int_from(value))
+    2 -> dynamic_float(js_float_from(value))
+    3 -> dynamic_string(string(value))
+    4 -> dynamic_bool(js_bool_from(value))
+    5 -> dynamic_nil()
+    6 -> dynamic_bit_array(js_bit_array_from(value))
+    7 -> dynamic_list(js_list_from_with(value, item))
+    8 ->
+      dynamic_array(prepend_from(
+        value,
+        i32_to_int(array_length(value)) - 1,
+        [],
+        item,
+      ))
+    _ -> other(value)
+  }
+}
+
 // -- Values of the host ------------------------------------------------------
 
 /// Whether `a` and `b` are equal, as on JavaScript: the hook of `==` of the
@@ -305,6 +371,12 @@ fn result_is_ok(value: JsValue) -> I32
 
 @external(webassembly, "gleam:js", "result_value")
 fn result_value(value: JsValue) -> JsValue
+
+/// What `value` is read as by `js_dynamic_from_with`: 1 an integer, 2 another
+/// number, 3 a string, 4 a boolean, 5 `undefined`, 6 a `BitArray`, 7 a `List`,
+/// 8 an array and 0 another value.
+@external(webassembly, "gleam:js", "kind")
+fn kind(value: JsValue) -> I32
 
 @external(webassembly, "gleam:js", "unknown_variant")
 fn unknown_variant(value: JsValue) -> Nil

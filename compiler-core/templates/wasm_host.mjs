@@ -96,6 +96,9 @@ export async function instantiate(url) {
       let f = functions.get(closure);
       if (f === undefined) {
         f = (...args) => trampoline(closure, ...args);
+        // The arity of the function, which the trampoline takes after the
+        // closure, as `string.inspect` shows it.
+        Object.defineProperty(f, "length", { value: trampoline.length - 1 });
         js.register(closure, f);
       }
       return f;
@@ -106,6 +109,16 @@ export async function instantiate(url) {
       closures.set(f, closure);
     },
     call: (f, ...args) => f(...args),
+    kind(value) {
+      if (typeof value === "number") return Number.isInteger(value) ? 1 : 2;
+      if (typeof value === "string") return 3;
+      if (typeof value === "boolean") return 4;
+      if (value === undefined) return 5;
+      if (value instanceof BitArray) return 6;
+      if (value instanceof List) return 7;
+      if (Array.isArray(value)) return 8;
+      return 0;
+    },
     unknown_variant(value) {
       throw new TypeError(`Not a variant of the custom type: ${inspect(value)}`);
     },
@@ -191,7 +204,10 @@ function inspect(value, seen = new Set()) {
   if (value instanceof RegExp) return `//js(${value})`;
   if (value instanceof Date) return `//js(Date("${value.toISOString()}"))`;
   if (value instanceof globalThis.Error) return `//js(${value})`;
-  if (typeof value === "function") return "//fn(...) { ... }";
+  if (typeof value === "function") {
+    const args = Array.from({ length: value.length }, (_, i) => String.fromCharCode(97 + i));
+    return `//fn(${args.join(", ")}) { ... }`;
+  }
   if (seen.has(value)) return "//js(circular reference)";
   seen.add(value);
   let text;
