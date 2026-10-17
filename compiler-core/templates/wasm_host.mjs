@@ -153,8 +153,10 @@ export async function instantiate(url) {
   }
   const imports = { wasi_snapshot_preview1: wasi, "gleam:js": js };
   for (const { module: name } of WebAssembly.Module.imports(module)) {
-    if (!(name in imports) && /\.m?js$/.test(name)) {
-      imports[name] = await import(new URL(name, url));
+    if (!(name in imports)) {
+      // A module of a package is relative to the program, like on JavaScript,
+      // where a module of the runtime, like `node:process`, is not.
+      imports[name] = await import(/\.m?js$/.test(name) ? new URL(name, url) : name);
     }
   }
   const instance = await WebAssembly.instantiate(module, imports);

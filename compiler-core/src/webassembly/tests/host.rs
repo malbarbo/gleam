@@ -206,6 +206,23 @@ export const next = (a) => new UtfCodepoint(a.value + 1);
     );
 }
 
+/// A function of a module of the runtime, like `node:path`, is imported by
+/// its name, as on JavaScript.
+#[test]
+fn host_runtime_module() {
+    run_with_host(
+        r#"
+@external(webassembly, "node:path", "basename")
+fn basename(path: String) -> String
+
+pub fn main() {
+    let assert "c.txt" = basename("/a/b/c.txt")
+}
+"#,
+        "",
+    );
+}
+
 #[test]
 fn host_strings() {
     run_with_host(
