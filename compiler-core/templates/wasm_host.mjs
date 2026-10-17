@@ -18,6 +18,31 @@ import {
   toList,
 } from "./prelude.mjs";
 
+// The fields of the error of kind `kind` of the JavaScript target, from its
+// `details`.
+function errorFields(kind, details) {
+  const expression = ([kind, value, start, end]) =>
+    kind === "unevaluated" ? { kind, start, end } : { kind, value, start, end };
+  if (kind === "let_assert") {
+    const [value, start, end, pattern_start, pattern_end] = details;
+    return { value, start, end, pattern_start, pattern_end };
+  }
+  if (kind === "assert") {
+    const [start, end, expression_start, assertKind, ...rest] = details;
+    let fields = { kind: assertKind };
+    if (assertKind === "binary_operator") {
+      const [operator, left, right] = rest;
+      fields = { ...fields, operator, left: expression(left), right: expression(right) };
+    } else if (assertKind === "function_call") {
+      fields.arguments = rest[0].map(expression);
+    } else {
+      fields.expression = expression(rest[0]);
+    }
+    return { ...fields, start, end, expression_start };
+  }
+  return {};
+}
+
 // Thrown by `proc_exit`, to stop running the module.
 export class Exit extends Error {
   constructor(code) {
@@ -124,9 +149,10 @@ export async function instantiate(url) {
     entries: (fold, dict) =>
       fold(dict, [], (entries, key, value) => (entries.push(key, value), entries)),
     // The error of a `panic`, `todo`, `let assert` or `assert`, as on
-    // JavaScript.
-    panic(kind, file, module, fn, line, message) {
-      throw makeError(kind, file, module, Number(line), fn, message, {});
+    // JavaScript, with the fields of its `details` (see `panic.rs`).
+    panic(kind, file, module, fn, line, message, details) {
+      let extra = errorFields(kind, details);
+      throw makeError(kind, file, module, Number(line), fn, message, extra);
     },
     unknown_variant(value) {
       throw new TypeError(`Not a variant of the custom type: ${inspect(value)}`);

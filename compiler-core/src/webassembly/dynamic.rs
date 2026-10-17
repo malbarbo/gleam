@@ -508,7 +508,7 @@ impl<'a> Generator<'a> {
     }
 
     /// `dynamic_from_array`, which makes a `Dynamic` of an array of `Dynamic`.
-    fn function_dynamic_from_array(&mut self, dynamic: &Arc<Type>) -> FunctionId {
+    pub(super) fn function_dynamic_from_array(&mut self, dynamic: &Arc<Type>) -> FunctionId {
         let array = self.runtime_named_type(ARRAY_MODULE, "Array", vec![dynamic.clone()]);
         self.runtime_function_id(
             DYNAMIC_MODULE,

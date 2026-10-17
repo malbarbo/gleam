@@ -35,6 +35,7 @@ use hash::*;
 use instructions::*;
 use js_string::*;
 use monomorphize::*;
+use panic::{AssertKind, Asserted, AssertedValue, Failure};
 use runtime::{Hooks, RUNTIME_PACKAGE};
 pub use runtime::{RuntimeModule, modules as runtime_modules};
 
@@ -80,7 +81,7 @@ use walrus::{
 use crate::{
     STDLIB_PACKAGE_NAME,
     ast::{
-        AssignName, AssignmentKind, BinOp, ClauseGuard, Constant, PIPE_VARIABLE, Pattern,
+        AssignName, AssignmentKind, BinOp, CallArg, ClauseGuard, Constant, PIPE_VARIABLE, Pattern,
         Publicity, Statement, StringPrefixLeftSideAssignment, TypeAst, TypeAstVar, TypedArg,
         TypedAssignment, TypedClause, TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr,
         TypedExprBitArraySegment, TypedFunction, TypedModule, TypedModuleConstant, TypedPattern,
@@ -91,7 +92,8 @@ use crate::{
     config::{WasmFloat, WasmInt, WasmString, WebAssemblyConfig},
     type_::{
         self, Deprecation, ModuleValueConstructor, PRELUDE_MODULE_NAME, Type, TypeVar,
-        ValueConstructor, ValueConstructorVariant,
+        TypedCallArg, ValueConstructor, ValueConstructorVariant,
+        error::{VariableDeclaration, VariableOrigin, VariableSyntax},
         printer::{Names, Printer},
     },
 };
@@ -859,6 +861,8 @@ struct Generator<'a> {
     current_function_name: EcoString,
     /// `_panic`, when it is called, see `panic`.
     panic: Option<FunctionId>,
+    /// Whether the program can run in a JavaScript host, see `panic`.
+    javascript_host: bool,
 }
 
 impl<'a> Generator<'a> {
@@ -959,6 +963,14 @@ impl<'a> Generator<'a> {
             current_module_name: module.name.clone(),
             current_function_name: EcoString::new(),
             panic: None,
+            javascript_host: config.string == WasmString::JsString
+                || iter::once(module)
+                    .chain(all_modules.values().copied())
+                    // The runtime declares the functions of the host it uses
+                    .filter(|module| module.type_info.package != RUNTIME_PACKAGE)
+                    .flat_map(|module| &module.definitions.functions)
+                    .filter_map(|function| function.external_webassembly.as_ref())
+                    .any(|(module, _, _)| module != BUILTINS_MODULE),
         }
     }
 
@@ -4406,6 +4418,10 @@ impl<'a> Generator<'a> {
         }
     }
 
+    /// `assert value`, whose error has the values of the operands of `value`,
+    /// like on JavaScript: the arguments of a call and the operands of a
+    /// binary operator, which are stored in locals before the operation.
+    /// The operands of `&&` and `||` are known by the one that failed.
     fn assert(
         &mut self,
         instructions: &mut Instructions<'_, '_>,
@@ -4413,25 +4429,199 @@ impl<'a> Generator<'a> {
         locals: &Locals,
         assert: &crate::ast::Assert<TypedExpr>,
     ) {
-        assert!(assert.value.type_().is_bool());
-        let _ = instructions
-            .expression(self, locals, scope.clone(), &assert.value)
-            .if_else(
-                BOOL_VALTYPE,
-                |then_s| {
-                    let _ = then_s.bool_const(true);
-                },
-                |else_s| {
-                    self.panic(
-                        else_s,
-                        locals,
-                        scope.clone(),
-                        "assert",
-                        assert.location.start,
-                        assert.message.as_ref(),
-                    );
-                },
+        let value = &assert.value;
+        assert!(value.type_().is_bool());
+        let fail = |this: &mut Self, instructions: &mut Instructions<'_, '_>, kind| {
+            this.panic(
+                instructions,
+                locals,
+                scope.clone(),
+                Failure::Assert { value, kind },
+                assert.location.start,
+                assert.message.as_ref(),
             );
+        };
+        let asserted = |expression, value| Asserted { expression, value };
+        let operand = |expression: &TypedExpr| {
+            if expression.is_var() {
+                AssertedValue::Var
+            } else {
+                AssertedValue::Local(locals.for_asserted(expression))
+            }
+        };
+        let kind = match value {
+            TypedExpr::BinOp {
+                operator: BinOp::And,
+                left,
+                right,
+                ..
+            } => {
+                // block outer
+                //   block short
+                //     left; br_if.eqz short
+                //     right; if { true; br outer }
+                //     fail, left true and right false
+                //   end
+                //   fail, left false and right unevaluated
+                // end
+                let _ = instructions.block_(BOOL_VALTYPE, |outer| {
+                    let outer_id = outer.id();
+                    let _ = outer.block_(InstrSeqType::Simple(None), |short| {
+                        let short_id = short.id();
+                        let _ = short
+                            .expression(self, locals, scope.clone(), left)
+                            .i32_eqz()
+                            .br_if(short_id)
+                            .expression(self, locals, scope.clone(), right)
+                            .if_(InstrSeqType::Simple(None), |then_s| {
+                                let _ = then_s.bool_const(true).br(outer_id);
+                            });
+                        let kind = AssertKind::BinaryOperator {
+                            operator: BinOp::And.name(),
+                            left: asserted(left, AssertedValue::Bool(true)),
+                            right: asserted(right, AssertedValue::Bool(false)),
+                        };
+                        fail(self, short, kind);
+                    });
+                    let kind = AssertKind::BinaryOperator {
+                        operator: BinOp::And.name(),
+                        left: asserted(left, AssertedValue::Bool(false)),
+                        right: asserted(right, AssertedValue::Unevaluated),
+                    };
+                    fail(self, outer, kind);
+                });
+                return;
+            }
+            TypedExpr::BinOp {
+                operator: BinOp::Or,
+                left,
+                right,
+                ..
+            } => {
+                let _ = instructions.expression(self, locals, scope.clone(), value);
+                AssertKind::BinaryOperator {
+                    operator: BinOp::Or.name(),
+                    left: asserted(left, AssertedValue::Bool(false)),
+                    right: asserted(right, AssertedValue::Bool(false)),
+                }
+            }
+            TypedExpr::BinOp {
+                location,
+                operator,
+                operator_start,
+                type_,
+                left,
+                right,
+            } => {
+                let mut scope = scope.clone();
+                let left_var = self.asserted_operand(instructions, locals, &mut scope, left);
+                let right_var = self.asserted_operand(instructions, locals, &mut scope, right);
+                let operation = TypedExpr::BinOp {
+                    location: *location,
+                    operator: *operator,
+                    operator_start: *operator_start,
+                    type_: type_.clone(),
+                    left: Box::new(left_var),
+                    right: Box::new(right_var),
+                };
+                let _ = instructions.expression(self, locals, scope, &operation);
+                AssertKind::BinaryOperator {
+                    operator: operator.name(),
+                    left: asserted(left, operand(left)),
+                    right: asserted(right, operand(right)),
+                }
+            }
+            TypedExpr::Call { fun, arguments, .. } => {
+                let mut scope = scope.clone();
+                let arguments_vars: Vec<_> = arguments
+                    .iter()
+                    .map(|argument| CallArg {
+                        label: argument.label.clone(),
+                        location: argument.location,
+                        value: self.asserted_operand(
+                            instructions,
+                            locals,
+                            &mut scope,
+                            &argument.value,
+                        ),
+                        implicit: argument.implicit,
+                    })
+                    .collect();
+                self.expression_call(locals, scope, instructions, fun, &arguments_vars, false);
+                AssertKind::FunctionCall(
+                    arguments
+                        .iter()
+                        .map(|argument| asserted(&argument.value, operand(&argument.value)))
+                        .collect(),
+                )
+            }
+            TypedExpr::Int { .. }
+            | TypedExpr::Float { .. }
+            | TypedExpr::String { .. }
+            | TypedExpr::Block { .. }
+            | TypedExpr::Pipeline { .. }
+            | TypedExpr::Var { .. }
+            | TypedExpr::Fn { .. }
+            | TypedExpr::List { .. }
+            | TypedExpr::Case { .. }
+            | TypedExpr::RecordAccess { .. }
+            | TypedExpr::PositionalAccess { .. }
+            | TypedExpr::ModuleSelect { .. }
+            | TypedExpr::Tuple { .. }
+            | TypedExpr::TupleIndex { .. }
+            | TypedExpr::Todo { .. }
+            | TypedExpr::Panic { .. }
+            | TypedExpr::Echo { .. }
+            | TypedExpr::BitArray { .. }
+            | TypedExpr::RecordUpdate { .. }
+            | TypedExpr::NegateBool { .. }
+            | TypedExpr::NegateInt { .. }
+            | TypedExpr::Invalid { .. } => {
+                let _ = instructions.expression(self, locals, scope.clone(), value);
+                AssertKind::Expression(asserted(value, AssertedValue::Bool(false)))
+            }
+        };
+        let _ = instructions.if_else(
+            BOOL_VALTYPE,
+            |then_s| {
+                let _ = then_s.bool_const(true);
+            },
+            |else_s| fail(self, else_s, kind),
+        );
+    }
+
+    /// Evaluates the operand `operand` of an asserted expression to its local,
+    /// see `Locals::for_asserted`, and gives a variable of it in `scope`. A
+    /// variable is its own.
+    fn asserted_operand(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        locals: &Locals,
+        scope: &mut Scope,
+        operand: &TypedExpr,
+    ) -> TypedExpr {
+        if operand.is_var() {
+            return operand.clone();
+        }
+        let local = locals.for_asserted(operand);
+        let _ = instructions
+            .expression(self, locals, scope.clone(), operand)
+            .local_set(local);
+        let name: EcoString = ecow::eco_format!("asserted@{}", operand.location().start);
+        *scope = scope.insert_local(name.clone(), local);
+        let location = operand.location();
+        TypedExpr::Var {
+            location,
+            constructor: ValueConstructor::local_variable(
+                location,
+                VariableOrigin {
+                    syntax: VariableSyntax::Generated,
+                    declaration: VariableDeclaration::Generated,
+                },
+                operand.type_(),
+            ),
+            name,
+        }
     }
 
     fn _expression(
@@ -4665,104 +4855,7 @@ impl<'a> Generator<'a> {
                 }
             },
             TypedExpr::Call { fun, arguments, .. } => {
-                // `return_call*` requires the callee results to match the
-                // current function results. They do: both have the same Gleam
-                // type, and equal Gleam types map to equal wasm types (module
-                // validation fails otherwise). Constructors don't grow the
-                // stack, so a tail call gains nothing there.
-                let tail = tail && !fun.is_record_constructor_function();
-                let args = arguments.iter().map(|arg| &arg.value);
-                let target = self.call_target(&scope, fun, arguments);
-                let direct = match target {
-                    CallTarget::Literal => {
-                        self.function_literal_call(instructions, locals, scope, fun, args, tail);
-                        return;
-                    }
-                    // A callee whose identity is known, see `specialization`
-                    CallTarget::Known(Known::Code(id)) => {
-                        // The closure is the first argument
-                        let _ = instructions.expression(self, locals, scope.clone(), fun);
-                        Some((id, tail))
-                    }
-                    CallTarget::Known(known @ (Known::Function(id) | Known::Constructor(id))) => {
-                        if !fun.is_var() {
-                            // Evaluated for its effects
-                            let _ = instructions
-                                .expression(self, locals, scope.clone(), fun)
-                                .drop();
-                        }
-                        Some((id, tail && !matches!(known, Known::Constructor(_))))
-                    }
-                    CallTarget::Direct(id) => Some((id, tail)),
-                    CallTarget::Local(ref info, id) => {
-                        // The captures are the first arguments
-                        for local in self.local_function_captures_locals(&scope, info) {
-                            let _ = instructions.local_get(local);
-                        }
-                        Some((id, tail))
-                    }
-                    CallTarget::Dynamic => None,
-                };
-                if let Some((id, tail)) = direct {
-                    let builtin = self.builtins_external_ids.get(&id).copied();
-                    if let Some(
-                        builtin @ (BuiltinFunctionExternal::IntBitwiseShiftLeft
-                        | BuiltinFunctionExternal::IntBitwiseShiftRight),
-                    ) = builtin
-                        && let [x, n] = arguments.as_slice()
-                    {
-                        // A shift is emitted in place, by a constant amount
-                        // or by any amount.
-                        let left = builtin == BuiltinFunctionExternal::IntBitwiseShiftLeft;
-                        let _ = instructions.expression(self, locals, scope.clone(), &x.value);
-                        if let TypedExpr::Int { int_value, .. } = &n.value {
-                            let _ = instructions.int_shift_by(left, int_value);
-                        } else {
-                            let value = self.wasm_local(self.int.val_type());
-                            let amount = self.wasm_local(self.int.val_type());
-                            let _ = instructions
-                                .local_set(value)
-                                .expression(self, locals, scope, &n.value)
-                                .local_set(amount)
-                                .int_shift(left, value, amount);
-                        }
-                        return;
-                    }
-                    if let Some(builtin) = builtin {
-                        for (index, arg) in arguments.iter().enumerate() {
-                            let _ = instructions
-                                .expression(self, locals, scope.clone(), &arg.value)
-                                .builtin_argument(builtin, index);
-                        }
-                    } else {
-                        let _ = instructions.expressions(self, locals, scope, args);
-                    }
-                    if !builtin.is_some_and(|builtin| instructions.builtin_inline(builtin)) {
-                        let _ = instructions.call_maybe_tail(id, tail);
-                    }
-                } else {
-                    // The closure is the first argument, and its field 0 is
-                    // the code to call.
-                    if fun.is_var() {
-                        // Evaluating a variable again has no effects.
-                        let _ = instructions
-                            .expression(self, locals, scope.clone(), fun)
-                            .expressions(self, locals, scope.clone(), args)
-                            .expression(self, locals, scope, fun);
-                    } else {
-                        let index = locals.for_call(fun);
-                        let _ = instructions
-                            .expression(self, locals, scope.clone(), fun)
-                            .local_tee(index)
-                            .expressions(self, locals, scope, args)
-                            .local_get(index);
-                    }
-                    let (params, return_) = fun.type_().fn_types().expect("function type");
-                    let closure = self.closure_type(params, return_);
-                    let _ = instructions
-                        .struct_get(closure.type_index, 0)
-                        .call_ref_maybe_tail(closure.code_type_index, tail);
-                }
+                self.expression_call(locals, scope, instructions, fun, arguments, tail);
             }
             TypedExpr::Fn {
                 location,
@@ -4908,6 +5001,116 @@ impl<'a> Generator<'a> {
         };
     }
 
+    /// The call of `fun` with `arguments`.
+    fn expression_call(
+        &mut self,
+        locals: &Locals,
+        scope: Scope,
+        instructions: &mut Instructions<'_, '_>,
+        fun: &TypedExpr,
+        arguments: &[TypedCallArg],
+        tail: bool,
+    ) {
+        // `return_call*` requires the callee results to match the
+        // current function results. They do: both have the same Gleam
+        // type, and equal Gleam types map to equal wasm types (module
+        // validation fails otherwise). Constructors don't grow the
+        // stack, so a tail call gains nothing there.
+        let tail = tail && !fun.is_record_constructor_function();
+        let args = arguments.iter().map(|arg| &arg.value);
+        let target = self.call_target(&scope, fun, arguments);
+        let direct = match target {
+            CallTarget::Literal => {
+                self.function_literal_call(instructions, locals, scope, fun, args, tail);
+                return;
+            }
+            // A callee whose identity is known, see `specialization`
+            CallTarget::Known(Known::Code(id)) => {
+                // The closure is the first argument
+                let _ = instructions.expression(self, locals, scope.clone(), fun);
+                Some((id, tail))
+            }
+            CallTarget::Known(known @ (Known::Function(id) | Known::Constructor(id))) => {
+                if !fun.is_var() {
+                    // Evaluated for its effects
+                    let _ = instructions
+                        .expression(self, locals, scope.clone(), fun)
+                        .drop();
+                }
+                Some((id, tail && !matches!(known, Known::Constructor(_))))
+            }
+            CallTarget::Direct(id) => Some((id, tail)),
+            CallTarget::Local(ref info, id) => {
+                // The captures are the first arguments
+                for local in self.local_function_captures_locals(&scope, info) {
+                    let _ = instructions.local_get(local);
+                }
+                Some((id, tail))
+            }
+            CallTarget::Dynamic => None,
+        };
+        if let Some((id, tail)) = direct {
+            let builtin = self.builtins_external_ids.get(&id).copied();
+            if let Some(
+                builtin @ (BuiltinFunctionExternal::IntBitwiseShiftLeft
+                | BuiltinFunctionExternal::IntBitwiseShiftRight),
+            ) = builtin
+                && let [x, n] = arguments
+            {
+                // A shift is emitted in place, by a constant amount
+                // or by any amount.
+                let left = builtin == BuiltinFunctionExternal::IntBitwiseShiftLeft;
+                let _ = instructions.expression(self, locals, scope.clone(), &x.value);
+                if let TypedExpr::Int { int_value, .. } = &n.value {
+                    let _ = instructions.int_shift_by(left, int_value);
+                } else {
+                    let value = self.wasm_local(self.int.val_type());
+                    let amount = self.wasm_local(self.int.val_type());
+                    let _ = instructions
+                        .local_set(value)
+                        .expression(self, locals, scope, &n.value)
+                        .local_set(amount)
+                        .int_shift(left, value, amount);
+                }
+                return;
+            }
+            if let Some(builtin) = builtin {
+                for (index, arg) in arguments.iter().enumerate() {
+                    let _ = instructions
+                        .expression(self, locals, scope.clone(), &arg.value)
+                        .builtin_argument(builtin, index);
+                }
+            } else {
+                let _ = instructions.expressions(self, locals, scope, args);
+            }
+            if !builtin.is_some_and(|builtin| instructions.builtin_inline(builtin)) {
+                let _ = instructions.call_maybe_tail(id, tail);
+            }
+        } else {
+            // The closure is the first argument, and its field 0 is
+            // the code to call.
+            if fun.is_var() {
+                // Evaluating a variable again has no effects.
+                let _ = instructions
+                    .expression(self, locals, scope.clone(), fun)
+                    .expressions(self, locals, scope.clone(), args)
+                    .expression(self, locals, scope, fun);
+            } else {
+                let index = locals.for_call(fun);
+                let _ = instructions
+                    .expression(self, locals, scope.clone(), fun)
+                    .local_tee(index)
+                    .expressions(self, locals, scope, args)
+                    .local_get(index);
+            }
+            let (params, return_) = fun.type_().fn_types().expect("function type");
+            let closure = self.closure_type(params, return_);
+            let _ = instructions
+                .struct_get(closure.type_index, 0)
+                .call_ref_maybe_tail(closure.code_type_index, tail);
+        }
+    }
+
     fn expression_todo_panic(
         &mut self,
         locals: &Locals,
@@ -4916,16 +5119,16 @@ impl<'a> Generator<'a> {
         expression: &TypedExpr,
         message: &Option<Box<TypedExpr>>,
     ) {
-        let kind = if expression.is_panic() {
-            "panic"
+        let error = if expression.is_panic() {
+            Failure::Panic
         } else {
-            "todo"
+            Failure::Todo
         };
         self.panic(
             instructions,
             locals,
             scope,
-            kind,
+            error,
             expression.location().start,
             message.as_deref(),
         );
@@ -5392,7 +5595,12 @@ impl<'a> Generator<'a> {
                 skip_b,
                 locals,
                 message_scope,
-                "let_assert",
+                Failure::LetAssert {
+                    value: right,
+                    type_: assignment.value.type_(),
+                    subject: &assignment.value,
+                    pattern: assignment.pattern.location(),
+                },
                 assignment.location.start,
                 message,
             );

@@ -952,6 +952,182 @@ export function rescue(f) {
     );
 }
 
+/// The error of a `let assert` or an `assert` has the fields of the error of
+/// the JavaScript target: the positions in the source and the values of the
+/// operands.
+#[test]
+fn host_error_details() {
+    let fails = r#"
+pub fn let_assert(n: Int) -> Int {
+  let assert 1 = n
+  n
+}
+
+pub fn binary_operator(a: Int, b: Int) -> Nil {
+  assert a + 1 == b
+}
+
+pub fn function_call(a: Int) -> Nil {
+  assert is_one(a, 2)
+}
+
+fn is_one(a: Int, _b: Int) -> Bool {
+  a == 1
+}
+
+pub fn and(a: Bool, b: Bool) -> Nil {
+  assert a && b
+}
+
+pub fn or(a: Bool, b: Bool) -> Nil {
+  assert a || b
+}
+
+pub fn expression(a: Bool) -> Nil {
+  assert !a
+}
+"#;
+    // The start and end of `part` in the first line with `line`, after its
+    // `assert`.
+    let span = |line: &str, part: &str| {
+        let after = line
+            .find("assert ")
+            .map_or(0, |start| start + "assert ".len());
+        let start = fails.find(line).expect("the line")
+            + line[after..].find(part).map_or(0, |start| after + start);
+        (start, start + part.len())
+    };
+    let expression = |kind: &str, value: Option<&str>, (start, end): (usize, usize)| match value {
+        Some(value) => {
+            format!(r#"{{"kind":"{kind}","value":{value},"start":{start},"end":{end}}}"#)
+        }
+        None => format!(r#"{{"kind":"{kind}","start":{start},"end":{end}}}"#),
+    };
+    let assert = |line: &str, value: &str, fields: String| {
+        let (start, _) = span(line, line);
+        let (expression_start, end) = span(line, value);
+        format!(r#"{{{fields},"start":{start},"end":{end},"expression_start":{expression_start}}}"#)
+    };
+    let binary_operator = |line: &str, value: &str, operator: &str, left: String, right: String| {
+        assert(
+            line,
+            value,
+            format!(
+                r#""kind":"binary_operator","operator":"{operator}","left":{left},"right":{right}"#
+            ),
+        )
+    };
+    let (start, _) = span("let assert 1 = n", "let");
+    let (pattern_start, pattern_end) = span("let assert 1 = n", "1");
+    let (_, end) = span("let assert 1 = n", "n");
+    let cases = [
+        (
+            "let_assert(7)",
+            format!(
+                r#"{{"value":7,"start":{start},"end":{end},"pattern_start":{pattern_start},"pattern_end":{pattern_end}}}"#
+            ),
+        ),
+        (
+            "binary_operator(2, 4)",
+            binary_operator(
+                "assert a + 1 == b",
+                "a + 1 == b",
+                "==",
+                expression("expression", Some("3"), span("assert a + 1 == b", "a + 1")),
+                expression("expression", Some("4"), span("assert a + 1 == b", "b")),
+            ),
+        ),
+        (
+            "function_call(5)",
+            assert(
+                "assert is_one(a, 2)",
+                "is_one(a, 2)",
+                format!(
+                    r#""kind":"function_call","arguments":[{},{}]"#,
+                    expression("expression", Some("5"), span("assert is_one(a, 2)", "a")),
+                    expression("literal", Some("2"), span("assert is_one(a, 2)", "2")),
+                ),
+            ),
+        ),
+        (
+            "and(True, False)",
+            binary_operator(
+                "assert a && b",
+                "a && b",
+                "&&",
+                expression("expression", Some("true"), span("assert a && b", "a")),
+                expression("expression", Some("false"), span("assert a && b", "b")),
+            ),
+        ),
+        (
+            "and(False, True)",
+            binary_operator(
+                "assert a && b",
+                "a && b",
+                "&&",
+                expression("expression", Some("false"), span("assert a && b", "a")),
+                expression("unevaluated", None, span("assert a && b", "b")),
+            ),
+        ),
+        (
+            "or(False, False)",
+            binary_operator(
+                "assert a || b",
+                "a || b",
+                "||",
+                expression("expression", Some("false"), span("assert a || b", "a")),
+                expression("expression", Some("false"), span("assert a || b", "b")),
+            ),
+        ),
+        (
+            "expression(True)",
+            assert(
+                "assert !a",
+                "!a",
+                format!(
+                    r#""kind":"expression","expression":{}"#,
+                    expression("expression", Some("false"), span("assert !a", "!a")),
+                ),
+            ),
+        ),
+    ];
+    let mut src = String::from(
+        r#"
+import my/fails
+
+@external(webassembly, "./ffi.mjs", "details")
+fn details(f: fn() -> a) -> String
+
+pub fn main() {
+"#,
+    );
+    for (call, expected) in cases {
+        let expected = expected.replace('"', "\\\"");
+        src.push_str(&format!(
+            "    let assert \"{expected}\" = details(fn() {{ fails.{call} }})\n"
+        ));
+    }
+    src.push_str("}\n");
+    run_with_host_in(
+        super::TEST_PACKAGE,
+        &src,
+        vec![(super::TEST_PACKAGE, "my/fails", fails)],
+        r#"
+const fields = ["kind", "operator", "left", "right", "arguments", "expression", "value",
+  "start", "end", "expression_start", "pattern_start", "pattern_end"];
+
+export function details(f) {
+  try {
+    f();
+    return "";
+  } catch (e) {
+    return JSON.stringify(e, fields);
+  }
+}
+"#,
+    );
+}
+
 /// A value that the host returns as a `List`, a `Result`, a `BitArray` or a
 /// custom type with variants is checked to be one.
 #[test]

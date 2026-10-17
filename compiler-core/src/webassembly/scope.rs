@@ -8,12 +8,13 @@ use walrus::{FunctionId, GlobalId, LocalId, ValType};
 use crate::{
     ast::{
         AssignName, AssignmentKind, BinOp, ClauseGuard, FunctionLiteralKind,
-        StringPrefixLeftSideAssignment, TypeAst, TypedArg, TypedAssignment, TypedClause,
-        TypedClauseGuard, TypedExpr, TypedPattern, TypedPipelineAssignment, TypedStatement,
+        StringPrefixLeftSideAssignment, TypeAst, TypedArg, TypedAssert, TypedAssignment,
+        TypedClause, TypedClauseGuard, TypedExpr, TypedPattern, TypedPipelineAssignment,
+        TypedStatement,
         visit::{
-            Visit, visit_typed_assignment, visit_typed_clause_guard, visit_typed_expr,
-            visit_typed_expr_bin_op, visit_typed_expr_call, visit_typed_expr_case,
-            visit_typed_pattern, visit_typed_pipeline_assignment,
+            Visit, visit_typed_assert, visit_typed_assignment, visit_typed_clause_guard,
+            visit_typed_expr, visit_typed_expr_bin_op, visit_typed_expr_call,
+            visit_typed_expr_case, visit_typed_pattern, visit_typed_pipeline_assignment,
         },
     },
     type_::{self, ModuleValueConstructor, Type, TypedCallArg},
@@ -417,6 +418,28 @@ impl Locals {
         self._get(assignment)
     }
 
+    /// The operands of an asserted expression, a call or a binary operator,
+    /// are stored in locals, as the error has their values, see
+    /// `Generator::assert`.
+    fn insert_assert(&mut self, generator: &mut Generator<'_>, assert: &TypedAssert) {
+        for operand in asserted_operands(&assert.value) {
+            if !operand.is_var() {
+                let prefix = "asserted";
+                self._insert(
+                    generator,
+                    Operand(operand),
+                    &operand.type_(),
+                    prefix,
+                    operand.location(),
+                );
+            }
+        }
+    }
+
+    pub(super) fn for_asserted(&self, operand: &TypedExpr) -> LocalId {
+        self._get(Operand(operand))
+    }
+
     fn insert_echo(&mut self, generator: &mut Generator<'_>, echo: &TypedExpr) {
         // the number of written bytes
         self._insert_with_val_type(generator, echo.location(), ValType::I32);
@@ -507,6 +530,11 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
             self.locals.insert_assignment(self.generator, assignment);
             visit_typed_assignment(self, assignment);
         }
+    }
+
+    fn visit_typed_assert(&mut self, assert: &'ast TypedAssert) {
+        self.locals.insert_assert(self.generator, assert);
+        visit_typed_assert(self, assert);
     }
 
     fn visit_typed_expr_fn(
@@ -634,6 +662,55 @@ impl<T> LocalHash for &T {
         // We started using location as key, but we got collision on generated
         // assigments. Let's hope we do not get collisions with this.
         ptr::from_ref(*self) as u64
+    }
+}
+
+/// An operand of an asserted expression, which can also be the key of
+/// another local, like an `echo`.
+struct Operand<'a>(&'a TypedExpr);
+
+impl LocalHash for Operand<'_> {
+    fn hash(&self) -> u64 {
+        // The address of an expression is aligned, so its lowest bit is free.
+        ptr::from_ref(self.0) as u64 | 1
+    }
+}
+
+/// The operands of the asserted expression `value` whose values the error
+/// has: the arguments of a call and the operands of a binary operator other
+/// than `&&` and `||`.
+pub(super) fn asserted_operands(value: &TypedExpr) -> Vec<&TypedExpr> {
+    match value {
+        TypedExpr::Call { arguments, .. } => {
+            arguments.iter().map(|argument| &argument.value).collect()
+        }
+        TypedExpr::BinOp {
+            operator: BinOp::And | BinOp::Or,
+            ..
+        } => vec![],
+        TypedExpr::BinOp { left, right, .. } => vec![left, right],
+        TypedExpr::Int { .. }
+        | TypedExpr::Float { .. }
+        | TypedExpr::String { .. }
+        | TypedExpr::Block { .. }
+        | TypedExpr::Pipeline { .. }
+        | TypedExpr::Var { .. }
+        | TypedExpr::Fn { .. }
+        | TypedExpr::List { .. }
+        | TypedExpr::Case { .. }
+        | TypedExpr::RecordAccess { .. }
+        | TypedExpr::PositionalAccess { .. }
+        | TypedExpr::ModuleSelect { .. }
+        | TypedExpr::Tuple { .. }
+        | TypedExpr::TupleIndex { .. }
+        | TypedExpr::Todo { .. }
+        | TypedExpr::Panic { .. }
+        | TypedExpr::Echo { .. }
+        | TypedExpr::BitArray { .. }
+        | TypedExpr::RecordUpdate { .. }
+        | TypedExpr::NegateBool { .. }
+        | TypedExpr::NegateInt { .. }
+        | TypedExpr::Invalid { .. } => vec![],
     }
 }
 
