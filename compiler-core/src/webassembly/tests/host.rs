@@ -692,6 +692,40 @@ export const identity = (a) => a;
     );
 }
 
+/// A value of a custom type that crosses back as a `Dynamic` is a value of the
+/// host, though its structure is the one of a `Dynamic`, and a `Dynamic`
+/// crosses back as itself.
+#[test]
+fn host_values_back_as_dynamic() {
+    run_with_host(
+        r#"
+@external(webassembly, "builtins", "Dynamic")
+pub type Dynamic
+@external(webassembly, "builtins", "dynamic_classify")
+fn classify(data: Dynamic) -> String
+@external(webassembly, "builtins", "dynamic_int")
+fn int(a: Int) -> Dynamic
+@external(webassembly, "./ffi.mjs", "identity")
+fn from(a: a) -> Dynamic
+@external(webassembly, "./ffi.mjs", "identity")
+fn to_dynamic(a: Dynamic) -> Dynamic
+
+pub type Shape {
+    Circle(Int)
+    Name(String)
+}
+
+pub fn main() {
+    let assert "Object" = classify(from(Circle(1)))
+    let assert "Object" = classify(from(Name("a")))
+    let assert "Int" = classify(to_dynamic(int(1)))
+    let assert True = to_dynamic(int(1)) == int(1)
+}
+"#,
+        r#"export const identity = (a) => a;"#,
+    );
+}
+
 /// A value that the host returns as a `List`, a `Result`, a `BitArray` or a
 /// custom type with variants is checked to be one.
 #[test]
