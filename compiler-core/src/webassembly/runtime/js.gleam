@@ -303,11 +303,12 @@ pub fn js_dynamic_with(
 
 /// The `Dynamic` of `value`, read as on JavaScript: a number is an `Int` when
 /// it is an integer and a `Float` otherwise, a string a `String`, a boolean a
-/// `Bool`, `undefined` is `Nil`, a `BitArray` a bit array, a `List` a list
-/// and an array a tuple, with their items read too, and an instance of
-/// `dict_class`, the `Dict` of the stdlib, a dict, converted with `dict`. Any
-/// other value, like an instance of a custom type, is a value of the host,
-/// made by `other`. `string` converts a string.
+/// `Bool`, `undefined` and `null` are `Nil`, a `BitArray` a bit array, a
+/// `List` a list and an array a tuple, with their items read too, and an
+/// instance of `dict_class`, the `Dict` of the stdlib, a dict, converted with
+/// `dict`. Any other value, like an instance of a custom type or a plain
+/// object (see `js_fields_with`), is a value of the host, made by `other`.
+/// `string` converts a string.
 pub fn js_dynamic_from_with(
   value: JsValue,
   string: fn(JsValue) -> String,
@@ -333,6 +334,33 @@ pub fn js_dynamic_from_with(
       ))
     9 -> dynamic_dict(dict(value))
     _ -> other(value)
+  }
+}
+
+/// The properties of `value` when it is a plain object, read by `decode.dict`
+/// and `decode.field` as on JavaScript: the hook `fields` of the values of
+/// the host, whose values are read with `js_dynamic_from_with`. The object
+/// itself stays a value of the host, so it is the same object when it goes
+/// back to the host.
+pub fn js_fields_with(
+  value: JsValue,
+  string: fn(JsValue) -> String,
+  dict_class: JsValue,
+  dict: fn(JsValue) -> Dict(Dynamic, Dynamic),
+  other: fn(JsValue) -> Dynamic,
+) -> Result(Dict(Dynamic, Dynamic), Nil) {
+  case i32_to_int(kind(value, dict_class)) {
+    10 -> {
+      let entries = object_entries(value)
+      Ok(insert_from(
+        entries,
+        i32_to_int(array_length(entries)) - 2,
+        dict_new(),
+        fn(key) { dynamic_string(string(key)) },
+        js_dynamic_from_with(_, string, dict_class, dict, other),
+      ))
+    }
+    _ -> Error(Nil)
   }
 }
 
@@ -440,9 +468,9 @@ fn result_is_ok(value: JsValue) -> I32
 fn result_value(value: JsValue) -> JsValue
 
 /// What `value` is read as by `js_dynamic_from_with`: 1 an integer, 2 another
-/// number, 3 a string, 4 a boolean, 5 `undefined`, 6 a `BitArray`, 7 a `List`,
-/// 8 an array, 9 an instance of `dict_class` (unless it is `null`, when the
-/// program has no dicts) and 0 another value.
+/// number, 3 a string, 4 a boolean, 5 `undefined` or `null`, 6 a `BitArray`,
+/// 7 a `List`, 8 an array, 9 an instance of `dict_class` (unless it is `null`,
+/// when the program has no dicts), 10 a plain object and 0 another value.
 @external(webassembly, "gleam:js", "kind")
 fn kind(value: JsValue, dict_class: JsValue) -> I32
 
@@ -450,6 +478,11 @@ fn kind(value: JsValue, dict_class: JsValue) -> I32
 /// read with `fold` of the module `dict.mjs` of the stdlib.
 @external(webassembly, "gleam:js", "entries")
 fn entries(fold: JsValue, dict: JsValue) -> JsValue
+
+/// The keys and values of the properties of the plain object `value`, one
+/// after the other in an array.
+@external(webassembly, "gleam:js", "object_entries")
+fn object_entries(value: JsValue) -> JsValue
 
 /// Calls the function `f` with `argument`.
 @external(webassembly, "gleam:js", "call")

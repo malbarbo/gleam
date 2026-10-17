@@ -591,6 +591,27 @@ impl<'a> Generator<'a> {
         js_value: &Arc<Type>,
         dynamic_box: TypeId,
     ) -> Conversion {
+        let (closures, closure_types) = self.js_dynamic_from_closures(dynamic, js_value);
+        let function = self.runtime_function_id(
+            JS_MODULE,
+            "js_dynamic_from_with",
+            iter::once(js_value.clone()).chain(closure_types).collect(),
+            dynamic.clone(),
+        );
+        Conversion::DynamicFromJs {
+            dynamic_box,
+            function,
+            closures,
+        }
+    }
+
+    /// The closures, and their types, that `js_dynamic_from_with` and
+    /// `js_fields_with` take to read a value of the host as a `Dynamic`.
+    fn js_dynamic_from_closures(
+        &mut self,
+        dynamic: &Arc<Type>,
+        js_value: &Arc<Type>,
+    ) -> (Vec<GlobalId>, Vec<Arc<Type>>) {
         let string_type = type_::fn_(vec![js_value.clone()], type_::string());
         let string = self.function_conversion(&type_::string(), Direction::FromJs);
         // A value of the host, which is compared, hashed and shown by the
@@ -615,23 +636,48 @@ impl<'a> Generator<'a> {
             self.closure_of(dict, &dict_type),
             self.closure_of(other, &other_type),
         ];
-        let function = self.runtime_function_id(
+        let types = vec![string_type, js_value.clone(), dict_type, other_type];
+        (closures, types)
+    }
+
+    /// The hook `fields` of the table of a boxed value of the host type
+    /// `type_`: `fn(AnyRef) -> Result(Dict(Dynamic, Dynamic), Nil)`, the
+    /// properties of a plain object (see `js_fields_with`).
+    pub(super) fn function_js_fields(
+        &mut self,
+        type_: &Arc<Type>,
+        dynamic: &Arc<Type>,
+    ) -> FunctionId {
+        let fields_type = self.dynamic_fields_type(dynamic);
+        let builtin =
+            BuiltinFunction::JsFields(self.val_type(&fields_type), qualified_type_name(type_));
+        let type_ = type_.clone();
+        let dynamic = dynamic.clone();
+        self.get_function_builtin(builtin, |s| s.code_js_fields(&type_, &dynamic))
+    }
+
+    fn code_js_fields(&mut self, type_: &Arc<Type>, dynamic: &Arc<Type>) -> FunctionId {
+        let js_value = self.runtime_named_type(JS_MODULE, "JsValue", vec![]);
+        let (closures, closure_types) = self.js_dynamic_from_closures(dynamic, &js_value);
+        let fields_type = self.dynamic_fields_type(dynamic);
+        let fields = self.runtime_function_id(
             JS_MODULE,
-            "js_dynamic_from_with",
-            vec![
-                js_value.clone(),
-                string_type,
-                js_value.clone(),
-                dict_type,
-                other_type,
-            ],
-            dynamic.clone(),
+            "js_fields_with",
+            iter::once(js_value).chain(closure_types).collect(),
+            fields_type.clone(),
         );
-        Conversion::DynamicFromJs {
-            dynamic_box,
-            function,
-            closures,
+        let fields_vt = self.val_type(&fields_type);
+        // params
+        let value = self.wasm_local(ANYREF);
+        let mut function = Function::new(self, "_js_fields", &[value], &[fields_vt]);
+        let mut instructions = function.extend_instructions(self);
+        let _ = instructions.local_get(value);
+        self.unbox_instructions(&mut instructions, type_);
+        for closure in closures {
+            let _ = instructions.global_get(closure);
         }
+        let _ = instructions.call(fields).end();
+        function.finish(self)
     }
 
     /// Converts a value of `type_` with the function `name` of the runtime

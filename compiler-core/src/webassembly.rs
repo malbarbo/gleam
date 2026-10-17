@@ -1343,6 +1343,7 @@ impl<'a> Generator<'a> {
             BuiltinFunction::DynamicInspect(string, _) => (vec![ANYREF], vec![*string]),
             BuiltinFunction::ToJs(val_type, _) => (vec![*val_type], vec![EXTERNREF]),
             BuiltinFunction::FromJs(val_type, _) => (vec![EXTERNREF], vec![*val_type]),
+            BuiltinFunction::JsFields(fields, _) => (vec![ANYREF], vec![*fields]),
             BuiltinFunction::JsTrampoline(params, result, _)
             | BuiltinFunction::JsCall(params, result, _) => (params.clone(), vec![*result]),
             BuiltinFunction::Array { params, result, .. } => (params.clone(), vec![*result]),

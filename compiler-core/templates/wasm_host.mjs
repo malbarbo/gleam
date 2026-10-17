@@ -140,13 +140,16 @@ export async function instantiate(url) {
       if (typeof value === "number") return Number.isInteger(value) ? 1 : 2;
       if (typeof value === "string") return 3;
       if (typeof value === "boolean") return 4;
-      if (value === undefined) return 5;
+      if (value === undefined || value === null) return 5;
       if (value instanceof BitArray) return 6;
       if (value instanceof List) return 7;
       if (Array.isArray(value)) return 8;
       if (dict !== null && value instanceof dict) return 9;
+      const proto = typeof value === "object" && Object.getPrototypeOf(value);
+      if (proto === Object.prototype || proto === null) return 10;
       return 0;
     },
+    object_entries: (value) => Object.entries(value).flat(1),
     entries: (fold, dict) =>
       fold(dict, [], (entries, key, value) => (entries.push(key, value), entries)),
     // The error of a `panic`, `todo`, `let assert` or `assert`, as on

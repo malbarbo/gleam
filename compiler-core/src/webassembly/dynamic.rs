@@ -68,6 +68,7 @@ enum Cast {
         equal: GlobalId,
         hash: GlobalId,
         inspect: GlobalId,
+        fields: GlobalId,
         other: FunctionId,
     },
 }
@@ -202,6 +203,7 @@ impl<'a> Generator<'a> {
                 equal,
                 hash,
                 inspect,
+                fields,
                 other,
             } => {
                 let _ = instructions.local_get(value);
@@ -214,6 +216,7 @@ impl<'a> Generator<'a> {
                     .global_get(equal)
                     .global_get(hash)
                     .global_get(inspect)
+                    .global_get(fields)
                     .call(other)
             }
         };
@@ -392,6 +395,19 @@ impl<'a> Generator<'a> {
         );
         let hash = self.closure_of(hash, &type_::fn_(vec![any_ref.clone()], type_::int()));
         let inspect = self.closure_of(inspect, &type_::fn_(vec![any_ref.clone()], type_::string()));
+        // Only a value of the host has fields, see `function_js_fields`.
+        let fields_type = type_::fn_(vec![any_ref.clone()], self.dynamic_fields_type(dynamic));
+        let fields = if self.external_val_type(type_) == Some(EXTERNREF) {
+            self.function_js_fields(type_, dynamic)
+        } else {
+            self.runtime_function_id(
+                DYNAMIC_MODULE,
+                "dynamic_no_fields",
+                vec![any_ref.clone()],
+                self.dynamic_fields_type(dynamic),
+            )
+        };
+        let fields = self.closure_of(fields, &fields_type);
         let other = self.runtime_function_id(
             DYNAMIC_MODULE,
             "dynamic_other",
@@ -402,6 +418,7 @@ impl<'a> Generator<'a> {
                 type_::fn_(vec![any_ref.clone(), any_ref.clone()], type_::bool()),
                 type_::fn_(vec![any_ref.clone()], type_::int()),
                 type_::fn_(vec![any_ref], type_::string()),
+                fields_type,
             ],
             dynamic.clone(),
         );
@@ -412,8 +429,16 @@ impl<'a> Generator<'a> {
             equal,
             hash,
             inspect,
+            fields,
             other,
         }
+    }
+
+    /// `Result(Dict(Dynamic, Dynamic), Nil)`, the fields of a `Dynamic` that
+    /// `decode.dict` and `decode.field` read.
+    pub(super) fn dynamic_fields_type(&self, dynamic: &Arc<Type>) -> Arc<Type> {
+        let dict = self.runtime_named_type(DICT_MODULE, "Dict", vec![dynamic.clone(); 2]);
+        type_::result(dict, type_::nil())
     }
 
     /// The closure of `_dynamic_cast(T)`.

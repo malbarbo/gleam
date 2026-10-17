@@ -31,6 +31,9 @@ pub(super) enum BuiltinFunction {
     /// back, with the representation of `T` (see `host.rs`).
     ToJs(ValType, EcoString),
     FromJs(ValType, EcoString),
+    /// The hook `fields` of the table of a boxed value of the host type `T`,
+    /// with the representation of its result.
+    JsFields(ValType, EcoString),
     /// The function that JavaScript calls to call a closure of the function
     /// type `T`, and the code of the closures of `T` that call a JavaScript
     /// function, with their params and result (see `host.rs`).
@@ -73,6 +76,7 @@ impl BuiltinFunction {
             BuiltinFunction::DynamicInspect(_, name) => format!("_dynamic_inspect({name})").into(),
             BuiltinFunction::ToJs(_, name) => format!("_to_js({name})").into(),
             BuiltinFunction::FromJs(_, name) => format!("_from_js({name})").into(),
+            BuiltinFunction::JsFields(_, name) => format!("_js_fields({name})").into(),
             BuiltinFunction::JsTrampoline(_, _, name) => format!("_js_trampoline({name})").into(),
             BuiltinFunction::JsCall(_, _, name) => format!("_js_call({name})").into(),
             BuiltinFunction::Array {

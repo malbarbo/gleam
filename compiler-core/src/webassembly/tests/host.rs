@@ -697,6 +697,67 @@ export const thrown = (a) => new Thrown({ a });
     );
 }
 
+/// A plain object of the host is read by `decode.field` and `decode.dict` as
+/// the dict of its properties, as on JavaScript, and is equal to that dict,
+/// though it is the same object when it goes back to the host. `null` is
+/// `Nil`.
+#[test]
+fn host_plain_objects() {
+    run_with_host(
+        r#"
+@external(webassembly, "builtins", "Dynamic")
+pub type Dynamic
+@external(webassembly, "builtins", "Dict")
+pub type Dict(k, v)
+@external(webassembly, "builtins", "dict_new")
+fn dict_new() -> Dict(k, v)
+@external(webassembly, "builtins", "dict_insert")
+fn dict_insert(dict: Dict(k, v), key: k, value: v) -> Dict(k, v)
+@external(webassembly, "builtins", "dynamic_dict")
+fn dynamic_dict(dict: Dict(Dynamic, Dynamic)) -> Dynamic
+@external(webassembly, "builtins", "dynamic_string")
+fn string(a: String) -> Dynamic
+@external(webassembly, "builtins", "dynamic_int")
+fn int(a: Int) -> Dynamic
+@external(webassembly, "builtins", "dynamic_index")
+fn index(data: Dynamic, key: Dynamic) -> Result(Result(Dynamic, Nil), String)
+@external(webassembly, "builtins", "dynamic_is_null")
+fn is_null(a: Dynamic) -> Bool
+@external(webassembly, "./ffi.mjs", "object")
+fn object(a: Int) -> Dynamic
+@external(webassembly, "./ffi.mjs", "nested")
+fn nested() -> Dynamic
+@external(webassembly, "./ffi.mjs", "null")
+fn null() -> Dynamic
+@external(webassembly, "./ffi.mjs", "same")
+fn same(a: Dynamic, b: Dynamic) -> Bool
+
+pub fn main() {
+    let a = object(1)
+    let assert Ok(Ok(value)) = index(a, string("a"))
+    let assert True = value == int(1)
+    let assert Ok(Error(Nil)) = index(a, string("b"))
+    let assert True = a == dynamic_dict(dict_insert(dict_new(), string("a"), int(1)))
+    let assert True = same(a, a)
+    let assert Ok(Ok(inner)) = index(nested(), string("inner"))
+    let assert Ok(Ok(value)) = index(inner, string("a"))
+    let assert True = value == int(2)
+    let assert True = is_null(null())
+}
+"#,
+        r#"
+export const object = (a) => ({ a });
+const inner = { a: 2 };
+export const nested = () => ({ inner });
+const null_ = () => null;
+export { null_ as null };
+export function same(a, b) {
+  return a === b && a.a === 1;
+}
+"#,
+    );
+}
+
 /// A value of a type variable bound to nothing is a value of the host, as on
 /// JavaScript.
 #[test]
