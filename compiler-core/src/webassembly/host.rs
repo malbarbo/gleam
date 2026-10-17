@@ -165,9 +165,10 @@ impl<'a> Generator<'a> {
         matches!(
             self.custom_type(type_),
             Some((CustomType::External { .. }, _))
-        ) || (type_.is_string()
-            && matches!(self.string, StringType::Js(_))
-            && direction == Direction::ToJs)
+        ) || (self.external_val_type(type_) == Some(EXTERNREF))
+            || (type_.is_string()
+                && matches!(self.string, StringType::Js(_))
+                && direction == Direction::ToJs)
     }
 
     /// `fn(T) -> JsValue` to JavaScript, `fn(JsValue) -> T` back.

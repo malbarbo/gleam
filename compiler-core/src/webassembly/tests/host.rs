@@ -697,6 +697,34 @@ export const thrown = (a) => new Thrown({ a });
     );
 }
 
+/// A value of a type variable bound to nothing is a value of the host, as on
+/// JavaScript.
+#[test]
+fn host_unbound_type_variable() {
+    run_with_host(
+        r#"
+@external(webassembly, "./ffi.mjs", "parse")
+fn parse(a: String) -> Result(a, Nil)
+@external(webassembly, "./ffi.mjs", "stringify")
+fn stringify(a: a) -> String
+@external(webassembly, "./ffi.mjs", "call")
+fn call(f: fn(a) -> a) -> String
+
+pub fn main() {
+    let assert Ok(value) = parse("[1,{\"a\":2}]")
+    let assert "[1,{\"a\":2}]" = stringify(value)
+    let assert "x" = call(fn(x) { x })
+}
+"#,
+        r#"
+import { Ok } from "../gleam.mjs";
+export const parse = (a) => new Ok(JSON.parse(a));
+export const stringify = (a) => JSON.stringify(a);
+export const call = (f) => f("x");
+"#,
+    );
+}
+
 /// A module of the host can export a function `then`, and the strings
 /// that cross keep a byte order mark at their start.
 #[test]

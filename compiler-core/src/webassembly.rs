@@ -616,7 +616,10 @@ fn closure_name(info: &LocalFunction) -> EcoString {
 /// values. It is not a unit type, so the representation of a type with such a
 /// variable is the one of the types where it is bound (see
 /// `UnionFieldLayout`): a value of `Result(a, Nil)`, which can only be an
-/// `Error(Nil)`, can be used where `a` is bound.
+/// `Error(Nil)`, can be used where `a` is bound. With a JavaScript host, its
+/// values are the values of the host that a function of the host gives, like
+/// `JSON.parse` with `fn(String) -> a`, as on JavaScript (see
+/// `external_val_type`).
 fn never_type() -> Arc<Type> {
     type_::named("", "gleam@webassembly", "Never", Publicity::Public, vec![])
 }
@@ -1262,6 +1265,11 @@ impl<'a> Generator<'a> {
 
     /// The wasm type of `type_` when it is an external type of wasm values.
     fn external_val_type(&self, type_: &Arc<Type>) -> Option<ValType> {
+        // The values of a type variable bound to nothing are values of the
+        // host, see `never_type`.
+        if self.javascript_host && is_never_type(type_) {
+            return Some(EXTERNREF);
+        }
         let (module, name, _) = type_.named_type_information()?;
         let CustomType::External { val_type, .. } = self.types.get(&(module, name))? else {
             return None;
@@ -2302,8 +2310,13 @@ impl<'a> Generator<'a> {
             return ANYREF;
         }
         if is_never_type(type_) {
-            let type_index = self.struct_type_index("Never".into(), vec![]);
-            self.val_type_ref(type_index)
+            match self.external_val_type(type_) {
+                Some(val_type) => val_type,
+                None => {
+                    let type_index = self.struct_type_index("Never".into(), vec![]);
+                    self.val_type_ref(type_index)
+                }
+            }
         } else if type_.is_utf_codepoint() {
             ValType::I32
         } else if type_.is_int() {
