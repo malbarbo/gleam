@@ -195,6 +195,12 @@ pub fn js_array_get(array: JsValue, index: Int) -> JsValue {
   array_get(array, int_to_i32(index))
 }
 
+/// Throws: `value` is not an instance of the class of a variant of the custom
+/// type it is converted to.
+pub fn js_unknown_variant(value: JsValue) -> Nil {
+  unknown_variant(value)
+}
+
 // -- Values of the host ------------------------------------------------------
 
 /// Whether `a` and `b` are equal, as on JavaScript: the hook of `==` of the
@@ -298,6 +304,9 @@ fn result_is_ok(value: JsValue) -> I32
 
 @external(webassembly, "gleam:js", "result_value")
 fn result_value(value: JsValue) -> JsValue
+
+@external(webassembly, "gleam:js", "unknown_variant")
+fn unknown_variant(value: JsValue) -> Nil
 
 @external(webassembly, "gleam:js", "equal")
 fn equal(a: JsValue, b: JsValue) -> I32

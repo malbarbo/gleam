@@ -91,6 +91,9 @@ export async function instantiate(url) {
       throw new TypeError(`Not a Result: ${value}`);
     },
     result_value: (value) => value[0],
+    unknown_variant(value) {
+      throw new TypeError(`Not a variant of the custom type: ${inspect(value)}`);
+    },
     equal: (a, b) => (isEqual(a, b) ? 1 : 0),
     hash,
     inspect: (value) => inspect(value),

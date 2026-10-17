@@ -394,6 +394,7 @@ impl<'a> WebAssembly<'a> {
             .collect();
         let runtime = webassembly::runtime_modules();
         for module in modules {
+            self.types_module(writer, module)?;
             self.wasm_module(
                 writer,
                 module,
@@ -406,17 +407,22 @@ impl<'a> WebAssembly<'a> {
         self.write_prelude(writer)
     }
 
+    /// Writes the JavaScript module of the custom types of `module`, whose
+    /// classes are the values of the custom types that the functions of the
+    /// host receive and return.
+    fn types_module(&self, writer: &impl FileSystemWriter, module: &Module) -> Result<()> {
+        let path = self.output_directory.join(format!("{}.mjs", module.name));
+        let line_numbers = LineNumbers::new(&module.code);
+        writer.write(&path, &javascript::types_module(&module.ast, &line_numbers))
+    }
+
     /// Writes the `gleam.mjs` of the package, which gives its FFI modules the
     /// JavaScript prelude, with the classes of the values they receive and
     /// return, and the host.
     fn write_prelude(&self, writer: &impl FileSystemWriter) -> Result<()> {
         let path = self.output_directory.join("gleam.mjs");
         if !writer.exists(&path) {
-            let reexport = format!(
-                "export * from \"../prelude.mjs\";\nexport * from \"../{}\";\n",
-                webassembly::HOST_FILE
-            );
-            writer.write(&path, &reexport)?;
+            writer.write(&path, webassembly::PACKAGE_PRELUDE)?;
         }
         Ok(())
     }

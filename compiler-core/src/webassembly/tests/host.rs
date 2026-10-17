@@ -195,7 +195,7 @@ pub fn main() {
 fn utf_codepoint(a: Int) -> Result(UtfCodepoint, Nil)
 "#,
         r#"
-import { UtfCodepoint } from "./prelude.mjs";
+import { UtfCodepoint } from "../gleam.mjs";
 export const add = (a, b) => a + b;
 export const half = (a) => a / 2;
 export const type_of = (a) => typeof a;
@@ -257,7 +257,7 @@ pub fn main() {
 }
 "#,
         r#"
-import { Ok, Error, List, toList } from "./prelude.mjs";
+import { Ok, Error, List, toList } from "../gleam.mjs";
 export const reverse = (a) => List.fromArray(a.toArray().reverse());
 export function parse(a) {
   const n = Number(a);
@@ -295,7 +295,7 @@ pub fn main() {
 }
 "#,
         r#"
-import { BitArray, toList } from "./prelude.mjs";
+import { BitArray, toList } from "../gleam.mjs";
 export const reverse = (a) => new BitArray(a.rawBuffer.slice().reverse());
 export const describe = (a) => [a.bitSize, a.bitOffset, toList([...a.rawBuffer])];
 export const same = (a) => a;
@@ -335,7 +335,7 @@ pub fn main() {
 }
 "#,
         r#"
-import { Ok, Error } from "./prelude.mjs";
+import { Ok, Error } from "../gleam.mjs";
 export const id = (a) => a;
 export const type_of = (a) => typeof a;
 export const first = (a) => (a.head === undefined ? new Error(undefined) : new Ok(a.head));
@@ -411,7 +411,7 @@ pub fn all(regexes: List(Regex), text: String) -> List(Bool)
             ),
         ],
         r#"
-import { toList } from "./prelude.mjs";
+import { toList } from "../gleam.mjs";
 export const id = (a) => a;
 export const new_regex = (source) => new RegExp(source);
 export const matches = (regex, text) => regex.test(text);
@@ -420,8 +420,100 @@ export const all = (regexes, text) => toList(regexes.toArray().map((r) => r.test
     );
 }
 
-/// A value that the host returns as a `String`, a `List` or a `Result` is
-/// checked to be one.
+/// A value of a custom type is an instance of the class of its variant, as on
+/// JavaScript, from the module of the custom types of its module.
+#[test]
+fn host_custom_types() {
+    run_with_host(
+        r#"
+pub type Point {
+    Point(x: Int, y: Int)
+}
+
+pub type Shape {
+    Circle(center: Point, radius: Float)
+    Polygon(List(Point))
+    Empty
+}
+
+pub type Color {
+    Red
+    Green
+    Blue
+}
+
+pub type Option(a) {
+    Some(a)
+    None
+}
+
+type Secret {
+    Secret(String)
+}
+
+@external(webassembly, "./ffi.mjs", "describe")
+fn describe(shape: Shape) -> String
+@external(webassembly, "./ffi.mjs", "id")
+fn shape(shape: Shape) -> Shape
+@external(webassembly, "./ffi.mjs", "id")
+fn color(color: Color) -> Color
+@external(webassembly, "./ffi.mjs", "next")
+fn next(color: Color) -> Color
+@external(webassembly, "./ffi.mjs", "id")
+fn option(option: Option(Int)) -> Option(Int)
+@external(webassembly, "./ffi.mjs", "first")
+fn first(list: List(a)) -> Option(a)
+@external(webassembly, "./ffi.mjs", "reveal")
+fn reveal(secret: Secret) -> String
+@external(webassembly, "./ffi.mjs", "hide")
+fn hide(text: String) -> Secret
+@external(webassembly, "./ffi.mjs", "origin")
+fn origin() -> Point
+
+pub fn main() {
+    let assert "circle 1,2 3.5" = describe(Circle(Point(1, 2), 3.5))
+    let assert "polygon 2" = describe(Polygon([Point(0, 0), Point(1, 1)]))
+    let assert "empty" = describe(Empty)
+    let assert Circle(Point(1, 2), 3.5) = shape(Circle(Point(1, 2), 3.5))
+    let assert Polygon([Point(0, 0)]) = shape(Polygon([Point(0, 0)]))
+    let assert Empty = shape(Empty)
+    let assert Green = color(Green)
+    let assert Blue = next(Green)
+    let assert Red = next(Blue)
+    let assert Some(1) = option(Some(1))
+    let assert None = option(None)
+    let assert Some(Point(1, 2)) = first([Point(1, 2)])
+    let assert None = first([])
+    let assert "abc" = reveal(Secret("abc"))
+    let assert Secret("xyz") = hide("xyz")
+    let assert Point(0, 0) = origin()
+}
+"#,
+        r#"
+import { Circle, Polygon, Empty, Shape$isCircle, Shape$isPolygon, Red, Green, Blue, Some, None, Secret } from "./mod.mjs";
+export const id = (a) => a;
+export function describe(shape) {
+  if (shape instanceof Circle) return `circle ${shape.center.x},${shape.center.y} ${shape.radius}`;
+  if (Shape$isPolygon(shape)) return `polygon ${shape[0].toArray().length}`;
+  if (shape instanceof Empty) return "empty";
+  return "?";
+}
+export function next(color) {
+  if (color instanceof Red) return new Green();
+  if (color instanceof Green) return new Blue();
+  return new Red();
+}
+export const first = (list) => (list.head === undefined ? new None() : new Some(list.head));
+export const reveal = (secret) => secret[0];
+export const hide = (text) => new Secret(text);
+// A record of a type with a single variant is read by its fields.
+export const origin = () => ({ x: 0, y: 0 });
+"#,
+    );
+}
+
+/// A value that the host returns as a `String`, a `List`, a `Result`, a
+/// `BitArray` or a custom type with variants is checked to be one.
 #[test]
 fn host_wrong_values() {
     let ffi = r#"export const wrong = () => 42;"#;
@@ -430,10 +522,16 @@ fn host_wrong_values() {
         ("List(Int)", "Not a List: 42"),
         ("Result(Int, Nil)", "Not a Result: 42"),
         ("BitArray", "Not a BitArray: 42"),
+        ("Color", "Not a variant of the custom type: 42"),
     ] {
         for string in [WasmString::Utf8, WasmString::JsString] {
             let src = format!(
                 r#"
+pub type Color {{
+    Red
+    Green
+}}
+
 @external(webassembly, "./ffi.mjs", "wrong")
 fn wrong() -> {type_}
 

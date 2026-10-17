@@ -425,24 +425,47 @@ pub fn run_wasm_node_in(
     config: WebAssemblyConfig,
     files: &[(&str, &str)],
 ) -> WasmOutput {
-    let wasm_bytes = compile_wasm_in(package, src, deps, config);
+    // The files are where the build writes them: the host and the prelude
+    // in the directory of the target, and in the directory of each package
+    // its `gleam.mjs` and the modules of the custom types of its modules,
+    // and the program and `files` next to its module.
+    let (module, dep_modules) = compile_in(package, src, deps.clone());
     let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("gleam_wasm_js_test_{id}"));
-    std::fs::create_dir_all(&dir).expect("failed to create the test directory");
-    let run = r#"import { run } from "./host.mjs";
-await run(new URL("./main.wasm", import.meta.url));
-"#;
-    let files = [
-        ("host.mjs", crate::webassembly::HOST),
-        ("prelude.mjs", crate::javascript::PRELUDE),
-        ("run.mjs", run),
-    ]
-    .into_iter()
-    .chain(files.iter().copied());
-    for (name, source) in files {
-        std::fs::write(dir.join(name), source).expect("failed to write a test file");
+    let write = |path: &str, contents: &[u8]| {
+        let path = dir.join(path);
+        let parent = path.parent().expect("a directory");
+        std::fs::create_dir_all(parent).expect("failed to create the test directory");
+        std::fs::write(path, contents).expect("failed to write a test file");
+    };
+    for dep in dep_modules.values().chain([&module]) {
+        let dep_src = deps
+            .iter()
+            .find(|(_, name, _)| *name == dep.name)
+            .map_or(src, |(_, _, dep_src)| dep_src);
+        let package = &dep.type_info.package;
+        let types = crate::javascript::types_module(dep, &LineNumbers::new(dep_src));
+        write(&format!("{package}/{}.mjs", dep.name), types.as_bytes());
+        write(
+            &format!("{package}/gleam.mjs"),
+            crate::webassembly::PACKAGE_PRELUDE.as_bytes(),
+        );
     }
-    std::fs::write(dir.join("main.wasm"), &wasm_bytes).expect("failed to write the wasm file");
+    let program = match module.name.rsplit_once('/') {
+        Some((directory, _)) => format!("{package}/{directory}"),
+        None => package.to_owned(),
+    };
+    let run = format!(
+        "import {{ run }} from \"./host.mjs\";\nawait run(new URL(\"./{program}/main.wasm\", import.meta.url));\n"
+    );
+    write("host.mjs", crate::webassembly::HOST.as_bytes());
+    write("prelude.mjs", crate::javascript::PRELUDE.as_bytes());
+    write("run.mjs", run.as_bytes());
+    for (name, source) in files {
+        write(&format!("{program}/{name}"), source.as_bytes());
+    }
+    let wasm_bytes = compile_wasm_in(package, src, deps, config);
+    write(&format!("{program}/main.wasm"), &wasm_bytes);
     let output = std::process::Command::new("node")
         .arg(dir.join("run.mjs"))
         .output()

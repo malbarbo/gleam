@@ -44,6 +44,12 @@ pub const HOST: &str = include_str!("../templates/wasm_host.mjs");
 
 /// The location of `HOST` in the build directory of the target.
 pub const HOST_FILE: &str = "host.mjs";
+
+/// The `gleam.mjs` of a package, which gives its FFI modules the JavaScript
+/// prelude, with the classes of the values they receive and return, and the
+/// host.
+pub const PACKAGE_PRELUDE: &str =
+    "export * from \"../prelude.mjs\";\nexport * from \"../host.mjs\";\n";
 use scope::*;
 use specialization::*;
 use string::*;

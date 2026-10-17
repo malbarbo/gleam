@@ -106,6 +106,9 @@ pub struct Generator<'a> {
     /// Relative path to the module, surrounded in `"`s to make it a string, and with `\`s escaped
     /// to `\\`.
     src_path: EcoString,
+    /// Whether only the custom types are generated, all public, see
+    /// `types_module`.
+    types_only: bool,
 }
 
 impl<'a, 'doc> Generator<'a> {
@@ -133,6 +136,7 @@ impl<'a, 'doc> Generator<'a> {
             line_numbers,
             module,
             src_path,
+            types_only: false,
             tracker: UsageTracker::default(),
             module_scope: imbl::HashMap::new(),
             typescript,
@@ -200,7 +204,11 @@ impl<'a, 'doc> Generator<'a> {
 
     pub fn compile(&mut self, arena: &'doc DocumentArena<'a, 'doc>) -> Document<'a, 'doc> {
         // Determine what JavaScript imports we need to generate
-        let mut imports = self.collect_imports(arena);
+        let mut imports = if self.types_only {
+            Imports::new()
+        } else {
+            self.collect_imports(arena)
+        };
 
         // Determine what names are defined in the module scope so we know to
         // rename any variables that are defined within functions using the same
@@ -494,7 +502,7 @@ impl<'a, 'doc> Generator<'a> {
 
         self.tracker.custom_type_used = true;
 
-        let constructor_publicity = if *opaque || publicity.is_private() {
+        let constructor_publicity = if !self.types_only && (*opaque || publicity.is_private()) {
             Publicity::Private
         } else {
             Publicity::Public
@@ -942,6 +950,10 @@ impl<'a, 'doc> Generator<'a> {
             }
         }
 
+        if self.types_only {
+            return definitions;
+        }
+
         for constant in &self.module.definitions.constants {
             if let Some(definition) = self.module_constant(arena, constant) {
                 definitions.push(definition);
@@ -1367,6 +1379,28 @@ pub fn module(config: ModuleConfig<'_>) -> (String, Option<SourceMap>) {
             .into_sourcemap()
     });
     (output, source_map)
+}
+
+/// The JavaScript module with only the custom types of `module`, for the
+/// functions of the host of the WebAssembly target, which receive and return
+/// their values as on JavaScript. Each custom type has the classes and the
+/// functions of the JavaScript target, also when it is private or opaque,
+/// since the WebAssembly module converts its values with them.
+pub fn types_module(module: &TypedModule, line_numbers: &LineNumbers) -> String {
+    let arena = DocumentArena::new();
+    let src = EcoString::new();
+    let mut generator = Generator::new(ModuleConfig {
+        module,
+        line_numbers,
+        src: &src,
+        typescript: TypeScriptDeclarations::None,
+        source_map: false,
+        stdlib_package: StdlibPackage::Missing,
+        path: Utf8Path::new(""),
+        project_root: Utf8Path::new(""),
+    });
+    generator.types_only = true;
+    generator.compile(&arena).to_pretty_string(80)
 }
 
 pub fn ts_declaration(module: &TypedModule) -> String {
