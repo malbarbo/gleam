@@ -122,6 +122,39 @@ pub fn main() {
     assert_eq!(imports, vec![import("env", "id"), import("env", "id")]);
 }
 
+/// A public external function is exported, like the other public functions,
+/// also when the module does not use it.
+#[test]
+fn public_external_is_exported() {
+    let wasm = super::compile_wasm_in(
+        "thepackage",
+        r#"
+@external(webassembly, "env", "add")
+pub fn add(a: Int, b: Int) -> Int
+
+@external(webassembly, "env", "nothing")
+pub fn nothing_test() -> a
+
+@external(webassembly, "env", "id")
+pub fn id(a: a) -> a
+"#,
+        vec![],
+        super::wasm_config(WasmInt::I32, WasmFloat::F64),
+    );
+    let mut exports = vec![];
+    for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
+        if let Ok(wasmparser::Payload::ExportSection(reader)) = payload {
+            for export in reader {
+                let export = export.expect("an export");
+                if export.kind == wasmparser::ExternalKind::Func {
+                    exports.push(export.name.to_string());
+                }
+            }
+        }
+    }
+    assert_eq!(exports, vec!["add", "nothing_test"]);
+}
+
 /// Runs `src` in Node.js next to the module `ffi.mjs` with the source `ffi`,
 /// with UTF-8 and JavaScript strings, and 64 and 32-bit ints.
 #[track_caller]

@@ -2237,27 +2237,34 @@ impl<'a> Generator<'a> {
 
     fn functions(&mut self) {
         for function in &self.module.definitions.functions {
-            if !function.publicity.is_public() || function.external_webassembly.is_some() {
-                // Private and external functions are compiled elsewhere.
+            if !function.publicity.is_public() {
+                // Private functions are compiled by each use.
                 continue;
             }
             let base_name: EcoString = function_name(function).into();
-            let id = if !is_generic_type(&function_type(function)) {
-                self.function(function, true, base_name)
-            } else if function.arguments.is_empty() {
+            let mut type_ = function_type(function);
+            let generic = is_generic_type(&type_);
+            if generic {
+                if !function.arguments.is_empty() {
+                    // Other generic functions are compiled by each use.
+                    continue;
+                }
                 // The host calls the functions without arguments, like `main`
                 // and the tests, so they are exported with their type
                 // variables as `Nil`, like a generic result of a `panic`.
-                let type_ = function_type(function);
-                let type_ =
-                    Monomorphizer::with_variables_bound(&type_, &type_::nil()).type_(&type_);
-                let id = self.function_generic(function, &type_, false, base_name.clone());
-                let _ = self.wasm_module.exports.add(&base_name, id.func_id());
-                id
+                type_ = Monomorphizer::with_variables_bound(&type_, &type_::nil()).type_(&type_);
+            }
+            let id = if function.external_webassembly.is_some() {
+                let module = self.module.name.clone();
+                self.function_external(function, &module, &type_)
+            } else if generic {
+                self.function_generic(function, &type_, false, base_name.clone())
             } else {
-                // Other generic functions are compiled by each use.
-                continue;
+                self.function(function, true, base_name.clone())
             };
+            if generic || function.external_webassembly.is_some() {
+                let _ = self.wasm_module.exports.add(&base_name, id.func_id());
+            }
             if is_main_funtion(function) {
                 self.main = Some(id.func_id())
             }
