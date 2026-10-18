@@ -444,7 +444,6 @@ impl<'a> WebAssembly<'a> {
         sources: &HashMap<EcoString, &Module>,
     ) -> Result<()> {
         let name = format!("{}.wasm", module.name);
-        println!("Generating {name}");
         let path = self.output_directory.join(&name);
         let line_numbers = LineNumbers::new(&module.code);
         let output = webassembly::module(
