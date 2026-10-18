@@ -14,6 +14,11 @@ fn main() {
         Command::new("cargo")
             .args(["build", "--release", "--target", "wasm32-unknown-unknown"])
             .env("RUSTFLAGS", "-C link-arg=--no-merge-data-segments")
+            // The flags and the target directory of the outer build (for
+            // example, the instrumentation of a coverage build) are not for
+            // the builtins, which are included from their own target.
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("CARGO_TARGET_DIR")
             .current_dir(Utf8Path::new("..").join(BUILTINS))
             .status()
             .unwrap_or_else(|_| panic!("Building {BUILTINS}"))
