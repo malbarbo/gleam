@@ -77,3 +77,9 @@ pub fn unaligned_11_test() {
   let right = <<<<0b11011100>>:bits-size(three), 1:size(two)>>
   assert left == right
 }
+
+pub fn unaligned_literal_then_variable_test() {
+  let five = 5
+  assert <<1:3, five:5>> == <<0b00100101>>
+  assert <<0b111:3, five:5, 1:1>> == <<0b11100101, 1:1>>
+}

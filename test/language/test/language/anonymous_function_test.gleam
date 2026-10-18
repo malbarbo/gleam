@@ -31,3 +31,58 @@ pub fn call_tuple_access_test() {
   let t = #(fn(x) { x })
   assert t.0(5) == 5
 }
+
+fn apply(f, x) {
+  f(x)
+}
+
+fn add_one(x) {
+  x + 1
+}
+
+fn with(x, f) {
+  f(x)
+}
+
+pub fn function_from_block_ending_in_use_test() {
+  assert apply(
+      {
+        use n <- with(10)
+        fn(x) { x + n }
+      },
+      2,
+    )
+    == 12
+}
+
+fn apply_second(_, f) {
+  f(1)
+}
+
+pub fn discarded_parameter_test() {
+  assert apply_second(0, add_one) == 2
+}
+
+fn make_adder_in_block(n) {
+  {
+    let f = fn(x) { x + n }
+    f
+  }
+}
+
+fn make_adder_with_use(n) {
+  use m <- with(n)
+  fn(x) { x + m }
+}
+
+fn make_adder_with_assert(n) {
+  let f = fn(x) { x + n }
+  assert n > 0
+  f
+}
+
+pub fn returned_function_test() {
+  assert apply(make_adder_in_block(1), 2) == 3
+  assert apply(make_adder_with_use(1), 2) == 3
+  assert apply(make_adder_with_assert(1), 2) == 3
+}

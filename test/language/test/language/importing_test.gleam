@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-import mod_with_numbers_0123456789
+import mod_with_numbers_0123456789.{hello}
 import shadowed_module.{ShadowPerson}
 
 pub fn mod_with_numbers_test() {
@@ -12,4 +12,9 @@ pub fn shadowed_module_test() {
   let shadowed_module = ShadowPerson(18)
   let shadowed_module = shadowed_module.celebrate_birthday(shadowed_module)
   assert shadowed_module.age == 19
+}
+
+pub fn unqualified_function_as_value_test() {
+  let f = hello
+  assert f() == "world"
 }

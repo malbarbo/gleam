@@ -73,3 +73,13 @@ pub fn constant_aliased_string_in_bit_arrays_test() {
     _ -> False
   }
 }
+
+fn double(x) {
+  x * 2
+}
+
+pub const public_function_constant = double
+
+pub fn public_function_constant_test() {
+  assert public_function_constant(2) == 4
+}

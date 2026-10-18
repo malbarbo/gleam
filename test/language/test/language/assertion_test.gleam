@@ -18,3 +18,13 @@ pub fn let_assert_ok_bind_test() {
 fn ok_one() -> Result(Int, a) {
   Ok(1)
 }
+
+fn assert_same(a: a, b: a) -> a {
+  assert a == b as "not the same"
+  a
+}
+
+pub fn generic_assert_with_message_test() {
+  assert assert_same(1, 1) == 1
+  assert assert_same("a", "a") == "a"
+}
