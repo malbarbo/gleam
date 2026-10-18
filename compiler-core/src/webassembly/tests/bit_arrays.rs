@@ -124,6 +124,9 @@ pub fn main() {
   let assert "<<16, 2:size(4)>>" = bit_array.inspect(<<1:4, 2:8>>)
   let assert "<<255, 254>>" = bit_array.inspect(<<-2:16>>)
   let assert "<<2, 1>>" = bit_array.inspect(<<258:16-little>>)
+  let assert "<<5:size(3)>>" = bit_array.inspect(<<5:3-little>>)
+  let assert "<<232, 3:size(4)>>" = bit_array.inspect(<<1000:12-little>>)
+  let assert "<<222, 188, 10:size(4)>>" = bit_array.inspect(<<0xABCDE:20-little>>)
   let assert "<<0, 0, 1, 0>>" = bit_array.inspect(<<256:32>>)
   let assert "<<97, 98, 195, 169>>" = bit_array.inspect(<<"abé":utf8>>)
   let assert "<<0, 97, 216, 61, 222, 0>>" = bit_array.inspect(<<"a😀":utf16>>)
@@ -853,6 +856,10 @@ fn construction_errors() {
             "Bit array segment size is larger than its value",
         ),
         (
+            "<<1, 2>>:bits-size(24)",
+            "Bit array segment size is larger than its value",
+        ),
+        (
             "id(1.5):float-size(id(8))",
             "Sized floats must be 16-bit, 32-bit or 64-bit",
         ),
@@ -1016,6 +1023,9 @@ fn literals(b: BitArray) -> String {
     <<7 as n, rest:bits>> -> "assign int " <> show(#(n, rest))
     <<-1, _:bits>> -> "never"
     <<256, _:bits>> -> "never"
+    <<128:8-signed>> -> "never"
+    <<129:8-signed>> -> "never"
+    <<-129:8-signed>> -> "never"
     _ -> "other"
   }
 }
@@ -1037,6 +1047,9 @@ pub fn main() {
   let assert "assign int #(7, <<8, 9>>)" = literals(<<7, 8, 9>>)
   let assert "other" = literals(<<255>>)
   let assert "other" = literals(<<0, 1>>)
+  let assert "other" = literals(<<127>>)
+  let assert "other" = literals(<<128>>)
+  let assert "other" = literals(<<129>>)
   Nil
 }
 "##);

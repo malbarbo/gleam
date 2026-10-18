@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
+use ecow::EcoString;
+
 #[test]
 fn unknown_external_type() {
     assert_wasm_error!(
@@ -244,6 +246,51 @@ pub fn main() {
     );
 }
 
+/// A literal in a segment that is not a literal is an Int.
+#[test]
+fn int_literal_overflow_in_bit_array_segment() {
+    assert_wasm_validate_error!(
+        r#"
+pub fn main() {
+    let x = 1
+    <<{ x + 9223372036854775808 }:64>>
+}
+"#,
+        crate::config::WasmInt::I64,
+        crate::config::WasmFloat::F64,
+    );
+}
+
+#[test]
+fn int_literal_overflow_in_bit_array_segment_size() {
+    assert_wasm_validate_error!(
+        r#"
+pub fn main() {
+    let x = 1
+    <<x:size(9223372036854775808)>>
+}
+"#,
+        crate::config::WasmInt::I64,
+        crate::config::WasmFloat::F64,
+    );
+}
+
+#[test]
+fn int_literal_overflow_in_bit_array_pattern() {
+    assert_wasm_validate_error!(
+        r#"
+pub fn main() {
+    case <<1>> {
+        <<n, 9223372036854775808:size(n)>> -> n
+        _ -> 0
+    }
+}
+"#,
+        crate::config::WasmInt::I64,
+        crate::config::WasmFloat::F64,
+    );
+}
+
 /// A literal of an imported module is reported in that module.
 #[test]
 fn int_literal_overflow_in_imported_module() {
@@ -268,6 +315,7 @@ pub fn size(x: Int) -> Int {
 "#,
         )],
     );
+    assert_eq!(error.module().map(EcoString::as_str), Some("other"));
     insta::assert_debug_snapshot!(error);
 }
 

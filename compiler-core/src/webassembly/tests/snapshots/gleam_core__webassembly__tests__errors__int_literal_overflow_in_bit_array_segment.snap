@@ -1,0 +1,17 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+expression: "\npub fn main() {\n    let x = 1\n    <<{ x + 9223372036854775808 }:64>>\n}\n"
+---
+----- SOURCE CODE
+
+pub fn main() {
+    let x = 1
+    <<{ x + 9223372036854775808 }:64>>
+}
+
+
+----- CONFIG
+int=I64 float=F64
+
+----- ERROR
+IntLiteralOutOfRange { module: "my/mod", location: SrcSpan { start: 43, end: 62 }, value: "9223372036854775808", target: "I64" }
