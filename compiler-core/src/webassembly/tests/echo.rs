@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
-use super::run_ok;
+use super::{run_ok, run_wasm, run_wasm_js};
 
 #[test]
 fn inspect_int() {
@@ -76,6 +76,22 @@ pub fn main() {
 }
 "#,
     );
+}
+
+/// The location is grey and the message is written as is, like in the other
+/// targets.
+#[test]
+fn echo_location_and_message() {
+    let src = r#"
+pub fn main() {
+    echo 1 as "olá"
+    echo 2
+}
+"#;
+    let expected = "\u{1b}[90msrc/my/mod.gleam:3\u{1b}[39m olá\n1\n\
+                    \u{1b}[90msrc/my/mod.gleam:4\u{1b}[39m\n2\n";
+    assert_eq!(run_wasm(src, vec![]).stderr, expected);
+    assert_eq!(run_wasm_js(src, &[]).stderr, expected);
 }
 
 #[test]

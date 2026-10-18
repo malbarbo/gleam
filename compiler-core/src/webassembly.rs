@@ -977,6 +977,18 @@ impl<'a> Generator<'a> {
         }
     }
 
+    /// The path of the source file of `module`, relative to its package.
+    pub(super) fn source_file(&self, module: &EcoString) -> EcoString {
+        let origin = self
+            .all_modules
+            .get(module)
+            .copied()
+            .unwrap_or(self.module)
+            .type_info
+            .origin;
+        ecow::eco_format!("{}/{module}.gleam", origin.folder_name())
+    }
+
     /// Get the source location for a byte offset, using the correct module
     /// name and line numbers for the currently-compiled module.
     fn source_location(&self, start: u32) -> (EcoString, u32) {
@@ -5418,10 +5430,12 @@ impl<'a> Generator<'a> {
         let heap_base = self.find_global_expect(HEAP_BASE).func_id();
         let string_to_memory =
             self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
-        let (mod_name, line) = self.source_location(echo.location().start);
+        let (module, line) = self.source_location(echo.location().start);
+        let file = self.source_file(&module);
         let suffix = if message.is_some() { ' ' } else { '\n' };
+        // Grey, like in the other targets
         let string_index =
-            self.string_index(&format!("src/{mod_name}.gleam:{line}{suffix}").into());
+            self.string_index(&format!("\u{1b}[90m{file}:{line}\u{1b}[39m{suffix}").into());
 
         let (dest, expr) = locals.for_echo(echo);
 
@@ -5455,7 +5469,7 @@ impl<'a> Generator<'a> {
             let _ = instructions
                 .expression(self, locals, scope.clone(), message)
                 .local_get(dest)
-                .call(self.function_repr(&message.type_()))
+                .call(string_to_memory)
                 // update end
                 .local_get(dest)
                 .i32_add()

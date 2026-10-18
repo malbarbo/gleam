@@ -94,7 +94,7 @@ fn run_with(src: &str, modules: Vec<(&str, &str)>) -> String {
             "WASM execution failed ({int:?}):\n{}",
             result.stderr
         );
-        stderr.push(result.stderr);
+        stderr.push(result.stderr_without_colour());
     }
     let config = super::wasm_config(WasmInt::I64, WasmFloat::F64);
     let result = run_wasm_js_with_config(src, deps, config, &[]);
@@ -104,7 +104,7 @@ fn run_with(src: &str, modules: Vec<(&str, &str)>) -> String {
         result.stderr
     );
     assert_eq!(stderr[0], stderr[1]);
-    assert_eq!(stderr[0], result.stderr);
+    assert_eq!(stderr[0], result.stderr_without_colour());
     stderr.swap_remove(0)
 }
 

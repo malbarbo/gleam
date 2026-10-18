@@ -347,6 +347,15 @@ pub struct WasmOutput {
     pub status: std::process::ExitStatus,
 }
 
+impl WasmOutput {
+    /// The stderr without the grey of the locations of `echo`.
+    pub fn stderr_without_colour(&self) -> String {
+        self.stderr
+            .replace("\u{1b}[90m", "")
+            .replace("\u{1b}[39m", "")
+    }
+}
+
 pub fn run_wasm(src: &str, deps: Vec<(&str, &str, &str)>) -> WasmOutput {
     run_wasm_with_config(src, deps, WebAssemblyConfig::default())
 }
@@ -538,7 +547,8 @@ macro_rules! assert_wasm_echo {
         );
         let output = format!(
             "----- SOURCE CODE\n{}\n\n----- STDERR\n{}",
-            $src, result.stderr
+            $src,
+            result.stderr_without_colour()
         );
         insta::assert_snapshot!(insta::internals::AutoName, output, $src);
     }};

@@ -23,7 +23,7 @@ src/my/mod.gleam:9
 1
 src/my/mod.gleam:10
 1
-src/my/mod.gleam:10 "inc"
+src/my/mod.gleam:10 inc
 2
 src/my/mod.gleam:11
 //fn(a) { ... }

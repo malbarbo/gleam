@@ -109,14 +109,7 @@ impl<'a> Generator<'a> {
         message: Option<&TypedExpr>,
     ) {
         let (module, line) = self.source_location(start);
-        let origin = self
-            .all_modules
-            .get(&module)
-            .copied()
-            .unwrap_or(self.module)
-            .type_info
-            .origin;
-        let file = ecow::eco_format!("{}/{module}.gleam", origin.folder_name());
+        let file = self.source_file(&module);
         let function = self.current_function_name.clone();
         let strings = [
             error.name().into(),

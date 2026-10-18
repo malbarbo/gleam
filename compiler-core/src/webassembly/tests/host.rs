@@ -819,7 +819,7 @@ fn host_output_streams() {
 fn capture(f: fn() -> Nil) -> String
 
 pub fn main() {
-    let assert "src/my/mod.gleam:7\n1\n" = capture(fn() {
+    let assert "\u{1b}[90msrc/my/mod.gleam:7\u{1b}[39m\n1\n" = capture(fn() {
       echo 1
       Nil
     })

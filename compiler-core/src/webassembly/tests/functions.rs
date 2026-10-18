@@ -843,7 +843,7 @@ pub fn main() {
         result.stderr
     );
     assert_eq!(
-        result.stderr,
+        result.stderr_without_colour(),
         "src/my/mod.gleam:4\n1\nsrc/my/mod.gleam:8\n2\nsrc/my/mod.gleam:12\n3\n"
     );
 }
@@ -881,7 +881,7 @@ pub fn main() {
         result.stderr
     );
     assert_eq!(
-        result.stderr,
+        result.stderr_without_colour(),
         "src/my/mod.gleam:14\n1\nsrc/my/mod.gleam:4\n2\nsrc/my/mod.gleam:4\n2\nsrc/my/mod.gleam:14\n1\n"
     );
 }
@@ -1146,7 +1146,7 @@ pub fn main() {
         result.stderr
     );
     assert_eq!(
-        result.stderr,
+        result.stderr_without_colour(),
         "src/my/mod.gleam:3\n42\nsrc/my/mod.gleam:3\n43\n"
     );
 }
