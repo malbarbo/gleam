@@ -606,6 +606,7 @@ mod host;
 mod js_strings;
 mod link;
 mod lists;
+mod liveness;
 mod local_closures;
 mod memory;
 mod numbers;
