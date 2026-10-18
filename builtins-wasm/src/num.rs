@@ -218,7 +218,7 @@ pub fn float_parse(s: &str, f32mode: bool) -> Option<f64> {
 // math
 
 pub fn power(base: f64, exponent: f64) -> f64 {
-    libm::pow(base, exponent)
+    crate::pow::pow(base, exponent)
 }
 
 pub fn logarithm(x: f64) -> f64 {

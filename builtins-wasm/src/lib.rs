@@ -12,6 +12,7 @@ extern crate alloc;
 
 pub mod codec;
 pub mod num;
+mod pow;
 pub mod text;
 
 #[cfg(target_arch = "wasm32")]
