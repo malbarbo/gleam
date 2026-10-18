@@ -605,3 +605,66 @@ pub fn guard_binding_in_directly_matching_case_is_not_redeclared_test() {
   let b = 5
   assert b == 5
 }
+
+pub fn float_arithmetic_test() {
+  let float_one = make_float_zero() +. 1.0
+  let float_two = float_one +. float_one
+
+  assert 0
+    == case Nil {
+      _ if float_one +. float_two >. 2.5 -> 0
+      _ -> 1
+    }
+
+  assert 0
+    == case Nil {
+      _ if float_two -. float_one <. 1.5 -> 0
+      _ -> 1
+    }
+
+  assert 0
+    == case Nil {
+      _ if float_two *. float_two == 4.0 -> 0
+      _ -> 1
+    }
+
+  assert 0
+    == case Nil {
+      _ if float_one /. float_two == 0.5 -> 0
+      _ -> 1
+    }
+}
+
+pub fn not_test() {
+  let yes = true()
+  let no = false()
+
+  assert 0
+    == case Nil {
+      _ if !no -> 0
+      _ -> 1
+    }
+
+  assert 1
+    == case Nil {
+      _ if !yes -> 0
+      _ -> 1
+    }
+}
+
+pub fn block_test() {
+  let yes = true()
+  let no = false()
+
+  assert 0
+    == case Nil {
+      _ if { no || yes } && yes -> 0
+      _ -> 1
+    }
+
+  assert 0
+    == case Nil {
+      _ if !{ yes && no } -> 0
+      _ -> 1
+    }
+}
