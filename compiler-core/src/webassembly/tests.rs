@@ -19,6 +19,13 @@ use src_span::LineNumbers;
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// A name for the files of a test that no other test uses, even one of
+/// another process running at the same time.
+pub fn unique_name(prefix: &str) -> String {
+    let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}_{}_{id}", std::process::id())
+}
+
 /// The package of the module of a test: the standard library, which reaches
 /// the builtins, so the tests can declare them.
 pub const TEST_PACKAGE: &str = crate::STDLIB_PACKAGE_NAME;
@@ -376,8 +383,7 @@ pub fn run_wasm_in(
     config: WebAssemblyConfig,
 ) -> WasmOutput {
     let wasm_bytes = compile_wasm_in(package, src, deps, config);
-    let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = std::env::temp_dir().join(format!("gleam_wasm_test_{id}.wasm"));
+    let tmp = std::env::temp_dir().join(format!("{}.wasm", unique_name("gleam_wasm_test")));
     std::fs::write(&tmp, &wasm_bytes).expect("failed to write temp wasm file");
     let output = std::process::Command::new("wasmtime")
         .args(["-W", "function-references=y", "-W", "gc=y"])
@@ -439,8 +445,7 @@ pub fn run_wasm_node_in(
     // its `gleam.mjs` and the modules of the custom types of its modules,
     // and the program and `files` next to its module.
     let (module, dep_modules) = compile_in(package, src, deps.clone());
-    let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("gleam_wasm_js_test_{id}"));
+    let dir = std::env::temp_dir().join(unique_name("gleam_wasm_js_test"));
     let write = |path: &str, contents: &[u8]| {
         let path = dir.join(path);
         let parent = path.parent().expect("a directory");

@@ -1779,7 +1779,7 @@ pub fn main() {
 "#,
         vec![],
     );
-    let path = std::env::temp_dir().join("gleam_wasm_test_main_runs_once.wasm");
+    let path = std::env::temp_dir().join(format!("{}.wasm", super::unique_name("gleam_wasm_test")));
     std::fs::write(&path, &wasm_bytes).expect("failed to write temp wasm file");
     let output = std::process::Command::new("wasmtime")
         .args(["run", "-W", "function-references=y", "-W", "gc=y"])
