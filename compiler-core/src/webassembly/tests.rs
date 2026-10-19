@@ -271,6 +271,42 @@ pub fn wasm_global_names(wasm_bytes: &[u8]) -> Vec<String> {
     names
 }
 
+/// The names of the named locals of each function in the wasm binary, in the
+/// order of their indexes.
+pub fn wasm_local_names(wasm_bytes: &[u8]) -> HashMap<String, Vec<String>> {
+    let mut functions = HashMap::new();
+    let mut locals = vec![];
+    for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
+        if let wasmparser::Payload::CustomSection(section) = payload.expect("valid wasm")
+            && let wasmparser::KnownCustom::Name(name_section) = section.as_known()
+        {
+            for subsection in name_section {
+                let subsection = subsection.expect("valid wasm");
+                if let wasmparser::Name::Function(names) = subsection {
+                    for naming in names {
+                        let naming = naming.expect("valid wasm");
+                        let _ = functions.insert(naming.index, naming.name.to_string());
+                    }
+                } else if let wasmparser::Name::Local(names) = subsection {
+                    for function in names {
+                        let function = function.expect("valid wasm");
+                        let names = function
+                            .names
+                            .into_iter()
+                            .map(|naming| naming.expect("valid wasm").name.to_string())
+                            .collect::<Vec<_>>();
+                        locals.push((function.index, names));
+                    }
+                }
+            }
+        }
+    }
+    locals
+        .into_iter()
+        .map(|(index, names)| (functions.get(&index).cloned().unwrap_or_default(), names))
+        .collect()
+}
+
 /// Count the calls through function references (`call_ref` and
 /// `return_call_ref`) in the code of the wasm binary.
 pub fn count_ref_calls(wasm_bytes: &[u8]) -> usize {

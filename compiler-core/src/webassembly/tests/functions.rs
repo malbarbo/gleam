@@ -3,7 +3,7 @@
 
 use super::{
     compile_wasm, count_ref_calls, run_ok, run_ok_i64, run_wasm, wasm_function_names,
-    wasm_type_names,
+    wasm_local_names, wasm_type_names,
 };
 
 #[test]
@@ -1820,5 +1820,37 @@ pub fn main() {
         result.status.success(),
         "WASM execution failed:\n{}",
         result.stderr
+    );
+}
+
+/// Locals with the same name and location are told apart by primes.
+#[test]
+fn names_of_locals_at_the_same_location() {
+    let src = r#"
+fn id(x: Int) -> Int {
+  x
+}
+
+pub fn divide(a: Int, b: Int, c: Int) -> Int {
+  id(a) / b / c / id(b)
+}
+
+pub fn main() {
+  assert divide(12, 1, 2) == 6
+}
+"#;
+    run_ok(src);
+    let names = wasm_local_names(&compile_wasm(src, vec![]));
+    assert_eq!(
+        names.get("divide").map_or(&[][..], Vec::as_slice),
+        [
+            "a",
+            "b",
+            "c",
+            "div_left@7:2",
+            "div_right@7:18",
+            "div_left@7:2'",
+            "div_left@7:2''"
+        ]
     );
 }

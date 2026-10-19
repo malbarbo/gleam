@@ -345,3 +345,89 @@ pub fn main() {
         .collect::<Vec<_>>();
     assert_eq!(anonymous, []);
 }
+
+/// A value moved to another local is cleared with that local, even when it
+/// comes from a param that can be cleared.
+#[test]
+fn clears_the_local_a_value_is_moved_to() {
+    let cleared = cleared(
+        r#"
+pub fn moved(l: List(Int)) -> Int {
+  let x = l
+  let n = length(x, 0)
+  wrap(n) |> length(0)
+}
+
+pub fn main() {
+  assert moved([1]) == 1
+}
+"#,
+    );
+    assert_eq!(cleared_in(&cleared, "moved"), ["x"]);
+}
+
+/// `&&` evaluates its right operand in one arm of an `if`, and a call or an
+/// allocation there is enough to clear before calling the function.
+#[test]
+fn clears_before_a_call_that_allocates_in_one_operand() {
+    let cleared = cleared(
+        r#"
+fn allocating(flag: Bool, n: Int) -> Bool {
+  flag && length([n], 0) == 1
+}
+
+fn calling(flag: Bool, n: Int) -> Bool {
+  flag && length(build(n, []), 0) == n
+}
+
+pub fn allocates() -> Int {
+  let big = build(1000, [])
+  let n = length(big, 0)
+  case allocating(True, n) {
+    True -> 1
+    False -> 0
+  }
+}
+
+pub fn calls() -> Int {
+  let big = build(1000, [])
+  let n = length(big, 0)
+  case calling(True, n) {
+    True -> 1
+    False -> 0
+  }
+}
+
+pub fn main() {
+  assert allocates() == 1
+  assert calls() == 1
+}
+"#,
+    );
+    assert_eq!(cleared_in(&cleared, "allocates"), ["big"]);
+    assert_eq!(cleared_in(&cleared, "calls"), ["big"]);
+}
+
+/// Nothing is read after a panic, so a local read only after the other arm
+/// is cleared at the start of the arm that panics, before the calls that
+/// build the error.
+#[test]
+fn clears_in_the_arm_that_panics() {
+    let cleared = cleared(
+        r#"
+pub fn or_panic(flag: Bool) -> Int {
+  let big = build(1000, [])
+  let n = case flag || panic {
+    True -> length(big, 0)
+    False -> 0
+  }
+  wrap(n) |> length(0)
+}
+
+pub fn main() {
+  assert or_panic(True) == 1000
+}
+"#,
+    );
+    assert_eq!(cleared_in(&cleared, "or_panic"), ["big", "big"]);
+}

@@ -962,3 +962,53 @@ pub fn main() {
     });
     assert!(matches!(types.as_slice(), [f, g] if f == g), "{types:?}");
 }
+
+/// A closure that calls a local function and then uses it as a value
+/// captures its closure, which is the same value outside.
+#[test]
+fn called_then_used_as_a_value_in_a_closure() {
+    run(r#"
+pub fn main() {
+  let n = 10
+  let f = fn(x) { x + n }
+  let g = fn() { #(f(1), f) }
+  assert g().0 == 11
+  assert g().1 == f
+}
+"#);
+}
+
+/// Every local function is called directly, without a closure: after other
+/// local functions, in the value of a `let` and in another local function.
+#[test]
+fn direct_calls_wherever_defined() {
+    let src = r#"
+pub fn main() {
+  let n = 1
+  let f = fn(x) { x + n }
+  let g = fn(x) { f(x) * n }
+  let r = {
+    let h = fn(x) { x - n }
+    h(2)
+  }
+  let k = fn(x) {
+    let m = fn(y) { y + x + n }
+    m(1)
+  }
+  assert f(2) + g(3) + r + k(4) == 14
+}
+"#;
+    run(src);
+    let wasm = super::compile_wasm(src, vec![]);
+    assert_eq!(super::count_ref_calls(&wasm), 0);
+    super::for_each_operator(&wasm, |function, op| {
+        assert!(
+            function != "main"
+                || !matches!(
+                    op,
+                    wasmparser::Operator::StructNew { .. } | wasmparser::Operator::RefFunc { .. }
+                ),
+            "main allocates a closure"
+        );
+    });
+}
