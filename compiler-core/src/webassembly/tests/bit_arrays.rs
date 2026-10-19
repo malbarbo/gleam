@@ -1379,3 +1379,78 @@ pub fn main() {
 }
 "#);
 }
+
+/// A bit array whose segments are all literals, maybe of constants, is a
+/// constant: the function that creates it only reads a global.
+#[test]
+fn literals_are_constants() {
+    let src = r#"
+import bit_array
+
+const k = 5
+
+const c = <<1, 2>>
+
+pub fn ints() -> BitArray {
+  <<258:16-little, -2:16, 1000:12-little>>
+}
+
+pub fn large_int() -> BitArray {
+  <<1:size(65536)>>
+}
+
+pub fn floats() -> BitArray {
+  <<2.0:float, 1.5:32-float>>
+}
+
+pub fn strings() -> BitArray {
+  <<"a":utf8, "b":utf16, "c":utf32>>
+}
+
+pub fn bits() -> BitArray {
+  <<<<3>>:bits-size(8), c:bits-size(12), c:bits>>
+}
+
+pub fn constants() -> BitArray {
+  <<-k, c:bits>>
+}
+
+pub fn main() {
+  let assert "<<2, 1, 255, 254, 232, 3:size(4)>>" = bit_array.inspect(ints())
+  let assert 65_536 = bit_array.bit_size(large_int())
+  let assert "<<64, 0, 0, 0, 0, 0, 0, 0, 63, 192, 0, 0>>" =
+    bit_array.inspect(floats())
+  let assert "<<97, 0, 98, 0, 0, 0, 99>>" = bit_array.inspect(strings())
+  let assert "<<3, 1, 0, 16, 2:size(4)>>" = bit_array.inspect(bits())
+  let assert "<<251, 1, 2>>" = bit_array.inspect(constants())
+  Nil
+}
+"#;
+    let _ = run(src);
+    let wasm = compile_wasm(src, vec![(TEST_PACKAGE, "bit_array", BIT_ARRAY)]);
+    let functions = [
+        "ints",
+        "large_int",
+        "floats",
+        "strings",
+        "bits",
+        "constants",
+    ];
+    let mut found = vec![];
+    for_each_operator(&wasm, |function, op| {
+        if functions.contains(&function) {
+            found.push(function.to_string());
+            assert!(
+                matches!(
+                    op,
+                    wasmparser::Operator::GlobalGet { .. }
+                        | wasmparser::Operator::RefAsNonNull
+                        | wasmparser::Operator::End
+                ),
+                "{function} creates its bit array with {op:?}"
+            );
+        }
+    });
+    found.dedup();
+    assert_eq!(found, functions);
+}
