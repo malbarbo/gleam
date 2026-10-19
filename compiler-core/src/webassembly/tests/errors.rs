@@ -37,6 +37,23 @@ pub fn main() {
     );
 }
 
+/// The names that the name of an unknown builtin function is compared with to
+/// suggest one: the builtins of every kind, as externals name them.
+#[test]
+fn names_of_the_builtin_functions() {
+    let names = crate::webassembly::builtin_function_names();
+    for name in [
+        "_string_concat",
+        "_int_to_i32",
+        "_inspect",
+        "_hash",
+        "_dynamic_cast",
+        "_array_get",
+    ] {
+        assert!(names.iter().any(|n| n == name), "{name} in {names:?}");
+    }
+}
+
 #[test]
 fn unknown_glued_builtin_function() {
     assert_wasm_error!(

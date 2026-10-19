@@ -73,3 +73,18 @@ fn module_without_builtins_has_none_of_their_items() {
         assert!(!has_section(&wasm, id), "{section} section");
     }
 }
+
+/// The section that records where the items of builtins-wasm are is not in
+/// the emitted module.
+#[test]
+fn builtins_leave_no_custom_section_of_their_own() {
+    let wasm = compile_wasm(BUILTINS, vec![]);
+    let mut customs = vec![];
+    for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
+        if let wasmparser::Payload::CustomSection(section) = payload.expect("valid wasm") {
+            customs.push(section.name().to_string());
+        }
+    }
+    customs.sort();
+    assert_eq!(customs, ["name", "producers", "target_features"]);
+}

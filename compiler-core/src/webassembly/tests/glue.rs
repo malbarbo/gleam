@@ -217,3 +217,33 @@ pub fn lowercase(a: String) -> String
     );
     assert!(output.status.success(), "{}", output.stderr);
 }
+
+/// A Rust builtin can't take or return a value of a type that has no layout
+/// in linear memory, also inside a `Result`.
+#[test]
+fn rust_builtins_with_unsupported_types() {
+    for type_ in ["Result(Int, Color)", "Result(Color, Nil)", "List(Color)"] {
+        let error = super::compile_wasm_error(&format!(
+            r#"
+pub type Color {{
+    Red
+}}
+
+@external(webassembly, "builtins", "int_parse")
+fn int_parse(a: String) -> {type_}
+
+pub fn main() {{
+    int_parse("1")
+}}
+"#
+        ));
+        assert!(
+            matches!(
+                error,
+                crate::webassembly::Error::UnsupportedFeature { ref feature, .. }
+                    if feature.contains("in a Rust builtin")
+            ),
+            "{type_}: {error:?}"
+        );
+    }
+}

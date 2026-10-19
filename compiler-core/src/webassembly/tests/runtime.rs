@@ -249,6 +249,30 @@ pub fn main() {
     );
 }
 
+/// Only a dict whose keys and values are both `Dynamic` is a dict of
+/// dynamics as it is, the others have their keys and values cast.
+#[test]
+fn dynamic_cast_of_dicts() {
+    let _ = run_dynamic(
+        r#"
+import dict
+import dynamic
+
+pub fn main() {
+  let keys = dict.from_list([#(dynamic.cast("k"), 7)])
+  let assert Ok(Ok(v)) = dynamic.index(dynamic.cast(keys), dynamic.cast("k"))
+  let assert Ok(7) = dynamic.int(v)
+  let values = dict.from_list([#(8, dynamic.cast("v"))])
+  let assert Ok(Ok(v)) = dynamic.index(dynamic.cast(values), dynamic.cast(8))
+  let assert Ok("v") = dynamic.string(v)
+  let both = dict.from_list([#(dynamic.cast(9), dynamic.cast(10))])
+  let assert Ok(Ok(v)) = dynamic.index(dynamic.cast(both), dynamic.cast(9))
+  let assert Ok(10) = dynamic.int(v)
+}
+"#,
+    );
+}
+
 /// An `Array` is an array, as a tuple, with its elements cast too. Only the
 /// runtime has arrays, so the modules are in its package.
 #[test]

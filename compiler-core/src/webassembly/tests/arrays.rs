@@ -355,8 +355,8 @@ pub fn main() { Nil }
     assert!(
         matches!(
             error,
-            crate::webassembly::Error::WrongBuiltinFunctionSignature { ref name, .. }
-                if name == "_array_get"
+            crate::webassembly::Error::WrongBuiltinFunctionSignature { ref name, ref expected, .. }
+                if name == "_array_get" && expected == "fn(Array(a), Int) -> a"
         ),
         "{error:?}"
     );
@@ -404,8 +404,8 @@ pub fn main() { Nil }
     assert!(
         matches!(
             error,
-            crate::webassembly::Error::WrongBuiltinFunctionSignature { ref name, .. }
-                if name == "_array_set"
+            crate::webassembly::Error::WrongBuiltinFunctionSignature { ref name, ref expected, .. }
+                if name == "_array_set" && expected == "fn(Array(a), Int, a) -> Array(a)"
         ),
         "{error:?}"
     );
