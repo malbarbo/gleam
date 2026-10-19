@@ -901,6 +901,30 @@ pub fn main() {{
     }
 }
 
+/// A panic in the runtime is reported at its line in the module of the
+/// runtime.
+#[test]
+fn runtime_panic_location() {
+    let message = "Bit array segment size is larger than its value";
+    let line = include_str!("../runtime/bit_array.gleam")
+        .lines()
+        .position(|line| line.contains(message))
+        .expect("panic in the runtime")
+        + 1;
+    let result = run_wasm(
+        r#"
+pub fn main() {
+  let x = <<1, 2>>
+  <<x:bits-size(24)>>
+}
+"#,
+        vec![],
+    );
+    assert!(!result.status.success());
+    let location = format!("src/builtins/bit_array.gleam:{line}");
+    assert!(result.stderr.contains(&location), "{}", result.stderr);
+}
+
 /// The externals of the runtime are checked with its types, so a module
 /// that declares them, like `gleam/bit_array` in the tests of the standard
 /// library, compiles on its own.

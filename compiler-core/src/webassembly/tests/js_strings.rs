@@ -55,6 +55,26 @@ fn parse_int(a: String) -> Result(Int, Nil)
 fn lowercase(a: String) -> String
 "#;
 
+/// A string is an `externref`, which a recursive type keeps when its types
+/// are moved to their rec group.
+#[test]
+fn recursive_type_with_a_string() {
+    let _ = run_ok(
+        r#"
+type Tree {
+  Node(name: String, children: List(Tree), f: fn(Tree) -> String)
+}
+
+pub fn main() {
+  let name = fn(t: Tree) { t.name }
+  let t = Node("a", [Node("b", [], name)], name)
+  assert t.f(t) == "a"
+}
+"#,
+        &[],
+    );
+}
+
 #[test]
 fn literals_and_constants() {
     let _ = run_ok(

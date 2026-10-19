@@ -196,3 +196,35 @@ pub fn main() {
 "#,
     );
 }
+
+/// A pattern with a discarded tail reads each of its elements from its own
+/// cell, and does not check the rest after the last one.
+#[test]
+fn list_pattern_with_a_discarded_tail() {
+    run_ok(
+        r#"
+fn first_two(l: List(Int)) -> Result(#(Int, Int), Nil) {
+  case l {
+    [a, b, ..] -> Ok(#(a, b))
+    _ -> Error(Nil)
+  }
+}
+
+fn third(l: List(Int)) -> Result(Int, Nil) {
+  case l {
+    [_, _, c, ..] -> Ok(c)
+    _ -> Error(Nil)
+  }
+}
+
+pub fn main() {
+  assert first_two([1, 2]) == Ok(#(1, 2))
+  assert first_two([1, 2, 3]) == Ok(#(1, 2))
+  assert first_two([1]) == Error(Nil)
+  assert third([1, 2, 3]) == Ok(3)
+  assert third([1, 2, 3, 4]) == Ok(3)
+  assert third([1, 2]) == Error(Nil)
+}
+"#,
+    );
+}

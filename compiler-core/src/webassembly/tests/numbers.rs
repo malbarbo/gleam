@@ -79,6 +79,68 @@ pub fn main() {
     );
 }
 
+/// The smallest Int divided by a literal -1 wraps, as when the divisor is
+/// a variable, instead of trapping like the wasm instruction.
+#[test]
+fn int_div_by_minus_one() {
+    let src = |min: &str| {
+        format!(
+            r#"
+fn id(x: a) -> a {{
+  x
+}}
+
+pub fn main() {{
+  let min = id({min})
+  let minus_one = id(-1)
+  assert min / -1 == min
+  assert min / -1 == min / minus_one
+  assert min % -1 == 0
+  assert id(7) / -1 == -7
+}}
+"#
+        )
+    };
+    run_ok(&src("-2147483648"));
+    super::run_ok_i64(&src("-9223372036854775808"));
+}
+
+/// A division by a literal that is not 0, nor -1 for `/`, is the wasm
+/// instruction, without the checks of the division by a variable.
+#[test]
+fn division_by_safe_literals_has_no_checks() {
+    let wasm = super::compile_wasm(
+        r#"
+pub fn div(a: Int) -> Int {
+  a / 3
+}
+
+pub fn rem(a: Int) -> Int {
+  a % -1
+}
+
+pub fn fdiv(a: Float) -> Float {
+  a /. 2.0
+}
+
+pub fn checked(a: Int, b: Int) -> Int {
+  a / b
+}
+"#,
+        vec![],
+    );
+    let mut ifs: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    super::for_each_operator(&wasm, |function, op| {
+        if matches!(op, wasmparser::Operator::If { .. }) {
+            *ifs.entry(function.to_string()).or_default() += 1;
+        }
+    });
+    assert_eq!(ifs.get("div"), None);
+    assert_eq!(ifs.get("rem"), None);
+    assert_eq!(ifs.get("fdiv"), None);
+    assert!(ifs.contains_key("checked"), "{ifs:?}");
+}
+
 #[test]
 fn int_negation() {
     run_ok(

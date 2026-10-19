@@ -719,6 +719,34 @@ pub fn main() { size(1) }
     );
 }
 
+/// The type of an external of the runtime must have the types of the
+/// function of the runtime, of the same module and name, and with the same
+/// arguments.
+#[test]
+fn runtime_external_with_other_types() {
+    for (name, signature) in [
+        ("dict_size", "(dict: Dict(k, v)) -> Float"),
+        ("dict_get", "(dict: Dict(k, v), key: k) -> Result(Int, v)"),
+    ] {
+        let error = super::compile_wasm_error(&format!(
+            r#"
+{DICT}
+
+@external(webassembly, "builtins", "{name}")
+fn f{signature}
+"#
+        ));
+        assert!(
+            matches!(
+                error,
+                crate::webassembly::Error::WrongBuiltinFunctionSignature { name: ref got, .. }
+                    if got == name
+            ),
+            "{name}{signature}: {error:?}"
+        );
+    }
+}
+
 #[test]
 fn runtime_external_with_a_specific_signature() {
     let _ = run_dict(

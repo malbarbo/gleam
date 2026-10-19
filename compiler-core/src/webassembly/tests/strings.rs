@@ -15,6 +15,27 @@ fn run_ok(src: &str) {
     );
 }
 
+/// The global of a string literal is named after its first characters, the
+/// ones that are not ASCII letters or digits replaced by `_`.
+#[test]
+fn string_literal_global_names() {
+    let wasm = super::compile_wasm(
+        r#"
+pub fn main() {
+  ["hello, world!", "abcdefghijklmnopqrstuvwxyz"]
+}
+"#,
+        vec![],
+    );
+    let tags = super::wasm_global_names(&wasm)
+        .into_iter()
+        .filter(|name| name.starts_with("string@"))
+        .filter_map(|name| Some(name.split_once('<')?.1.trim_end_matches('>').to_string()))
+        .collect::<Vec<_>>();
+    assert!(tags.contains(&"hello__world_".to_string()), "{tags:?}");
+    assert!(tags.contains(&"abcdefghijklmnop".to_string()), "{tags:?}");
+}
+
 #[test]
 fn int_to_utf_codepoint() {
     run_ok(

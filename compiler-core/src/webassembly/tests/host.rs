@@ -155,6 +155,54 @@ pub fn id(a: a) -> a
     assert_eq!(exports, vec!["add", "nothing_test"]);
 }
 
+/// The public constants of the module are exported, also when the module
+/// does not use them, and so are the values of its public types without
+/// fields, but not those of the modules it imports.
+#[test]
+fn public_constants_and_values_are_exported() {
+    let wasm = super::compile_wasm(
+        r#"
+import other.{Big}
+
+pub type Color {
+  Red
+  Green
+}
+
+pub const answer = 42
+
+pub const greeting = "hi"
+
+pub fn main() {
+  Big
+}
+"#,
+        vec![(
+            super::TEST_PACKAGE,
+            "other",
+            r#"
+pub type Size {
+  Small
+  Big
+}
+"#,
+        )],
+    );
+    let mut exports = vec![];
+    for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
+        if let Ok(wasmparser::Payload::ExportSection(reader)) = payload {
+            for export in reader {
+                let export = export.expect("an export");
+                if export.kind == wasmparser::ExternalKind::Global {
+                    exports.push(export.name.to_string());
+                }
+            }
+        }
+    }
+    exports.sort();
+    assert_eq!(exports, vec!["Green", "Red", "answer", "greeting"]);
+}
+
 /// Runs `src` in Node.js next to the module `ffi.mjs` with the source `ffi`,
 /// with UTF-8 and JavaScript strings, and 64 and 32-bit ints.
 #[track_caller]

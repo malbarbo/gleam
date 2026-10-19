@@ -178,6 +178,67 @@ pub fn main() {
     );
 }
 
+/// The generic builtins take one value of any type, and return their type.
+#[test]
+fn wrong_signatures_of_generic_builtins() {
+    for (name, signature) in [
+        ("_hash", "(a: Int) -> Int"),
+        ("_hash", "(a: a, b: b) -> Int"),
+        ("_hash", "(a: a) -> String"),
+        ("_dynamic_cast", "(a: Int) -> Dynamic"),
+        ("_dynamic_cast", "(a: a, b: b) -> Dynamic"),
+        ("_dynamic_cast", "(a: a) -> Int"),
+        ("_inspect", "(a: Int) -> String"),
+        ("_inspect", "(a: a) -> Int"),
+    ] {
+        let error = super::compile_wasm_error(&format!(
+            r#"
+@external(webassembly, "builtins", "Dynamic")
+pub type Dynamic
+
+@external(webassembly, "builtins", "{name}")
+fn f{signature}
+"#
+        ));
+        assert!(
+            matches!(
+                error,
+                crate::webassembly::Error::WrongBuiltinFunctionSignature { name: ref got, .. }
+                    if got == name
+            ),
+            "{name}{signature}: {error:?}"
+        );
+    }
+}
+
+/// An invalid external type of another module is left out, and fails only
+/// where it is used.
+#[test]
+fn invalid_external_type_of_another_module() {
+    let output = super::run_wasm(
+        r#"
+import other
+
+pub fn main() {
+  assert other.one() == 1
+}
+"#,
+        vec![(
+            super::TEST_PACKAGE,
+            "other",
+            r#"
+@external(webassembly, "builtins", "F128")
+pub type MyFloat
+
+pub fn one() -> Int {
+  1
+}
+"#,
+        )],
+    );
+    assert!(output.status.success(), "{}", output.stderr);
+}
+
 #[test]
 fn wrong_external_function_arity() {
     assert_wasm_error!(

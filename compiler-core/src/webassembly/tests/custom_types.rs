@@ -1341,6 +1341,71 @@ pub fn main() {
     );
 }
 
+/// A recursive type defined inside the definition of another type that is
+/// not recursive has its own rec group, without the other type.
+#[test]
+fn recursive_type_inside_another_type() {
+    let wasm = compile_wasm(
+        r#"
+type Outer {
+  Outer(inner: Inner)
+}
+
+type Inner {
+  Inner(next: fn() -> Inner)
+}
+
+pub fn main() {
+  let o = Outer(Inner(fn() { panic }))
+  let _ = o.inner
+  0
+}
+"#,
+        vec![],
+    );
+    let mut names = std::collections::HashMap::new();
+    let mut groups = vec![];
+    for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
+        let payload = payload.expect("valid wasm");
+        if let wasmparser::Payload::TypeSection(reader) = payload {
+            groups.extend(reader.into_iter().map(|group| group.expect("rec group")));
+        } else if let wasmparser::Payload::CustomSection(section) = payload
+            && let wasmparser::KnownCustom::Name(name_section) = section.as_known()
+        {
+            for subsection in name_section {
+                if let wasmparser::Name::Type(type_names) = subsection.expect("valid wasm") {
+                    for naming in type_names {
+                        let naming = naming.expect("valid wasm");
+                        let _ = names.insert(naming.index, naming.name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let mut index = 0;
+    let mut group_names = vec![];
+    for group in &groups {
+        let size = group.types().len() as u32;
+        group_names.push(
+            (index..index + size)
+                .filter_map(|i| names.get(&i).cloned())
+                .collect::<Vec<_>>(),
+        );
+        index += size;
+    }
+    let outer = group_names
+        .iter()
+        .find(|names| names.contains(&"Outer".to_string()))
+        .expect("group of Outer");
+    assert_eq!(outer, &["Outer"]);
+    assert!(
+        group_names
+            .iter()
+            .any(|names| names.contains(&"Inner".to_string())),
+        "{group_names:?}"
+    );
+}
+
 #[test]
 fn recursive_type_rec_group_without_shared_types() {
     // The supertype of Result is created first in the definition of S, but it is not moved to

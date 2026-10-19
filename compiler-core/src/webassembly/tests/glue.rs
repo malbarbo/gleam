@@ -185,6 +185,32 @@ pub fn main() {
     );
 }
 
+/// A function of builtins-wasm whose name starts with `_` is called without
+/// glue, with the wasm values of the external types.
+#[test]
+fn rust_with_wasm_values() {
+    run_ok(
+        r#"
+@external(webassembly, "builtins", "I32")
+pub type I32
+
+@external(webassembly, "builtins", "_int_to_i32")
+fn to_i32(a: Int) -> I32
+
+@external(webassembly, "builtins", "_i32_to_int")
+fn to_int(a: I32) -> Int
+
+@external(webassembly, "builtins", "_i32_is_codepoint")
+fn is_codepoint(a: I32) -> I32
+
+pub fn main() {
+  assert to_int(is_codepoint(to_i32(65))) == 1
+  assert to_int(is_codepoint(to_i32(0xD800))) == 0
+}
+"#,
+    );
+}
+
 #[test]
 fn unused_builtins_are_removed() {
     // The Rust exports and their data are not roots of the program.
