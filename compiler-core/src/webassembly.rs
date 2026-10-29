@@ -104,6 +104,8 @@ const BUILTINS_WASM: &[u8] =
     include_bytes!("../../builtins-wasm/target/wasm32-unknown-unknown/release/builtins_wasm.wasm");
 
 const MAIN: &str = "main";
+/// The module of the imports of WASI.
+const WASI_MODULE: &str = "wasi_snapshot_preview1";
 const BUILTINS_MODULE: &str = "builtins";
 const INSPECT: &str = "_inspect";
 
@@ -275,10 +277,22 @@ pub fn module(
             return Err(Error::ReservedModuleName { name: name.clone() });
         }
     }
-    let mut generator =
-        Generator::new(module, line_numbers, &all_modules, all_line_numbers, config);
-    generator.runtime = runtime;
-    generator.compile()
+    let generator = || {
+        let mut generator =
+            Generator::new(module, line_numbers, &all_modules, all_line_numbers, config);
+        generator.runtime = runtime;
+        generator
+    };
+    match generator().compile()? {
+        Some(wasm) => Ok(wasm),
+        // None of the functions of the host that the program declares is
+        // called, so it is generated again without the host.
+        None => {
+            let mut generator = generator();
+            generator.javascript_host = false;
+            Ok(generator.compile()?.expect("a program without the host"))
+        }
+    }
 }
 
 /// `module` and the modules it imports, directly or not: the modules of the
@@ -760,7 +774,10 @@ struct Generator<'a> {
     current_function_name: EcoString,
     /// `_panic`, when it is called, see `panic`.
     panic: Option<FunctionId>,
-    /// Whether the program can run in a JavaScript host, see `panic`.
+    /// Whether the program runs in a JavaScript host, see `panic`: always
+    /// with JavaScript strings, and otherwise when it calls a function of the
+    /// host, which is guessed from the ones it declares and checked by
+    /// `compile`.
     javascript_host: bool,
 }
 
@@ -1047,13 +1064,30 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn compile(mut self) -> Result<Vec<u8>, Error> {
+    /// The program, or `None` when it was generated for a JavaScript host,
+    /// which `javascript_host` guesses from the functions of the host that
+    /// it declares, but it does not import any.
+    fn compile(mut self) -> Result<Option<Vec<u8>>, Error> {
         let start = self.generate()?;
+        if self.javascript_host && !matches!(self.string, StringType::Js(_)) && !self.imports_host()
+        {
+            return Ok(None);
+        }
+        self.code_panic();
         self.wasm_module.name = Some(self.module.name.to_string());
         self.wasm_module.start = Some(start);
         let link = self.linker.eliminate_dead_code(&mut self.wasm_module);
         liveness::clear_dead_locals(&mut self.wasm_module);
-        Ok(link::emit(&mut self.wasm_module, link))
+        Ok(Some(link::emit(&mut self.wasm_module, link)))
+    }
+
+    /// Whether the program imports anything other than WASI, so it runs in
+    /// a JavaScript host.
+    fn imports_host(&self) -> bool {
+        self.wasm_module
+            .imports
+            .iter()
+            .any(|import| import.module != WASI_MODULE)
     }
 
     fn generate(&mut self) -> Result<FunctionId, Error> {
@@ -1075,7 +1109,6 @@ impl<'a> Generator<'a> {
         self.functions();
         let constants = self.function_constants();
         let start = self.function_start(constants);
-        self.code_panic();
         match self.error.take() {
             Some(error) => Err(error),
             None => Ok(start),

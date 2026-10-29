@@ -93,9 +93,6 @@ const PANIC: &str = "_panic";
 /// The strings that `_panic` prints between its params.
 const PRINTED: [&str; 4] = [" at ", ":", "\n  ", "\n"];
 
-/// The module of the imports of WASI.
-const WASI_MODULE: &str = "wasi_snapshot_preview1";
-
 impl<'a> Generator<'a> {
     /// Calls `_panic` for `error` at `start`, with the message `message`, or
     /// the one of the JavaScript target when it has none.
@@ -300,11 +297,6 @@ impl<'a> Generator<'a> {
         let Some(panic) = self.panic else {
             return;
         };
-        let js_host = self
-            .wasm_module
-            .imports
-            .iter()
-            .any(|import| import.module != WASI_MODULE);
         let string_type = type_::string();
         let dynamic_type = self.runtime_named_type(DYNAMIC_MODULE, "Dynamic", vec![]);
         let types = [&string_type; 6].into_iter().chain([&dynamic_type]);
@@ -318,7 +310,7 @@ impl<'a> Generator<'a> {
             .collect();
         let mut function = Function::new(self, PANIC, &params, &[]);
         let mut instructions = function.extend_instructions(self);
-        if js_host {
+        if self.javascript_host {
             let mut js_types = vec![];
             for (param, type_) in params.iter().zip(types) {
                 let _ = instructions.local_get(*param);

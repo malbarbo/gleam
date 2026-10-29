@@ -139,6 +139,35 @@ pub fn run() -> Nil
     assert!(compile(vec![unused]) == compile(vec![]));
 }
 
+/// A function of the host that the program declares but does not call does
+/// not change the program: its errors are still printed through WASI, so
+/// it does not build the details of the errors of a JavaScript host.
+#[test]
+fn external_of_the_host_not_called() {
+    let compile = |src| {
+        super::compile_wasm_in(
+            "thepackage",
+            src,
+            vec![],
+            super::wasm_config(WasmInt::I32, WasmFloat::F64),
+        )
+    };
+    let main = r#"
+pub fn main() {
+    let assert Ok(x) = Error(1)
+    x
+}
+"#;
+    // After `main`, so that the lines of the errors are the same.
+    let declared = format!(
+        r#"{main}
+@external(webassembly, "./ffi.mjs", "run")
+fn run() -> Nil
+"#
+    );
+    assert!(compile(&declared) == compile(main));
+}
+
 /// Each function of the host is imported once.
 #[test]
 fn external_of_the_host_used_twice() {
