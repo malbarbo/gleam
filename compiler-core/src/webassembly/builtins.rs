@@ -194,10 +194,12 @@ pub(super) enum BuiltinFunctionExternal {
     BytesGet,
     #[strum(serialize = "_bytes_set")]
     BytesSet,
-    #[strum(serialize = "_bytes_copy")]
-    BytesCopy,
-    #[strum(serialize = "_bytes_copy_shifted")]
-    BytesCopyShifted,
+    #[strum(serialize = "_bytes_is_utf8")]
+    BytesIsUtf8,
+    #[strum(serialize = "_bits_copy")]
+    BitsCopy,
+    #[strum(serialize = "_bytes_write_string")]
+    BytesWriteString,
     #[strum(serialize = "_bytes_to_memory")]
     BytesToMemory,
     #[strum(serialize = "_bytes_from_memory")]
@@ -292,42 +294,43 @@ impl BuiltinFunctionExternal {
                 vec![string()],
                 result(tuple(vec![string(), string()]), nil()),
             ),
-            B::BytesNew => return (vec![int().into()], ext("Bytes")),
-            B::BytesSize => return (vec![ext("Bytes")], int().into()),
-            B::BytesGet => return (vec![ext("Bytes"), int().into()], int().into()),
+            B::BytesNew => return (vec![int().into()], ext("Words")),
+            B::BytesSize => return (vec![ext("Words")], int().into()),
+            B::BytesGet => return (vec![ext("Words"), int().into()], int().into()),
             B::BytesSet => {
-                return (vec![ext("Bytes"), int().into(), int().into()], nil().into());
+                return (vec![ext("Words"), int().into(), int().into()], nil().into());
             }
-            B::BytesCopy => {
+            B::BytesIsUtf8 => {
+                return (
+                    vec![ext("Words"), int().into(), int().into()],
+                    bool().into(),
+                );
+            }
+            B::BitsCopy => {
                 let params = vec![
-                    ext("Bytes"),
+                    ext("Words"),
                     int().into(),
-                    ext("Bytes"),
+                    ext("Words"),
                     int().into(),
                     int().into(),
                 ];
                 return (params, nil().into());
             }
-            B::BytesCopyShifted => {
-                let params = vec![
-                    ext("Bytes"),
-                    int().into(),
-                    ext("Bytes"),
-                    int().into(),
-                    int().into(),
-                    int().into(),
-                ];
-                return (params, nil().into());
+            B::BytesWriteString => {
+                return (
+                    vec![ext("Words"), int().into(), string().into()],
+                    nil().into(),
+                );
             }
             B::BytesToMemory => {
-                let params = vec![ext("Bytes"), int().into(), int().into(), ext("I32")];
+                let params = vec![ext("Words"), int().into(), int().into(), ext("I32")];
                 return (params, nil().into());
             }
-            B::BytesFromMemory => return (vec![ext("I32"), int().into()], ext("Bytes")),
+            B::BytesFromMemory => return (vec![ext("I32"), int().into()], ext("Words")),
             B::StringBits => (vec![string()], bit_array()),
             B::BytesToString => {
                 return (
-                    vec![ext("Bytes"), int().into(), int().into()],
+                    vec![ext("Words"), int().into(), int().into()],
                     string().into(),
                 );
             }
@@ -412,6 +415,28 @@ impl<'a> Generator<'a> {
             .i32_const(0)
             .i32_const(length)
             .array_new_data(self.bytes.index, data);
+    }
+
+    /// Pushes new words with `bytes` (see `WordsType`), which are put in a
+    /// data segment: the bytes of each word in the reverse order, as an
+    /// array of `i64` is read from it in little endian.
+    pub(super) fn push_words(&mut self, instructions: &mut Instructions<'_, '_>, bytes: Vec<u8>) {
+        let data: Vec<u8> = bytes
+            .chunks(8)
+            .flat_map(|chunk| {
+                let word = chunk
+                    .iter()
+                    .enumerate()
+                    .fold(0, |word, (i, byte)| word | u64::from(*byte) << (56 - 8 * i));
+                word.to_le_bytes()
+            })
+            .collect();
+        let length = (data.len() / 8) as i32;
+        let data = self.wasm_module.data.add(walrus::DataKind::Passive, data);
+        let _ = instructions
+            .i32_const(0)
+            .i32_const(length)
+            .array_new_data(self.words.index, data);
     }
 
     /// Creates the constants of the module. It is generated before the start

@@ -688,6 +688,116 @@ pub fn main() {
 
 /// A bit array extended by the segments after it, in the same bytes when it
 /// ends where they are written, changes no other bit array.
+/// Bits copied across the words of `Words`: the bits of `<<x:bits,
+/// y:bits>>` and of a concatenation, for sizes and starts around the
+/// boundaries of the words, are compared one by one with those of `x` and
+/// `y`.
+#[test]
+fn copies_across_words() {
+    let _ = run(r#"
+import bit_array
+
+fn bits(n: Int, seed: Int, acc: BitArray) -> BitArray {
+  case n {
+    0 -> acc
+    _ -> {
+      let b = { n * seed + n / 3 } % 2
+      bits(n - 1, seed, <<acc:bits, b:1>>)
+    }
+  }
+}
+
+fn bit(bits: BitArray, i: Int) -> Int {
+  let assert <<_:size(i), b:1, _:bits>> = bits
+  b
+}
+
+fn check(z: BitArray, at: Int, x: BitArray, i: Int) -> Nil {
+  case i < bit_array.bit_size(x) {
+    False -> Nil
+    True -> {
+      let assert True = bit(z, at + i) == bit(x, i)
+      check(z, at, x, i + 1)
+    }
+  }
+}
+
+fn each(items: List(Int), f: fn(Int) -> Nil) -> Nil {
+  case items {
+    [] -> Nil
+    [item, ..rest] -> {
+      f(item)
+      each(rest, f)
+    }
+  }
+}
+
+pub fn main() {
+  let sizes = [0, 1, 7, 8, 9, 56, 63, 64, 65, 127, 129, 200]
+  let starts = [0, 1, 5, 8, 61, 64, 67]
+  use a <- each(sizes)
+  use start <- each(starts)
+  let assert <<_:size(start), x:bits>> = bits(a + start, 7, <<>>)
+  use b <- each(sizes)
+  let assert <<_:size(3), y:bits>> = bits(b + 3, 5, <<>>)
+  let z = <<x:bits, y:bits>>
+  let assert True = bit_array.bit_size(z) == a + b
+  check(z, 0, x, 0)
+  check(z, a, y, 0)
+  let w = bit_array.concat([y, x, y])
+  check(w, 0, y, 0)
+  check(w, b, x, 0)
+  check(w, a + b, y, 0)
+}
+"#);
+}
+
+/// The bytes of strings written to `Words` from each byte of a word, and
+/// read back.
+#[test]
+fn strings_across_words() {
+    let _ = run(r#"
+import bit_array
+
+pub fn main() {
+  let s = "0123456789abcdefghijklmnopqrstuvwxyzé😀"
+  let n = bit_array.byte_size(bit_array.from_string(s))
+  use at <- each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17])
+  let prefix = <<0:size(at * 8)>>
+  let x = <<prefix:bits, s:utf8, "!":utf8>>
+  let assert True = bit_array.byte_size(x) == at + n + 1
+  let assert Ok(t) = bit_array.slice(x, at, n)
+  let assert Ok(u) = bit_array.to_string(t)
+  let assert True = u == s
+  let assert <<_:size(at)-bytes, v:bytes-size(n), "!":utf8>> = x
+  let assert True = v == bit_array.from_string(s)
+  // a string after bits that are not whole bytes
+  let y = <<1:3, s:utf8>>
+  let assert <<1:3, w:bytes-size(n)>> = y
+  let assert True = w == bit_array.from_string(s)
+  let assert True = bit_array.is_utf8(w)
+  // invalid bytes after whole words of ASCII
+  let assert False = bit_array.is_utf8(<<prefix:bits, s:utf8, 0xE2, 0x82>>)
+  let assert False =
+    bit_array.is_utf8(<<prefix:bits, s:utf8, 0xE2, 0x28, 0xA1, s:utf8>>)
+  let assert False = bit_array.is_utf8(<<prefix:bits, s:utf8, 0x80, s:utf8>>)
+  let assert <<1:3, z:bytes>> = <<1:3, s:utf8, 0xFF>>
+  let assert False = bit_array.is_utf8(z)
+  Nil
+}
+
+fn each(items: List(Int), f: fn(Int) -> Nil) -> Nil {
+  case items {
+    [] -> Nil
+    [item, ..rest] -> {
+      f(item)
+      each(rest, f)
+    }
+  }
+}
+"#);
+}
+
 #[test]
 fn construction_extend() {
     let _ = run(r#"
@@ -933,9 +1043,9 @@ fn runtime_externals_compile_on_their_own() {
     let _ = compile_wasm(BIT_ARRAY, vec![]);
 }
 
-/// The builtins of `Bytes` and of the bits of floats are emitted in place
-/// of their calls, so the module has no function for them, except the loop
-/// of `_bytes_copy_shifted`.
+/// The builtins of the size of `Words` and of the bits of floats are
+/// emitted in place of their calls, so the module has no function for them,
+/// unlike the ones that read and write bytes, which need locals.
 #[test]
 fn bytes_builtins_are_inlined() {
     let wasm = compile_wasm(
@@ -966,7 +1076,13 @@ fn read_floats(bits: BitArray) -> Float {
     let builtins = names
         .iter()
         .filter(|name| {
-            *name != "_bytes_copy_shifted"
+            ![
+                "_bytes_get",
+                "_bytes_set",
+                "_bytes_to_string",
+                "_bytes_is_utf8",
+            ]
+            .contains(&name.as_str())
                 && [
                     "_bytes",
                     "_float64_byte",

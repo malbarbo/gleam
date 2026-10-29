@@ -1338,111 +1338,91 @@ const FUNCREF: ValType = ValType::Ref(RefType {
 });
 
 impl<'a> Generator<'a> {
-    /// `_bytes_to_memory(bytes, start, size, address)`: writes `size` bytes of
-    /// `bytes` from `start` at `address` of the linear memory.
+    /// `_bytes_to_memory(words, start, size, address)`: writes `size` bytes
+    /// of `words` from `start` at `address` of the linear memory.
     pub(super) fn code_bytes_to_memory(&mut self) -> FunctionId {
         // params
-        let bytes = self.wasm_local(self.bytes.val_type());
-        let start = self.wasm_local(self.int.val_type());
-        let size = self.wasm_local(self.int.val_type());
+        let words = self.wasm_local(self.words.val_type());
+        let start_int = self.wasm_local(self.int.val_type());
+        let size_int = self.wasm_local(self.int.val_type());
         let dest = self.wasm_local(ValType::I32);
         // locals
-        let i = self.wasm_local(ValType::I32);
-        let end = self.wasm_local(ValType::I32);
+        let start = self.wasm_local(ValType::I32);
+        let size = self.wasm_local(ValType::I32);
         let needed = self.wasm_local(ValType::I32);
         let mut function = Function::new(
             self,
             "_bytes_to_memory",
-            &[bytes, start, size, dest],
+            &[words, start_int, size_int, dest],
             &[BOOL_VALTYPE],
         );
         let mut instructions = function.extend_instructions(self);
         #[rustfmt::skip]
         let _ = instructions
+            .local_get(start_int).int_to_i32().local_set(start)
+            .local_get(size_int).int_to_i32().local_set(size)
             .local_get(dest)
             .local_get(size)
-            .int_to_i32()
             .i32_add()
-            .ensure_memory(needed)
-            .local_get(start)
-            .int_to_i32()
-            .local_tee(i)
-            .local_get(size)
-            .int_to_i32()
-            .i32_add()
-            .local_set(end)
-            .block_(InstrSeqType::Simple(None), |block_s| {
-                let block_id = block_s.id();
-                let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
-                    let loop_id = loop_s.id();
-                    let _ = loop_s
-                        .local_get(i)
-                        .local_get(end)
-                        .i32_ge_u()
-                        .br_if(block_id)
-                        .local_get(dest)
-                        .local_get(bytes)
-                        .local_get(i)
-                        .bytes_get()
-                        .i32_store8(MemArg { offset: 0, align: 0 })
-                        .i32_inc(dest)
-                        .i32_inc(i)
-                        .br(loop_id);
-                });
-            })
-            // Nil
-            .i32_const(0)
-            .end();
+            .ensure_memory(needed);
+        self.words_unpack(
+            &mut instructions,
+            words,
+            start,
+            size,
+            |instructions, k, byte| {
+                let _ = instructions
+                    .local_get(dest)
+                    .local_get(k)
+                    .i32_add()
+                    .local_get(byte)
+                    .i32_store8(MemArg {
+                        offset: 0,
+                        align: 0,
+                    });
+            },
+        );
+        // Nil
+        let _ = instructions.i32_const(0).end();
         function.finish(self)
     }
 
-    /// `_bytes_from_memory(address, size)`: the `size` bytes at `address` of
-    /// the linear memory.
+    /// `_bytes_from_memory(address, size)`: words with the `size` bytes at
+    /// `address` of the linear memory.
     pub(super) fn code_bytes_from_memory(&mut self) -> FunctionId {
         // params
         let src = self.wasm_local(ValType::I32);
         let size = self.wasm_local(self.int.val_type());
         // locals
-        let bytes = self.wasm_local(self.bytes.val_type());
+        let words = self.wasm_local(self.words.val_type());
         let len = self.wasm_local(ValType::I32);
-        let i = self.wasm_local(ValType::I32);
+        let at = self.wasm_local(ValType::I32);
         let mut function = Function::new(
             self,
             "_bytes_from_memory",
             &[src, size],
-            &[self.bytes.val_type()],
+            &[self.words.val_type()],
         );
         let mut instructions = function.extend_instructions(self);
-        #[rustfmt::skip]
         let _ = instructions
             .local_get(size)
             .int_to_i32()
             .local_tee(len)
-            .bytes_new()
-            .local_set(bytes)
+            .words_new()
+            .local_set(words)
             .i32_const(0)
-            .local_set(i)
-            .block_(InstrSeqType::Simple(None), |block_s| {
-                let block_id = block_s.id();
-                let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
-                    let loop_id = loop_s.id();
-                    let _ = loop_s
-                        .local_get(i)
-                        .local_get(len)
-                        .i32_ge_u()
-                        .br_if(block_id)
-                        .local_get(bytes)
-                        .local_get(i)
-                        .local_get(src)
-                        .i32_load8_u(MemArg { offset: 0, align: 0 })
-                        .bytes_set()
-                        .i32_inc(src)
-                        .i32_inc(i)
-                        .br(loop_id);
+            .local_set(at);
+        self.words_pack(&mut instructions, words, at, len, |instructions, k| {
+            let _ = instructions
+                .local_get(src)
+                .local_get(k)
+                .i32_add()
+                .i32_load8_u(MemArg {
+                    offset: 0,
+                    align: 0,
                 });
-            })
-            .local_get(bytes)
-            .end();
+        });
+        let _ = instructions.local_get(words).end();
         function.finish(self)
     }
 }

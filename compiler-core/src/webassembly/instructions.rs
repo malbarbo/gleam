@@ -38,6 +38,7 @@ impl Function {
                 int: generator.int,
                 float: generator.float,
                 bytes: generator.bytes,
+                words: generator.words,
                 string: generator.string,
                 cell: generator.cell,
                 memory: generator.memory,
@@ -64,6 +65,7 @@ pub(super) struct Representations {
     pub(super) int: IntType,
     pub(super) float: FloatType,
     pub(super) bytes: BytesType,
+    pub(super) words: WordsType,
     pub(super) string: StringType,
     /// The `Cell` of the runtime, see `Generator::cell`.
     pub(super) cell: TypeId,
@@ -364,6 +366,45 @@ impl<'a, 'b> Instructions<'a, 'b> {
     /// `[dst: bytes, dst_off, src: bytes, src_off, len] -> []`.
     pub(super) fn bytes_copy(&mut self) -> &mut Self {
         self.array_copy(self.repr.bytes.index, self.repr.bytes.index)
+    }
+
+    /// `[] -> [shift]`: the `i64` shift of the byte `i` in its word, from
+    /// the most significant one, `(7 - i % 8) * 8`.
+    pub(super) fn push_byte_shift(&mut self, i: LocalId) -> &mut Self {
+        self.local_get(i)
+            .i32_const(-1)
+            .i32_xor()
+            .i32_const(7)
+            .i32_and()
+            .i32_const(3)
+            .i32_shl()
+            .i64_extend_i32_u()
+    }
+
+    /// `[words, i] -> [byte]`: the byte `i` of `words`, with the local `i`
+    /// for `i`.
+    pub(super) fn words_get_byte(&mut self, i: LocalId) -> &mut Self {
+        let index = self.repr.words.index;
+        self.local_tee(i)
+            .i32_const(3)
+            .i32_shr_u()
+            .array_get(index)
+            .push_byte_shift(i)
+            .i64_shr_u()
+            .i32_wrap_i64()
+            .i32_const(0xFF)
+            .i32_and()
+    }
+
+    /// `[len] -> [words]`: zeroed words with room for `len` bytes, to build
+    /// a bit array.
+    pub(super) fn words_new(&mut self) -> &mut Self {
+        let index = self.repr.words.index;
+        self.i32_const(7)
+            .i32_add()
+            .i32_const(3)
+            .i32_shr_u()
+            .array_new_default(index)
     }
 
     /// Ensure linear memory is large enough to access the given address.
@@ -692,6 +733,11 @@ impl<'a, 'b> Instructions<'a, 'b> {
     binop!(i32_xor, I32Xor);
     binop!(i32_div_s, I32DivS);
     binop!(i64_ne, I64Ne);
+    binop!(i64_add, I64Add);
+    binop!(i64_sub, I64Sub);
+    binop!(i64_xor, I64Xor);
+    binop!(i64_le_s, I64LeS);
+    binop!(i64_shr_s, I64ShrS);
     binop!(i64_shr_u, I64ShrU);
     binop!(i64_shl, I64Shl);
     binop!(i64_and, I64And);
@@ -701,6 +747,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
     binop!(f64_div, F64Div);
 
     unop!(i32_eqz, I32Eqz);
+    unop!(i64_eqz, I64Eqz);
     unop!(i32_wrap_i64, I32WrapI64);
     unop!(i64_extend_i32_u, I64ExtendUI32);
     unop!(f64_reinterpret_i64, F64ReinterpretI64);
@@ -1114,7 +1161,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
     float_unop!(float_abs, F32Abs, F64Abs);
 }
 
-/// The byte array of strings and bit arrays, the `Bytes` of the runtime.
+/// The byte array of strings.
 #[derive(Clone, Copy)]
 pub(super) struct BytesType {
     pub(super) index: TypeId,
@@ -1132,6 +1179,37 @@ impl BytesType {
 
     pub(super) fn wasm_type() -> WasmType {
         WasmType::array(StorageType::I8)
+    }
+
+    pub(super) fn val_type(&self) -> ValType {
+        ValType::Ref(RefType {
+            heap_type: HeapType::Concrete(self.index),
+            nullable: false,
+        })
+    }
+}
+
+/// The bytes of bit arrays, 8 in each `i64` of an array from the most
+/// significant one, the `Words` of the runtime. A bit array is copied a
+/// word at a time, and an array of `i64` is created faster than one of `i8`
+/// with as many bytes.
+#[derive(Clone, Copy)]
+pub(super) struct WordsType {
+    pub(super) index: TypeId,
+}
+
+impl WordsType {
+    pub(super) fn new(module: &mut walrus::Module) -> WordsType {
+        let index = module.types.add_array(FieldType {
+            element_type: StorageType::Val(ValType::I64),
+            mutable: true,
+        });
+        module.types.get_mut(index).name = Some("Words".into());
+        WordsType { index }
+    }
+
+    pub(super) fn wasm_type() -> WasmType {
+        WasmType::array(StorageType::Val(ValType::I64))
     }
 
     pub(super) fn val_type(&self) -> ValType {

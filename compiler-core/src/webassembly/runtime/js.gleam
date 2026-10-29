@@ -17,7 +17,7 @@
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
 
 import builtins/array.{array_to_list}
-import builtins/bit_array.{type Bits, type Bytes, type Cell, Bits}
+import builtins/bit_array.{type Bits, type Cell, type Words, Bits}
 import builtins/dict.{type Dict, dict_fold, dict_insert, dict_new}
 import builtins/dynamic.{
   type Dynamic, DArray, DBitArray, DBool, DDict, DFloat, DInt, DList, DNil,
@@ -512,10 +512,10 @@ fn string_to_memory(string: String, address: I32) -> I32
 fn memory_to_string(address: I32, size: I32) -> String
 
 @external(webassembly, "builtins", "_bytes_to_memory")
-fn bytes_to_memory(bytes: Bytes, start: Int, size: Int, address: I32) -> Nil
+fn bytes_to_memory(bytes: Words, start: Int, size: Int, address: I32) -> Nil
 
 @external(webassembly, "builtins", "_bytes_from_memory")
-fn bytes_from_memory(address: I32, size: Int) -> Bytes
+fn bytes_from_memory(address: I32, size: Int) -> Words
 
 @external(webassembly, "builtins", "_cell_new")
 fn cell_new(value: Int) -> Cell

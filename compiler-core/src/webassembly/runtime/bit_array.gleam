@@ -2,9 +2,9 @@
 //// `Bits`, and the functions of `gleam/bit_array`. They are reached with
 //// `@external(webassembly, "builtins", "bit_array_...")`.
 ////
-//// The bits of a bit array are a range of a `Bytes`, the byte array of
-//// strings, so slices and the bit arrays made from strings share them. The
-//// bits of a `Bytes` are written in order and only once: the bit arrays of
+//// The bits of a bit array are a range of a `Words`, whose bytes are in
+//// `i64`s, so it is copied a word at a time, and slices share them. The
+//// bits of a `Words` are written in order and only once: the bit arrays of
 //// the same bytes share a `Cell` with the end of the bits written so far, and
 //// the bits after it are zero. A bit array that ends there is extended by
 //// writing after it, in the same bytes, which changes no bit array: this
@@ -22,9 +22,10 @@ import builtins/base.{
   string_byte_size,
 }
 
-/// An array of bytes, the `(array (mut i8))` of strings.
-@external(webassembly, "builtins", "Bytes")
-pub type Bytes
+/// An array of bytes, 8 in each `i64` of an `(array (mut i64))` from the
+/// most significant one. Its functions take the index of a byte.
+@external(webassembly, "builtins", "Words")
+pub type Words
 
 /// An `Int` that can be changed, `(struct (field (mut i64)))`.
 @external(webassembly, "builtins", "Cell")
@@ -34,26 +35,20 @@ pub type Cell
 /// the bits written to `bytes`, which is `-1` when they are not written
 /// anymore.
 pub type Bits {
-  Bits(bytes: Bytes, start: Int, end: Int, written: Cell)
+  Bits(bytes: Words, start: Int, end: Int, written: Cell)
 }
 
 // -- Construction -------------------------------------------------------------
 
 /// The first `size` bits of `bytes`, which are no longer changed. The
 /// compiler creates the bit arrays of the literals with it.
-pub fn bit_array_from_bytes(bytes: Bytes, size: Int) -> Bits {
+pub fn bit_array_from_bytes(bytes: Words, size: Int) -> Bits {
   Bits(bytes, 0, size, cell_new(size))
 }
 
-/// The bytes of `string`, shared.
+/// The bytes of `string`.
 pub fn bit_array_from_string(string: String) -> Bits {
   string_bits(string)
-}
-
-/// The `size` bytes of `bytes` from `start`, shared. The compiler creates
-/// the bit array of a string with it (see `string_bits`).
-pub fn bit_array_from_utf8(bytes: Bytes, start: Int, size: Int) -> Bits {
-  Bits(bytes, start * 8, { start + size } * 8, cell_new(-1))
 }
 
 /// `bits` followed by `size` bits, which are zero, to be written after
@@ -93,7 +88,7 @@ fn sum_sizes(arrays: List(Bits), acc: Int) -> Int {
   }
 }
 
-fn concat_loop(bytes: Bytes, at: Int, arrays: List(Bits)) -> Nil {
+fn concat_loop(bytes: Words, at: Int, arrays: List(Bits)) -> Nil {
   case arrays {
     [] -> Nil
     [bits, ..rest] -> {
@@ -185,7 +180,7 @@ fn unicode_size(string: String, unit: Int) -> Int {
 
 /// The size of the code units of the UTF-8 bytes from `index` to `end`.
 fn unicode_size_loop(
-  bytes: Bytes,
+  bytes: Words,
   index: Int,
   end: Int,
   unit: Int,
@@ -225,7 +220,7 @@ pub fn bit_array_codepoint_utf16_size(codepoint: UtfCodepoint) -> Int {
 /// value has its bytes from the least significant, and then the bits that
 /// are left.
 pub fn bit_array_write_int(
-  bytes: Bytes,
+  bytes: Words,
   at: Int,
   value: Int,
   size: Int,
@@ -247,7 +242,7 @@ pub fn bit_array_write_int(
 
 /// Writes the `size` bits of `value` below bit `size`, a multiple of 8,
 /// from the most significant byte.
-fn write_int_big(bytes: Bytes, at: Int, value: Int, size: Int) -> Int {
+fn write_int_big(bytes: Words, at: Int, value: Int, size: Int) -> Int {
   case size {
     0 -> at
     _ -> {
@@ -261,7 +256,7 @@ fn write_int_big(bytes: Bytes, at: Int, value: Int, size: Int) -> Int {
 /// Writes the bytes of `value` from bit `shift` to bit `end`, from the
 /// least significant.
 fn write_int_little(
-  bytes: Bytes,
+  bytes: Words,
   at: Int,
   value: Int,
   shift: Int,
@@ -286,7 +281,7 @@ fn int_bits(value: Int, shift: Int, count: Int) -> Int {
 
 /// Writes `value` as a float of `size` bits, 16, 32 or 64.
 pub fn bit_array_write_float(
-  bytes: Bytes,
+  bytes: Words,
   at: Int,
   value: Float,
   size: Int,
@@ -301,7 +296,7 @@ pub fn bit_array_write_float(
 /// Writes the bytes of the float of `size` bits of `value` from the byte
 /// `index`.
 fn write_float_loop(
-  bytes: Bytes,
+  bytes: Words,
   at: Int,
   value: Float,
   size: Int,
@@ -404,7 +399,7 @@ fn round_shift(value: Int, shift: Int, sticky: Bool) -> Int {
 
 /// Writes the first `size` bits of `bits`.
 pub fn bit_array_write_bits(
-  bytes: Bytes,
+  bytes: Words,
   at: Int,
   bits: Bits,
   size: Int,
@@ -413,15 +408,23 @@ pub fn bit_array_write_bits(
   at + size
 }
 
-pub fn bit_array_write_utf8(bytes: Bytes, at: Int, string: String) -> Int {
-  let bits = string_bits(string)
-  let size = bits.end - bits.start
-  let _ = copy_bits(bytes, at, bits.bytes, bits.start, size)
-  at + size
+pub fn bit_array_write_utf8(bytes: Words, at: Int, string: String) -> Int {
+  case bitwise_and(at, 7) {
+    0 -> {
+      let _ = bytes_write_string(bytes, bitwise_shift_right(at, 3), string)
+      at + string_byte_size(string) * 8
+    }
+    _ -> {
+      let bits = string_bits(string)
+      let size = bits.end - bits.start
+      let _ = copy_bits(bytes, at, bits.bytes, bits.start, size)
+      at + size
+    }
+  }
 }
 
 pub fn bit_array_write_utf16(
-  bytes: Bytes,
+  bytes: Words,
   at: Int,
   string: String,
   little: Bool,
@@ -430,7 +433,7 @@ pub fn bit_array_write_utf16(
 }
 
 pub fn bit_array_write_utf32(
-  bytes: Bytes,
+  bytes: Words,
   at: Int,
   string: String,
   little: Bool,
@@ -441,7 +444,7 @@ pub fn bit_array_write_utf32(
 /// Writes the code points of `string` in UTF-16 or UTF-32 (`unit` 16 or
 /// 32).
 fn write_unicode(
-  bytes: Bytes,
+  bytes: Words,
   at: Int,
   string: String,
   unit: Int,
@@ -455,9 +458,9 @@ fn write_unicode(
 /// Writes the code points of the UTF-8 bytes of `string` from `index` to
 /// `end`.
 fn write_unicode_loop(
-  bytes: Bytes,
+  bytes: Words,
   at: Int,
-  string: Bytes,
+  string: Words,
   index: Int,
   end: Int,
   unit: Int,
@@ -479,7 +482,7 @@ fn write_unicode_loop(
 }
 
 pub fn bit_array_write_codepoint_utf8(
-  bytes: Bytes,
+  bytes: Words,
   at: Int,
   codepoint: UtfCodepoint,
 ) -> Int {
@@ -506,12 +509,12 @@ pub fn bit_array_write_codepoint_utf8(
 
 /// Writes the UTF-8 continuation byte of the 6 bits of `codepoint` from bit
 /// `shift`.
-fn put_continuation(bytes: Bytes, at: Int, codepoint: Int, shift: Int) -> Int {
+fn put_continuation(bytes: Words, at: Int, codepoint: Int, shift: Int) -> Int {
   put_bits(bytes, at, 0x80 + int_bits(codepoint, shift, 6), 8)
 }
 
 pub fn bit_array_write_codepoint_utf16(
-  bytes: Bytes,
+  bytes: Words,
   at: Int,
   codepoint: UtfCodepoint,
   little: Bool,
@@ -520,7 +523,7 @@ pub fn bit_array_write_codepoint_utf16(
 }
 
 pub fn bit_array_write_codepoint_utf32(
-  bytes: Bytes,
+  bytes: Words,
   at: Int,
   codepoint: UtfCodepoint,
   little: Bool,
@@ -528,7 +531,7 @@ pub fn bit_array_write_codepoint_utf32(
   bit_array_write_int(bytes, at, codepoint_to_int(codepoint), 32, little)
 }
 
-fn write_utf16(bytes: Bytes, at: Int, codepoint: Int, little: Bool) -> Int {
+fn write_utf16(bytes: Words, at: Int, codepoint: Int, little: Bool) -> Int {
   case codepoint < 0x10000 {
     True -> bit_array_write_int(bytes, at, codepoint, 16, little)
     False -> {
@@ -552,7 +555,7 @@ fn utf8_length(byte: Int) -> Int {
 }
 
 /// The code point of the `length` UTF-8 bytes of `bytes` from `index`.
-fn utf8_decode(bytes: Bytes, index: Int, length: Int) -> Int {
+fn utf8_decode(bytes: Words, index: Int, length: Int) -> Int {
   let first = bytes_get(bytes, index)
   case length {
     1 -> first
@@ -562,7 +565,7 @@ fn utf8_decode(bytes: Bytes, index: Int, length: Int) -> Int {
   }
 }
 
-fn utf8_continue(bytes: Bytes, index: Int, count: Int, acc: Int) -> Int {
+fn utf8_continue(bytes: Words, index: Int, count: Int, acc: Int) -> Int {
   case count {
     0 -> acc
     _ ->
@@ -624,7 +627,7 @@ pub fn bit_array_read_int(
 }
 
 /// The unsigned integer of the `size` bits of `bytes` at `position`.
-fn read_int(bytes: Bytes, position: Int, size: Int, little: Bool) -> Int {
+fn read_int(bytes: Words, position: Int, size: Int, little: Bool) -> Int {
   case bitwise_and(position, 7), little {
     0, False -> read_big(bytes, bitwise_shift_right(position, 3), size, 0)
     0, True -> {
@@ -641,7 +644,7 @@ fn read_int(bytes: Bytes, position: Int, size: Int, little: Bool) -> Int {
 
 /// The integer `acc` followed by the `remaining` bits from the byte
 /// `index`.
-fn read_big(bytes: Bytes, index: Int, remaining: Int, acc: Int) -> Int {
+fn read_big(bytes: Words, index: Int, remaining: Int, acc: Int) -> Int {
   case remaining >= 8 {
     True ->
       read_big(
@@ -661,7 +664,7 @@ fn read_big(bytes: Bytes, index: Int, remaining: Int, acc: Int) -> Int {
 }
 
 /// The integer `acc` followed by the bytes from `end - 1` to `start`.
-fn read_little(bytes: Bytes, start: Int, end: Int, acc: Int) -> Int {
+fn read_little(bytes: Words, start: Int, end: Int, acc: Int) -> Int {
   case end == start {
     True -> acc
     False ->
@@ -670,7 +673,7 @@ fn read_little(bytes: Bytes, start: Int, end: Int, acc: Int) -> Int {
 }
 
 fn read_int_little(
-  bytes: Bytes,
+  bytes: Words,
   position: Int,
   remaining: Int,
   shift: Int,
@@ -829,7 +832,7 @@ fn codepoint_tail(
 }
 
 fn codepoint_continuation(
-  bytes: Bytes,
+  bytes: Words,
   position: Int,
   count: Int,
   acc: Int,
@@ -982,7 +985,7 @@ pub fn bit_array_compare(a: Bits, b: Bits) -> Int {
 
 /// The order of the `count` bytes of `a` from the byte `i` and of `b` from
 /// the byte `j`.
-fn compare_bytes(a: Bytes, i: Int, b: Bytes, j: Int, count: Int) -> Int {
+fn compare_bytes(a: Words, i: Int, b: Words, j: Int, count: Int) -> Int {
   case count {
     0 -> 0
     _ -> {
@@ -997,7 +1000,7 @@ fn compare_bytes(a: Bytes, i: Int, b: Bytes, j: Int, count: Int) -> Int {
 }
 
 /// The order of the `count` bytes of `a` at `i` and of `b` at `j`.
-fn compare_bits(a: Bytes, i: Int, b: Bytes, j: Int, count: Int) -> Int {
+fn compare_bits(a: Words, i: Int, b: Words, j: Int, count: Int) -> Int {
   case count {
     0 -> 0
     _ -> {
@@ -1015,10 +1018,10 @@ fn compare_bits(a: Bytes, i: Int, b: Bytes, j: Int, count: Int) -> Int {
 /// `b_size` bits of `b` at `j`, from the most significant bit of the
 /// largest, at `bit` from the left.
 fn compare_values(
-  a: Bytes,
+  a: Words,
   i: Int,
   a_size: Int,
-  b: Bytes,
+  b: Words,
   j: Int,
   b_size: Int,
   bit: Int,
@@ -1038,14 +1041,14 @@ fn compare_values(
 }
 
 /// The bit at `offset` from `position`, or 0 when `offset` is negative.
-fn bit_or_zero(bytes: Bytes, position: Int, offset: Int) -> Int {
+fn bit_or_zero(bytes: Words, position: Int, offset: Int) -> Int {
   case offset < 0 {
     True -> 0
     False -> bits_at(bytes, position + offset, 1)
   }
 }
 
-fn to_int_loop(bytes: Bytes, position: Int, remaining: Int, acc: Int) -> Int {
+fn to_int_loop(bytes: Words, position: Int, remaining: Int, acc: Int) -> Int {
   case remaining >= 8 {
     True ->
       to_int_loop(
@@ -1067,86 +1070,37 @@ fn to_int_loop(bytes: Bytes, position: Int, remaining: Int, acc: Int) -> Int {
 // -- Strings ------------------------------------------------------------------
 
 pub fn bit_array_is_utf8(bits: Bits) -> Bool {
-  bitwise_and(bits.end - bits.start, 7) == 0
-  && utf8_loop(bits.bytes, bits.start, bits.end)
+  bitwise_and(bits.end - bits.start, 7) == 0 && is_utf8(aligned(bits))
 }
 
 /// The string of the bytes of `bits`, which shares them when `bits` starts
 /// at a whole byte.
 pub fn bit_array_to_string(bits: Bits) -> Result(String, Nil) {
-  case bit_array_is_utf8(bits) {
+  case bitwise_and(bits.end - bits.start, 7) == 0 {
     True -> {
       let bits = aligned(bits)
-      let start = bitwise_shift_right(bits.start, 3)
-      Ok(bytes_to_string(bits.bytes, start, byte_count(bits.end - bits.start)))
+      case is_utf8(bits) {
+        True -> {
+          let start = bitwise_shift_right(bits.start, 3)
+          let size = bitwise_shift_right(bits.end - bits.start, 3)
+          Ok(bytes_to_string(bits.bytes, start, size))
+        }
+        False -> Error(Nil)
+      }
     }
     False -> Error(Nil)
   }
 }
 
-/// Whether the bytes from `position` to `end` are UTF-8, without overlong
-/// encodings, surrogates or code points after U+10FFFF.
-fn utf8_loop(bytes: Bytes, position: Int, end: Int) -> Bool {
-  case position == end {
-    True -> True
-    False -> {
-      let byte = byte_at(bytes, position)
-      case byte {
-        _ if byte < 0x80 -> utf8_loop(bytes, position + 8, end)
-        _ if byte < 0xC2 -> False
-        _ if byte < 0xE0 -> utf8_tail(bytes, position, end, 1, 0x80, 0xBF)
-        0xE0 -> utf8_tail(bytes, position, end, 2, 0xA0, 0xBF)
-        0xED -> utf8_tail(bytes, position, end, 2, 0x80, 0x9F)
-        _ if byte < 0xF0 -> utf8_tail(bytes, position, end, 2, 0x80, 0xBF)
-        0xF0 -> utf8_tail(bytes, position, end, 3, 0x90, 0xBF)
-        0xF4 -> utf8_tail(bytes, position, end, 3, 0x80, 0x8F)
-        _ if byte < 0xF4 -> utf8_tail(bytes, position, end, 3, 0x80, 0xBF)
-        _ -> False
-      }
-    }
-  }
-}
-
-/// Checks the `count` bytes after the first byte of a code point at
-/// `position`, the first of them from `low` to `high`, and continues after
-/// them.
-fn utf8_tail(
-  bytes: Bytes,
-  position: Int,
-  end: Int,
-  count: Int,
-  low: Int,
-  high: Int,
-) -> Bool {
-  let next = position + 8
-  case next + count * 8 <= end {
-    False -> False
-    True -> {
-      let byte = byte_at(bytes, next)
-      case low <= byte && byte <= high {
-        False -> False
-        True -> utf8_continuation(bytes, next + 8, end, count - 1)
-      }
-    }
-  }
-}
-
-fn utf8_continuation(
-  bytes: Bytes,
-  position: Int,
-  end: Int,
-  count: Int,
-) -> Bool {
-  case count {
-    0 -> utf8_loop(bytes, position, end)
-    _ -> {
-      let byte = byte_at(bytes, position)
-      case 0x80 <= byte && byte <= 0xBF {
-        False -> False
-        True -> utf8_continuation(bytes, position + 8, end, count - 1)
-      }
-    }
-  }
+/// Whether the bytes of `bits`, which start and end at whole bytes, are
+/// UTF-8.
+fn is_utf8(bits: Bits) -> Bool {
+  let start = bitwise_shift_right(bits.start, 3)
+  bytes_is_utf8(
+    bits.bytes,
+    start,
+    bitwise_shift_right(bits.end - bits.start, 3),
+  )
 }
 
 // -- Base 64 and base 16 ------------------------------------------------------
@@ -1182,7 +1136,7 @@ fn base64_encode(bits: Bits, padding: Bool, url: Bool) -> String {
 /// The bytes to encode, which end at `end`, and the `length` bytes of the
 /// encoded string.
 type Base64Encoder {
-  Base64Encoder(bytes: Bytes, end: Int, out: Bytes, length: Int, url: Bool)
+  Base64Encoder(bytes: Words, end: Int, out: Words, length: Int, url: Bool)
 }
 
 /// Encodes the groups of 3 bytes from `index`, the last one with the `=`
@@ -1210,7 +1164,7 @@ fn base64_encode_loop(encoder: Base64Encoder, index: Int, at: Int) -> Nil {
   }
 }
 
-fn byte_or_zero(bytes: Bytes, index: Int, end: Int) -> Int {
+fn byte_or_zero(bytes: Words, index: Int, end: Int) -> Int {
   case index < end {
     True -> bytes_get(bytes, index)
     False -> 0
@@ -1276,7 +1230,7 @@ fn base64_decode(encoded: String, url: Bool) -> Result(Bits, Nil) {
 /// The bytes of the string to decode, which end at `last`, and the bytes
 /// to which they are decoded.
 type Base64Decoder {
-  Base64Decoder(bytes: Bytes, last: Int, out: Bytes, url: Bool)
+  Base64Decoder(bytes: Words, last: Int, out: Words, url: Bool)
 }
 
 /// Decodes the characters from `index` to `end`, which are `=` after
@@ -1361,7 +1315,7 @@ fn base64_value(char: Int, url: Bool) -> Int {
 
 /// Writes the `count` low bytes of `value` at `at`, the most significant
 /// first, and returns the index after them.
-fn put_big(out: Bytes, at: Int, value: Int, count: Int) -> Int {
+fn put_big(out: Words, at: Int, value: Int, count: Int) -> Int {
   case count {
     0 -> at
     _ -> {
@@ -1384,9 +1338,9 @@ pub fn bit_array_base16_encode(bits: Bits) -> String {
 }
 
 fn base16_encode_loop(
-  bytes: Bytes,
+  bytes: Words,
   index: Int,
-  out: Bytes,
+  out: Words,
   at: Int,
   end: Int,
 ) -> Nil {
@@ -1426,10 +1380,10 @@ pub fn bit_array_base16_decode(encoded: String) -> Result(Bits, Nil) {
 }
 
 fn base16_decode_loop(
-  bytes: Bytes,
+  bytes: Words,
   index: Int,
   end: Int,
-  out: Bytes,
+  out: Words,
   at: Int,
 ) -> Bool {
   case index < end {
@@ -1466,7 +1420,7 @@ pub fn bit_array_equal(a: Bits, b: Bits) -> Bool {
 }
 
 /// Whether the `size` bits of `a` at `i` and of `b` at `j` are equal.
-fn equal_loop(a: Bytes, i: Int, b: Bytes, j: Int, size: Int) -> Bool {
+fn equal_loop(a: Words, i: Int, b: Words, j: Int, size: Int) -> Bool {
   case bitwise_and(bitwise_or(i, j), 7) {
     0 ->
       equal_bytes(
@@ -1482,7 +1436,7 @@ fn equal_loop(a: Bytes, i: Int, b: Bytes, j: Int, size: Int) -> Bool {
 
 /// Whether the `size` bits of `a` from the byte `i` and of `b` from the
 /// byte `j` are equal.
-fn equal_bytes(a: Bytes, i: Int, b: Bytes, j: Int, size: Int) -> Bool {
+fn equal_bytes(a: Words, i: Int, b: Words, j: Int, size: Int) -> Bool {
   case size >= 8 {
     True ->
       case bytes_get(a, i) == bytes_get(b, j) {
@@ -1496,7 +1450,7 @@ fn equal_bytes(a: Bytes, i: Int, b: Bytes, j: Int, size: Int) -> Bool {
   }
 }
 
-fn equal_bits(a: Bytes, i: Int, b: Bytes, j: Int, size: Int) -> Bool {
+fn equal_bits(a: Words, i: Int, b: Words, j: Int, size: Int) -> Bool {
   case size >= 8 {
     True ->
       case byte_at(a, i) == byte_at(b, j) {
@@ -1530,7 +1484,7 @@ pub fn bit_array_hash(bits: Bits) -> Int {
 }
 
 /// The hash `acc` of the `count` bytes of `bytes` from the byte `index`.
-fn hash_bytes(bytes: Bytes, index: Int, count: Int, acc: Int) -> Int {
+fn hash_bytes(bytes: Words, index: Int, count: Int, acc: Int) -> Int {
   case count {
     0 -> acc
     _ ->
@@ -1539,7 +1493,7 @@ fn hash_bytes(bytes: Bytes, index: Int, count: Int, acc: Int) -> Int {
 }
 
 /// The hash `acc` of the `count` bytes of `bytes` at `position`.
-fn hash_bits(bytes: Bytes, position: Int, count: Int, acc: Int) -> Int {
+fn hash_bits(bytes: Words, position: Int, count: Int, acc: Int) -> Int {
   case count {
     0 -> acc
     _ ->
@@ -1564,7 +1518,7 @@ pub fn bit_array_inspect(bits: Bits) -> String {
 }
 
 fn inspect_loop(
-  bytes: Bytes,
+  bytes: Words,
   position: Int,
   remaining: Int,
   acc: List(String),
@@ -1601,7 +1555,7 @@ fn byte_count(size: Int) -> Int {
 }
 
 /// The 8 bits of `bytes` at `position`.
-fn byte_at(bytes: Bytes, position: Int) -> Int {
+fn byte_at(bytes: Words, position: Int) -> Int {
   let index = bitwise_shift_right(position, 3)
   case bitwise_and(position, 7) {
     0 -> bytes_get(bytes, index)
@@ -1618,7 +1572,7 @@ fn byte_at(bytes: Bytes, position: Int) -> Int {
 
 /// The `count` bits of `bytes` at `position`, from 1 to 8, as an unsigned
 /// integer.
-fn bits_at(bytes: Bytes, position: Int, count: Int) -> Int {
+fn bits_at(bytes: Words, position: Int, count: Int) -> Int {
   let index = bitwise_shift_right(position, 3)
   let shift = bitwise_and(position, 7)
   let high = bitwise_shift_left(bytes_get(bytes, index), shift)
@@ -1633,50 +1587,9 @@ fn bits_at(bytes: Bytes, position: Int, count: Int) -> Int {
   bitwise_shift_right(bitwise_and(window, 0xFF), 8 - count)
 }
 
-/// Writes `count` bits of `src` at `from` to `dst` at `at`. The bits of
-/// `dst` from `at` on are zero.
-fn copy_bits(dst: Bytes, at: Int, src: Bytes, from: Int, count: Int) -> Nil {
-  // The bits up to the first byte boundary of `dst`, then whole bytes, then
-  // the rest.
-  let head = min(bitwise_and(0 - at, 7), count)
-  let _ = copy_few_bits(dst, at, src, from, head)
-  let at = at + head
-  let from = from + head
-  let whole = bitwise_shift_right(count - head, 3)
-  let index = bitwise_shift_right(at, 3)
-  let _ = case bitwise_and(from, 7) {
-    0 -> bytes_copy(dst, index, src, bitwise_shift_right(from, 3), whole)
-    shift ->
-      bytes_copy_shifted(
-        dst,
-        index,
-        src,
-        bitwise_shift_right(from, 3),
-        shift,
-        whole,
-      )
-  }
-  let rest = count - head - whole * 8
-  copy_few_bits(dst, at + whole * 8, src, from + whole * 8, rest)
-}
-
-/// Like `copy_bits`, for a `count` from 0 to 7.
-fn copy_few_bits(
-  dst: Bytes,
-  at: Int,
-  src: Bytes,
-  from: Int,
-  count: Int,
-) -> Nil {
-  case count {
-    0 -> Nil
-    _ -> or_bits(dst, at, bits_at(src, from, count), count)
-  }
-}
-
 /// Sets the `count` bits of `dst` at `at`, which are zero, to the bits of
 /// `value`, from 1 to 8 of them.
-fn or_bits(dst: Bytes, at: Int, value: Int, count: Int) -> Nil {
+fn or_bits(dst: Words, at: Int, value: Int, count: Int) -> Nil {
   let index = bitwise_shift_right(at, 3)
   let shift = bitwise_and(at, 7)
   // The bits in a window of two bytes, from `index`.
@@ -1695,7 +1608,7 @@ fn or_bits(dst: Bytes, at: Int, value: Int, count: Int) -> Nil {
 
 /// Writes the `count` bits of `value`, from 0 to 8 of them, to `dst` at
 /// `at`, whose bits are zero, and returns the position after them.
-fn put_bits(dst: Bytes, at: Int, value: Int, count: Int) -> Int {
+fn put_bits(dst: Words, at: Int, value: Int, count: Int) -> Int {
   let _ = case count, bitwise_and(at, 7) {
     0, _ -> Nil
     8, 0 -> bytes_set(dst, bitwise_shift_right(at, 3), value)
@@ -1730,37 +1643,33 @@ fn max(a: Int, b: Int) -> Int {
 
 /// A new array of `size` zero bytes.
 @external(webassembly, "builtins", "_bytes_new")
-fn bytes_new(size: Int) -> Bytes
+fn bytes_new(size: Int) -> Words
+
+/// Whether the `size` bytes of `bytes` from `start` are UTF-8, without
+/// overlong encodings, surrogates or code points after U+10FFFF.
+@external(webassembly, "builtins", "_bytes_is_utf8")
+fn bytes_is_utf8(bytes: Words, start: Int, size: Int) -> Bool
 
 @external(webassembly, "builtins", "_bytes_size")
-fn bytes_size(bytes: Bytes) -> Int
+fn bytes_size(bytes: Words) -> Int
 
 @external(webassembly, "builtins", "_bytes_get")
-fn bytes_get(bytes: Bytes, index: Int) -> Int
+fn bytes_get(bytes: Words, index: Int) -> Int
 
 /// Only on the bytes the caller has just created, or after the bits written
 /// to them.
 @external(webassembly, "builtins", "_bytes_set")
-fn bytes_set(bytes: Bytes, index: Int, byte: Int) -> Nil
+fn bytes_set(bytes: Words, index: Int, byte: Int) -> Nil
 
-/// Copies `count` bytes of `src` from `from` to `dst` at `at`. Only on the
-/// bytes the caller has just created, or after the bits written to them.
-@external(webassembly, "builtins", "_bytes_copy")
-fn bytes_copy(dst: Bytes, at: Int, src: Bytes, from: Int, count: Int) -> Nil
+/// Writes `count` bits of `src` at `from` to `dst` at `at`. The bits of
+/// `dst` from `at` on are zero.
+@external(webassembly, "builtins", "_bits_copy")
+fn copy_bits(dst: Words, at: Int, src: Words, from: Int, count: Int) -> Nil
 
-/// Writes `count` bytes to `dst` from `at`, each one made of the bits of the
-/// bytes `i` and `i + 1` of `src` from the bit `shift` (1 to 7) of byte `i`,
-/// for `i` from `from`. Only on the bytes the caller has just created, or
+/// Writes the UTF-8 bytes of `string` to `bytes` from the byte `at`. Only
 /// after the bits written to them.
-@external(webassembly, "builtins", "_bytes_copy_shifted")
-fn bytes_copy_shifted(
-  dst: Bytes,
-  at: Int,
-  src: Bytes,
-  from: Int,
-  shift: Int,
-  count: Int,
-) -> Nil
+@external(webassembly, "builtins", "_bytes_write_string")
+fn bytes_write_string(bytes: Words, at: Int, string: String) -> Nil
 
 @external(webassembly, "builtins", "_cell_new")
 fn cell_new(value: Int) -> Cell
@@ -1771,14 +1680,13 @@ fn cell_get(cell: Cell) -> Int
 @external(webassembly, "builtins", "_cell_set")
 fn cell_set(cell: Cell, value: Int) -> Nil
 
-/// The bit array of the UTF-8 bytes of `string`, shared: with
-/// `bit_array_from_utf8`, converting a JavaScript string only once.
+/// The bit array of the UTF-8 bytes of `string`.
 @external(webassembly, "builtins", "_string_bits")
 fn string_bits(string: String) -> Bits
 
 /// The string of the `size` bytes of `bytes` from `start`, which are UTF-8.
 @external(webassembly, "builtins", "_bytes_to_string")
-fn bytes_to_string(bytes: Bytes, start: Int, size: Int) -> String
+fn bytes_to_string(bytes: Words, start: Int, size: Int) -> String
 
 @external(webassembly, "builtins", "_utf_codepoint_to_int")
 fn codepoint_to_int(codepoint: UtfCodepoint) -> Int

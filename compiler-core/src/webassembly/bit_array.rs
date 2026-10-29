@@ -516,8 +516,8 @@ impl Generator<'_> {
             parts.push(self.literal_segment(literal));
         }
 
-        let bytes_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bytes", vec![]);
-        let bytes = self.wasm_local(self.bytes.val_type());
+        let bytes_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Words", vec![]);
+        let bytes = self.wasm_local(self.words.val_type());
         // The size of the segments, after the extended bit array if any.
         let constant: u64 = parts
             .iter()
@@ -540,7 +540,7 @@ impl Generator<'_> {
                     .int_add()
                     .int_shift_by(false, &3.into())
                     .int_to_i32()
-                    .bytes_new()
+                    .words_new()
                     .local_set(bytes);
                 None
             }
@@ -618,7 +618,7 @@ impl Generator<'_> {
         if let Some(id) = self.bit_array_from_bytes {
             return id;
         }
-        let bytes_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bytes", vec![]);
+        let bytes_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Words", vec![]);
         let id = self.runtime_function_id(
             BIT_ARRAY_MODULE,
             "bit_array_from_bytes",
@@ -629,91 +629,679 @@ impl Generator<'_> {
         id
     }
 
-    /// `_string_bits(s)`: the bit array of the UTF-8 bytes of `s`, shared,
-    /// with the bytes converted only once.
+    /// `_string_bits(s)`: the bit array of the UTF-8 bytes of `s`.
     pub(super) fn code_string_bits(&mut self) -> FunctionId {
         let s = self.wasm_local(self.string.val_type());
         let bytes = self.wasm_local(self.bytes.val_type());
         let off = self.wasm_local(ValType::I32);
         let len = self.wasm_local(ValType::I32);
-        let bytes_type = self.runtime_named_type(BIT_ARRAY_MODULE, "Bytes", vec![]);
-        let from_utf8 = self.runtime_function_id(
-            BIT_ARRAY_MODULE,
-            "bit_array_from_utf8",
-            vec![bytes_type, type_::int(), type_::int()],
-            type_::bit_array(),
-        );
+        let words = self.wasm_local(self.words.val_type());
+        let at = self.wasm_local(ValType::I32);
+        let from_bytes = self.bit_array_from_bytes_id();
         let result = self.val_type(&type_::bit_array());
         let mut function = Function::new(self, "_string_bits", &[s], &[result]);
-        let _ = function
-            .extend_instructions(self)
+        let mut instructions = function.extend_instructions(self);
+        let _ = instructions
             .string_utf8_view(s, bytes, off, len)
-            .local_get(bytes)
-            .local_get(off)
-            .i32_to_int()
             .local_get(len)
+            .words_new()
+            .local_set(words)
+            .i32_const(0)
+            .local_set(at);
+        self.words_pack(&mut instructions, words, at, len, |instructions, k| {
+            let _ = instructions
+                .local_get(bytes)
+                .local_get(off)
+                .local_get(k)
+                .i32_add()
+                .bytes_get();
+        });
+        let _ = instructions
+            .local_get(words)
+            .local_get(len)
+            .i32_const(3)
+            .i32_shl()
             .i32_to_int()
-            .call(from_utf8)
+            .call(from_bytes)
             .end();
         function.finish(self)
     }
 
-    /// `_bytes_copy_shifted(dst, at, src, from, shift, count)`: writes
-    /// `count` bytes to `dst` from `at`, each one made of the bits of the
-    /// bytes `i` and `i + 1` of `src` from the bit `shift` (1 to 7) of byte
-    /// `i`, for `i` from `from`. A loop of `i32`s that reads each byte once.
-    pub(super) fn code_bytes_copy_shifted(&mut self) -> FunctionId {
-        let bytes_vt = self.bytes.val_type();
-        let int_vt = self.int.val_type();
+    /// `_bytes_write_string(words, at, s)`: writes the UTF-8 bytes of `s` to
+    /// `words` from the byte `at`.
+    pub(super) fn code_bytes_write_string(&mut self) -> FunctionId {
         // params
-        let dst = self.wasm_local(bytes_vt);
-        let at_int = self.wasm_local(int_vt);
-        let src = self.wasm_local(bytes_vt);
-        let from_int = self.wasm_local(int_vt);
-        let shift_int = self.wasm_local(int_vt);
-        let count_int = self.wasm_local(int_vt);
+        let words = self.wasm_local(self.words.val_type());
+        let at_int = self.wasm_local(self.int.val_type());
+        let s = self.wasm_local(self.string.val_type());
         // locals
         let at = self.wasm_local(ValType::I32);
-        let i = self.wasm_local(ValType::I32);
-        let end = self.wasm_local(ValType::I32);
-        let shift = self.wasm_local(ValType::I32);
-        // The bytes `i` and `i + 1` in the low 16 bits.
-        let window = self.wasm_local(ValType::I32);
+        let bytes = self.wasm_local(self.bytes.val_type());
+        let off = self.wasm_local(ValType::I32);
+        let len = self.wasm_local(ValType::I32);
         let nil = self.val_type(&type_::nil());
+        let mut function = Function::new(self, "_bytes_write_string", &[words, at_int, s], &[nil]);
+        let mut instructions = function.extend_instructions(self);
+        let _ = instructions
+            .local_get(at_int)
+            .int_to_i32()
+            .local_set(at)
+            .string_utf8_view(s, bytes, off, len);
+        self.words_pack(&mut instructions, words, at, len, |instructions, k| {
+            let _ = instructions
+                .local_get(bytes)
+                .local_get(off)
+                .local_get(k)
+                .i32_add()
+                .bytes_get();
+        });
+        let _ = instructions.i32_const(0).end();
+        function.finish(self)
+    }
+
+    /// `_bytes_to_string(words, start, size)`: the string of the `size`
+    /// bytes of `words` from `start`, which are UTF-8.
+    pub(super) fn code_bytes_to_string(&mut self) -> FunctionId {
+        // params
+        let words = self.wasm_local(self.words.val_type());
+        let start_int = self.wasm_local(self.int.val_type());
+        let size_int = self.wasm_local(self.int.val_type());
+        // locals
+        let start = self.wasm_local(ValType::I32);
+        let size = self.wasm_local(ValType::I32);
+        let bytes = self.wasm_local(self.bytes.val_type());
+        let result = self.string.val_type();
         let mut function = Function::new(
             self,
-            "_bytes_copy_shifted",
-            &[dst, at_int, src, from_int, shift_int, count_int],
-            &[nil],
+            "_bytes_to_string",
+            &[words, start_int, size_int],
+            &[result],
         );
+        let mut instructions = function.extend_instructions(self);
+        let _ = instructions
+            .local_get(start_int)
+            .int_to_i32()
+            .local_set(start)
+            .local_get(size_int)
+            .int_to_i32()
+            .local_tee(size)
+            .bytes_new()
+            .local_set(bytes);
+        self.words_unpack(
+            &mut instructions,
+            words,
+            start,
+            size,
+            |instructions, k, byte| {
+                let _ = instructions
+                    .local_get(bytes)
+                    .local_get(k)
+                    .local_get(byte)
+                    .bytes_set();
+            },
+        );
+        let _ = instructions
+            .local_get(bytes)
+            .i32_const(0)
+            .local_get(size)
+            .string_from_utf8()
+            .end();
+        function.finish(self)
+    }
+
+    /// `_bytes_is_utf8(words, start, size)`: whether the `size` bytes of
+    /// `words` from `start` are UTF-8, without overlong encodings,
+    /// surrogates or code points after U+10FFFF. The bytes are taken from a
+    /// word read once, and the 8 bytes of a word at once when they are ASCII
+    /// and start a code point.
+    pub(super) fn code_bytes_is_utf8(&mut self) -> FunctionId {
+        let words_index = self.words.index;
+        // params
+        let words = self.wasm_local(self.words.val_type());
+        let start_int = self.wasm_local(self.int.val_type());
+        let size_int = self.wasm_local(self.int.val_type());
+        // locals
+        let i = self.wasm_local(ValType::I32);
+        let end = self.wasm_local(ValType::I32);
+        let word = self.wasm_local(ValType::I64);
+        let byte = self.wasm_local(ValType::I32);
+        // The number of continuation bytes still expected, and the range of
+        // the next one, from `low` to `low + range`.
+        let need = self.wasm_local(ValType::I32);
+        let low = self.wasm_local(ValType::I32);
+        let range = self.wasm_local(ValType::I32);
+        let result = self.val_type(&type_::bool());
+        let mut function = Function::new(
+            self,
+            "_bytes_is_utf8",
+            &[words, start_int, size_int],
+            &[result],
+        );
+        let mut instructions = function.extend_instructions(self);
+        // `low` and `range` of the continuation bytes after the first one.
+        let any_continuation = |instructions: &mut Instructions<'_, '_>| {
+            let _ = instructions
+                .i32_const(0x80)
+                .local_set(low)
+                .i32_const(0x3F)
+                .local_set(range);
+        };
+        // When the first byte is `first`, sets `low` and `range`.
+        let restrict = |instructions: &mut Instructions<'_, '_>, first: i32, l: i32, h: i32| {
+            let _ = instructions.local_get(byte).i32_const(first).i32_eq().if_(
+                InstrSeqType::Simple(None),
+                |then| {
+                    let _ = then
+                        .i32_const(l)
+                        .local_set(low)
+                        .i32_const(h - l)
+                        .local_set(range);
+                },
+            );
+        };
+        #[rustfmt::skip]
+        let _ = instructions
+            .local_get(start_int).int_to_i32().local_tee(i)
+            .local_get(size_int).int_to_i32().i32_add().local_set(end)
+            .i32_const(0).local_set(need)
+            // The word of the first byte, from it.
+            .local_get(i).local_get(end).i32_lt_u()
+            .if_(InstrSeqType::Simple(None), |then| {
+                let _ = then
+                    .local_get(words)
+                    .local_get(i).i32_const(3).i32_shr_u()
+                    .array_get(words_index)
+                    .local_get(i).i32_const(7).i32_and().i32_const(3).i32_shl()
+                    .i64_extend_i32_u()
+                    .i64_shl()
+                    .local_set(word);
+            })
+            .loop_(InstrSeqType::Simple(None), |loop_s| {
+                let loop_id = loop_s.id();
+                let _ = loop_s
+                    .local_get(i).local_get(end).i32_ge_u()
+                    .if_(InstrSeqType::Simple(None), |then| {
+                        let _ = then.local_get(need).i32_eqz().return_();
+                    })
+                    .local_get(i).i32_const(7).i32_and().i32_eqz()
+                    .if_(InstrSeqType::Simple(None), |then| {
+                        let _ = then
+                            .local_get(words)
+                            .local_get(i).i32_const(3).i32_shr_u()
+                            .array_get(words_index)
+                            .local_set(word)
+                            // 8 ASCII bytes
+                            .local_get(need).i32_eqz()
+                            .local_get(end).local_get(i).i32_sub().i32_const(8).i32_ge_u()
+                            .i32_and()
+                            .local_get(word)
+                            .i64_const(0x8080_8080_8080_8080_u64 as i64)
+                            .i64_and()
+                            .i64_eqz()
+                            .i32_and()
+                            .if_(InstrSeqType::Simple(None), |then| {
+                                let _ = then
+                                    .local_get(i).i32_const(8).i32_add().local_set(i)
+                                    .br(loop_id);
+                            });
+                    })
+                    .local_get(word).i64_const(56).i64_shr_u().i32_wrap_i64().local_set(byte)
+                    .local_get(word).i64_const(8).i64_shl().local_set(word)
+                    .i32_inc(i)
+                    .local_get(need).i32_eqz()
+                    .if_else(
+                        InstrSeqType::Simple(None),
+                        |first| {
+                            let _ = first
+                                .local_get(byte).i32_const(0x80).i32_lt_u().br_if(loop_id)
+                                // from 0xC2 to 0xF4
+                                .local_get(byte).i32_const(0xC2).i32_sub()
+                                .i32_const(0xF4 - 0xC2)
+                                .i32_le_u()
+                                .i32_eqz()
+                                .if_(InstrSeqType::Simple(None), |then| {
+                                    let _ = then.i32_const(0).return_();
+                                })
+                                .i32_const(1)
+                                .local_get(byte).i32_const(0xE0).i32_ge_u()
+                                .i32_add()
+                                .local_get(byte).i32_const(0xF0).i32_ge_u()
+                                .i32_add()
+                                .local_set(need);
+                            any_continuation(first);
+                            restrict(first, 0xE0, 0xA0, 0xBF);
+                            restrict(first, 0xED, 0x80, 0x9F);
+                            restrict(first, 0xF0, 0x90, 0xBF);
+                            restrict(first, 0xF4, 0x80, 0x8F);
+                        },
+                        |continuation| {
+                            let _ = continuation
+                                .local_get(byte).local_get(low).i32_sub()
+                                .local_get(range)
+                                .i32_le_u()
+                                .i32_eqz()
+                                .if_(InstrSeqType::Simple(None), |then| {
+                                    let _ = then.i32_const(0).return_();
+                                })
+                                .local_get(need).i32_const(1).i32_sub().local_set(need);
+                            any_continuation(continuation);
+                        },
+                    )
+                    .br(loop_id);
+            })
+            .unreachable()
+            .end();
+        function.finish(self)
+    }
+
+    /// `_bytes_get(words, i)`: the byte `i` of `words`, to call it as a
+    /// value: a call is emitted in place (see `expression_call`).
+    pub(super) fn code_bytes_get(&mut self) -> FunctionId {
+        let words = self.wasm_local(self.words.val_type());
+        let i_int = self.wasm_local(self.int.val_type());
+        let i = self.wasm_local(ValType::I32);
+        let result = self.int.val_type();
+        let mut function = Function::new(self, "_bytes_get", &[words, i_int], &[result]);
+        let _ = function
+            .extend_instructions(self)
+            .local_get(words)
+            .local_get(i_int)
+            .int_to_i32()
+            .words_get_byte(i)
+            .i32_to_int()
+            .end();
+        function.finish(self)
+    }
+
+    /// `_bytes_set(words, i, byte)`: sets the byte `i` of `words`.
+    pub(super) fn code_bytes_set(&mut self) -> FunctionId {
+        // params
+        let words = self.wasm_local(self.words.val_type());
+        let i_int = self.wasm_local(self.int.val_type());
+        let byte = self.wasm_local(self.int.val_type());
+        // locals
+        let i = self.wasm_local(ValType::I32);
+        let index = self.wasm_local(ValType::I32);
+        let shift = self.wasm_local(ValType::I64);
+        let nil = self.val_type(&type_::nil());
+        let mut function = Function::new(self, "_bytes_set", &[words, i_int, byte], &[nil]);
+        let words_index = self.words.index;
         #[rustfmt::skip]
         let _ = function
             .extend_instructions(self)
-            .local_get(at_int).int_to_i32().local_set(at)
-            .local_get(from_int).int_to_i32().local_set(i)
-            .local_get(i).local_get(count_int).int_to_i32().i32_add().local_set(end)
-            .i32_const(8).local_get(shift_int).int_to_i32().i32_sub().local_set(shift)
-            .local_get(src).local_get(i).bytes_get().local_set(window)
+            .local_get(i_int).int_to_i32().local_tee(i)
+            .i32_const(3).i32_shr_u().local_set(index)
+            .push_byte_shift(i).local_set(shift)
+            .local_get(words)
+            .local_get(index)
+            // the word without the byte, and the byte
+            .local_get(words).local_get(index).array_get(words_index)
+            .i64_const(0xFF).local_get(shift).i64_shl().i64_const(-1).i64_xor()
+            .i64_and()
+            .local_get(byte).int_to_i64().i64_const(0xFF).i64_and()
+            .local_get(shift).i64_shl()
+            .i64_or()
+            .array_set(words_index)
+            .i32_const(0)
+            .end();
+        function.finish(self)
+    }
+
+    /// `_bits_copy(dst, at, src, from, count)`: writes the `count` bits of
+    /// `src` from the bit `from` to `dst` at the bit `at`, whose bits are
+    /// zero. The first and the last words of `dst` get the bits of the words
+    /// of `src` they overlap, which are zero out of `src`, and the words
+    /// between them are copied, shifted when the bits are not in the same
+    /// place of their words.
+    pub(super) fn code_bits_copy(&mut self) -> FunctionId {
+        let words_vt = self.words.val_type();
+        let int_vt = self.int.val_type();
+        let words_index = self.words.index;
+        // params
+        let dst = self.wasm_local(words_vt);
+        let at_int = self.wasm_local(int_vt);
+        let src = self.wasm_local(words_vt);
+        let from_int = self.wasm_local(int_vt);
+        let count_int = self.wasm_local(int_vt);
+        // locals
+        let at = self.wasm_local(ValType::I64);
+        let last_bit = self.wasm_local(ValType::I64);
+        // The bits of a word of `dst` start at bit `shift` of the word
+        // `offset` words after it in `src`.
+        let delta = self.wasm_local(ValType::I64);
+        let shift = self.wasm_local(ValType::I64);
+        let offset = self.wasm_local(ValType::I32);
+        let first = self.wasm_local(ValType::I32);
+        let last = self.wasm_local(ValType::I32);
+        let src_len = self.wasm_local(ValType::I32);
+        let mask = self.wasm_local(ValType::I64);
+        let last_mask = self.wasm_local(ValType::I64);
+        let k = self.wasm_local(ValType::I32);
+        let j = self.wasm_local(ValType::I32);
+        let current = self.wasm_local(ValType::I64);
+        let next = self.wasm_local(ValType::I64);
+        let nil = self.val_type(&type_::nil());
+        let mut function = Function::new(
+            self,
+            "_bits_copy",
+            &[dst, at_int, src, from_int, count_int],
+            &[nil],
+        );
+        let mut instructions = function.extend_instructions(self);
+        // The word of `src` at `j`, or zero out of it.
+        let src_word = |instructions: &mut Instructions<'_, '_>| {
+            let _ = instructions
+                .local_get(j)
+                .local_get(src_len)
+                .i32_lt_u()
+                .if_else(
+                    ValType::I64,
+                    |then| {
+                        let _ = then.local_get(src).local_get(j).array_get(words_index);
+                    },
+                    |else_| {
+                        let _ = else_.i64_const(0);
+                    },
+                );
+        };
+        // `dst[k] |= (the word of the bits of src for dst[k]) & mask`
+        let or_edge = |instructions: &mut Instructions<'_, '_>, mask: LocalId| {
+            let _ = instructions
+                .local_get(dst)
+                .local_get(k)
+                .local_get(dst)
+                .local_get(k)
+                .array_get(words_index)
+                .local_get(k)
+                .local_get(offset)
+                .i32_add()
+                .local_set(j);
+            src_word(instructions);
+            let _ = instructions.local_get(shift).i64_shl().i32_inc(j);
+            src_word(instructions);
+            #[rustfmt::skip]
+            let _ = instructions
+                // `>> (64 - shift)`, which is zero when `shift` is zero
+                .i64_const(1).i64_shr_u()
+                .i64_const(63).local_get(shift).i64_sub().i64_shr_u()
+                .i64_or()
+                .local_get(mask)
+                .i64_and()
+                .i64_or()
+                .array_set(words_index);
+        };
+        #[rustfmt::skip]
+        let _ = instructions
+            .local_get(count_int).int_to_i64().i64_const(0).i64_le_s()
+            .if_(InstrSeqType::Simple(None), |then| {
+                let _ = then.i32_const(0).return_();
+            })
+            .local_get(at_int).int_to_i64().local_tee(at)
+            .local_get(count_int).int_to_i64().i64_add()
+            .i64_const(1).i64_sub().local_set(last_bit)
+            .local_get(at).i64_const(6).i64_shr_u().i32_wrap_i64().local_tee(first)
+            .local_set(k)
+            .local_get(last_bit).i64_const(6).i64_shr_u().i32_wrap_i64().local_set(last)
+            .local_get(from_int).int_to_i64().local_get(at).i64_sub().local_tee(delta)
+            .i64_const(63).i64_and().local_set(shift)
+            .local_get(delta).i64_const(6).i64_shr_s().i32_wrap_i64().local_set(offset)
+            .local_get(src).array_len().local_set(src_len)
+            .i64_const(-1).local_get(at).i64_const(63).i64_and().i64_shr_u().local_set(mask)
+            .i64_const(-1)
+            .i64_const(63).local_get(last_bit).i64_const(63).i64_and().i64_sub()
+            .i64_shl().local_set(last_mask)
+            .local_get(first).local_get(last).i32_eq()
+            .if_(InstrSeqType::Simple(None), |then| {
+                let _ = then
+                    .local_get(mask).local_get(last_mask).i64_and().local_set(mask);
+            });
+        or_edge(&mut instructions, mask);
+        let _ = instructions
+            .local_get(first)
+            .local_get(last)
+            .i32_eq()
+            .if_(InstrSeqType::Simple(None), |then| {
+                let _ = then.i32_const(0).return_();
+            })
+            .local_get(last)
+            .local_set(k);
+        or_edge(&mut instructions, last_mask);
+        // The words between the first and the last ones.
+        #[rustfmt::skip]
+        let _ = instructions
+            .local_get(first).i32_const(1).i32_add().local_tee(k)
+            .local_get(offset).i32_add().local_set(j)
+            .local_get(shift).i64_const(0).i64_ne()
+            .if_else(
+                InstrSeqType::Simple(None),
+                |then| {
+                    let _ = then
+                        .local_get(k).local_get(last).i32_lt_u()
+                        .if_(InstrSeqType::Simple(None), |then| {
+                            let _ = then
+                                .local_get(src).local_get(j).array_get(words_index)
+                                .local_set(current);
+                        })
+                        .block_(InstrSeqType::Simple(None), |block_s| {
+                            let block_id = block_s.id();
+                            let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
+                                let loop_id = loop_s.id();
+                                let _ = loop_s
+                                    .local_get(k).local_get(last).i32_ge_u().br_if(block_id)
+                                    .i32_inc(j)
+                                    .local_get(src).local_get(j).array_get(words_index)
+                                    .local_set(next)
+                                    .local_get(dst).local_get(k)
+                                    .local_get(current).local_get(shift).i64_shl()
+                                    .local_get(next)
+                                    .i64_const(64).local_get(shift).i64_sub().i64_shr_u()
+                                    .i64_or()
+                                    .array_set(words_index)
+                                    .local_get(next).local_set(current)
+                                    .i32_inc(k)
+                                    .br(loop_id);
+                            });
+                        });
+                },
+                |else_| {
+                    let _ = else_
+                        .local_get(dst).local_get(k)
+                        .local_get(src).local_get(j)
+                        .local_get(last).local_get(k).i32_sub()
+                        .array_copy(words_index, words_index);
+                },
+            )
+            .i32_const(0)
+            .end();
+        function.finish(self)
+    }
+
+    /// Writes `len` bytes to `words` from the byte `at`, which are zero,
+    /// the byte `k` pushed by `byte`. A whole word is written at once, and
+    /// the bytes of the other ones are put together in an `i64`, which is
+    /// written once it has the last byte of its word.
+    pub(super) fn words_pack(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        words: LocalId,
+        at: LocalId,
+        len: LocalId,
+        byte: impl Fn(&mut Instructions<'_, '_>, LocalId),
+    ) {
+        let k = self.wasm_local(ValType::I32);
+        let j = self.wasm_local(ValType::I32);
+        let word = self.wasm_local(ValType::I64);
+        let index = self.wasm_local(ValType::I32);
+        let kk = self.wasm_local(ValType::I32);
+        let words_index = self.words.index;
+        // `words[index] |= word`
+        let or_word = |instructions: &mut Instructions<'_, '_>| {
+            let _ = instructions
+                .local_get(words)
+                .local_get(index)
+                .local_get(words)
+                .local_get(index)
+                .array_get(words_index)
+                .local_get(word)
+                .i64_or()
+                .array_set(words_index);
+        };
+        #[rustfmt::skip]
+        let _ = instructions
+            .i32_const(0).local_set(k)
+            .local_get(at).local_set(j)
+            .i64_const(0).local_set(word)
             .block_(InstrSeqType::Simple(None), |block_s| {
                 let block_id = block_s.id();
                 let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
                     let loop_id = loop_s.id();
                     let _ = loop_s
-                        .local_get(i).local_get(end).i32_ge_u().br_if(block_id)
-                        .i32_inc(i)
-                        .local_get(window).i32_const(8).i32_shl()
-                        .local_get(src).local_get(i).bytes_get()
-                        .i32_or().local_set(window)
-                        .local_get(dst).local_get(at)
-                        .local_get(window).local_get(shift).i32_shr_u()
-                        .bytes_set()
-                        .i32_inc(at)
+                        .local_get(k).local_get(len).i32_ge_u().br_if(block_id)
+                        // a whole word
+                        .local_get(j).i32_const(7).i32_and().i32_eqz()
+                        .local_get(len).local_get(k).i32_sub().i32_const(8).i32_ge_u()
+                        .i32_and()
+                        .if_(InstrSeqType::Simple(None), |then| {
+                            let _ = then
+                                .local_get(words)
+                                .local_get(j).i32_const(3).i32_shr_u();
+                            for t in 0..8 {
+                                let _ = then.local_get(k).i32_const(t).i32_add().local_set(kk);
+                                byte(then, kk);
+                                let _ = then.i64_extend_i32_u();
+                                if t < 7 {
+                                    let _ = then.i64_const(i64::from(56 - 8 * t)).i64_shl();
+                                }
+                                if t > 0 {
+                                    let _ = then.i64_or();
+                                }
+                            }
+                            let _ = then
+                                .array_set(words_index)
+                                .local_get(k).i32_const(8).i32_add().local_set(k)
+                                .local_get(j).i32_const(8).i32_add().local_set(j)
+                                .br(loop_id);
+                        })
+                        .local_get(word).i64_const(8).i64_shl();
+                    byte(loop_s, k);
+                    let _ = loop_s
+                        .i64_extend_i32_u().i64_or().local_set(word)
+                        .i32_inc(k)
+                        .i32_inc(j)
+                        .local_get(j).i32_const(7).i32_and().i32_eqz()
+                        .if_(InstrSeqType::Simple(None), |then| {
+                            let _ = then
+                                .local_get(j).i32_const(3).i32_shr_u()
+                                .i32_const(1).i32_sub().local_set(index);
+                            or_word(then);
+                            let _ = then.i64_const(0).local_set(word);
+                        })
                         .br(loop_id);
                 });
             })
-            .i32_const(0)
-            .end();
-        function.finish(self)
+            // The bytes of a last word that is not full, to its start.
+            .local_get(j).i32_const(7).i32_and().i32_const(0).i32_ne()
+            .local_get(len).i32_const(0).i32_ne()
+            .i32_and()
+            .if_(InstrSeqType::Simple(None), |then| {
+                let _ = then
+                    .local_get(word)
+                    .i64_const(64)
+                    .local_get(j).i32_const(7).i32_and().i32_const(3).i32_shl()
+                    .i64_extend_i32_u()
+                    .i64_sub()
+                    .i64_shl()
+                    .local_set(word)
+                    .local_get(j).i32_const(3).i32_shr_u().local_set(index);
+                or_word(then);
+            });
+    }
+
+    /// Reads `len` bytes of `words` from the byte `start`, each one given to
+    /// `consume` with its index from 0 in a local. The bytes of a whole word
+    /// are read from it at once.
+    pub(super) fn words_unpack(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        words: LocalId,
+        start: LocalId,
+        len: LocalId,
+        consume: impl Fn(&mut Instructions<'_, '_>, LocalId, LocalId),
+    ) {
+        let k = self.wasm_local(ValType::I32);
+        let i = self.wasm_local(ValType::I32);
+        let word = self.wasm_local(ValType::I64);
+        let byte = self.wasm_local(ValType::I32);
+        let kk = self.wasm_local(ValType::I32);
+        let words_index = self.words.index;
+        // The word of the byte `i`, from it.
+        let load = |instructions: &mut Instructions<'_, '_>| {
+            let _ = instructions
+                .local_get(words)
+                .local_get(i)
+                .i32_const(3)
+                .i32_shr_u()
+                .array_get(words_index)
+                .local_get(i)
+                .i32_const(7)
+                .i32_and()
+                .i32_const(3)
+                .i32_shl()
+                .i64_extend_i32_u()
+                .i64_shl()
+                .local_set(word);
+        };
+        #[rustfmt::skip]
+        let _ = instructions
+            .i32_const(0).local_set(k)
+            .local_get(start).local_set(i)
+            .block_(InstrSeqType::Simple(None), |block_s| {
+                let block_id = block_s.id();
+                let _ = block_s.loop_(InstrSeqType::Simple(None), |loop_s| {
+                    let loop_id = loop_s.id();
+                    let _ = loop_s
+                        .local_get(k).local_get(len).i32_ge_u().br_if(block_id)
+                        // a whole word
+                        .local_get(i).i32_const(7).i32_and().i32_eqz()
+                        .local_get(len).local_get(k).i32_sub().i32_const(8).i32_ge_u()
+                        .i32_and()
+                        .if_(InstrSeqType::Simple(None), |then| {
+                            let _ = then
+                                .local_get(words)
+                                .local_get(i).i32_const(3).i32_shr_u()
+                                .array_get(words_index)
+                                .local_set(word);
+                            for t in 0..8 {
+                                let _ = then
+                                    .local_get(k).i32_const(t).i32_add().local_set(kk)
+                                    .local_get(word)
+                                    .i64_const(i64::from(56 - 8 * t))
+                                    .i64_shr_u()
+                                    .i32_wrap_i64()
+                                    .i32_const(0xFF)
+                                    .i32_and()
+                                    .local_set(byte);
+                                consume(then, kk, byte);
+                            }
+                            let _ = then
+                                .local_get(k).i32_const(8).i32_add().local_set(k)
+                                .local_get(i).i32_const(8).i32_add().local_set(i)
+                                .br(loop_id);
+                        })
+                        .local_get(k).i32_eqz()
+                        .local_get(i).i32_const(7).i32_and().i32_eqz()
+                        .i32_or()
+                        .if_(InstrSeqType::Simple(None), load)
+                        .local_get(word).i64_const(56).i64_shr_u().i32_wrap_i64()
+                        .local_set(byte)
+                        .local_get(word).i64_const(8).i64_shl().local_set(word);
+                    consume(loop_s, k, byte);
+                    let _ = loop_s
+                        .i32_inc(k)
+                        .i32_inc(i)
+                        .br(loop_id);
+                });
+            });
     }
 
     /// Pushes the number of bits of the `Bits` of `bits`.
@@ -903,7 +1491,7 @@ impl Generator<'_> {
             return;
         };
         for (bits, index) in self.bit_arrays.clone() {
-            self.push_bytes(instructions, bits.bytes);
+            self.push_words(instructions, bits.bytes);
             let _ = instructions
                 .int_const(&bits.size.into())
                 .call(from_bytes)

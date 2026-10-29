@@ -33,12 +33,8 @@ impl Instructions<'_, '_> {
             B::FloatToF64 => self.float_to_f64(),
             B::StringNumBytes | B::StringByteSize => self.string_utf8_len().i32_to_int(),
             B::StringCodeunitSize => self.string_len().i32_to_int(),
-            B::BytesNew => self.bytes_new(),
-            B::BytesSize => self.array_len().i32_to_int(),
-            B::BytesGet => self.bytes_get().i32_to_int(),
-            B::BytesSet => self.bytes_set().i32_const(0),
-            B::BytesCopy => self.bytes_copy().i32_const(0),
-            B::BytesToString => self.string_from_utf8(),
+            B::BytesNew => self.words_new(),
+            B::BytesSize => self.array_len().i32_const(3).i32_shl().i32_to_int(),
             B::Float64Byte => self
                 .i64_shr_u()
                 .i32_wrap_i64()
@@ -70,7 +66,12 @@ impl Instructions<'_, '_> {
             | B::StringPopCodeunit
             | B::StringFind
             | B::StringBits
-            | B::BytesCopyShifted
+            | B::BytesGet
+            | B::BytesSet
+            | B::BitsCopy
+            | B::BytesWriteString
+            | B::BytesToString
+            | B::BytesIsUtf8
             | B::BytesToMemory
             | B::BytesFromMemory
             | B::StringStartsWith
@@ -87,7 +88,7 @@ impl Instructions<'_, '_> {
 
     /// Converts the argument at `index` of `builtin`, just pushed, to the
     /// type that `builtin_inline` expects: the `Int` positions and sizes of
-    /// `Bytes` are `i32`, a float whose bytes are taken is its bits, and the
+    /// `Words` are `i32`, a float whose bytes are taken is its bits, and the
     /// bits of a float are `i64` or `i32`, and the value of a cell is `i64`.
     /// Only builtins that `builtin_inline` emits convert their arguments.
     pub(super) fn builtin_argument(
@@ -106,11 +107,8 @@ impl Instructions<'_, '_> {
             // The high and the low 32 bits of the float, joined.
             (B::Float64FromBits, 0) => self.int_to_i64().i64_const(32).i64_shl(),
             (B::Float64FromBits, _) => self.int_to_i64().i64_const(0xFFFF_FFFF).i64_and(),
-            // Sizes and indices of bytes, and the bits of an `f32`.
-            (B::BytesNew | B::Float32FromBits, _)
-            | (B::BytesGet | B::BytesSet | B::BytesToString, 1..)
-            | (B::BytesCopy, 1 | 3..)
-            | (B::Float32Byte, 1) => self.int_to_i32(),
+            // Sizes of bytes, and the bits of an `f32`.
+            (B::BytesNew | B::Float32FromBits, _) | (B::Float32Byte, 1) => self.int_to_i32(),
             _ => self,
         }
     }

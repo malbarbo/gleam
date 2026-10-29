@@ -718,6 +718,8 @@ struct Generator<'a> {
     int: IntType,
     float: FloatType,
     bytes: BytesType,
+    /// The bytes of bit arrays.
+    words: WordsType,
     string: StringType,
     /// The `Cell` of the runtime, `(struct (field (mut i64)))`: an `Int`
     /// that can be changed.
@@ -752,6 +754,7 @@ impl<'a> Generator<'a> {
         let linker = link::Linker::new(&mut wasm_module);
         let memory = Some(linker.memory());
         let bytes = BytesType::new(&mut wasm_module);
+        let words = WordsType::new(&mut wasm_module);
         let cell = wasm_module.types.add_struct(vec![FieldType {
             element_type: StorageType::Val(ValType::I64),
             mutable: true,
@@ -760,6 +763,7 @@ impl<'a> Generator<'a> {
         let string = StringType::new(&mut wasm_module, bytes, cell, config.string);
         let mut wasm_types = IndexMap::new();
         let _ = wasm_types.insert(BytesType::wasm_type(), bytes.index);
+        let _ = wasm_types.insert(WordsType::wasm_type(), words.index);
         Generator {
             wasm_module,
             memory,
@@ -799,6 +803,7 @@ impl<'a> Generator<'a> {
                 WasmFloat::F64 => FloatType::F64,
             },
             bytes,
+            words,
             string,
             cell,
             module,
@@ -1328,11 +1333,11 @@ impl<'a> Generator<'a> {
     /// The representation of the external type `name` of `package` whose
     /// values are wasm values.
     fn wasm_external_type(&self, package: &str, name: &str) -> Option<CustomType> {
-        // `AnyRef`, `Bytes`, `Cell` and `JsValue` are only for the runtime,
+        // `AnyRef`, `Words`, `Cell` and `JsValue` are only for the runtime,
         // which compares an `AnyRef` by the functions of its type, writes
         // only the bytes it creates, shares a cell by the bit arrays of the
         // same bytes, and converts the values of the host.
-        if package != RUNTIME_PACKAGE && matches!(name, "AnyRef" | "Bytes" | "Cell" | "JsValue") {
+        if package != RUNTIME_PACKAGE && matches!(name, "AnyRef" | "Words" | "Cell" | "JsValue") {
             return None;
         }
         let (val_type, to_str) = self.wasm_external(name)?;
@@ -1348,7 +1353,7 @@ impl<'a> Generator<'a> {
             "F32" => Some((ValType::F32, Some(F32_TO_STR))),
             "F64" => Some((ValType::F64, Some(F64_TO_STR))),
             "AnyRef" => Some((ANYREF, None)),
-            "Bytes" => Some((self.bytes.val_type(), None)),
+            "Words" => Some((self.words.val_type(), None)),
             "Cell" => Some((self.val_type_ref(self.cell), None)),
             "JsValue" => Some((EXTERNREF, None)),
             _ => None,
@@ -4861,6 +4866,19 @@ impl<'a> Generator<'a> {
                 }
                 return;
             }
+            if builtin == Some(BuiltinFunctionExternal::BytesGet)
+                && let [words, i] = arguments
+            {
+                // Emitted in place, with a local for the index.
+                let index = self.wasm_local(ValType::I32);
+                let _ = instructions
+                    .expression(self, locals, scope.clone(), &words.value)
+                    .expression(self, locals, scope, &i.value)
+                    .int_to_i32()
+                    .words_get_byte(index)
+                    .i32_to_int();
+                return;
+            }
             if let Some(builtin) = builtin {
                 for (index, arg) in arguments.iter().enumerate() {
                     let _ = instructions
@@ -6027,7 +6045,12 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::StringJoin => self.code_string_join(true),
             BuiltinFunctionExternal::StringPopGrapheme => self.code_string_pop_grapheme(),
             BuiltinFunctionExternal::StringBits => self.code_string_bits(),
-            BuiltinFunctionExternal::BytesCopyShifted => self.code_bytes_copy_shifted(),
+            BuiltinFunctionExternal::BytesGet => self.code_bytes_get(),
+            BuiltinFunctionExternal::BytesSet => self.code_bytes_set(),
+            BuiltinFunctionExternal::BitsCopy => self.code_bits_copy(),
+            BuiltinFunctionExternal::BytesToString => self.code_bytes_to_string(),
+            BuiltinFunctionExternal::BytesIsUtf8 => self.code_bytes_is_utf8(),
+            BuiltinFunctionExternal::BytesWriteString => self.code_bytes_write_string(),
             BuiltinFunctionExternal::BytesToMemory => self.code_bytes_to_memory(),
             BuiltinFunctionExternal::BytesFromMemory => self.code_bytes_from_memory(),
             BuiltinFunctionExternal::StringNumBytes
@@ -6054,10 +6077,6 @@ impl<'a> Generator<'a> {
             | BuiltinFunctionExternal::UnsafeIntToUtfCodepoint
             | BuiltinFunctionExternal::BytesNew
             | BuiltinFunctionExternal::BytesSize
-            | BuiltinFunctionExternal::BytesGet
-            | BuiltinFunctionExternal::BytesSet
-            | BuiltinFunctionExternal::BytesCopy
-            | BuiltinFunctionExternal::BytesToString
             | BuiltinFunctionExternal::Float64Byte
             | BuiltinFunctionExternal::Float32Byte
             | BuiltinFunctionExternal::Float64FromBits
