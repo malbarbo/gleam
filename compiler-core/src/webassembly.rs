@@ -1204,8 +1204,7 @@ impl<'a> Generator<'a> {
         self.types_external()?;
         self.types_prelude();
         self.types_runtime();
-        let builtins = self.functions_external()?;
-        self.functions_builtins(builtins);
+        self.functions_external()?;
         self.types();
         self.types_imported();
         self.constants();
@@ -1216,13 +1215,6 @@ impl<'a> Generator<'a> {
         match self.error.take() {
             Some(error) => Err(error),
             None => Ok(start),
-        }
-    }
-
-    fn functions_builtins(&mut self, builtins: Vec<(BuiltinFunctionExternal, EcoString)>) {
-        for (builtin, name) in builtins {
-            let index = self.get_function_builtin_external(builtin);
-            let _ = self.add_function_to_globals(name, index);
         }
     }
 
@@ -1653,7 +1645,7 @@ impl<'a> Generator<'a> {
         );
     }
 
-    fn functions_external(&mut self) -> Result<Vec<(BuiltinFunctionExternal, EcoString)>, Error> {
+    fn functions_external(&mut self) -> Result<(), Error> {
         let mut available: HashMap<EcoString, (Vec<ValType>, Vec<ValType>)> = HashMap::new();
         let func_info: Vec<(EcoString, FunctionId, Vec<ValType>, Vec<ValType>)> =
             match &self.linking {
@@ -1695,15 +1687,14 @@ impl<'a> Generator<'a> {
             *names = self.rust_functions.keys().map(|n| n.to_string()).collect();
         }
 
-        // Validate external function signatures and collect needed builtins
+        // Validate external function signatures
         self.validate_externals(&available)
     }
 
     fn validate_externals(
         &mut self,
         available: &HashMap<EcoString, (Vec<ValType>, Vec<ValType>)>,
-    ) -> Result<Vec<(BuiltinFunctionExternal, EcoString)>, Error> {
-        let mut builtins = vec![];
+    ) -> Result<(), Error> {
         let functions: Vec<_> = self.module.definitions.functions.iter().collect();
         for function in functions {
             if let Some((module, name, _)) = &function.external_webassembly {
@@ -1750,7 +1741,6 @@ impl<'a> Generator<'a> {
                     }
                 } else if let Some(builtin) = BuiltinFunctionExternal::by_name(name) {
                     self.validate_builtin_external(function, name, builtin)?;
-                    builtins.push((builtin, name.clone()));
                 } else if let Some(array_function) = ArrayFunction::by_name(name)
                     && self.module.type_info.package == RUNTIME_PACKAGE
                 {
@@ -1810,7 +1800,7 @@ impl<'a> Generator<'a> {
                 }
             }
         }
-        Ok(builtins)
+        Ok(())
     }
 
     /// Checks that the type of the external `function` is an instance of
