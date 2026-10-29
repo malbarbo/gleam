@@ -9,8 +9,10 @@ import { readFileSync, writeSync } from "node:fs";
 import process from "node:process";
 import {
   BitArray,
+  CustomType,
   Error as GleamError,
   List,
+  List$isNonEmpty,
   Ok,
   UtfCodepoint,
   isEqual,
@@ -246,16 +248,22 @@ function hash(value) {
   return hash;
 }
 
-// The text of `value`, as `string.inspect` of the JavaScript target, with
-// the objects in `seen` being shown.
+// The text of `value`, as `string.inspect` of the JavaScript target (the
+// `Inspector` of `gleam_stdlib.mjs`, which a program of this target does not
+// have), with the objects in `seen` being shown. A `Dict` of the stdlib is
+// shown as an object, as its class is not known here.
 function inspect(value, seen = new Set()) {
   if (value === true) return "True";
   if (value === false) return "False";
   if (value === null) return "//js(null)";
   if (value === undefined) return "Nil";
-  if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "bigint" || Number.isSafeInteger(value)) return value.toString();
-  if (typeof value === "number") return Number.isFinite(value) ? `${value}` : `//js(${value})`;
+  if (typeof value === "string") return inspectString(value);
+  if (typeof value === "bigint" || Number.isInteger(value)) return value.toString();
+  if (typeof value === "number") return floatToString(value);
+  if (value instanceof UtfCodepoint) {
+    return `//utfcodepoint(${String.fromCodePoint(value.value)})`;
+  }
+  if (value instanceof BitArray) return inspectBitArray(value);
   if (value instanceof RegExp) return `//js(${value})`;
   if (value instanceof Date) return `//js(Date("${value.toISOString()}"))`;
   if (value instanceof globalThis.Error) return `//js(${value})`;
@@ -268,6 +276,17 @@ function inspect(value, seen = new Set()) {
   let text;
   if (Array.isArray(value)) {
     text = `#(${value.map((item) => inspect(item, seen)).join(", ")})`;
+  } else if (value instanceof List) {
+    text = inspectList(value, seen);
+  } else if (value instanceof CustomType) {
+    const fields = Object.keys(value).map((label) => {
+      const field = inspect(value[label], seen);
+      return isNaN(parseInt(label)) ? `${label}: ${field}` : field;
+    });
+    const name = value.constructor.name;
+    text = fields.length ? `${name}(${fields.join(", ")})` : name;
+  } else if (value instanceof Set) {
+    text = `//js(Set(${[...value].map((item) => inspect(item, seen)).join(", ")}))`;
   } else {
     const name = Object.getPrototypeOf(value)?.constructor?.name || "Object";
     const props = Object.keys(value).map(
@@ -278,6 +297,50 @@ function inspect(value, seen = new Set()) {
   }
   seen.delete(value);
   return text;
+}
+
+// `float_to_string` of `gleam_stdlib.mjs`.
+function floatToString(float) {
+  const text = float.toString().replace("+", "");
+  if (text.includes(".")) return text;
+  const index = text.indexOf("e");
+  return index >= 0 ? text.slice(0, index) + ".0" + text.slice(index) : text + ".0";
+}
+
+function inspectString(string) {
+  const escapes = { "\n": "\\n", "\r": "\\r", "\t": "\\t", "\f": "\\f", "\\": "\\\\", '"': '\\"' };
+  let text = '"';
+  for (const char of string.split("")) {
+    if (char in escapes) {
+      text += escapes[char];
+    } else if (char < " " || (char > "~" && char < "\u{00A0}")) {
+      text += `\\u{${char.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}}`;
+    } else {
+      text += char;
+    }
+  }
+  return text + '"';
+}
+
+// A list of printable ASCII codes is shown as the charlist of its text.
+function inspectList(list, seen) {
+  const items = [];
+  for (let rest = list; List$isNonEmpty(rest); rest = rest.tail) items.push(rest.head);
+  if (items.length === 0) return "[]";
+  if (items.every((item) => Number.isInteger(item) && item >= 32 && item <= 126)) {
+    return `charlist.from_string("${String.fromCharCode(...items)}")`;
+  }
+  return `[${items.map((item) => inspect(item, seen)).join(", ")}]`;
+}
+
+function inspectBitArray(bits) {
+  if (bits.bitSize === 0) return "<<>>";
+  const bytes = [];
+  for (let i = 0; i < bits.byteSize - 1; i++) bytes.push(bits.byteAt(i));
+  const last = bits.byteAt(bits.byteSize - 1);
+  const trailing = bits.bitSize % 8;
+  bytes.push(trailing === 0 ? last : `${last >> (8 - trailing)}:size(${trailing})`);
+  return `<<${bytes.join(", ")}>>`;
 }
 
 // Runs the `main` function of the module at `url` and exits. The error of a

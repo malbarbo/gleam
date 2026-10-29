@@ -815,6 +815,38 @@ export const thrown = (a) => new Thrown({ a });
     );
 }
 
+/// The values of the JavaScript target inside a value of the host are shown
+/// as `string.inspect` of the JavaScript target shows them.
+#[test]
+fn host_values_inspected_as_on_javascript() {
+    run_with_host(
+        r#"
+@external(webassembly, "builtins", "Dynamic")
+pub type Dynamic
+@external(webassembly, "builtins", "_inspect")
+fn inspect(a: a) -> String
+@external(webassembly, "./ffi.mjs", "object")
+fn object() -> Dynamic
+
+pub fn main() {
+    let assert "//js({ \"list\": [1, 2], \"chars\": charlist.from_string(\"ab\"), \"ok\": Ok(Nil), \"bits\": <<1, 1:size(1)>>, \"codepoint\": //utfcodepoint(a), \"float\": 1.5, \"string\": \"a\\n\" })" = inspect(object())
+}
+"#,
+        r#"
+import { toList, Ok, BitArray, UtfCodepoint } from "../gleam.mjs";
+export const object = () => ({
+  list: toList([1, 2]),
+  chars: toList([97, 98]),
+  ok: new Ok(undefined),
+  bits: new BitArray(new Uint8Array([1, 128]), 9),
+  codepoint: new UtfCodepoint(97),
+  float: 1.5,
+  string: "a\n",
+});
+"#,
+    );
+}
+
 /// A plain object of the host is read by `decode.field` and `decode.dict` as
 /// the dict of its properties, as on JavaScript, and is equal to that dict,
 /// though it is the same object when it goes back to the host. `null` is
