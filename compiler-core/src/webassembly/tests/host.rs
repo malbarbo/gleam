@@ -889,8 +889,8 @@ export function capture(f) {
     );
 }
 
-/// A value that crosses to the host as an opaque value crosses back as the
-/// same value, also through a `Dynamic`, like in the JavaScript target.
+/// A value that crosses to the host crosses back as an equal value, also
+/// through a `Dynamic`, like in the JavaScript target.
 #[test]
 fn host_values_back() {
     run_with_host(
@@ -1356,4 +1356,52 @@ pub fn main() {{
             assert!(result.stderr.contains(expected), "{}", result.stderr);
         }
     }
+}
+
+/// A value cast to `Dynamic` crosses to the host in a box, and crosses back
+/// as itself, like in the JavaScript target.
+#[test]
+fn cast_values_back() {
+    run_with_host(
+        r#"
+@external(webassembly, "builtins", "Dynamic")
+pub type Dynamic
+@external(webassembly, "builtins", "_dynamic_cast")
+fn cast(a: a) -> Dynamic
+@external(webassembly, "./ffi.mjs", "identity")
+fn to_box(a: Dynamic) -> Box
+@external(webassembly, "./ffi.mjs", "identity")
+fn to_color(a: Dynamic) -> Color
+@external(webassembly, "./ffi.mjs", "identity")
+fn to_result(a: Dynamic) -> Result(Int, Nil)
+@external(webassembly, "./ffi.mjs", "identity")
+fn to_boxes(a: Dynamic) -> List(Box)
+@external(webassembly, "./ffi.mjs", "identity")
+fn to_pair(a: Dynamic) -> #(Color, Int)
+@external(webassembly, "./ffi.mjs", "identity")
+fn to_function(a: Dynamic) -> fn(Int) -> Int
+
+pub type Box {
+    Box(Int)
+}
+
+pub type Color {
+    Red
+    Rgb(Int, Int, Int)
+}
+
+pub fn main() {
+    let assert Box(4) = to_box(cast(Box(4)))
+    let assert Red = to_color(cast(Red))
+    let assert Rgb(1, 2, 3) = to_color(cast(Rgb(1, 2, 3)))
+    let ok: Result(Int, Nil) = Ok(1)
+    let assert Ok(1) = to_result(cast(ok))
+    let assert [Box(1), Box(2)] = to_boxes(cast([Box(1), Box(2)]))
+    let assert #(Red, 1) = to_pair(cast(#(Red, 1)))
+    let add = fn(a) { a + 1 }
+    let assert 2 = to_function(cast(add))(1)
+}
+"#,
+        r#"export const identity = (a) => a;"#,
+    );
 }

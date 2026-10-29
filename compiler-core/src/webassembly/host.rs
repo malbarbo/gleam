@@ -208,7 +208,7 @@ impl<'a> Generator<'a> {
         if direction == Direction::FromJs
             && !matches!(
                 conversion,
-                Conversion::Same | Conversion::Opaque(_) | Conversion::DynamicFromJs { .. }
+                Conversion::Same | Conversion::DynamicFromJs { .. }
             )
         {
             self.return_wasm_value(&mut instructions, value, type_);
@@ -449,35 +449,58 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// Returns the JavaScript value of the local `value` as it is when it is a
-    /// wasm value of `type_` that crossed to the host as an opaque value (see
-    /// `Conversion::Opaque`), so it crosses back as the same value, like in
-    /// the JavaScript target.
+    /// Returns the wasm value of `type_` that the JavaScript value of the local
+    /// `value` holds when it is a `Dynamic` that crossed to the host in its box
+    /// (see `dynamic_self_box`) and holds a wasm value of `type_`, so a value
+    /// cast to `Dynamic` crosses back as itself, like in the JavaScript
+    /// target.
     fn return_wasm_value(
         &mut self,
         instructions: &mut Instructions<'_, '_>,
         value: LocalId,
         type_: &Arc<Type>,
     ) {
-        let heap_type = match (self.val_type(type_), self.dynamic_box(type_)) {
-            (_, Some(box_)) => HeapType::Concrete(box_),
+        // A variant without fields may be null.
+        let (nullable, heap_type) = match (self.val_type(type_), self.dynamic_box(type_)) {
+            (_, Some(box_)) => (false, HeapType::Concrete(box_)),
             (
                 ValType::Ref(RefType {
+                    nullable,
                     heap_type: heap_type @ HeapType::Concrete(_),
-                    ..
                 }),
                 None,
-            ) => heap_type,
+            ) => (nullable, heap_type),
             (_, None) => return,
         };
+        let dynamic = self.runtime_named_type(DYNAMIC_MODULE, "Dynamic", vec![]);
+        let self_box = self.dynamic_self_box(&dynamic);
+        let (d_other, field) = self.dynamic_other(&dynamic);
+        let other = self.wasm_local(ANYREF);
         let _ = instructions
             .local_get(value)
             .any_convert_extern()
-            .ref_test(false, heap_type)
+            .local_tee(other)
+            .ref_test(false, HeapType::Concrete(self_box))
             .if_(InstrSeqType::Simple(None), |then| {
-                let _ = then.local_get(value).any_convert_extern();
-                self.unbox_instructions(then, type_);
-                let _ = then.return_();
+                let _ = then
+                    .local_get(other)
+                    .ref_cast_non_null(HeapType::Concrete(self_box))
+                    .struct_get(self_box, 0)
+                    .local_tee(other)
+                    .ref_test(false, HeapType::Concrete(d_other))
+                    .if_(InstrSeqType::Simple(None), |then| {
+                        let _ = then
+                            .local_get(other)
+                            .ref_cast_non_null(HeapType::Concrete(d_other))
+                            .struct_get(d_other, field)
+                            .local_tee(other)
+                            .ref_test(nullable, heap_type)
+                            .if_(InstrSeqType::Simple(None), |then| {
+                                let _ = then.local_get(other);
+                                self.unbox_instructions(then, type_);
+                                let _ = then.return_();
+                            });
+                    });
             });
     }
 
@@ -505,13 +528,9 @@ impl<'a> Generator<'a> {
         id
     }
 
-    /// `Conversion::DynamicToJs` for the type `dynamic`.
-    fn dynamic_to_js(
-        &mut self,
-        dynamic: &Arc<Type>,
-        js_value: &Arc<Type>,
-        dynamic_box: TypeId,
-    ) -> Conversion {
+    /// The struct of the variant `DOther` of `dynamic` and the field of its
+    /// value.
+    fn dynamic_other(&mut self, dynamic: &Arc<Type>) -> (TypeId, u32) {
         let Some((CustomType::Union { custom_type }, args)) = self.custom_type(dynamic) else {
             panic!("Dynamic to be a union");
         };
@@ -528,6 +547,17 @@ impl<'a> Generator<'a> {
             .copied()
             .flatten()
             .expect("the field value");
+        (other, field)
+    }
+
+    /// `Conversion::DynamicToJs` for the type `dynamic`.
+    fn dynamic_to_js(
+        &mut self,
+        dynamic: &Arc<Type>,
+        js_value: &Arc<Type>,
+        dynamic_box: TypeId,
+    ) -> Conversion {
+        let (other, field) = self.dynamic_other(dynamic);
         let box_ = self
             .dynamic_box(js_value)
             .expect("a boxed JavaScript value");
@@ -873,6 +903,7 @@ impl<'a> Generator<'a> {
                 let _ = instructions.unreachable();
             }
             Direction::FromJs if variants.len() == 1 => {
+                self.return_wasm_value(&mut instructions, value, type_);
                 let (_, conversion) = variants.into_iter().next().expect("a variant");
                 let _ = instructions.local_get(value).return_call(conversion);
             }
