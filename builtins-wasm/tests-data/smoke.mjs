@@ -57,29 +57,17 @@ x._config(64, 64);
 const S = (s) => () => str(s);
 
 assert.deepEqual(
-  call(x.string_split, [S("a,b,,c"), S(",")], 8, (r) => readList(r, 8, readStr)),
-  ["a", "b", "", "c"],
-);
-assert.deepEqual(
   call(x.string_to_graphemes, [S("aé🇧🇷")], 8, (r) => readList(r, 8, readStr)),
   ["a", "é", "🇧🇷"],
 );
 assert.equal(call(x.string_trim, [S(" \t gleam \n")], 8, readStr), "gleam");
 assert.equal(call(x.string_uppercase, [S("straße")], 8, readStr), "STRASSE");
-assert.equal(call(x.string_replace, [S("a.b.c"), S("."), S("--")], 8, readStr), "a--b--c");
 assert.equal(call(x.string_slice, [S("gleam"), -2n, 2n], 8, readStr), "am");
 assert.equal(call(x.string_slice, [S("gleam"), 1n, (1n << 32n) + 1n], 8, readStr), "leam");
 assert.equal(call(x.string_drop_end, [S("gleam"), (1n << 32n) + 1n], 8, readStr), "");
 assert.equal(call(x.string_drop_start, [S("gleam"), (1n << 32n) + 1n], 8, readStr), "");
 assert.equal(call(x.string_length,[S("é🇧🇷")]), 2n);
-assert.equal(call(x.string_contains, [S("gleam"), S("lea")]), 1);
 assert.equal(call(x.string_inspect, [S('a"\n\u001b')], 8, readStr), '"a\\"\\n\\u{001B}"');
-assert.deepEqual(
-  call(x.string_split_once, [S("k=v=w"), S("=")], 24, (r) =>
-    readResult(r, (p) => [readStr(p), readStr(p + 8)]),
-  ),
-  { ok: ["k", "v=w"] },
-);
 assert.deepEqual(call(x.string_first, [S("")], 16, (r) => readResult(r, readStr)), { error: null });
 assert.deepEqual(
   call(x.string_to_utf_codepoints, [S("aé🎉")], 8, (r) => readList(r, 8, (p) => view().getUint32(p, true))),

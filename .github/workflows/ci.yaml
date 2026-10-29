@@ -355,6 +355,16 @@ jobs:
       - name: Run wasm tests
         run: wasm-pack test --node compiler-wasm
 
+      - name: Run builtins-wasm tests
+        run: cargo test
+        working-directory: ./builtins-wasm
+
+      - name: Run builtins-wasm smoke test
+        run: |
+          cargo build --release --target wasm32-unknown-unknown
+          node tests-data/smoke.mjs target/wasm32-unknown-unknown/release/builtins_wasm.wasm
+        working-directory: ./builtins-wasm
+
   rustfmt:
     name: rustfmt
     runs-on: ubuntu-latest
