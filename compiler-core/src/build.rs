@@ -69,8 +69,6 @@ pub enum Target {
     #[serde(alias = "js")]
     #[clap(alias = "js")]
     JavaScript,
-    #[strum(serialize = "webassembly", serialize = "wasm")]
-    #[serde(rename = "webassembly", alias = "wasm")]
     WebAssembly,
 }
 

@@ -1384,6 +1384,27 @@ name = "1"
 }
 
 #[test]
+fn webassembly_target() {
+    let input = r#"
+name = "one_two"
+target = "webassembly"
+"#;
+    let config = toml::from_str::<PackageConfig>(input).unwrap();
+    assert_eq!(config.target, Target::WebAssembly);
+}
+
+/// The WebAssembly target has no shorthand, as the shorthands of the other
+/// targets are deprecated.
+#[test]
+fn webassembly_target_shorthand() {
+    let input = r#"
+name = "one_two"
+target = "wasm"
+"#;
+    assert!(toml::from_str::<PackageConfig>(input).is_err());
+}
+
+#[test]
 fn docs_dot_dot_string_path() {
     let input = r#"
 name = "one_two"
