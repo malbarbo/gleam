@@ -80,7 +80,10 @@ impl Out {
         write: impl Fn(Out, T),
     ) {
         let count = items.len();
-        let base = alloc_area(count * size);
+        let Some(bytes) = count.checked_mul(size) else {
+            panic!("allocation too large");
+        };
+        let base = alloc_area(bytes);
         for (i, item) in items.enumerate() {
             write(base.at(i * size), item);
         }

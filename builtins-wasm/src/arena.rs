@@ -18,14 +18,14 @@ unsafe extern "C" {
 // Zero means "not initialized yet"; the first use sets it to the heap base.
 static mut TOP: usize = 0;
 
-fn align_up(n: usize, align: usize) -> usize {
-    (n + align - 1) & !(align - 1)
+fn align_up(n: usize, align: usize) -> Option<usize> {
+    Some(n.checked_add(align - 1)? & !(align - 1))
 }
 
 pub fn top() -> usize {
     unsafe {
         if TOP == 0 {
-            TOP = align_up(&raw const __heap_base as usize, 8);
+            TOP = (&raw const __heap_base as usize).next_multiple_of(8);
         }
         TOP
     }
@@ -35,19 +35,23 @@ pub fn release(mark: usize) {
     unsafe { TOP = mark }
 }
 
-/// Makes sure `end` is addressable, growing the memory if needed.
+/// Makes sure `end` is addressable, growing the memory if needed. The size
+/// in bytes is computed in `u64`, as the 4 GiB of a full memory do not fit in
+/// `usize`.
 fn ensure(end: usize) -> bool {
-    let size = wasm32::memory_size(0) * PAGE;
-    if end <= size {
+    let size = wasm32::memory_size(0) as u64 * PAGE as u64;
+    if end as u64 <= size {
         return true;
     }
-    let pages = (end - size).div_ceil(PAGE);
-    wasm32::memory_grow(0, pages) != usize::MAX
+    let pages = (end as u64 - size).div_ceil(PAGE as u64);
+    wasm32::memory_grow(0, pages as usize) != usize::MAX
 }
 
 /// Allocates `size` bytes aligned to `align` (a power of two), or returns null.
 pub fn alloc(size: usize, align: usize) -> *mut u8 {
-    let start = align_up(top(), align.max(1));
+    let Some(start) = align_up(top(), align.max(1)) else {
+        return core::ptr::null_mut();
+    };
     match start.checked_add(size) {
         Some(end) if ensure(end) => {
             unsafe { TOP = end };
@@ -66,7 +70,7 @@ pub unsafe fn realloc(ptr: *mut u8, old_size: usize, align: usize, new_size: usi
         return alloc(new_size, align);
     }
     let start = ptr as usize;
-    if start + old_size == top() {
+    if start.checked_add(old_size) == Some(top()) {
         let Some(end) = start.checked_add(new_size) else {
             return core::ptr::null_mut();
         };

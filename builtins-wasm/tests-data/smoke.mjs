@@ -147,4 +147,9 @@ const big = alloc(before * 2);
 assert.ok(x.memory.buffer.byteLength >= big + before * 2);
 x._arena_release(mark);
 
+// the whole 4 GiB of memory, whose size in bytes does not fit in 32 bits
+x.memory.grow(65536 - x.memory.buffer.byteLength / 65536);
+assert.ok(alloc(16) > 0);
+x._arena_release(mark);
+
 console.log("smoke ok");
