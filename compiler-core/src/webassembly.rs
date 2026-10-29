@@ -5075,8 +5075,10 @@ impl<'a> Generator<'a> {
     ) {
         let case_id = case_b.id();
         for clause in clauses {
-            let mut scope = scope.clone();
             for patterns in iter::once(&clause.pattern).chain(&clause.alternative_patterns) {
+                // Each alternative starts from the scope of the case, so it
+                // does not see the variables bound by the ones that failed.
+                let mut scope = scope.clone();
                 // block alt — _pattern branches here on failure
                 let _ = case_b.block_(InstrSeqType::Simple(None), |alt_b| {
                     let alt_id = alt_b.id();

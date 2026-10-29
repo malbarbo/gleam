@@ -1453,6 +1453,27 @@ pub fn main() {
 "##);
 }
 
+/// A pattern alternative does not see the variables bound by the
+/// alternatives before it, even when they failed after binding them.
+#[test]
+fn pattern_alternatives_scope() {
+    let _ = run(r##"
+fn f(b: BitArray, n: Int) -> Int {
+  case b {
+    <<n, 1>> | <<_:size(n), n>> -> n
+    _ -> -1
+  }
+}
+
+pub fn main() {
+  let assert 1 = f(<<1, 1>>, 8)
+  let assert 0 = f(<<16, 0>>, 8)
+  let assert -1 = f(<<16, 0, 0>>, 8)
+  Nil
+}
+"##);
+}
+
 /// Integer segments of patterns of 64 bits and more, of which an `Int` has
 /// the least significant bits.
 #[test]
