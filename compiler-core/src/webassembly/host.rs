@@ -650,11 +650,15 @@ impl<'a> Generator<'a> {
         let other = self.function_dynamic_cast(js_value);
         // The class of the dicts is `null` when the program has none.
         let dict_class = self.js_dict_export("default").unwrap_or_else(|| {
+            let name: EcoString = "_no_dict_class".into();
+            if let Some(id) = self.find_global(&name) {
+                return id.global_id();
+            }
             let null = ConstExpr::RefNull(RefType {
                 nullable: true,
                 heap_type: HeapType::Abstract(walrus::AbstractHeapType::Extern),
             });
-            self.add_const(&"_no_dict_class".into(), EXTERNREF, null, false, false)
+            self.add_const(&name, EXTERNREF, null, false, false)
                 .global_id()
         });
         let dict = self.runtime_named_type(DICT_MODULE, "Dict", vec![dynamic.clone(); 2]);

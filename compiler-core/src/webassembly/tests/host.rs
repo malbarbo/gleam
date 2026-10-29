@@ -1536,3 +1536,30 @@ pub fn main() {
         r#"export const identity = (a) => a;"#,
     );
 }
+
+/// Without the dicts of the standard library, the class of the dicts that the
+/// conversions of a value of the host compare with is a single `null`.
+#[test]
+fn one_null_dict_class() {
+    let wasm = super::compile_wasm(
+        r#"
+@external(webassembly, "builtins", "Dynamic")
+pub type Dynamic
+@external(webassembly, "builtins", "dynamic_classify")
+fn classify(data: Dynamic) -> String
+@external(webassembly, "./ffi.mjs", "object")
+fn object(a: Int) -> Dynamic
+
+pub fn main() {
+    classify(object(1))
+}
+"#,
+        vec![],
+    );
+    let names = super::wasm_global_names(&wasm);
+    let count = names
+        .iter()
+        .filter(|name| *name == "_no_dict_class")
+        .count();
+    assert_eq!(count, 1, "{names:?}");
+}
