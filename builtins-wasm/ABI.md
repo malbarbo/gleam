@@ -184,7 +184,8 @@ Not callable from Gleam; the compiler calls them from generated code.
 
 The older exports (`_print`, `_exit`, `_i32_to_str`, `_i64_to_str`, `_f32_to_str`,
 `_f64_to_str`, `_i32_is_codepoint`, `_i64_is_codepoint`, `_heap_base`) keep their
-signatures. `_f32_to_str`/`_f64_to_str` now write the `float_to_string` text (for
+signatures. `_print` loops on partial writes, like `io_print`, and returns the
+WASI errno. `_f32_to_str`/`_f64_to_str` now write the `float_to_string` text (for
 `f32` and `f64` respectively).
 
 Indirect calls are fine (`memchr::memmem` uses them): the code generator keeps

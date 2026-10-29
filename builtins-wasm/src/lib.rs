@@ -40,7 +40,9 @@ mod exports {
     #[cfg(not(test))]
     #[panic_handler]
     fn panic(info: &core::panic::PanicInfo) -> ! {
-        let out = |s: &str| io::write_all(STDERR, s.as_bytes());
+        let out = |s: &str| {
+            let _ = io::write_all(STDERR, s.as_bytes());
+        };
         out("panic: ");
         match (info.message().as_str(), info.location()) {
             (Some(message), _) => out(message),
@@ -128,7 +130,7 @@ mod exports {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn _print(fd: i32, ptr: *const u8, len: u32) -> i32 {
         let bytes = unsafe { bytes_arg(ptr as i32, len as i32) };
-        io::write(fd, bytes).0
+        io::write_all(fd, bytes)
     }
 
     unsafe fn write_to(ptr: *mut u8, s: &str) -> u32 {
@@ -392,23 +394,23 @@ mod exports {
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn io_print(ptr: i32, len: i32) {
-        io::write_all(STDOUT, unsafe { bytes_arg(ptr, len) })
+        let _ = io::write_all(STDOUT, unsafe { bytes_arg(ptr, len) });
     }
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn io_println(ptr: i32, len: i32) {
-        io::write_all(STDOUT, unsafe { bytes_arg(ptr, len) });
-        io::write_all(STDOUT, b"\n")
+        let _ = io::write_all(STDOUT, unsafe { bytes_arg(ptr, len) });
+        let _ = io::write_all(STDOUT, b"\n");
     }
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn io_print_error(ptr: i32, len: i32) {
-        io::write_all(STDERR, unsafe { bytes_arg(ptr, len) })
+        let _ = io::write_all(STDERR, unsafe { bytes_arg(ptr, len) });
     }
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn io_println_error(ptr: i32, len: i32) {
-        io::write_all(STDERR, unsafe { bytes_arg(ptr, len) });
-        io::write_all(STDERR, b"\n")
+        let _ = io::write_all(STDERR, unsafe { bytes_arg(ptr, len) });
+        let _ = io::write_all(STDERR, b"\n");
     }
 }

@@ -24,14 +24,17 @@ pub fn write(fd: i32, bytes: &[u8]) -> (i32, usize) {
     (errno, written)
 }
 
-/// Writes all `bytes`, stopping early on an error.
-pub fn write_all(fd: i32, mut bytes: &[u8]) {
+/// Writes all `bytes`, stopping early on an error, returning the WASI errno.
+/// A write of no bytes stops with `EIO`.
+pub fn write_all(fd: i32, mut bytes: &[u8]) -> i32 {
     while !bytes.is_empty() {
         match write(fd, bytes) {
             (0, n) if n > 0 => bytes = &bytes[n.min(bytes.len())..],
-            _ => return,
+            (0, _) => return wasi::ERRNO_IO.raw() as i32,
+            (errno, _) => return errno,
         }
     }
+    0
 }
 
 pub fn random_seed() -> [u64; 4] {

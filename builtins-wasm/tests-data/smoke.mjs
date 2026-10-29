@@ -12,7 +12,19 @@ import assert from "node:assert/strict";
 
 const wasi = new WASI({ version: "preview1", returnOnExit: true });
 const module = await WebAssembly.compile(readFileSync(process.argv[2]));
-const instance = await WebAssembly.instantiate(module, wasi.getImportObject());
+const imports = wasi.getImportObject();
+// While `written` is an array, `fd_write` writes at most 2 bytes per call to it.
+let written = null;
+const fdWrite = imports.wasi_snapshot_preview1.fd_write;
+imports.wasi_snapshot_preview1.fd_write = (fd, iovs, count, nwritten) => {
+  if (written === null) return fdWrite(fd, iovs, count, nwritten);
+  const v = view();
+  const n = Math.min(v.getUint32(iovs + 4, true), 2);
+  written.push(...new Uint8Array(x.memory.buffer, v.getUint32(iovs, true), n));
+  v.setUint32(nwritten, n, true);
+  return 0;
+};
+const instance = await WebAssembly.instantiate(module, imports);
 const x = instance.exports;
 wasi.initialize({ exports: { memory: x.memory, _initialize() {} } });
 
@@ -120,6 +132,13 @@ assert.equal(dec.decode(new Uint8Array(x.memory.buffer, scratch, x._float_repr(1
 assert.equal(dec.decode(new Uint8Array(x.memory.buffer, scratch, x._float_repr(Math.fround(0.1), scratch))), "0.1");
 assert.deepEqual(call(x.int_parse, [S("2147483648")], 16, (r) => readResult(r, (p) => view().getBigInt64(p, true))), { error: null });
 x._config(64, 64);
+
+// partial writes
+written = [];
+const [pp, pl] = str("olá, mundo");
+assert.equal(x._print(1, pp, pl), 0);
+assert.equal(dec.decode(new Uint8Array(written)), "olá, mundo");
+written = null;
 
 // growing the memory
 const before = x.memory.buffer.byteLength;
