@@ -4111,18 +4111,26 @@ impl<'a> Generator<'a> {
         }
         let declaring = self.all_modules.get(module).copied().unwrap_or(self.module);
         let mut path = build_directory(declaring);
+        // The `..` that leave the directory of the packages.
+        let mut above = 0;
         for part in host_module.split('/') {
             match part {
                 "." => {}
                 ".." => {
-                    let _ = path.pop();
+                    if path.pop().is_none() {
+                        above += 1;
+                    }
                 }
                 _ => path.push(part),
             }
         }
         let from = build_directory(self.module);
-        let common = path.iter().zip(&from).take_while(|(a, b)| a == b).count();
-        let up = from.len() - common;
+        let common = if above == 0 {
+            path.iter().zip(&from).take_while(|(a, b)| a == b).count()
+        } else {
+            0
+        };
+        let up = from.len() - common + above;
         let mut relative = if up == 0 { vec!["."] } else { vec![".."; up] };
         relative.extend(path.iter().skip(common));
         relative.join("/").into()

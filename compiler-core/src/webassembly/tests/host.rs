@@ -88,6 +88,28 @@ pub fn run() -> Nil
     assert_eq!(imports, vec![import("../../other/ffi.mjs", "run")]);
 }
 
+/// A relative path can leave the directory of the packages, as the path of a
+/// JavaScript import can, and keeps the `..` that do.
+#[test]
+fn external_of_the_host_above_the_packages() {
+    let imports = host_imports(
+        r#"
+import a/b
+
+pub fn main() { b.run() }
+"#,
+        vec![(
+            "other",
+            "a/b",
+            r#"
+@external(webassembly, "../../../ffi.mjs", "run")
+pub fn run() -> Nil
+"#,
+        )],
+    );
+    assert_eq!(imports, vec![import("../../../ffi.mjs", "run")]);
+}
+
 /// A function of the host in a module that the program does not import does
 /// not change the program.
 #[test]
