@@ -8,7 +8,10 @@
 //// the same bytes share a `Cell` with the end of the bits written so far, and
 //// the bits after it are zero. A bit array that ends there is extended by
 //// writing after it, in the same bytes, which changes no bit array: this
-//// makes `<<bits:bits, ...>>` in a loop linear, as on Erlang.
+//// makes `<<bits:bits, ...>>` in a loop linear, as on Erlang. The bytes are
+//// copied when they have no room: with a little room the first time, as a
+//// bit array is often extended only once or twice, and with room for as many
+//// bits more after that.
 ////
 //// A position or a size is a number of bits. The bits of a byte are counted
 //// from the most significant one, as in a bit array literal.
@@ -31,9 +34,9 @@ pub type Words
 @external(webassembly, "builtins", "Cell")
 pub type Cell
 
-/// The bits of `bytes` from `start` to `end`, not included, and the end of
-/// the bits written to `bytes`, which is `-1` when they are not written
-/// anymore.
+/// The bits of `bytes` from `start` to `end`, not included, and twice the
+/// end of the bits written to `bytes`, plus 1 when the bytes were created to
+/// extend a bit array.
 pub type Bits {
   Bits(bytes: Words, start: Int, end: Int, written: Cell)
 }
@@ -43,7 +46,7 @@ pub type Bits {
 /// The first `size` bits of `bytes`, which are no longer changed. The
 /// compiler creates the bit arrays of the literals with it.
 pub fn bit_array_from_bytes(bytes: Words, size: Int) -> Bits {
-  Bits(bytes, 0, size, cell_new(size))
+  Bits(bytes, 0, size, cell_new(2 * size))
 }
 
 /// The bytes of `string`.
@@ -53,18 +56,30 @@ pub fn bit_array_from_string(string: String) -> Bits {
 
 /// `bits` followed by `size` bits, which are zero, to be written after
 /// `bits`: in the same bytes when `bits` ends where they are written and
-/// they have room, and otherwise in new bytes with room for as many bits
-/// more. The compiler creates `<<bits:bits, ...>>` with it.
+/// they have room, and otherwise in new bytes, with 64 bytes more when
+/// `bits` were not extended before and with room for as many bits more when
+/// they were. The compiler creates `<<bits:bits, ...>>` with it.
 pub fn bit_array_extend(bits: Bits, size: Int) -> Bits {
   let end = bits.end + size
-  case cell_get(bits.written) == bits.end && end <= bytes_size(bits.bytes) * 8 {
+  let written = cell_get(bits.written)
+  let extended = bitwise_and(written, 1)
+  case
+    bitwise_shift_right(written, 1) == bits.end
+    && end <= bytes_size(bits.bytes) * 8
+  {
     True -> {
-      let _ = cell_set(bits.written, end)
+      let _ = cell_set(bits.written, 2 * end + extended)
       Bits(bits.bytes, bits.start, end, bits.written)
     }
     False -> {
       let size = bits.end - bits.start + size
-      copy(bits, size, byte_count(size) * 2)
+      let capacity = case extended {
+        0 -> byte_count(size) + 64
+        _ -> byte_count(size) * 2
+      }
+      let bytes = bytes_new(capacity)
+      let _ = copy_bits(bytes, 0, bits.bytes, bits.start, bits.end - bits.start)
+      Bits(bytes, 0, size, cell_new(2 * size + 1))
     }
   }
 }
