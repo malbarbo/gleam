@@ -415,3 +415,33 @@ pub fn main() {
 "#,
     );
 }
+
+/// The type of a `case` with many arms is a long chain of links, which the
+/// monomorphization followed many times for each type (minutes for a few
+/// thousand arms, like in the emojis package).
+#[test]
+fn case_with_many_arms_compiles_fast() {
+    let arms: String = (0..1500)
+        .map(|i| format!("    \"{i}\" -> Ok(T(#({i}, [\"a\"])))\n"))
+        .collect();
+    let src = format!(
+        r#"
+pub type T {{
+    T(#(Int, List(String)))
+}}
+
+fn f(s) {{
+    case s {{
+{arms}    _ -> Error(Nil)
+    }}
+}}
+
+pub fn main() {{
+    assert f("1") == Ok(T(#(1, ["a"])))
+}}
+"#
+    );
+    let start = std::time::Instant::now();
+    run_ok(&src);
+    assert!(start.elapsed() < std::time::Duration::from_secs(60));
+}

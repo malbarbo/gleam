@@ -14,7 +14,7 @@ use crate::{
         TypedAssignment, TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr,
         TypedFunction, TypedPattern, TypedRecordConstructor, TypedStatement,
     },
-    type_::{Type, TypeVar},
+    type_::{Type, TypeVar, collapse_links},
     webassembly::{
         LocalFunction,
         captures::{Reference, Variables},
@@ -344,6 +344,9 @@ impl Monomorphizer {
     }
 
     pub(super) fn type_(&self, old: &Arc<Type>) -> Arc<Type> {
+        // The links are followed once: the chains can be long, like the one
+        // of the type of a `case` with many arms.
+        let old = &collapse_links(old.clone());
         if let Some(id) = get_unbound_or_generic_id(old) {
             if let Some(to) = self.map.get(&id) {
                 to.clone()
@@ -387,10 +390,6 @@ impl Monomorphizer {
                 inferred_variant,
             }
             .into()
-        } else if let Type::Var { type_ } = old.as_ref()
-            && let TypeVar::Link { type_ } = &*type_.borrow()
-        {
-            self.type_(type_)
         } else {
             old.clone()
         }
