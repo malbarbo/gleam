@@ -285,6 +285,31 @@ pub fn module(
     generator.compile()
 }
 
+/// `module` and the modules it imports, directly or not: the modules of the
+/// program of `module`.
+fn imported_modules<'a>(
+    module: &'a TypedModule,
+    all_modules: &HashMap<EcoString, &'a TypedModule>,
+) -> Vec<&'a TypedModule> {
+    let mut seen = HashSet::new();
+    let mut imported = vec![];
+    let mut modules = vec![module];
+    while let Some(module) = modules.pop() {
+        if !seen.insert(&module.name) {
+            continue;
+        }
+        imported.push(module);
+        modules.extend(
+            module
+                .definitions
+                .imports
+                .iter()
+                .filter_map(|import| all_modules.get(&import.module).copied()),
+        );
+    }
+    imported
+}
+
 /// Builtins that never read the data segments of builtins-wasm.
 const DATA_FREE_BUILTINS: &[&str] = &[
     CONFIG,
@@ -827,8 +852,8 @@ impl<'a> Generator<'a> {
             current_function_name: EcoString::new(),
             panic: None,
             javascript_host: config.string == WasmString::JsString
-                || iter::once(module)
-                    .chain(all_modules.values().copied())
+                || imported_modules(module, all_modules)
+                    .into_iter()
                     // The runtime declares the functions of the host it uses
                     .filter(|module| module.type_info.package != RUNTIME_PACKAGE)
                     .flat_map(|module| &module.definitions.functions)
@@ -875,20 +900,8 @@ impl<'a> Generator<'a> {
     /// the modules it imports, directly or not, fit in their WebAssembly
     /// types.
     fn validate_numeric_literals(&self) -> Result<(), Error> {
-        let mut validated = HashSet::new();
-        let mut modules = vec![self.module];
-        while let Some(module) = modules.pop() {
-            if !validated.insert(module.name.clone()) {
-                continue;
-            }
+        for module in imported_modules(self.module, self.all_modules) {
             self.validate_module_numeric_literals(module)?;
-            modules.extend(
-                module
-                    .definitions
-                    .imports
-                    .iter()
-                    .filter_map(|import| self.all_modules.get(&import.module).copied()),
-            );
         }
         Ok(())
     }

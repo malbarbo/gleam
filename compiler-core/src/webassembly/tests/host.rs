@@ -88,6 +88,35 @@ pub fn run() -> Nil
     assert_eq!(imports, vec![import("../../other/ffi.mjs", "run")]);
 }
 
+/// A function of the host in a module that the program does not import does
+/// not change the program.
+#[test]
+fn external_of_the_host_in_a_module_not_imported() {
+    let src = r#"
+pub fn main() {
+    let assert Ok(x) = Error(1)
+    x
+}
+"#;
+    let compile = |deps| {
+        super::compile_wasm_in(
+            "thepackage",
+            src,
+            deps,
+            super::wasm_config(WasmInt::I32, WasmFloat::F64),
+        )
+    };
+    let unused = (
+        "thepackage",
+        "unused",
+        r#"
+@external(webassembly, "./ffi.mjs", "run")
+pub fn run() -> Nil
+"#,
+    );
+    assert!(compile(vec![unused]) == compile(vec![]));
+}
+
 /// Each function of the host is imported once.
 #[test]
 fn external_of_the_host_used_twice() {
