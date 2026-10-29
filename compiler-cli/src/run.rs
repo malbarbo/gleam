@@ -112,7 +112,9 @@ pub fn setup(
             // If we're trying to run a dependecy module we do not compile and
             // check the root package. So we can run the main function from a
             // dependency's module even if the root package doesn't compile.
-            PackageKind::Dependency => Compile::DepsOnly,
+            PackageKind::Dependency => Compile::DepsOnly {
+                module: module.clone().into(),
+            },
             PackageKind::Root => Compile::All,
         },
         codegen: Codegen::All,

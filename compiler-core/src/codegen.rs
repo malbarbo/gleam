@@ -382,24 +382,27 @@ impl<'a> WebAssembly<'a> {
         for module in modules {
             self.types_module(writer, module)?;
         }
-        if !programs {
-            return self.write_prelude(writer);
+        if programs {
+            self.programs(writer, modules, dependencies)?;
         }
-        let all_modules: HashMap<_, _> = dependencies
-            .iter()
-            .chain(modules)
-            .map(|m| (m.name.clone(), &m.ast))
-            .collect();
-        let all_line_numbers: HashMap<_, _> = dependencies
-            .iter()
-            .chain(modules)
+        self.write_prelude(writer)
+    }
+
+    /// Generates a WebAssembly module for each one of `modules`, a whole
+    /// program, with the modules it imports from other packages in
+    /// `dependencies`.
+    pub fn programs(
+        &self,
+        writer: &impl FileSystemWriter,
+        modules: &[Module],
+        dependencies: &[Module],
+    ) -> Result<()> {
+        let all = || dependencies.iter().chain(modules);
+        let all_modules: HashMap<_, _> = all().map(|m| (m.name.clone(), &m.ast)).collect();
+        let all_line_numbers: HashMap<_, _> = all()
             .map(|m| (m.name.clone(), LineNumbers::new(&m.code)))
             .collect();
-        let sources: HashMap<_, _> = dependencies
-            .iter()
-            .chain(modules)
-            .map(|m| (m.name.clone(), m))
-            .collect();
+        let sources: HashMap<_, _> = all().map(|m| (m.name.clone(), m)).collect();
         let runtime = webassembly::runtime_modules();
         for module in modules {
             self.wasm_module(
@@ -411,7 +414,7 @@ impl<'a> WebAssembly<'a> {
                 &sources,
             )?
         }
-        self.write_prelude(writer)
+        Ok(())
     }
 
     /// Writes the JavaScript module of the custom types of `module`, whose

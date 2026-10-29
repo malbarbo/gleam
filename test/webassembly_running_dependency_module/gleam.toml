@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Gleam contributors
+
+name = "webassembly_running_dependency_module"
+version = "1.0.0"
+
+[dependencies]
+dep = { path = "./dep" }

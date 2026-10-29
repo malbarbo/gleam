@@ -240,6 +240,13 @@ jobs:
         env:
           GLEAM_COMMAND: gleam
 
+      - name: test/webassembly_running_dependency_module
+        run: ./test.sh
+        working-directory: ./test/webassembly_running_dependency_module
+        if: ${{ matrix.run-integration-tests }}
+        env:
+          GLEAM_COMMAND: gleam
+
       - name: test/erlang_shipment_no_dev_deps
         run: ./test.sh
         working-directory: ./test/erlang_shipment_no_dev_deps

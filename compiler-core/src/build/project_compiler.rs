@@ -48,7 +48,7 @@ const ELIXIR_EXECUTABLE: &str = "elixir";
 #[cfg(target_os = "windows")]
 const ELIXIR_EXECUTABLE: &str = "elixir.bat";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Options {
     pub mode: Mode,
     pub target: Option<Target>,
@@ -214,6 +214,7 @@ where
         let dependencies = self.compile_dependencies()?;
         if self.target() == Target::WebAssembly {
             self.webassembly_dependencies = dependencies;
+            self.write_webassembly_dependency_program()?;
         }
 
         // We reset the warning count as we don't want to fail the build if a
@@ -233,6 +234,36 @@ where
             root_package,
             module_interfaces: self.importable_modules,
         })
+    }
+
+    /// Generates the WebAssembly program of the dependency module that is
+    /// run, as the programs are generated only for the modules of the root
+    /// package.
+    fn write_webassembly_dependency_program(&self) -> Result<()> {
+        let Compile::DepsOnly { module } = &self.options.compile else {
+            return Ok(());
+        };
+        // An unknown module is reported when looking for its main function.
+        let Some(module) = self
+            .webassembly_dependencies
+            .iter()
+            .find(|dependency| &dependency.name == module)
+        else {
+            return Ok(());
+        };
+        if !self.options.codegen.should_codegen(false) {
+            return Ok(());
+        }
+        let out = self.paths.build_directory_for_package(
+            self.mode(),
+            self.target(),
+            &module.ast.type_info.package,
+        );
+        crate::codegen::WebAssembly::new(&out, self.config.webassembly).programs(
+            &self.io,
+            std::slice::from_ref(module),
+            &self.webassembly_dependencies,
+        )
     }
 
     pub fn compile_root_package(&mut self) -> Outcome<Package, Error> {
@@ -640,7 +671,8 @@ where
         compiler.write_entrypoint = is_root;
         compiler.perform_codegen = self.options.codegen.should_codegen(is_root);
         compiler.webassembly_dependencies = &self.webassembly_dependencies;
-        compiler.compile_modules = !(self.options.compile == Compile::DepsOnly && is_root);
+        compiler.compile_modules =
+            !(matches!(self.options.compile, Compile::DepsOnly { .. }) && is_root);
         compiler.subprocess_stdio = self.subprocess_stdio;
         compiler.target_support = if is_root {
             // When compiling the root package it is context specific as to whether we need to

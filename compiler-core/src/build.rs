@@ -104,7 +104,7 @@ impl Target {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 /// This is used to skip compiling the root package when running the main
 /// function coming from a dependency. This way a dependency can be run even
 /// there's compilation errors in the root package.
@@ -113,9 +113,12 @@ pub enum Compile {
     /// The default compiler behaviour, compile all packages.
     ///
     All,
-    /// Only compile the dependency packages, skipping the root package.
+    /// Only compile the dependency packages, skipping the root package, to
+    /// run the dependency module `module`. On the WebAssembly target, whose
+    /// programs are generated only for the modules of the root package, the
+    /// program of `module` is generated too.
     ///
-    DepsOnly,
+    DepsOnly { module: EcoString },
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
