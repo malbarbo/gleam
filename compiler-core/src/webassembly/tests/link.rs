@@ -63,10 +63,6 @@ fn builtins_are_the_same_in_every_compilation() {
 
 #[test]
 fn module_without_builtins_has_none_of_their_items() {
-    if super::super::link::walrus() {
-        // The table of builtins-wasm is kept with walrus.
-        return;
-    }
     let wasm = compile_wasm("pub fn main() { 1 + 2 }", vec![]);
     validate(&wasm);
     for (id, section) in [(2, "import"), (4, "table")] {

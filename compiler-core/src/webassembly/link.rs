@@ -7,10 +7,6 @@
 //! table, global and data they need, and the emitted binary gets the bodies of
 //! builtins-wasm in place of the stubs. builtins-wasm is parsed only once,
 //! and its code never goes through walrus.
-//!
-//! While it is new, the former linking stays available with
-//! `GLEAM_WASM_BUILTINS=walrus`: the module is built on builtins-wasm parsed
-//! by walrus, see `eliminate_dead_code`.
 
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Gleam contributors
@@ -40,14 +36,6 @@ const INDEXES_SECTION: &str = "gleam:builtins";
 
 /// The custom sections of builtins-wasm that the generated module keeps.
 const CUSTOM_SECTIONS: &[&str] = &["producers", "target_features"];
-
-/// Whether the module is built on builtins-wasm parsed by walrus.
-pub(super) fn walrus() -> bool {
-    static WALRUS: LazyLock<bool> = LazyLock::new(|| {
-        std::env::var("GLEAM_WASM_BUILTINS").is_ok_and(|linking| linking == "walrus")
-    });
-    *WALRUS
-}
 
 /// builtins-wasm, parsed once.
 static BUILTINS: LazyLock<Builtins> = LazyLock::new(|| Builtins::parse(BUILTINS_WASM));
