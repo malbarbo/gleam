@@ -75,6 +75,8 @@ struct Function {
     types: Vec<u32>,
     indirect: bool,
     global: bool,
+    /// Whether its code refers to an address of the data segments.
+    data: bool,
 }
 
 impl Builtins {
@@ -224,6 +226,12 @@ impl Builtins {
             let index = imports + index as u32;
             function.name = names.remove(&index);
             function.export = exports.remove(&index);
+            function.data = addresses(&function.body).any(|address| {
+                builtins.data.iter().any(|(offset, range)| {
+                    let start = *offset as u32 as u64;
+                    (start..start + range.len() as u64).contains(&address)
+                })
+            });
         }
         builtins
     }
@@ -254,6 +262,7 @@ impl Function {
             types: vec![],
             indirect: false,
             global: false,
+            data: false,
         };
         let mut reader = body.get_operators_reader().expect("valid builtins wasm");
         while !reader.eof() {
@@ -282,6 +291,45 @@ impl Function {
         }
         function
     }
+}
+
+/// The constant addresses that the code of a function can read or write: its
+/// `i32.const` and the offsets of its loads and stores. A static of Rust is at
+/// an address in the data segments that the code has as one of them.
+fn addresses(body: &FunctionBody<'static>) -> impl Iterator<Item = u64> {
+    let mut reader = body.get_operators_reader().expect("valid builtins wasm");
+    std::iter::from_fn(move || {
+        while !reader.eof() {
+            match reader.read().expect("valid builtins wasm") {
+                Operator::I32Const { value } => return Some(value as u32 as u64),
+                Operator::I32Load { memarg }
+                | Operator::I64Load { memarg }
+                | Operator::F32Load { memarg }
+                | Operator::F64Load { memarg }
+                | Operator::I32Load8S { memarg }
+                | Operator::I32Load8U { memarg }
+                | Operator::I32Load16S { memarg }
+                | Operator::I32Load16U { memarg }
+                | Operator::I64Load8S { memarg }
+                | Operator::I64Load8U { memarg }
+                | Operator::I64Load16S { memarg }
+                | Operator::I64Load16U { memarg }
+                | Operator::I64Load32S { memarg }
+                | Operator::I64Load32U { memarg }
+                | Operator::I32Store { memarg }
+                | Operator::I64Store { memarg }
+                | Operator::F32Store { memarg }
+                | Operator::F64Store { memarg }
+                | Operator::I32Store8 { memarg }
+                | Operator::I32Store16 { memarg }
+                | Operator::I64Store8 { memarg }
+                | Operator::I64Store16 { memarg }
+                | Operator::I64Store32 { memarg } => return Some(memarg.offset),
+                _ => {}
+            }
+        }
+        None
+    })
 }
 
 fn val_type(type_: &wasmparser::ValType) -> ValType {
@@ -429,10 +477,7 @@ impl Linker {
                         let _ = type_id(module, type_);
                     }
                     global |= function.global;
-                    data |= !function
-                        .export
-                        .as_deref()
-                        .is_some_and(|name| super::DATA_FREE_BUILTINS.contains(&name));
+                    data |= function.data;
                     if let std::collections::hash_map::Entry::Vacant(entry) = functions.entry(index)
                     {
                         let _ = entry.insert(stub(module, function));

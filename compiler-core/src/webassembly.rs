@@ -320,17 +320,6 @@ fn imported_modules<'a>(
     imported
 }
 
-/// Builtins that never read the data segments of builtins-wasm.
-const DATA_FREE_BUILTINS: &[&str] = &[
-    CONFIG,
-    ARENA_MARK,
-    ARENA_RELEASE,
-    CABI_REALLOC,
-    HEAP_BASE,
-    EXIT,
-    PRINT,
-];
-
 #[derive(Hash, PartialEq, Eq)]
 struct WasmType {
     name: Option<EcoString>,

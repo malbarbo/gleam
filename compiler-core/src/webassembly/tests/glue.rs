@@ -303,3 +303,30 @@ pub fn main() {{
         );
     }
 }
+
+/// The data segments of builtins-wasm, the active ones, are emitted only when
+/// a function of the program reads them, which the code of the functions
+/// tells.
+#[test]
+fn data_of_builtins_only_when_read() {
+    let data = |src: &str| {
+        let wasm = super::compile_wasm(src, vec![]);
+        wasmparser::Parser::new(0)
+            .parse_all(&wasm)
+            .any(|payload| match payload {
+                Ok(wasmparser::Payload::DataSection(reader)) => reader.into_iter().any(|data| {
+                    matches!(data, Ok(data) if matches!(data.kind, wasmparser::DataKind::Active { .. }))
+                }),
+                _ => false,
+            })
+    };
+    // A panic prints its message and exits.
+    assert!(!data("pub fn main() { let assert 1 = 2 }"));
+    assert!(data(&format!(
+        r#"{RUST}
+pub fn main() {{
+    lowercase("ABC")
+}}
+"#
+    )));
+}
