@@ -429,7 +429,7 @@ To have a clause without a guard, remove this.",
                 let full_name = match target {
                     Target::Erlang => "erlang",
                     Target::JavaScript => "javascript",
-                    Target::WebAssembly => "webassebly",
+                    Target::WebAssembly => "webassembly",
                 };
 
                 Diagnostic {
