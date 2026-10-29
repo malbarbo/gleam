@@ -437,6 +437,53 @@ pub fn main() {
 }
 
 #[test]
+fn float_literal_overflow_f32_in_pattern() {
+    assert_wasm_validate_error!(
+        r#"
+pub fn main() {
+    case 1.0 {
+        3.5e38 -> 1.0
+        x -> x
+    }
+}
+"#,
+        crate::config::WasmInt::I32,
+        crate::config::WasmFloat::F32,
+    );
+}
+
+#[test]
+fn float_literal_overflow_f32_in_guard() {
+    assert_wasm_validate_error!(
+        r#"
+pub fn main() {
+    case 1.0 {
+        x if x >. 3.5e38 -> x
+        x -> x
+    }
+}
+"#,
+        crate::config::WasmInt::I32,
+        crate::config::WasmFloat::F32,
+    );
+}
+
+#[test]
+fn float_literal_overflow_f32_in_constant() {
+    assert_wasm_validate_error!(
+        r#"
+const big = 3.5e38
+
+pub fn main() {
+    big
+}
+"#,
+        crate::config::WasmInt::I32,
+        crate::config::WasmFloat::F32,
+    );
+}
+
+#[test]
 fn type_too_large_polymorphic_recursion() {
     assert_wasm_error!(
         r#"

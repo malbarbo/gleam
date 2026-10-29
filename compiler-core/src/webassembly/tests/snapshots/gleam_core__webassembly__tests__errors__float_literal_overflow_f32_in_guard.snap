@@ -1,0 +1,20 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+assertion_line: 457
+expression: "\npub fn main() {\n    case 1.0 {\n        x if x >. 3.5e38 -> x\n        x -> x\n    }\n}\n"
+---
+----- SOURCE CODE
+
+pub fn main() {
+    case 1.0 {
+        x if x >. 3.5e38 -> x
+        x -> x
+    }
+}
+
+
+----- CONFIG
+int=I32 float=F32
+
+----- ERROR
+FloatLiteralOutOfRange { module: "my/mod", location: SrcSpan { start: 50, end: 56 }, value: "3.5e38", target: "F32" }

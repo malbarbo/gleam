@@ -1047,6 +1047,15 @@ impl FloatType {
         }
     }
 
+    /// Whether the float literal `value` is a finite `Float`.
+    pub(super) fn fits(&self, value: &str) -> bool {
+        let value = value.replace("_", "");
+        match self {
+            FloatType::F32 => value.parse::<f32>().is_ok_and(f32::is_finite),
+            FloatType::F64 => value.parse::<f64>().is_ok_and(f64::is_finite),
+        }
+    }
+
     /// The value of the float literal `value` in this type, as an `f64`,
     /// which is exact for `F32`.
     pub(super) fn literal_value(self, value: &str) -> f64 {

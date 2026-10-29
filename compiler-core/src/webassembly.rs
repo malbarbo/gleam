@@ -90,6 +90,7 @@ use crate::{
         visit::{self, Visit},
     },
     config::{WasmFloat, WasmInt, WasmString, WebAssemblyConfig},
+    parse::LiteralFloatValue,
     type_::{
         self, Deprecation, ModuleValueConstructor, PRELUDE_MODULE_NAME, Type, TypeVar,
         TypedCallArg, ValueConstructor, ValueConstructorVariant,
@@ -917,6 +918,23 @@ impl<'a> Generator<'a> {
                     });
                 }
             }
+
+            fn float(&mut self, location: &SrcSpan, value: &EcoString) {
+                if self.error.is_some() {
+                    return;
+                }
+                if !self.float.fits(value) {
+                    self.error = Some(Error::FloatLiteralOutOfRange {
+                        module: self.module.clone(),
+                        location: *location,
+                        value: value.clone(),
+                        target: match self.float {
+                            FloatType::F32 => "F32".into(),
+                            FloatType::F64 => "F64".into(),
+                        },
+                    });
+                }
+            }
         }
 
         impl<'ast> Visit<'ast> for Validator {
@@ -986,33 +1004,24 @@ impl<'a> Generator<'a> {
                 _type_: &'ast Arc<Type>,
                 value: &'ast EcoString,
             ) {
-                if self.error.is_some() {
-                    return;
-                }
-                let clean = value.replace("_", "");
-                let err = match self.float {
-                    FloatType::F32 => clean
-                        .parse::<f32>()
-                        .ok()
-                        .filter(|f| !f.is_infinite())
-                        .is_none(),
-                    FloatType::F64 => clean
-                        .parse::<f64>()
-                        .ok()
-                        .filter(|f| !f.is_infinite())
-                        .is_none(),
-                };
-                if err {
-                    self.error = Some(Error::FloatLiteralOutOfRange {
-                        module: self.module.clone(),
-                        location: *location,
-                        value: value.clone(),
-                        target: match self.float {
-                            FloatType::F32 => "F32".into(),
-                            FloatType::F64 => "F64".into(),
-                        },
-                    });
-                }
+                self.float(location, value);
+            }
+
+            fn visit_typed_pattern_float(
+                &mut self,
+                location: &'ast SrcSpan,
+                value: &'ast EcoString,
+            ) {
+                self.float(location, value);
+            }
+
+            fn visit_typed_constant_float(
+                &mut self,
+                location: &'ast SrcSpan,
+                value: &'ast EcoString,
+                _float_value: &'ast LiteralFloatValue,
+            ) {
+                self.float(location, value);
             }
         }
 

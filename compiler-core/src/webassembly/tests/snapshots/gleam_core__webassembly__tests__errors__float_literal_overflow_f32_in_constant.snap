@@ -1,0 +1,19 @@
+---
+source: compiler-core/src/webassembly/tests/errors.rs
+assertion_line: 473
+expression: "\nconst big = 3.5e38\n\npub fn main() {\n    big\n}\n"
+---
+----- SOURCE CODE
+
+const big = 3.5e38
+
+pub fn main() {
+    big
+}
+
+
+----- CONFIG
+int=I32 float=F32
+
+----- ERROR
+FloatLiteralOutOfRange { module: "my/mod", location: SrcSpan { start: 13, end: 19 }, value: "3.5e38", target: "F32" }
