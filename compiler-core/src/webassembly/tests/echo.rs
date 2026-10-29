@@ -167,3 +167,36 @@ pub fn main() {
 "#,
     );
 }
+
+/// An `echo` where the generated code keeps the value in a local, as the
+/// divisor, the subject of a `case`, the called function and the record of
+/// an update.
+#[test]
+fn echo_of_a_value_kept_in_a_local() {
+    let output = run_wasm(
+        r#"
+pub type Rec {
+    Rec(a: Int, b: Int)
+}
+
+fn inc(x: Int) -> Int {
+    x + 1
+}
+
+pub fn main() {
+    let x = 2
+    let assert 3 = 6 / echo x
+    let assert 2 = case echo x {
+        _ -> x
+    }
+    let assert 3 = { echo inc }(x)
+    let r = Rec(1, 2)
+    let assert Rec(3, 2) = Rec(..echo r, a: 3)
+    Nil
+}
+"#,
+        vec![],
+    );
+    assert!(output.status.success(), "{}", output.stderr);
+}
+

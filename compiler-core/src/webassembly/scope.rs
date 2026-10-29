@@ -144,7 +144,7 @@ impl Scope {
 #[derive(Debug)]
 pub(super) struct Locals {
     params: Vec<(LocalId, Option<EcoString>)>,
-    locals: HashMap<u64, (LocalId, Option<EcoString>)>,
+    locals: HashMap<LocalKey, (LocalId, Option<EcoString>)>,
     names: HashMap<EcoString, usize>,
 }
 
@@ -203,7 +203,7 @@ impl Locals {
         } else {
             self._insert(
                 generator,
-                assignment,
+                LocalKey::new(LocalKind::Assignment, assignment),
                 &assignment.type_(),
                 "assignment",
                 assignment.location,
@@ -213,9 +213,9 @@ impl Locals {
 
     pub(super) fn for_assigment(&self, assignment: &TypedAssignment) -> LocalId {
         if matches!(assignment.kind, AssignmentKind::Let) && assignment.pattern.is_variable() {
-            self._get(&assignment.pattern)
+            self.for_pattern(&assignment.pattern)
         } else {
-            self._get(assignment)
+            self._get(LocalKey::new(LocalKind::Assignment, assignment))
         }
     }
 
@@ -223,14 +223,15 @@ impl Locals {
     /// others (like module constants) are stored in new locals.
     fn insert_div(&mut self, generator: &mut Generator<'_>, left: &TypedExpr, right: &TypedExpr) {
         if !left.is_local_var() {
-            self._insert(generator, left, &left.type_(), "div_left", left.location());
+            let key = LocalKey::new(LocalKind::DivOperand, left);
+            self._insert(generator, key, &left.type_(), "div_left", left.location());
         } else {
             // use var name
         }
         if !right.is_local_var() {
             self._insert(
                 generator,
-                right,
+                LocalKey::new(LocalKind::DivOperand, right),
                 &right.type_(),
                 "div_right",
                 right.location(),
@@ -251,14 +252,14 @@ impl Locals {
         {
             scope.find_expect(name).local_id()
         } else {
-            self._get(left)
+            self._get(LocalKey::new(LocalKind::DivOperand, left))
         };
         let right = if let Some(name) = right.var_name()
             && right.is_local_var()
         {
             scope.find_expect(name).local_id()
         } else {
-            self._get(right)
+            self._get(LocalKey::new(LocalKind::DivOperand, right))
         };
         (left, right)
     }
@@ -270,12 +271,13 @@ impl Locals {
         right: &TypedClauseGuard,
     ) {
         if !matches!(left, ClauseGuard::Var { .. }) {
-            self._insert(generator, left, &left.type_(), "div_left", left.location());
+            let key = LocalKey::new(LocalKind::DivOperand, left);
+            self._insert(generator, key, &left.type_(), "div_left", left.location());
         }
         if !matches!(right, ClauseGuard::Var { .. }) {
             self._insert(
                 generator,
-                right,
+                LocalKey::new(LocalKind::DivOperand, right),
                 &right.type_(),
                 "div_right",
                 right.location(),
@@ -292,12 +294,12 @@ impl Locals {
         let left = if let ClauseGuard::Var { name, .. } = left {
             scope.find_expect(name).local_id()
         } else {
-            self._get(left)
+            self._get(LocalKey::new(LocalKind::DivOperand, left))
         };
         let right = if let ClauseGuard::Var { name, .. } = right {
             scope.find_expect(name).local_id()
         } else {
-            self._get(right)
+            self._get(LocalKey::new(LocalKind::DivOperand, right))
         };
         (left, right)
     }
@@ -316,13 +318,14 @@ impl Locals {
         if matches!(fun, TypedExpr::Fn { .. }) {
             // Called directly, see `Generator::function_literal_call`
         } else if !fun.is_var() && !is_static_module_select {
-            self._insert(generator, fun, &fun.type_(), "fun", fun.location())
+            let key = LocalKey::new(LocalKind::Callee, fun);
+            self._insert(generator, key, &fun.type_(), "fun", fun.location());
         }
     }
 
     pub(super) fn for_call(&self, fun: &TypedExpr) -> LocalId {
         assert!(!fun.is_var());
-        self._get(fun)
+        self._get(LocalKey::new(LocalKind::Callee, fun))
     }
 
     fn insert_subjects(&mut self, generator: &mut Generator<'_>, subjects: &[TypedExpr]) {
@@ -332,7 +335,7 @@ impl Locals {
             }
             self._insert(
                 generator,
-                subject,
+                LocalKey::new(LocalKind::Subject, subject),
                 &subject.type_(),
                 "subject",
                 subject.location(),
@@ -341,22 +344,17 @@ impl Locals {
     }
 
     pub(super) fn for_subject(&self, subject: &TypedExpr) -> LocalId {
-        self._get(subject)
+        self._get(LocalKey::new(LocalKind::Subject, subject))
     }
 
     fn insert_pattern(&mut self, generator: &mut Generator<'_>, pattern: &TypedPattern) {
+        let key = LocalKey::new(LocalKind::Pattern, pattern);
         match pattern {
             TypedPattern::Variable { name, .. } => {
-                self._insert(
-                    generator,
-                    pattern,
-                    &pattern.type_(),
-                    name,
-                    pattern.location(),
-                );
+                self._insert(generator, key, &pattern.type_(), name, pattern.location());
             }
             TypedPattern::Discard { .. } => {
-                self._insert_with_val_type(generator, pattern, ValType::I32);
+                self._insert_with_val_type(generator, key, ValType::I32);
             }
             TypedPattern::Int { .. }
             | TypedPattern::Float { .. }
@@ -371,7 +369,7 @@ impl Locals {
             | TypedPattern::Invalid { .. } => {
                 self._insert(
                     generator,
-                    pattern,
+                    key,
                     &pattern.type_(),
                     "pattern",
                     pattern.location(),
@@ -381,7 +379,7 @@ impl Locals {
     }
 
     pub(super) fn for_pattern(&self, pattern: &TypedPattern) -> LocalId {
-        self._get(pattern)
+        self._get(LocalKey::new(LocalKind::Pattern, pattern))
     }
 
     fn insert_pipeline_assignment(
@@ -391,7 +389,7 @@ impl Locals {
     ) {
         self._insert(
             generator,
-            assignment,
+            LocalKey::new(LocalKind::PipelineAssignment, assignment),
             &assignment.type_(),
             "pipeline_assignment",
             assignment.location,
@@ -401,7 +399,7 @@ impl Locals {
     fn insert_record_update(&mut self, generator: &mut Generator<'_>, record: &TypedExpr) {
         self._insert(
             generator,
-            record,
+            LocalKey::new(LocalKind::UpdatedRecord, record),
             &record.type_(),
             "record",
             record.location(),
@@ -409,11 +407,11 @@ impl Locals {
     }
 
     pub(super) fn for_record_update(&self, record: &TypedExpr) -> LocalId {
-        self._get(record)
+        self._get(LocalKey::new(LocalKind::UpdatedRecord, record))
     }
 
     pub(super) fn for_pipeline_assignment(&self, assignment: &TypedPipelineAssignment) -> LocalId {
-        self._get(assignment)
+        self._get(LocalKey::new(LocalKind::PipelineAssignment, assignment))
     }
 
     /// The operands of an asserted expression, a call or a binary operator,
@@ -425,7 +423,7 @@ impl Locals {
                 let prefix = "asserted";
                 self._insert(
                     generator,
-                    Operand(operand),
+                    LocalKey::new(LocalKind::Asserted, operand),
                     &operand.type_(),
                     prefix,
                     operand.location(),
@@ -435,14 +433,16 @@ impl Locals {
     }
 
     pub(super) fn for_asserted(&self, operand: &TypedExpr) -> LocalId {
-        self._get(Operand(operand))
+        self._get(LocalKey::new(LocalKind::Asserted, operand))
     }
 
     fn insert_echo(&mut self, generator: &mut Generator<'_>, echo: &TypedExpr) {
         // the number of written bytes
-        self._insert_with_val_type(generator, echo.location(), ValType::I32);
+        let key = LocalKey::new(LocalKind::EchoWritten, echo);
+        self._insert_with_val_type(generator, key, ValType::I32);
         if !echo.is_var() {
-            self._insert(generator, echo, &echo.type_(), "echo", echo.location());
+            let key = LocalKey::new(LocalKind::Echo, echo);
+            self._insert(generator, key, &echo.type_(), "echo", echo.location());
         }
     }
 
@@ -451,11 +451,11 @@ impl Locals {
         echo: &'echo TypedExpr,
     ) -> (LocalId, Result<LocalId, &'echo EcoString>) {
         (
-            self._get(echo.location()),
+            self._get(LocalKey::new(LocalKind::EchoWritten, echo)),
             if let Some(name) = echo.var_name() {
                 Err(name)
             } else {
-                Ok(self._get(echo))
+                Ok(self._get(LocalKey::new(LocalKind::Echo, echo)))
             },
         )
     }
@@ -463,7 +463,7 @@ impl Locals {
     fn _insert(
         &mut self,
         generator: &mut Generator<'_>,
-        key: impl LocalHash,
+        key: LocalKey,
         type_: &Arc<Type>,
         prefix: &str,
         location: SrcSpan,
@@ -483,11 +483,7 @@ impl Locals {
                 name + "'".repeat(*count - 1).as_str()
             }
         };
-        if self
-            .locals
-            .insert(key.hash(), (index, Some(name)))
-            .is_some()
-        {
+        if self.locals.insert(key, (index, Some(name))).is_some() {
             panic!("locals collision should not happen during code generation");
         }
     }
@@ -495,21 +491,26 @@ impl Locals {
     fn _insert_with_val_type(
         &mut self,
         generator: &mut Generator<'_>,
-        key: impl LocalHash,
+        key: LocalKey,
         val_type: ValType,
     ) {
         let index = generator.wasm_module.locals.add(val_type);
-        if self.locals.insert(key.hash(), (index, None)).is_some() {
+        if self.locals.insert(key, (index, None)).is_some() {
             panic!("locals collision should not happen during code generation");
         }
     }
 
-    pub(super) fn _get(&self, key: impl LocalHash) -> LocalId {
-        let id = key.hash();
+    fn _get(&self, key: LocalKey) -> LocalId {
         self.locals
-            .get(&id)
-            .unwrap_or_else(|| panic!("local not found during code generation: {id}"))
+            .get(&key)
+            .unwrap_or_else(|| panic!("local not found during code generation: {key:?}"))
             .0
+    }
+
+    /// The local of the string of the left side of a string prefix pattern,
+    /// at `left_location`, or of the rest of the string, at `right_location`.
+    pub(super) fn for_string_prefix(&self, location: &SrcSpan) -> LocalId {
+        self._get(LocalKey::new(LocalKind::StringPrefix, location))
     }
 }
 
@@ -619,13 +620,14 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
         right_side_assignment: &'ast AssignName,
     ) {
         let string_val_type = self.generator.string.val_type();
+        let key = |location| LocalKey::new(LocalKind::StringPrefix, location);
         if let AssignName::Variable(_) = right_side_assignment {
             self.locals
-                ._insert_with_val_type(self.generator, right_location, string_val_type);
+                ._insert_with_val_type(self.generator, key(right_location), string_val_type);
         }
         if left_side_assignment.is_some() {
             self.locals
-                ._insert_with_val_type(self.generator, left_location, string_val_type);
+                ._insert_with_val_type(self.generator, key(left_location), string_val_type);
         }
     }
 
@@ -651,26 +653,38 @@ impl<'ast, 'a, 'b, 'c> Visit<'ast> for LocalsVisit<'a, 'b, 'c> {
     }
 }
 
-pub(super) trait LocalHash {
-    fn hash(&self) -> u64;
+/// What a local of `Locals` keeps, see `LocalKey`.
+#[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
+enum LocalKind {
+    Assignment,
+    DivOperand,
+    Callee,
+    Subject,
+    Pattern,
+    PipelineAssignment,
+    UpdatedRecord,
+    Asserted,
+    Echo,
+    /// The number of bytes written by an `echo`.
+    EchoWritten,
+    StringPrefix,
 }
 
-impl<T> LocalHash for &T {
-    fn hash(&self) -> u64 {
-        // We started using location as key, but we got collision on generated
-        // assigments. Let's hope we do not get collisions with this.
-        ptr::from_ref(*self) as u64
-    }
+/// The key of a local of `Locals`: what it keeps and the node of the AST it
+/// is for, by its address. A node can have locals of different kinds, like
+/// an `echo` that is also the subject of a `case`.
+#[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
+struct LocalKey {
+    kind: LocalKind,
+    node: usize,
 }
 
-/// An operand of an asserted expression, which can also be the key of
-/// another local, like an `echo`.
-struct Operand<'a>(&'a TypedExpr);
-
-impl LocalHash for Operand<'_> {
-    fn hash(&self) -> u64 {
-        // The address of an expression is aligned, so its lowest bit is free.
-        ptr::from_ref(self.0) as u64 | 1
+impl LocalKey {
+    fn new<T>(kind: LocalKind, node: &T) -> Self {
+        Self {
+            kind,
+            node: ptr::from_ref(node) as usize,
+        }
     }
 }
 
@@ -709,11 +723,5 @@ pub(super) fn asserted_operands(value: &TypedExpr) -> Vec<&TypedExpr> {
         | TypedExpr::NegateBool { .. }
         | TypedExpr::NegateInt { .. }
         | TypedExpr::Invalid { .. } => vec![],
-    }
-}
-
-impl LocalHash for SrcSpan {
-    fn hash(&self) -> u64 {
-        (self.start as u64) << 32 | self.end as u64
     }
 }

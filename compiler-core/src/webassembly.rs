@@ -5653,7 +5653,7 @@ impl<'a> Generator<'a> {
                     .br_if(fail_target);
 
                 if let Some(StringPrefixLeftSideAssignment { name, .. }) = left_side_assignment {
-                    let local = locals._get(left_location);
+                    let local = locals.for_string_prefix(left_location);
                     scope = scope.insert_local(name.clone(), local);
                     let _ = instructions
                         .global_as_non_null(prefix_index)
@@ -5661,7 +5661,7 @@ impl<'a> Generator<'a> {
                 }
 
                 if let AssignName::Variable(name) = right_side_assignment {
-                    let rest_local = locals._get(right_location);
+                    let rest_local = locals.for_string_prefix(right_location);
                     scope = scope.insert_local(name.clone(), rest_local);
                     let _ = instructions
                         .string_drop_prefix(subject, &unescape(left_side_string))
