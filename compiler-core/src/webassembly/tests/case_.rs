@@ -445,3 +445,72 @@ pub fn main() {{
     run_ok(&src);
     assert!(start.elapsed() < std::time::Duration::from_secs(60));
 }
+
+/// A generic constant of another module in a guard is specialized to the
+/// type of its use.
+#[test]
+fn guard_with_generic_constant_of_another_module() {
+    let result = super::run_wasm(
+        r#"
+import thepackage/consts
+
+fn is_empty(xs: List(Int)) -> Bool {
+    case xs {
+        _ if xs == consts.empty -> True
+        _ -> False
+    }
+}
+
+fn is_nothing(r: Result(String, Nil)) -> Bool {
+    case r {
+        _ if r == consts.nothing -> True
+        _ -> False
+    }
+}
+
+pub fn main() {
+    let assert True = is_empty([])
+    let assert False = is_empty([1])
+    let assert True = is_nothing(Error(Nil))
+    let assert False = is_nothing(Ok("a"))
+}
+"#,
+        vec![(
+            "thepackage",
+            "thepackage/consts",
+            r#"
+pub const empty = []
+
+pub const nothing = Error(Nil)
+"#,
+        )],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
+
+/// A generic constant of the module in a guard is specialized to the type
+/// of its use.
+#[test]
+fn guard_with_generic_constant() {
+    run_ok(
+        r#"
+const empty = []
+
+fn is_empty(xs: List(Int)) -> Bool {
+    case xs {
+        _ if xs == empty -> True
+        _ -> False
+    }
+}
+
+pub fn main() {
+    let assert True = is_empty([])
+    let assert False = is_empty([1])
+}
+"#,
+    );
+}

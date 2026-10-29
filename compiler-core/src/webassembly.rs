@@ -5981,9 +5981,8 @@ impl<'a> Generator<'a> {
                     }
                 }
             }
-            ClauseGuard::ModuleSelect { literal, .. } => {
-                let global = Scope::Global(self.globals.clone());
-                let _ = instructions.constant(self, &global, literal);
+            ClauseGuard::ModuleSelect { literal, type_, .. } => {
+                self.constant_value(instructions, literal, type_);
             }
             ClauseGuard::Invalid { .. } => {
                 panic!("invalid guards should not reach code generation")
