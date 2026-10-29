@@ -114,7 +114,7 @@ impl Monomorphizer {
     }
 
     /// Binds the type variables of each variable bound by `let` in
-    /// `variables` used with a single type, like a local function, or a block
+    /// `variables`, also by destructuring, used with a single type, like a local function, or a block
     /// that results in one. A variable not typed where it is bound can be
     /// unified with them, and then it gets that type. The type of a use can
     /// depend on the type variables of another variable, like a call in the
@@ -130,14 +130,8 @@ impl Monomorphizer {
                 .push(&reference.type_);
         }
         let mut lets: Vec<_> = variables
-            .lets
-            .iter()
-            .filter_map(|assignment| {
-                let Pattern::Variable { location, .. } = &assignment.pattern else {
-                    return None;
-                };
-                Some((*location, assignment.value.type_()))
-            })
+            .let_variables()
+            .map(|variable| (variable.location, variable.type_))
             .collect();
         let mut unbindable = false;
         loop {
@@ -201,8 +195,8 @@ impl Monomorphizer {
         variables: &'v Variables<'_>,
     ) -> Option<&'v Reference> {
         let mut unbound = HashSet::new();
-        for assignment in &variables.lets {
-            self.free_variables(&assignment.value.type_(), &mut unbound);
+        for variable in variables.let_variables() {
+            self.free_variables(&variable.type_, &mut unbound);
         }
         let mut types: HashMap<SrcSpan, Arc<Type>> = HashMap::new();
         variables

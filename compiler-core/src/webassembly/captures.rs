@@ -11,9 +11,9 @@ use std::{
 
 use crate::{
     ast::{
-        ArgNames, AssignName, FunctionLiteralKind, Pattern, StringPrefixLeftSideAssignment,
-        TypeAst, TypedArg, TypedAssignment, TypedExpr, TypedPattern, TypedPipelineAssignment,
-        TypedStatement,
+        ArgNames, AssignName, BoundVariable, FunctionLiteralKind, Pattern,
+        StringPrefixLeftSideAssignment, TypeAst, TypedArg, TypedAssignment, TypedExpr,
+        TypedPattern, TypedPipelineAssignment, TypedStatement,
         visit::{
             Visit, visit_typed_assignment, visit_typed_expr_call, visit_typed_expr_fn,
             visit_typed_pattern_assign, visit_typed_pipeline_assignment,
@@ -81,7 +81,7 @@ pub(super) struct Variables<'a> {
     pub references: Vec<Reference>,
     /// The functions bound by `let`, in source order.
     pub let_functions: Vec<LetFunction<'a>>,
-    /// The assignments of `let` to a variable, in source order.
+    /// The assignments of `let`, in source order.
     pub lets: Vec<&'a TypedAssignment>,
     /// How many functions bound by `let` contain the visit.
     depth: usize,
@@ -97,6 +97,13 @@ impl<'a> Variables<'a> {
             variables.visit_typed_statement(statement);
         }
         variables
+    }
+
+    /// The variables bound by `let`, also by destructuring.
+    pub(super) fn let_variables(&self) -> impl Iterator<Item = BoundVariable> {
+        self.lets
+            .iter()
+            .flat_map(|assignment| assignment.pattern.bound_variables())
     }
 
     /// The variables referenced but not bound, see `captures`.
@@ -287,9 +294,7 @@ impl<'ast> Visit<'ast> for Variables<'ast> {
     }
 
     fn visit_typed_assignment(&mut self, assignment: &'ast TypedAssignment) {
-        if matches!(assignment.pattern, Pattern::Variable { .. }) {
-            self.lets.push(assignment);
-        }
+        self.lets.push(assignment);
         let is_function = matches!(assignment.value, TypedExpr::Fn { .. })
             && matches!(assignment.pattern, Pattern::Variable { .. });
         if is_function {

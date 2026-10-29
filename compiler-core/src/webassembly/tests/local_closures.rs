@@ -1012,3 +1012,41 @@ pub fn main() {
         );
     });
 }
+
+#[test]
+fn destructured_local_function() {
+    run(r#"
+pub fn main() {
+  let #(id, _) = #(fn(x: a) -> a { x }, 1)
+  assert id(1) == 1
+}
+"#);
+}
+
+#[test]
+fn destructured_local_function_used_with_two_types() {
+    assert_used_with_different_types(
+        r#"
+pub fn main() {
+  let #(id, _) = #(fn(x: a) -> a { x }, 1)
+  assert id(1) == 1
+  assert id("s") == "s"
+}
+"#,
+        "id",
+    );
+}
+
+#[test]
+fn destructured_local_function_used_with_an_unresolved_type_and_another_type() {
+    assert_used_with_different_types(
+        r#"
+pub fn main() {
+  let #(id, _) = #(fn(x: a) { x }, 1)
+  let _ = id([])
+  assert id(1) == 1
+}
+"#,
+        "id",
+    );
+}
