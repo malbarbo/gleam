@@ -174,9 +174,9 @@ impl Bits {
             }
             LiteralValue::BitArray(bits) if type_.is_bit_array() => {
                 let size = size.unwrap_or(bits.size);
-                // A segment longer than its value, or a `bytes` segment that
-                // is not whole bytes, fails when it is created.
-                if size > bits.size || segment.has_bytes_option() && !size.is_multiple_of(8) {
+                // A segment longer than its value fails when it is created.
+                // (`bytes` is only allowed in patterns.)
+                if size > bits.size {
                     return None;
                 }
                 self.push_bits(&bits, size);
