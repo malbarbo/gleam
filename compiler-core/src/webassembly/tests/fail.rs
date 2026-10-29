@@ -81,3 +81,25 @@ pub fn fail() {
         result.stderr
     );
 }
+
+/// The message of a `let assert` can have code that needs locals, like a
+/// variable, a `case` or an `echo`.
+#[test]
+fn let_assert_with_message_that_needs_locals() {
+    run_fail_stderr(
+        r#"
+pub fn main() {
+  let n = 2
+  let assert Ok(_) = Error(1) as {
+    let m = case echo n {
+      2 -> "boom"
+      _ -> "other"
+    }
+    m
+  }
+  0
+}
+"#,
+        "boom",
+    );
+}

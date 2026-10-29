@@ -11,9 +11,9 @@ use std::{
 
 use crate::{
     ast::{
-        ArgNames, AssignName, AssignmentKind, FunctionLiteralKind, Pattern,
-        StringPrefixLeftSideAssignment, TypeAst, TypedArg, TypedAssignment, TypedExpr,
-        TypedPattern, TypedPipelineAssignment, TypedStatement,
+        ArgNames, AssignName, FunctionLiteralKind, Pattern, StringPrefixLeftSideAssignment,
+        TypeAst, TypedArg, TypedAssignment, TypedExpr, TypedPattern, TypedPipelineAssignment,
+        TypedStatement,
         visit::{
             Visit, visit_typed_assignment, visit_typed_expr_call, visit_typed_expr_fn,
             visit_typed_pattern_assign, visit_typed_pipeline_assignment,
@@ -302,14 +302,6 @@ impl<'ast> Visit<'ast> for Variables<'ast> {
         visit_typed_assignment(self, assignment);
         if is_function {
             self.depth -= 1;
-        }
-        // The default visit skips the message
-        if let AssignmentKind::Assert {
-            message: Some(message),
-            ..
-        } = &assignment.kind
-        {
-            self.visit_typed_expr(message);
         }
     }
 

@@ -65,11 +65,12 @@ use vec1::Vec1;
 use crate::type_::Type;
 
 use super::{
-    AssignName, BinOp, BitArrayOption, CallArg, Pattern, PipelineAssignmentKind, RecordUpdateArg,
-    Statement, TodoKind, TypeAst, TypedArg, TypedAssert, TypedAssignment, TypedClause,
-    TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr, TypedExprBitArraySegment,
-    TypedFunction, TypedModule, TypedModuleConstant, TypedPattern, TypedPatternBitArraySegment,
-    TypedPipelineAssignment, TypedStatement, TypedUse, untyped::FunctionLiteralKind,
+    AssignName, AssignmentKind, BinOp, BitArrayOption, CallArg, Pattern, PipelineAssignmentKind,
+    RecordUpdateArg, Statement, TodoKind, TypeAst, TypedArg, TypedAssert, TypedAssignment,
+    TypedClause, TypedClauseGuard, TypedConstant, TypedCustomType, TypedExpr,
+    TypedExprBitArraySegment, TypedFunction, TypedModule, TypedModuleConstant, TypedPattern,
+    TypedPatternBitArraySegment, TypedPipelineAssignment, TypedStatement, TypedUse,
+    untyped::FunctionLiteralKind,
 };
 
 pub trait Visit<'ast> {
@@ -1806,6 +1807,13 @@ where
     }
     v.visit_typed_expr(&assignment.value);
     v.visit_typed_pattern(&assignment.pattern);
+    if let AssignmentKind::Assert {
+        message: Some(message),
+        ..
+    } = &assignment.kind
+    {
+        v.visit_typed_expr(message);
+    }
 }
 
 pub fn visit_typed_use<'a, V>(v: &mut V, use_: &'a TypedUse)
