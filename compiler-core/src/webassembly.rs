@@ -3316,7 +3316,7 @@ impl<'a> Generator<'a> {
                 } else if let Some((CustomType::External { val_type, .. }, _)) =
                     self.custom_type(type_)
                 {
-                    (ConstExpr::Value(Value::I32(0)), val_type)
+                    const_expr_zero(val_type)
                 } else if let Some((CustomType::Enum { .. }, _)) = self.custom_type(type_) {
                     (ConstExpr::Value(Value::I32(0)), ValType::I32)
                 } else if type_.is_string() {
@@ -6146,6 +6146,26 @@ impl<'a> Generator<'a> {
     pub(super) fn wasm_local(&mut self, val_type: ValType) -> LocalId {
         self.wasm_module.locals.add(val_type)
     }
+}
+
+/// The zero of `val_type`, `null` for a reference, with the type of a global
+/// that can hold it.
+fn const_expr_zero(val_type: ValType) -> (ConstExpr, ValType) {
+    let value = match val_type {
+        ValType::I32 => Value::I32(0),
+        ValType::I64 => Value::I64(0),
+        ValType::F32 => Value::F32(0.0),
+        ValType::F64 => Value::F64(0.0),
+        ValType::V128 => Value::V128(0),
+        ValType::Ref(ref_type) => {
+            let ref_type = RefType {
+                nullable: true,
+                ..ref_type
+            };
+            return (ConstExpr::RefNull(ref_type), ValType::Ref(ref_type));
+        }
+    };
+    (ConstExpr::Value(value), val_type)
 }
 
 fn const_expr_ref_null(type_index: TypeId) -> ConstExpr {
