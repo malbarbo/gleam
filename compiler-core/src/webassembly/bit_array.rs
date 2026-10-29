@@ -1660,6 +1660,13 @@ impl Generator<'_> {
             let _ = instructions.global_as_non_null(index).local_set(local);
             return scope.insert_local(name.clone(), local);
         }
+        if let Pattern::Int { int_value, .. } = value
+            && !self.int.fits(int_value)
+        {
+            // No bits that are read are the value.
+            let _ = instructions.br(matching.fail_target);
+            return scope;
+        }
         let little = segment.endianness() == Endianness::Little;
         let size = match segment.size() {
             Some(Pattern::BitArraySize(size)) => Some(self.pattern_segment_size(

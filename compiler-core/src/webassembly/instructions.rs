@@ -769,6 +769,14 @@ impl IntType {
         }
     }
 
+    /// Whether `value` is an `Int`.
+    pub(super) fn fits(&self, value: &BigInt) -> bool {
+        match self {
+            IntType::I32 => i32::try_from(value).is_ok(),
+            IntType::I64 => i64::try_from(value).is_ok(),
+        }
+    }
+
     fn to_i32(self, value: &BigInt) -> i32 {
         value.try_into().expect("int literal to fit in i32")
     }

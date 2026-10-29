@@ -905,11 +905,7 @@ impl<'a> Generator<'a> {
                 if self.error.is_some() {
                     return;
                 }
-                let err = match self.int {
-                    IntType::I32 => i32::try_from(int_value).err().map(|_| ()),
-                    IntType::I64 => i64::try_from(int_value).err().map(|_| ()),
-                };
-                if err.is_some() {
+                if !self.int.fits(int_value) {
                     self.error = Some(Error::IntLiteralOutOfRange {
                         module: self.module.clone(),
                         location: *location,

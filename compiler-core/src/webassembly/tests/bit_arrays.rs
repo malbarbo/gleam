@@ -1594,3 +1594,20 @@ pub fn main() {
     found.dedup();
     assert_eq!(found, functions);
 }
+
+/// A literal integer segment that does not fit in its size, nor in an
+/// `Int`, matches no bits.
+#[test]
+fn pattern_with_literal_int_that_does_not_fit_in_an_int() {
+    let src = r#"
+pub fn main() {
+    let assert False = case <<0, 255>> {
+        <<5000000000:size(8), _>> -> True
+        <<_, 18446744073709551616:size(8)>> -> True
+        _ -> False
+    }
+}
+"#;
+    super::run_ok(src);
+    super::run_ok_i64(src);
+}
