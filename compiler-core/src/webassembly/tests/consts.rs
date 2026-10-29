@@ -442,3 +442,28 @@ pub const empty = Empty
         result.stderr
     );
 }
+
+/// The value of `x` is only constructed by its constant, which must record
+/// that the program constructs values of `B` for its inspect (see
+/// `constructed`).
+#[test]
+fn const_variant_only_in_constants() {
+    run_ok(
+        r#"
+type T {
+    A(Int)
+    B(Float)
+}
+
+const x = B(1.0)
+const w = [x]
+
+@external(webassembly, "builtins", "_inspect")
+fn inspect(value: a) -> String
+
+pub fn main() {
+    assert inspect(w) == "[B(1.0)]"
+}
+"#,
+    );
+}
