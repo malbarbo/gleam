@@ -17,12 +17,12 @@ use crate::{
             visit_typed_expr_case, visit_typed_pattern, visit_typed_pipeline_assignment,
         },
     },
-    type_::{self, ModuleValueConstructor, Type, TypedCallArg},
+    type_::{ModuleValueConstructor, Type, TypedCallArg},
 };
 use src_span::SrcSpan;
 use vec1::Vec1;
 
-use super::{Generator, divisor_is_safe, monomorphize::set_ubound_or_generic};
+use super::{Generator, divisor_is_safe};
 
 #[derive(Clone, PartialEq)]
 pub(super) enum IdKind {
@@ -317,8 +317,6 @@ impl Locals {
             // Called directly, see `Generator::function_literal_call`
         } else if !fun.is_var() && !is_static_module_select {
             self._insert(generator, fun, &fun.type_(), "fun", fun.location())
-        } else {
-            set_ubound_or_generic(&fun.type_(), &type_::nil());
         }
     }
 

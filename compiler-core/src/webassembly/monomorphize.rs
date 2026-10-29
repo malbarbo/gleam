@@ -740,31 +740,3 @@ fn get_unbound_or_generic_id(type_: &Arc<Type>) -> Option<u64> {
         Type::Named { .. } | Type::Fn { .. } | Type::Tuple { .. } => None,
     }
 }
-
-pub(super) fn set_ubound_or_generic(old: &Arc<Type>, new: &Arc<Type>) {
-    match old.as_ref() {
-        Type::Var { type_ } => {
-            if let TypeVar::Link { type_ } = &*type_.borrow() {
-                set_ubound_or_generic(type_, new);
-            } else {
-                *type_.borrow_mut() = TypeVar::Link { type_: new.clone() };
-            };
-        }
-        Type::Named { arguments, .. } => {
-            for argument in arguments {
-                set_ubound_or_generic(argument, new);
-            }
-        }
-        Type::Fn { arguments, return_ } => {
-            for argument in arguments {
-                set_ubound_or_generic(argument, new);
-            }
-            set_ubound_or_generic(return_, new);
-        }
-        Type::Tuple { elements } => {
-            for element in elements {
-                set_ubound_or_generic(element, new);
-            }
-        }
-    }
-}
