@@ -1,0 +1,14 @@
+---
+source: test-package-compiler/src/tests.rs
+assertion_line: 362
+expression: "./cases/webassembly_reserved_module_name"
+---
+error: Reserved module name
+  ┌─ webassembly_reserved_module_name/src/builtins/dict.gleam:1:1
+  │
+1 │ // SPDX-License-Identifier: Apache-2.0
+  │ ^
+
+The module name "builtins/dict" is reserved by the WebAssembly target, which provides a module with this name.
+
+Hint: Rename the module.

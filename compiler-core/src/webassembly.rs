@@ -225,12 +225,12 @@ impl Error {
             | Error::GenericLocalVariable { module, .. }
             | Error::IntLiteralOutOfRange { module, .. }
             | Error::FloatLiteralOutOfRange { module, .. } => Some(module),
+            Error::ReservedModuleName { name } => Some(name),
             Error::UnknownExternalType { .. }
             | Error::UnknownBuiltinFunction { .. }
             | Error::WrongBuiltinFunctionSignature { .. }
             | Error::UnknownExternalModule { .. }
             | Error::ExternalOutsideStdlib { .. }
-            | Error::ReservedModuleName { .. }
             | Error::WrongExternalTypeArity { .. }
             | Error::UnsupportedFeature { .. }
             | Error::TypeTooLarge {

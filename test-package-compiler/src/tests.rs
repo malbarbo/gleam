@@ -353,3 +353,15 @@ fn otp_app_override() {
     let output = compiler.into_snapshot();
     insta::assert_snapshot!("otp_app_override", output, "./cases/otp_app_override");
 }
+
+/// A module with the name of a module of the WebAssembly runtime is reported
+/// in its own file.
+#[test]
+fn webassembly_reserved_module_name() {
+    let output = crate::run_package_compiler("webassembly_reserved_module_name");
+    insta::assert_snapshot!(
+        "webassembly_reserved_module_name",
+        output,
+        "./cases/webassembly_reserved_module_name",
+    );
+}
