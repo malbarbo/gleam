@@ -56,8 +56,6 @@ impl Instructions<'_, '_> {
             | B::StringRepr
             | B::StringToMemory
             | B::MemoryToString
-            | B::ParseInt
-            | B::ParseFloat
             | B::IntBitwiseShiftLeft
             | B::IntBitwiseShiftRight
             | B::FloatRound

@@ -112,18 +112,14 @@ const EXIT: &str = "_exit";
 const PRINT: &str = "_print";
 
 const I32_TO_STR: &str = "_i32_to_str";
-const I32_PARSE: &str = "_i32_parse";
 const I32_IS_CODEPOINT: &str = "_i32_is_codepoint";
 
 const I64_TO_STR: &str = "_i64_to_str";
-const I64_PARSE: &str = "_i64_parse";
 const I64_IS_CODEPOINT: &str = "_i64_is_codepoint";
 
 const F32_TO_STR: &str = "_f32_to_str";
-const F32_PARSE: &str = "_f32_parse";
 
 const F64_TO_STR: &str = "_f64_to_str";
-const F64_PARSE: &str = "_f64_parse";
 
 const UTF_CODEPOINT_REPR: &str = "_utf_codepoint_repr";
 
@@ -6053,8 +6049,6 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::StringRepr => self.code_string_repr(),
             BuiltinFunctionExternal::StringToMemory => self.code_string_to_memory(),
             BuiltinFunctionExternal::MemoryToString => self.code_memory_to_string(),
-            BuiltinFunctionExternal::ParseInt => self.code_parse_int(),
-            BuiltinFunctionExternal::ParseFloat => self.code_parse_float(),
             BuiltinFunctionExternal::IntBitwiseShiftLeft => self.code_int_shift(true),
             BuiltinFunctionExternal::IntBitwiseShiftRight => self.code_int_shift(false),
             BuiltinFunctionExternal::FloatRound => self.code_float_round(),

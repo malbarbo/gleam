@@ -145,10 +145,6 @@ pub(super) enum BuiltinFunctionExternal {
     StringToMemory,
     #[strum(serialize = "_memory_to_string")]
     MemoryToString,
-    #[strum(serialize = "_parse_int")]
-    ParseInt,
-    #[strum(serialize = "_parse_float")]
-    ParseFloat,
     #[strum(serialize = "_int_bitwise_and")]
     IntBitwiseAnd,
     #[strum(serialize = "_int_bitwise_or")]
@@ -285,8 +281,6 @@ impl BuiltinFunctionExternal {
                 return (vec![string().into(), ext("I32")], ext("I32"));
             }
             B::MemoryToString => return (vec![ext("I32"), ext("I32")], string().into()),
-            B::ParseInt => (vec![string()], result(int(), nil())),
-            B::ParseFloat => (vec![string()], result(float(), nil())),
             B::IntBitwiseAnd
             | B::IntBitwiseOr
             | B::IntBitwiseExclusiveOr
@@ -2082,80 +2076,6 @@ impl<'a> Generator<'a> {
             })
             .local_get(s)
             .string_from_bytes()
-            .end();
-        function.finish(self)
-    }
-
-    pub(super) fn code_parse_int(&mut self) -> FunctionId {
-        let parse = match self.int {
-            IntType::I32 => self.find_global_expect(I32_PARSE),
-            IntType::I64 => self.find_global_expect(I64_PARSE),
-        };
-        self.code_parse(type_::int(), parse.func_id())
-    }
-
-    pub(super) fn code_parse_float(&mut self) -> FunctionId {
-        let parse = match self.float {
-            FloatType::F32 => self.find_global_expect(F32_PARSE),
-            FloatType::F64 => self.find_global_expect(F64_PARSE),
-        };
-        self.code_parse(type_::float(), parse.func_id())
-    }
-
-    fn code_parse(&mut self, type_: Arc<Type>, parse: FunctionId) -> FunctionId {
-        let string_vt = self.string.val_type();
-        let value_vt = self.val_type(&type_);
-        // params
-        let s = self.wasm_local(string_vt); // String
-        // locals
-        let ptr = self.wasm_local(ValType::I32); // I32
-        let dest = self.wasm_local(ValType::I32); // I32
-        let len = self.wasm_local(ValType::I32); // I32
-        let r = self.wasm_local(value_vt); // type_
-        // return Result(type, Nil)
-        let string_to_memory =
-            self.get_function_builtin_external(BuiltinFunctionExternal::StringToMemory);
-        let heap_base = self.find_global_expect(HEAP_BASE);
-        let result = type_::result(type_.clone(), type_::nil());
-        let result_vt = self.val_type(&result);
-        let ok_index = self.ok_variant_constructor(type_.clone(), type_::nil());
-        let error_index = self.error_variant_constructor(type_.clone(), type_::nil());
-        let mut function = Function::new(self, "_parse", &[s], &[result_vt]);
-        #[rustfmt::skip]
-        let _ = function
-            .extend_instructions(self)
-            .call(heap_base.func_id())
-            .local_tee(ptr)
-            .i32_const(0)
-            .i32_store(MemArg { offset: 0, align: 2 })
-            .local_get(ptr)
-            .i32_const(4)
-            .i32_add()
-            .local_set(dest)
-            .local_get(s)
-            .local_get(dest)
-            .call(string_to_memory)
-            .local_set(len)
-            .local_get(ptr) // result
-            .local_get(dest) // ptr
-            .local_get(len)
-            .call(parse)
-            .local_set(r)
-            .local_get(ptr)
-            .i32_load(MemArg { offset: 0, align: 2 })
-            .if_else(
-                result_vt,
-                |then_s| {
-                    let _ = then_s
-                        .local_get(r)
-                        .call(ok_index);
-                },
-                |else_s| {
-                    let _ = else_s
-                        .nil_const()
-                        .call(error_index);
-                },
-            )
             .end();
         function.finish(self)
     }

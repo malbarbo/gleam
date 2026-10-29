@@ -37,6 +37,31 @@ pub fn main() {
     );
 }
 
+/// The former parses of numbers, with another grammar than `int_parse` and
+/// `float_parse`, are not builtins.
+#[test]
+fn former_parse_builtins() {
+    for (name, type_) in [("_parse_int", "Int"), ("_parse_float", "Float")] {
+        let error = super::compile_wasm_error(&format!(
+            r#"
+@external(webassembly, "builtins", "{name}")
+fn parse(a: String) -> Result({type_}, Nil)
+
+pub fn main() {{
+    parse("1")
+}}
+"#
+        ));
+        assert!(
+            matches!(
+                error,
+                crate::webassembly::Error::UnknownBuiltinFunction { name: ref n, .. } if n == name
+            ),
+            "{error:?}"
+        );
+    }
+}
+
 /// The names that the name of an unknown builtin function is compared with to
 /// suggest one: the builtins of every kind, as externals name them.
 #[test]

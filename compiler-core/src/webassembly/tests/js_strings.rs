@@ -49,7 +49,7 @@ fn pop_grapheme(a: String) -> Result(#(String, String), Nil)
 fn inspect(a: a) -> String
 @external(webassembly, "builtins", "_hash")
 fn hash(a: a) -> Int
-@external(webassembly, "builtins", "_parse_int")
+@external(webassembly, "builtins", "int_parse")
 fn parse_int(a: String) -> Result(Int, Nil)
 @external(webassembly, "builtins", "string_lowercase")
 fn lowercase(a: String) -> String

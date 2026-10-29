@@ -1743,7 +1743,7 @@ fn get_byte(a: String, i: Int) -> Result(Int, Nil)
 @external(webassembly, "builtins", "_int_to_utf_codepoint")
 fn to_codepoint(i: Int) -> Result(UtfCodepoint, Nil)
 
-@external(webassembly, "builtins", "_parse_int")
+@external(webassembly, "builtins", "int_parse")
 fn parse_int(s: String) -> Result(Int, Nil)
 
 fn apply2(f, a, b) { f(a, b) }

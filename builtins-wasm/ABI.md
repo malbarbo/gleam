@@ -183,10 +183,9 @@ Not callable from Gleam; the compiler calls them from generated code.
 | `_utf_codepoint_repr` | `(codepoint: i32, ptr: i32) -> i32` | writes `//utfcodepoint(c)` at `ptr`, as on JavaScript, returns the length (used by `_inspect`) |
 
 The older exports (`_print`, `_exit`, `_i32_to_str`, `_i64_to_str`, `_f32_to_str`,
-`_f64_to_str`, `_i32_parse`, `_i64_parse`, `_f32_parse`, `_f64_parse`,
-`_i32_is_codepoint`, `_i64_is_codepoint`, `_heap_base`) keep their signatures.
-`_f32_to_str`/`_f64_to_str` now write the `float_to_string` text (for `f32` and
-`f64` respectively) and `_i32_parse`/`_i64_parse` use the `from_str` grammar.
+`_f64_to_str`, `_i32_is_codepoint`, `_i64_is_codepoint`, `_heap_base`) keep their
+signatures. `_f32_to_str`/`_f64_to_str` now write the `float_to_string` text (for
+`f32` and `f64` respectively).
 
 Indirect calls are fine (`memchr::memmem` uses them): the code generator keeps
 the active element segments that fill the table. The panic handler still avoids

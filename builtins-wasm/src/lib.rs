@@ -177,41 +177,6 @@ mod exports {
         unsafe { write_to(ptr as usize as *mut u8, s) as i32 }
     }
 
-    unsafe fn parse_with<T: Default>(
-        parsed: *mut bool,
-        ptr: *const u8,
-        len: u32,
-        parse: impl FnOnce(&[u8]) -> Option<T>,
-    ) -> T {
-        let r = parse(unsafe { bytes_arg(ptr as i32, len as i32) });
-        unsafe { *parsed = r.is_some() };
-        r.unwrap_or_default()
-    }
-
-    fn parse_int<T: core::str::FromStr>(bytes: &[u8]) -> Option<T> {
-        core::str::from_utf8(bytes).ok()?.parse().ok()
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn _i32_parse(parsed: *mut bool, ptr: *const u8, len: u32) -> i32 {
-        unsafe { parse_with(parsed, ptr, len, parse_int) }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn _i64_parse(parsed: *mut bool, ptr: *const u8, len: u32) -> i64 {
-        unsafe { parse_with(parsed, ptr, len, parse_int) }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn _f32_parse(parsed: *mut bool, ptr: *const u8, len: u32) -> f32 {
-        unsafe { parse_with(parsed, ptr, len, |b| fast_float2::parse(b).ok()) }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn _f64_parse(parsed: *mut bool, ptr: *const u8, len: u32) -> f64 {
-        unsafe { parse_with(parsed, ptr, len, |b| fast_float2::parse(b).ok()) }
-    }
-
     #[unsafe(no_mangle)]
     pub extern "C" fn _i32_is_codepoint(ch: i32) -> bool {
         ch.try_into().ok().and_then(char::from_u32).is_some()

@@ -129,7 +129,7 @@ fn utf8_of_views() {
         r#"{RUST}
 @external(webassembly, "builtins", "_string_get_byte")
 fn get_byte(a: String, i: Int) -> Result(Int, Nil)
-@external(webassembly, "builtins", "_parse_int")
+@external(webassembly, "builtins", "int_parse")
 fn parse_int(a: String) -> Result(Int, Nil)
 @external(webassembly, "builtins", "_inspect")
 fn inspect(a: a) -> String
