@@ -1766,13 +1766,11 @@ impl<'a> Generator<'a> {
     }
 
     fn code_function_repr(&mut self, type_: &Arc<Type>) -> FunctionId {
-        // As on Erlang and JavaScript, only the arity is shown.
+        // As on Erlang and JavaScript, only the arity is shown, with the
+        // parameters named by the characters from `a` on.
         let (arguments, _) = type_.fn_types().expect("function type");
-        let names = (0..arguments.len())
-            .map(|index| {
-                let letter = (b'a' + (index % 26) as u8) as char;
-                letter.to_string().repeat(index / 26 + 1)
-            })
+        let names = (0..arguments.len() as u32)
+            .map(|index| char::from_u32(u32::from('a') + index).expect("a character"))
             .join(", ");
         let fn_vt = self.val_type(type_);
         self.code_constant_repr(fn_vt, &format!("//fn({names}) {{ ... }}"))

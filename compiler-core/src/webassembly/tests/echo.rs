@@ -17,6 +17,23 @@ pub fn main() {
     );
 }
 
+/// As on Erlang and JavaScript, the parameters of a function are named by
+/// consecutive characters, so they pass `z` after the 26th.
+#[test]
+fn inspect_function_of_many_parameters() {
+    run_ok(
+        r#"
+@external(webassembly, "builtins", "_inspect")
+fn inspect(value: a) -> String
+
+pub fn main() {
+    let f = fn(_0, _1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, _20, _21, _22, _23, _24, _25, _26, _27) { 0 }
+    assert inspect(f) == "//fn(a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x, y, z, {, |) { ... }"
+}
+"#,
+    );
+}
+
 #[test]
 fn inspect_string() {
     run_ok(
