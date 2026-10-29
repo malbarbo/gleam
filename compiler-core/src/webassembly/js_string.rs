@@ -732,7 +732,12 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    /// `_string_byte_slice(s, start, length)`, through the UTF-8 bytes.
+    /// `_string_byte_slice(s, start, length)`, through the UTF-8 bytes of
+    /// the whole of `s`, so it takes time in its length. Out of the
+    /// boundaries of code points, which the caller guarantees, the bytes are
+    /// decoded as if they were whole characters: a character cut at the end
+    /// is completed with the bytes after the slice, and one cut at the start
+    /// gives a wrong character or a trap.
     pub(super) fn code_js_string_byte_slice(&mut self, js: JsString) -> FunctionId {
         let int_vt = self.int.val_type();
         // params

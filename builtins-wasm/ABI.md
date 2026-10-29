@@ -229,7 +229,7 @@ comes from, is copied; a bigger one shares the array.
 | Name | Gleam type | Semantics |
 |---|---|---|
 | `_string_byte_size` | `fn(String) -> Int` | |
-| `_string_byte_slice` | `fn(String, Int, Int) -> String` | `(start, length)` in bytes, caller guarantees bounds |
+| `_string_byte_slice` | `fn(String, Int, Int) -> String` | `(start, length)` in bytes, caller guarantees bounds at code point boundaries; O(n) with JSString |
 | `_string_codeunit_slice` | `fn(String, Int, Int) -> String` | `(start, length)` in code units (bytes, or UTF-16 units with `string = "JSString"`), caller guarantees bounds |
 | `_string_pop_codeunit` | `fn(String) -> #(Int, String)` | first code unit and rest; `#(0, "")` for `""` |
 | `_string_codeunit_size` | `fn(String) -> Int` | in code units |

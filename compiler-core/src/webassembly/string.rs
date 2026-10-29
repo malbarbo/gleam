@@ -792,8 +792,11 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    /// `_string_byte_slice(s, start, length)`: the caller guarantees the
-    /// bounds. A view over `s` unless the slice is small.
+    /// `_string_byte_slice(s, start, length)`: the caller guarantees that the
+    /// slice is in `s` and starts and ends at boundaries of code points, as
+    /// `string.drop_start` of the stdlib does; otherwise the result is not
+    /// specified, as on the other targets, which differ there too. A view
+    /// over `s` unless the slice is small.
     pub(super) fn code_string_byte_slice(&mut self) -> FunctionId {
         match self.string {
             StringType::Utf8(_) => self.code_string_slice("_string_byte_slice"),
