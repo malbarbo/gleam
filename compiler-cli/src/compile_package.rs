@@ -69,7 +69,10 @@ pub fn command(options: CompilePackage) -> Result<()> {
         },
         Target::WebAssembly => TargetCodegenConfiguration::WebAssembly {
             config: config.webassembly,
-            programs: true,
+            // Only the metadata of the other packages is loaded, not the
+            // modules that a program contains, so the package is compiled
+            // as a dependency is.
+            programs: false,
         },
     };
 
