@@ -217,9 +217,10 @@ export async function instantiate(url) {
   const imports = { wasi_snapshot_preview1: wasi, "gleam:js": js };
   for (const { module: name } of WebAssembly.Module.imports(module)) {
     if (!(name in imports)) {
-      // A module of a package is relative to the program, like on JavaScript,
-      // where a module of the runtime, like `node:process`, is not.
-      const specifier = /\.m?js$/.test(name) ? new URL(name, url).href : import.meta.resolve(name);
+      // A relative path, which the compiler makes relative to the program,
+      // is resolved from the program, like on JavaScript, where a module of
+      // the runtime, like `node:process`, is not.
+      const specifier = /^\.\.?\//.test(name) ? new URL(name, url).href : import.meta.resolve(name);
       // It is imported through a module that exports it as `ns`, as `import`
       // takes a module that exports a function `then` for a promise.
       const source = `export * as ns from ${JSON.stringify(specifier)};`;

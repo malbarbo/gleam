@@ -365,6 +365,25 @@ pub fn main() {
     );
 }
 
+/// A module of a relative path is relative to the program whatever its
+/// extension, as the compiler decides by the path and not by the extension.
+#[test]
+fn host_relative_module_of_another_extension() {
+    run_with_host_files(
+        "thepackage",
+        r#"
+@external(webassembly, "./ffi.cjs", "add")
+fn add(a: Int, b: Int) -> Int
+
+pub fn main() {
+    let assert 3 = add(1, 2)
+}
+"#,
+        vec![],
+        &[("ffi.cjs", "exports.add = (a, b) => a + b;\n")],
+    );
+}
+
 #[test]
 fn host_strings() {
     run_with_host(
