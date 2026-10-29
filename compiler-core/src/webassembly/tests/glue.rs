@@ -273,3 +273,33 @@ pub fn main() {{
         );
     }
 }
+
+/// A list param is copied to linear memory item by item, so its items can
+/// only be the types stored in place, not lists, tuples or results.
+#[test]
+fn rust_builtins_with_unsupported_list_params() {
+    for type_ in [
+        "List(List(Int))",
+        "List(#(Int, Int))",
+        "List(Result(Int, Nil))",
+    ] {
+        let error = super::compile_wasm_error(&format!(
+            r#"
+@external(webassembly, "builtins", "string_from_utf_codepoints")
+fn from_utf_codepoints(a: {type_}) -> String
+
+pub fn main() {{
+    from_utf_codepoints([])
+}}
+"#
+        ));
+        assert!(
+            matches!(
+                error,
+                crate::webassembly::Error::UnsupportedFeature { ref feature, .. }
+                    if feature.contains("in a Rust builtin")
+            ),
+            "{type_}: {error:?}"
+        );
+    }
+}

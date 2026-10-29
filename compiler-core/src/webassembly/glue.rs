@@ -84,7 +84,14 @@ fn param_val_types(abi_: &Abi) -> Option<Vec<ValType>> {
         Abi::Float => Some(vec![ValType::F64]),
         Abi::I32 => Some(vec![ValType::I32]),
         Abi::Nil => Some(vec![]),
-        Abi::String | Abi::List(_) => Some(vec![ValType::I32, ValType::I32]),
+        Abi::String => Some(vec![ValType::I32, ValType::I32]),
+        // The items of a list are stored in place by `code_store`.
+        Abi::List(item) => match abi_expect(item) {
+            Abi::Int | Abi::Float | Abi::I32 | Abi::Nil | Abi::String => {
+                Some(vec![ValType::I32, ValType::I32])
+            }
+            Abi::List(_) | Abi::Tuple(_) | Abi::Result(_, _) => None,
+        },
         Abi::Tuple(_) | Abi::Result(_, _) => None,
     }
 }
