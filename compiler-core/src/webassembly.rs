@@ -5228,8 +5228,17 @@ impl<'a> Generator<'a> {
                 .expect("echo with no previous step in a pipe");
             let _ = instructions.local_get(previous);
         }
+        let _ = instructions.local_set(expr);
+        // The message is computed before writing to the memory, which it
+        // can use, like `inspect` does.
+        let message = message.as_ref().map(|message| {
+            let local = self.wasm_local(self.string.val_type());
+            let _ = instructions
+                .expression(self, locals, scope.clone(), message)
+                .local_set(local);
+            local
+        });
         let _ = instructions
-            .local_set(expr)
             // write the module name and line number
             .global_as_non_null(string_index)
             .call(heap_base)
@@ -5242,7 +5251,7 @@ impl<'a> Generator<'a> {
 
         if let Some(message) = message {
             let _ = instructions
-                .expression(self, locals, scope.clone(), message)
+                .local_get(message)
                 .local_get(dest)
                 .call(string_to_memory)
                 // update end

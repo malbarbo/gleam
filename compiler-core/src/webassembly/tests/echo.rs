@@ -200,3 +200,18 @@ pub fn main() {
     assert!(output.status.success(), "{}", output.stderr);
 }
 
+/// The message is computed before the location is written, as computing it
+/// can use the same memory, like `inspect` does.
+#[test]
+fn echo_message_that_uses_the_memory() {
+    let src = r#"
+@external(webassembly, "builtins", "_inspect")
+fn inspect(value: a) -> String
+
+pub fn main() {
+    echo 1 as inspect([2, 3])
+}
+"#;
+    let expected = "\u{1b}[90msrc/my/mod.gleam:6\u{1b}[39m [2, 3]\n1\n";
+    assert_eq!(run_wasm(src, vec![]).stderr, expected);
+}
