@@ -2734,10 +2734,11 @@ satisfying {required_version} but you are using v{gleam_version}.",
                         "You can not set a runtime for Erlang. Did you mean to target JavaScript?"
                             .into(),
                     ),
-                    Target::WebAssembly => Some(
-                        "You can not set a runtime for WebAssembly. Did you mean to target JavaScript?"
-                            .into(),
-                    ),
+                    // `gleam run` runs a WebAssembly program in the runtimes
+                    // of JavaScript, so it is not reached today.
+                    Target::WebAssembly => {
+                        Some("available runtimes for WebAssembly are: node, deno, bun.".into())
+                    }
                 };
 
                 vec![Diagnostic {
