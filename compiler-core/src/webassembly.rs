@@ -3249,8 +3249,6 @@ impl<'a> Generator<'a> {
             });
         }
 
-        self.register_string_const(&module_constant.value);
-
         let const_name = &module_constant.name;
         let export = module_constant.publicity.is_public();
 
@@ -3531,52 +3529,6 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn register_string_const(&mut self, const_: &TypedConstant) {
-        match const_ {
-            Constant::String { value, .. } => {
-                let _ = self.string_index(value);
-            }
-            Constant::Tuple { elements, .. } => {
-                for element in elements {
-                    self.register_string_const(element);
-                }
-            }
-            Constant::List { elements, tail, .. } => {
-                for element in elements.iter().chain(tail.as_deref()) {
-                    self.register_string_const(element);
-                }
-            }
-            Constant::Int { .. } | Constant::Float { .. } => {}
-            Constant::Record { arguments, .. } => {
-                for arg in arguments.iter().flatten() {
-                    self.register_string_const(&arg.value)
-                }
-            }
-            Constant::BitArray { segments, .. } => {
-                for segment in segments {
-                    self.register_string_const(&segment.value);
-                    if let Some(size) = segment.size() {
-                        self.register_string_const(size);
-                    }
-                }
-            }
-            Constant::Var { .. } => {}
-            Constant::RecordUpdate { .. } => {
-                panic!("record update constants should not reach code generation")
-            }
-            Constant::BinaryOperator { left, right, .. } => {
-                self.register_string_const(left);
-                self.register_string_const(right);
-            }
-            Constant::Todo { .. } => {
-                panic!("todo constants should not reach code generation")
-            }
-            Constant::Invalid { .. } => {
-                panic!("invalid constants should not reach code generation")
-            }
-        }
-    }
-
     fn _constant(
         &mut self,
         scope: &Scope,
@@ -3796,7 +3748,6 @@ impl<'a> Generator<'a> {
             let _ = instructions.global_get(closure);
         } else if is_generic_type(&constant.type_()) {
             let constant = Monomorphizer::with_bound(&constant.type_(), type_).constant(constant);
-            self.register_string_const(&constant);
             self._constant(&global, instructions, &constant);
         } else {
             self._constant(&global, instructions, constant);
