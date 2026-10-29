@@ -89,7 +89,7 @@ impl<'a> Generator<'a> {
         let builtin = BuiltinFunction::DynamicCast(
             self.val_type(&type_),
             self.val_type(&dynamic),
-            qualified_type_name(&type_),
+            TypeKey::new(&type_),
         );
         self.get_function_builtin(builtin, |s| s.code_dynamic_cast(&type_, &dynamic))
     }
@@ -373,18 +373,17 @@ impl<'a> Generator<'a> {
         } else {
             "Object"
         }));
-        let builtin = BuiltinFunction::DynamicEqual(qualified_type_name(type_));
+        let builtin = BuiltinFunction::DynamicEqual(TypeKey::new(type_));
         let equal = {
             let type_ = type_.clone();
             self.get_function_builtin(builtin, |s| s.code_dynamic_equal(&type_))
         };
-        let builtin = BuiltinFunction::DynamicHash(self.int.val_type(), qualified_type_name(type_));
+        let builtin = BuiltinFunction::DynamicHash(self.int.val_type(), TypeKey::new(type_));
         let hash = {
             let type_ = type_.clone();
             self.get_function_builtin(builtin, |s| s.code_dynamic_hash(&type_))
         };
-        let builtin =
-            BuiltinFunction::DynamicInspect(self.string.val_type(), qualified_type_name(type_));
+        let builtin = BuiltinFunction::DynamicInspect(self.string.val_type(), TypeKey::new(type_));
         let inspect = {
             let type_ = type_.clone();
             self.get_function_builtin(builtin, |s| s.code_dynamic_inspect(&type_))

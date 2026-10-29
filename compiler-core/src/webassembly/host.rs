@@ -174,10 +174,10 @@ impl<'a> Generator<'a> {
     /// `fn(T) -> JsValue` to JavaScript, `fn(JsValue) -> T` back.
     fn function_conversion(&mut self, type_: &Arc<Type>, direction: Direction) -> FunctionId {
         let val_type = self.val_type(type_);
-        let name = qualified_type_name(type_);
+        let key = TypeKey::new(type_);
         let builtin = match direction {
-            Direction::ToJs => BuiltinFunction::ToJs(val_type, name),
-            Direction::FromJs => BuiltinFunction::FromJs(val_type, name),
+            Direction::ToJs => BuiltinFunction::ToJs(val_type, key),
+            Direction::FromJs => BuiltinFunction::FromJs(val_type, key),
         };
         let type_ = type_.clone();
         self.get_function_builtin(builtin, |s| {
@@ -679,8 +679,7 @@ impl<'a> Generator<'a> {
         dynamic: &Arc<Type>,
     ) -> FunctionId {
         let fields_type = self.dynamic_fields_type(dynamic);
-        let builtin =
-            BuiltinFunction::JsFields(self.val_type(&fields_type), qualified_type_name(type_));
+        let builtin = BuiltinFunction::JsFields(self.val_type(&fields_type), TypeKey::new(type_));
         let type_ = type_.clone();
         let dynamic = dynamic.clone();
         self.get_function_builtin(builtin, |s| s.code_js_fields(&type_, &dynamic))
@@ -1010,7 +1009,6 @@ impl<'a> Generator<'a> {
             .iter()
             .map(|type_| self.js_val_type(type_, direction))
             .collect();
-        let variant_name = format!("{}.{constructor}", qualified_type_name(type_));
         match direction {
             Direction::ToJs => {
                 let new = self.class_function(
@@ -1019,7 +1017,8 @@ impl<'a> Generator<'a> {
                     &js_vts,
                     EXTERNREF,
                 );
-                let builtin = BuiltinFunction::ToJs(value_vt, variant_name.into());
+                let builtin =
+                    BuiltinFunction::ToJs(value_vt, TypeKey::variant(type_, &constructor));
                 let has_fields = !types.is_empty();
                 let code = move |s: &mut Self| {
                     let conversions: Vec<_> = types
@@ -1219,7 +1218,7 @@ impl<'a> Generator<'a> {
             .collect();
         let js_result = self.js_val_type(&return_, Direction::ToJs);
         let builtin =
-            BuiltinFunction::JsTrampoline(js_params.clone(), js_result, qualified_type_name(type_));
+            BuiltinFunction::JsTrampoline(js_params.clone(), js_result, TypeKey::new(type_));
         self.get_function_builtin(builtin, move |s| {
             let closure = s.closure_type(params.clone(), return_.clone());
             let from_js: Vec<_> = params
@@ -1267,8 +1266,7 @@ impl<'a> Generator<'a> {
             .chain(params.iter().map(|param| self.val_type(param)))
             .collect();
         let result_vt = self.val_type(&return_);
-        let builtin =
-            BuiltinFunction::JsCall(param_vts.clone(), result_vt, qualified_type_name(type_));
+        let builtin = BuiltinFunction::JsCall(param_vts.clone(), result_vt, TypeKey::new(type_));
         self.get_function_builtin(builtin, move |s| {
             let to_js: Vec<_> = params
                 .iter()

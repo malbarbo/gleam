@@ -38,10 +38,8 @@ impl<'a> Generator<'a> {
     pub(super) fn function_hash_external(&mut self, fn_type: &Arc<Type>) -> Id {
         let (params, _) = fn_type.fn_types().expect("hash must be a function type");
         let arg_type = params.into_iter().next().expect("hash takes one argument");
-        let builtin = BuiltinFunction::HashExternal(
-            self.val_type(&arg_type),
-            self.type_pretty_name(&arg_type),
-        );
+        let builtin =
+            BuiltinFunction::HashExternal(self.val_type(&arg_type), TypeKey::new(&arg_type));
         let name = builtin.name();
         let index = self.get_function_builtin(builtin, |s| s.code_hash_external(&arg_type));
         let _ = self.add_function_to_globals(name.clone(), index);
@@ -164,7 +162,7 @@ impl<'a> Generator<'a> {
                 }
             };
         }
-        let builtin = BuiltinFunction::Hash(self.val_type(type_), self.type_pretty_name(type_));
+        let builtin = BuiltinFunction::Hash(self.val_type(type_), TypeKey::new(type_));
         let index = if self.is_struct(type_) {
             let struct_type = type_.clone();
             self.get_function_constructor(builtin, type_, 0, move |s| s.code_hash(&struct_type))
@@ -360,7 +358,7 @@ impl<'a> Generator<'a> {
     /// `_hash_into(T)` of a union: `fn(T, h) -> h`, combining the hash of the
     /// value into `h`.
     fn function_union_hash_into(&mut self, type_: &Arc<Type>) -> FunctionId {
-        let builtin = BuiltinFunction::HashInto(self.val_type(type_), self.type_pretty_name(type_));
+        let builtin = BuiltinFunction::HashInto(self.val_type(type_), TypeKey::new(type_));
         let type_ = type_.clone();
         self.get_function_builtin(builtin, |s| s.code_union_hash_into(&type_))
     }
@@ -389,8 +387,8 @@ impl<'a> Generator<'a> {
                 let (_, type_index, types) =
                     self.union_subtype_index(type_, &custom_type, constructor, &args);
                 let mapping = layout.fields(i).to_vec();
-                let name = self.type_pretty_name(type_) + "." + constructor.name.clone();
-                let builtin = BuiltinFunction::HashInto(self.val_type_ref(type_index), name);
+                let key = TypeKey::variant(type_, &constructor.name);
+                let builtin = BuiltinFunction::HashInto(self.val_type_ref(type_index), key);
                 let union_type = type_.clone();
                 let hash_index = self.get_function_constructor(builtin, type_, i, move |s| {
                     s.code_variant_hash_into(type_index, &mapping, i as i32, types, &union_type)

@@ -4,47 +4,72 @@
 use super::*;
 use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 
+/// A type in the keys of the generated functions: its name qualified by its
+/// module, as two types can have the same printed name.
+#[derive(Hash, PartialEq, Eq, Clone, Debug)]
+pub(super) struct TypeKey(EcoString);
+
+impl TypeKey {
+    pub(super) fn new(type_: &Arc<Type>) -> Self {
+        Self(qualified_type_name(type_))
+    }
+
+    /// The key of the variant `constructor` of `type_`.
+    pub(super) fn variant(type_: &Arc<Type>, constructor: &str) -> Self {
+        Self(ecow::eco_format!(
+            "{}.{constructor}",
+            qualified_type_name(type_)
+        ))
+    }
+}
+
+impl std::fmt::Display for TypeKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Hash, PartialEq, Eq, Clone, Debug)]
 pub(super) enum BuiltinFunction {
-    Equal(ValType, EcoString),
-    ListRepr(ValType, EcoString),
-    TupleRepr(ValType, EcoString),
-    FunctionRepr(ValType, EcoString),
-    CustomTypeRepr(ValType, EcoString, Option<EcoString>),
-    VariantConstructor(Vec<ValType>, ValType, EcoString),
-    Inspect(ValType, EcoString),
+    Equal(ValType, TypeKey),
+    ListRepr(ValType, TypeKey),
+    TupleRepr(ValType, TypeKey),
+    FunctionRepr(ValType, TypeKey),
+    CustomTypeRepr(ValType, TypeKey),
+    VariantConstructor(Vec<ValType>, ValType, TypeKey),
+    Inspect(ValType, TypeKey),
     StringStartsWith,
-    Hash(ValType, EcoString),
-    HashInto(ValType, EcoString),
-    HashExternal(ValType, EcoString),
+    Hash(ValType, TypeKey),
+    HashInto(ValType, TypeKey),
+    HashExternal(ValType, TypeKey),
     HashMix,
     FoldI64,
     /// `_dynamic_cast(T)`, with the representations of `T` and `Dynamic`.
-    DynamicCast(ValType, ValType, EcoString),
+    DynamicCast(ValType, ValType, TypeKey),
     /// The functions of the table of a boxed `Dynamic` of type `T`: equal,
     /// hash (with the representation of `Int`) and inspect (with the
     /// representation of `String`).
-    DynamicEqual(EcoString),
-    DynamicHash(ValType, EcoString),
-    DynamicInspect(ValType, EcoString),
+    DynamicEqual(TypeKey),
+    DynamicHash(ValType, TypeKey),
+    DynamicInspect(ValType, TypeKey),
     /// The conversion of a value of the host type `T` to JavaScript and
     /// back, with the representation of `T` (see `host.rs`).
-    ToJs(ValType, EcoString),
-    FromJs(ValType, EcoString),
+    ToJs(ValType, TypeKey),
+    FromJs(ValType, TypeKey),
     /// The hook `fields` of the table of a boxed value of the host type `T`,
     /// with the representation of its result.
-    JsFields(ValType, EcoString),
+    JsFields(ValType, TypeKey),
     /// The function that JavaScript calls to call a closure of the function
     /// type `T`, and the code of the closures of `T` that call a JavaScript
     /// function, with their params and result (see `host.rs`).
-    JsTrampoline(Vec<ValType>, ValType, EcoString),
-    JsCall(Vec<ValType>, ValType, EcoString),
+    JsTrampoline(Vec<ValType>, ValType, TypeKey),
+    JsCall(Vec<ValType>, ValType, TypeKey),
     /// A function of `Array`, with its params, result and element type.
     Array {
         function: ArrayFunction,
         params: Vec<ValType>,
         result: ValType,
-        element: EcoString,
+        element: TypeKey,
     },
 }
 
@@ -55,13 +80,7 @@ impl BuiltinFunction {
             BuiltinFunction::ListRepr(_, name) => format!("_repr({name})").into(),
             BuiltinFunction::TupleRepr(_, name) => format!("_repr({name})").into(),
             BuiltinFunction::FunctionRepr(_, name) => format!("_repr({name})").into(),
-            BuiltinFunction::CustomTypeRepr(_, name, variant) => {
-                if let Some(variant) = variant {
-                    format!("_repr({name}.{variant})").into()
-                } else {
-                    format!("_repr({name})").into()
-                }
-            }
+            BuiltinFunction::CustomTypeRepr(_, name) => format!("_repr({name})").into(),
             BuiltinFunction::VariantConstructor(_, _, name) => format!("_create({name})").into(),
             BuiltinFunction::Inspect(_, name) => format!("_inspect({name})").into(),
             BuiltinFunction::StringStartsWith => "_string_starts_with".into(),
@@ -493,16 +512,18 @@ impl<'a> Generator<'a> {
         variant: Variant,
     ) -> FunctionId {
         self.constructed(&return_, variant.tag.unwrap_or(0) as usize);
-        let mut constructor_name = self.type_pretty_name(&return_);
-        if let CustomType::Union { .. } = &variant.custom_type {
-            constructor_name += ".";
-            constructor_name += variant.constructor.name.clone();
-        }
-
+        let key = match &variant.custom_type {
+            CustomType::Union { .. } => TypeKey::variant(&return_, &variant.constructor.name),
+            CustomType::External { .. }
+            | CustomType::Enum { .. }
+            | CustomType::Struct { .. }
+            | CustomType::Runtime { .. }
+            | CustomType::Array => TypeKey::new(&return_),
+        };
         let builtin = BuiltinFunction::VariantConstructor(
             self.val_types(params.iter().cloned()),
             self.val_type(&return_),
-            constructor_name.clone(),
+            key,
         );
 
         self.get_function_builtin(builtin, |s| {
@@ -610,7 +631,7 @@ impl<'a> Generator<'a> {
             };
         }
 
-        let builtin = BuiltinFunction::Equal(self.val_type(type_), self.type_pretty_name(type_));
+        let builtin = BuiltinFunction::Equal(self.val_type(type_), TypeKey::new(type_));
         let index = if self.is_struct(type_) {
             let struct_type = type_.clone();
             self.get_function_constructor(builtin, type_, 0, move |s| s.code_eq(&struct_type))
@@ -637,8 +658,8 @@ impl<'a> Generator<'a> {
             .position(|c| c.name == constructor.name)
             .expect("constructor in union");
         let mapping = layout.fields(variant_index).to_vec();
-        let name = self.type_pretty_name(type_) + "." + constructor.name.clone();
-        let builtin = BuiltinFunction::Equal(self.val_type_ref(type_index), name);
+        let key = TypeKey::variant(type_, &constructor.name);
+        let builtin = BuiltinFunction::Equal(self.val_type_ref(type_index), key);
         let union_type = type_.clone();
         let eq_index = self.get_function_constructor(builtin, type_, variant_index, move |s| {
             s.code_composite_or_union_eq(type_index, Some(&mapping), types, Some(&union_type))
@@ -1013,8 +1034,7 @@ impl<'a> Generator<'a> {
             .next()
             .expect("inspect takes one argument");
 
-        let builtin =
-            BuiltinFunction::Inspect(self.val_type(&arg_type), self.type_pretty_name(&arg_type));
+        let builtin = BuiltinFunction::Inspect(self.val_type(&arg_type), TypeKey::new(&arg_type));
         let name = builtin.name();
         let index = self.get_function_builtin(builtin, |s| s.code_inspect(&arg_type));
         let _ = self.add_function_to_globals(name.clone(), index);
@@ -1053,11 +1073,8 @@ impl<'a> Generator<'a> {
             return self.function_repr(&representation);
         }
         if let Some((module, hooks)) = self.type_hooks(type_) {
-            let builtin = BuiltinFunction::CustomTypeRepr(
-                self.val_type(type_),
-                self.type_pretty_name(type_),
-                None,
-            );
+            let builtin =
+                BuiltinFunction::CustomTypeRepr(self.val_type(type_), TypeKey::new(type_));
             let fn_type = type_::fn_(vec![type_.clone()], type_::string());
             let type_ = type_.clone();
             return self.get_function_builtin(builtin, |s| {
@@ -1078,21 +1095,16 @@ impl<'a> Generator<'a> {
             return self.get_function_builtin_external(BuiltinFunctionExternal::UtfCodepointRepr);
         }
 
+        let val_type = self.val_type(type_);
+        let key = TypeKey::new(type_);
         let repr = if type_.is_list() {
-            BuiltinFunction::ListRepr(self.val_type(type_), self.type_pretty_name(type_))
+            BuiltinFunction::ListRepr(val_type, key)
         } else if type_.is_tuple() {
-            BuiltinFunction::TupleRepr(
-                self.val_type(type_),
-                self.type_pretty_name(type_).replace("#", "Tuple"),
-            )
+            BuiltinFunction::TupleRepr(val_type, key)
         } else if type_.fn_types().is_some() {
-            BuiltinFunction::FunctionRepr(self.val_type(type_), self.type_pretty_name(type_))
+            BuiltinFunction::FunctionRepr(val_type, key)
         } else if is_never_type(type_) || self.custom_type(type_).is_some() {
-            BuiltinFunction::CustomTypeRepr(
-                self.val_type(type_),
-                self.type_pretty_name(type_),
-                None,
-            )
+            BuiltinFunction::CustomTypeRepr(val_type, key)
         } else {
             panic!("unexpected type should not reach repr: {type_:#?}");
         };
@@ -1137,14 +1149,12 @@ impl<'a> Generator<'a> {
         constructor: &TypedRecordConstructor,
         args: &[Arc<Type>],
     ) -> (TypeId, FunctionId) {
-        let name = self.type_pretty_name(type_);
         let (_, type_index, types) =
             self.union_subtype_index(type_, custom_type, constructor, args);
         let constructor_name = constructor.name.clone();
         let builtin = BuiltinFunction::CustomTypeRepr(
             self.val_type_ref(type_index),
-            name + "." + constructor_name.clone(),
-            Some(constructor_name.clone()),
+            TypeKey::variant(type_, &constructor_name),
         );
         let layout = self.union_layout(type_);
         let variant_index = custom_type

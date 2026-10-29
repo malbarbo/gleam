@@ -1169,7 +1169,7 @@ impl<'a> Generator<'a> {
             BuiltinFunction::FunctionRepr(val_type, _) => {
                 (vec![*val_type, ValType::I32], vec![ValType::I32])
             }
-            BuiltinFunction::CustomTypeRepr(val_type, _, _) => {
+            BuiltinFunction::CustomTypeRepr(val_type, _) => {
                 (vec![*val_type, ValType::I32], vec![ValType::I32])
             }
             BuiltinFunction::VariantConstructor(params, return_, _) => {

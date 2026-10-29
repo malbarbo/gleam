@@ -219,7 +219,7 @@ impl<'a> Generator<'a> {
             function: array_function,
             params: shapes.iter().map(val_type).collect(),
             result: val_type(&return_shape),
-            element: self.type_pretty_name(element),
+            element: TypeKey::new(element),
         };
         let element = element.clone();
         self.get_function_builtin(builtin, |s| s.code_array(array_function, &element))

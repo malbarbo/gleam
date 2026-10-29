@@ -1476,3 +1476,75 @@ pub fn main() {
 "#,
     );
 }
+
+/// Two types with the same name in modules whose names end the same way,
+/// one of them in a module that the main module does not import, so the
+/// main module prints both with the same name.
+#[test]
+fn types_with_the_same_printed_name() {
+    let result = super::run_wasm(
+        r#"
+import thepackage/a/color
+import thepackage/b/make
+
+pub fn main() {
+    let assert "Red" = string_inspect(color.Red)
+    let assert "Cyan" = string_inspect(make.cyan())
+    let assert "Circle(1.0)" = string_inspect(color.Circle(1.0))
+    let assert "Square(2.0)" = string_inspect(make.square(2.0))
+}
+
+@external(webassembly, "builtins", "_inspect")
+fn string_inspect(value: a) -> String
+"#,
+        vec![
+            (
+                "thepackage",
+                "thepackage/a/color",
+                r#"
+pub type Color {
+    Red
+    Green
+}
+
+pub type Shape {
+    Circle(Float)
+}
+"#,
+            ),
+            (
+                "thepackage",
+                "thepackage/b/color",
+                r#"
+pub type Color {
+    Cyan
+}
+
+pub type Shape {
+    Square(Float)
+}
+"#,
+            ),
+            (
+                "thepackage",
+                "thepackage/b/make",
+                r#"
+import thepackage/b/color
+
+pub fn cyan() -> color.Color {
+    color.Cyan
+}
+
+pub fn square(side: Float) -> color.Shape {
+    color.Square(side)
+}
+"#,
+            ),
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "WASM execution failed:\n{}",
+        result.stderr
+    );
+}
