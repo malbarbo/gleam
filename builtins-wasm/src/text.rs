@@ -105,11 +105,6 @@ pub fn last(s: &str) -> Option<&str> {
     s.graphemes(true).next_back()
 }
 
-pub fn pop_grapheme(s: &str) -> Option<(&str, &str)> {
-    let g = first(s)?;
-    Some((g, &s[g.len()..]))
-}
-
 pub fn to_utf_codepoints(s: &str) -> Vec<u32> {
     s.chars().map(|c| c as u32).collect()
 }
@@ -256,15 +251,12 @@ mod tests {
     }
 
     #[test]
-    fn first_last_pop() {
+    fn first_last() {
         assert_eq!(first(""), None);
         assert_eq!(first("e\u{301}x"), Some("e\u{301}"));
         assert_eq!(last(""), None);
         assert_eq!(last("xe\u{301}"), Some("e\u{301}"));
         assert_eq!(last("a"), Some("a"));
-        assert_eq!(pop_grapheme(""), None);
-        assert_eq!(pop_grapheme("gleam"), Some(("g", "leam")));
-        assert_eq!(pop_grapheme("\r\nx"), Some(("\r\n", "x")));
     }
 
     #[test]

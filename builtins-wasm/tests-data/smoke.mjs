@@ -123,13 +123,12 @@ assert.equal(x._grapheme_prefix_len(gp, 3, 0), -1);
 assert.equal(x._grapheme_prefix_len(gp, 3, 1), 3);
 const scratch = x._heap_base();
 assert.ok(scratch >= x._arena_mark() && scratch % 16 === 0);
-const n = x._float_repr(1e-7, scratch);
-assert.equal(dec.decode(new Uint8Array(x.memory.buffer, scratch, n)), "1.0e-7");
+assert.equal(dec.decode(new Uint8Array(x.memory.buffer, scratch, x._f64_to_str(1e-7, scratch))), "1.0e-7");
 assert.equal(dec.decode(new Uint8Array(x.memory.buffer, scratch, x._f64_to_str(-0.0, scratch))), "-0.0");
 assert.equal(dec.decode(new Uint8Array(x.memory.buffer, scratch, x._i64_to_str(-12n, scratch))), "-12");
+assert.equal(dec.decode(new Uint8Array(x.memory.buffer, scratch, x._f32_to_str(1 / 3, scratch))), "0.33333334");
+assert.equal(dec.decode(new Uint8Array(x.memory.buffer, scratch, x._f32_to_str(0.1, scratch))), "0.1");
 x._config(32, 32);
-assert.equal(dec.decode(new Uint8Array(x.memory.buffer, scratch, x._float_repr(1 / 3, scratch))), "0.33333334");
-assert.equal(dec.decode(new Uint8Array(x.memory.buffer, scratch, x._float_repr(Math.fround(0.1), scratch))), "0.1");
 assert.deepEqual(call(x.int_parse, [S("2147483648")], 16, (r) => readResult(r, (p) => view().getBigInt64(p, true))), { error: null });
 x._config(64, 64);
 

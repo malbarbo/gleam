@@ -172,13 +172,6 @@ mod exports {
         (prefix + c + suffix) as i32
     }
 
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn _float_repr(f: f64, ptr: i32) -> i32 {
-        let mut buf = [0; FLOAT_BUF_LEN];
-        let s = num::format_float(f, f32mode(), &mut buf);
-        unsafe { write_to(ptr as usize as *mut u8, s) as i32 }
-    }
-
     //////////////
     // raw exports used by compiler builtins
 
@@ -192,11 +185,6 @@ mod exports {
 
     fn str_out(out: Out, s: &str) {
         out.str(s)
-    }
-
-    fn pair_out(out: Out, (a, b): (&str, &str)) {
-        out.str(a);
-        out.at(8).str(b);
     }
 
     fn str_list_out(out: Out, items: alloc::vec::Vec<&str>) {
@@ -340,12 +328,6 @@ mod exports {
     pub unsafe extern "C" fn string_last(ptr: i32, len: i32, ret: i32) {
         let s = unsafe { str_arg(ptr, len) };
         Out::new(ret).result(text::last(s), str_out)
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn string_pop_grapheme(ptr: i32, len: i32, ret: i32) {
-        let s = unsafe { str_arg(ptr, len) };
-        Out::new(ret).result(text::pop_grapheme(s), pair_out)
     }
 
     #[unsafe(no_mangle)]
