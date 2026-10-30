@@ -723,12 +723,6 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    pub(super) fn function_string_starts_with(&mut self) -> FunctionId {
-        self.get_function_builtin(BuiltinFunction::StringStartsWith, |s| {
-            s.code_string_starts_with()
-        })
-    }
-
     pub(super) fn code_string_starts_with(&mut self) -> FunctionId {
         let string_vt = self.string.val_type();
         // params
@@ -1047,11 +1041,11 @@ impl<'a> Generator<'a> {
     /// the affix, or the string itself when it does not match.
     pub(super) fn code_string_remove_affix(&mut self, prefix: bool) -> FunctionId {
         let string_vt = self.string.val_type();
-        let matches = if prefix {
-            self.function_string_starts_with()
+        let matches = self.get_function_builtin_external(if prefix {
+            BuiltinFunctionExternal::StringStartsWith
         } else {
-            self.get_function_builtin_external(BuiltinFunctionExternal::StringEndsWith)
-        };
+            BuiltinFunctionExternal::StringEndsWith
+        });
         // params
         let s = self.wasm_local(string_vt); // String
         let affix = self.wasm_local(string_vt); // String

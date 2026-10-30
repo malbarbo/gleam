@@ -1214,10 +1214,6 @@ impl<'a> Generator<'a> {
             BuiltinFunction::Inspect(val_type, _) => {
                 (vec![*val_type], vec![self.string.val_type()])
             }
-            BuiltinFunction::StringStartsWith => {
-                let s = self.string.val_type();
-                (vec![s, s], vec![BOOL_VALTYPE])
-            }
             BuiltinFunction::Hash(val_type, _) => (vec![*val_type], vec![ValType::I32]),
             BuiltinFunction::HashInto(val_type, _) => {
                 (vec![*val_type, ValType::I32], vec![ValType::I32])
@@ -5701,7 +5697,8 @@ impl<'a> Generator<'a> {
                 ..
             } => {
                 let subject = locals.for_pattern(pattern);
-                let starts_with = self.function_string_starts_with();
+                let starts_with =
+                    self.get_function_builtin_external(BuiltinFunctionExternal::StringStartsWith);
                 let prefix_index = self.string_index(left_side_string);
 
                 let _ = instructions
@@ -6088,7 +6085,7 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::StringCodeunitSlice => self.code_string_codeunit_slice(),
             BuiltinFunctionExternal::StringPopCodeunit => self.code_string_pop_codeunit(),
             BuiltinFunctionExternal::StringFind => self.code_string_find(),
-            BuiltinFunctionExternal::StringStartsWith => self.function_string_starts_with(),
+            BuiltinFunctionExternal::StringStartsWith => self.code_string_starts_with(),
             BuiltinFunctionExternal::StringEndsWith => self.code_string_ends_with(),
             BuiltinFunctionExternal::StringRemovePrefix => self.code_string_remove_affix(true),
             BuiltinFunctionExternal::StringRemoveSuffix => self.code_string_remove_affix(false),
