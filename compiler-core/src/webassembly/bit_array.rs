@@ -14,6 +14,7 @@ use crate::ast::{
     BitArraySegment, BitArraySize, Endianness, IntOperator, TypedBitArraySize,
     TypedConstantBitArraySegment, TypedExprBitArraySegment, TypedPatternBitArraySegment,
 };
+use crate::strings::{string_to_utf16_bytes, string_to_utf32_bytes};
 use num_traits::ToPrimitive;
 
 /// The runtime module of bit arrays.
@@ -157,19 +158,16 @@ impl Bits {
                 self.push_int(&bits.into(), size, endianness);
             }
             LiteralValue::String(value) if type_.is_string() => {
-                let value = unescape(value);
-                if segment.has_utf16_option() {
-                    for unit in value.encode_utf16() {
-                        self.push_int(&unit.into(), 16, endianness);
-                    }
+                let value = convert_string_escape_chars(value);
+                let bytes = if segment.has_utf16_option() {
+                    string_to_utf16_bytes(&value, endianness)
                 } else if segment.has_utf32_option() {
-                    for char in value.chars() {
-                        self.push_int(&u32::from(char).into(), 32, endianness);
-                    }
+                    string_to_utf32_bytes(&value, endianness)
                 } else {
-                    for byte in value.bytes() {
-                        self.push_int(&byte.into(), 8, endianness);
-                    }
+                    value.as_bytes().to_vec()
+                };
+                for byte in bytes {
+                    self.push_int(&byte.into(), 8, endianness);
                 }
             }
             LiteralValue::BitArray(bits) if type_.is_bit_array() => {

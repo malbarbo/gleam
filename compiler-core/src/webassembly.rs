@@ -66,7 +66,6 @@ use std::{
     iter,
     ops::Deref,
     rc::Rc,
-    str::Chars,
     sync::Arc,
 };
 use walrus::{
@@ -91,6 +90,7 @@ use crate::{
     },
     config::{WasmFloat, WasmInt, WasmString, WebAssemblyConfig},
     parse::LiteralFloatValue,
+    strings::convert_string_escape_chars,
     type_::{
         self, Deprecation, ModuleValueConstructor, PRELUDE_MODULE_NAME, Type, TypeVar,
         TypedCallArg, ValueConstructor, ValueConstructorVariant,
@@ -5723,7 +5723,7 @@ impl<'a> Generator<'a> {
                     let rest_local = locals.for_string_prefix(right_location);
                     scope = scope.insert_local(name.clone(), rest_local);
                     let _ = instructions
-                        .string_drop_prefix(subject, &unescape(left_side_string))
+                        .string_drop_prefix(subject, &convert_string_escape_chars(left_side_string))
                         .local_set(rest_local);
                 }
             }
@@ -6669,47 +6669,6 @@ fn string_tag(s: &str) -> String {
             false => '_',
         })
         .collect()
-}
-
-pub fn unescape(s: &str) -> String {
-    let mut r = String::new();
-    let mut chars = s.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            r.push(ch);
-            continue;
-        }
-        // see https://tour.gleam.run/basics/strings/
-        let ch = match chars.next() {
-            Some('"') => '"',
-            Some('\\') => '\\',
-            Some('f') => '\x0C',
-            Some('n') => '\n',
-            Some('r') => '\r',
-            Some('t') => '\t',
-            Some('u') => unescape_unicode(&mut chars),
-            _ => panic!("invalid escape sequence during code generation"),
-        };
-        r.push(ch);
-    }
-    r
-}
-
-fn unescape_unicode(chars: &mut Chars<'_>) -> char {
-    let s = chars.as_str();
-    assert_eq!(chars.next(), Some('{'));
-    let num = 1 + chars.take_while(|c| *c != '}').count();
-    *chars = s[num + 1..].chars();
-    char::from_u32(u32::from_str_radix(&s[1..num], 16).expect("valid hex escape"))
-        .expect("valid unicode codepoint")
-}
-
-#[test]
-fn string_unescape() {
-    assert_eq!(
-        unescape(r#"sure \\ \n \"its\" \t works! \u{263A}, \r or \f not..."#),
-        "sure \\ \n \"its\" \t works! ☺, \r or \x0C not..."
-    );
 }
 
 /// Whether the modules of `package` may declare external functions and types

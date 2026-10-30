@@ -475,7 +475,7 @@ impl<'a> Generator<'a> {
     }
 
     pub(super) fn string_index(&mut self, string: &EcoString) -> GlobalId {
-        let string = unescape(string);
+        let string = convert_string_escape_chars(string);
         if let Some(id) = self.strings.get(string.as_str()) {
             return *id;
         }
@@ -497,7 +497,7 @@ impl<'a> Generator<'a> {
             self.strings.len(),
             string_tag(&string)
         ));
-        let _ = self.strings.insert(string.into(), id);
+        let _ = self.strings.insert(string, id);
         id
     }
 
