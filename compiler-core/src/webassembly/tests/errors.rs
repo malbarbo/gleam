@@ -37,18 +37,34 @@ pub fn main() {
     );
 }
 
-/// The former parses of numbers, with another grammar than `int_parse` and
-/// `float_parse`, are not builtins.
+/// The former builtins that the standard library does not use are not
+/// builtins: the parses of numbers, with another grammar than `int_parse` and
+/// `float_parse`, `_string_num_bytes`, the same as `_string_byte_size`,
+/// `_string_get_byte` and `_int_to_utf_codepoint`.
 #[test]
-fn former_parse_builtins() {
-    for (name, type_) in [("_parse_int", "Int"), ("_parse_float", "Float")] {
+fn former_builtins() {
+    for (name, signature, call) in [
+        ("_parse_int", "a: String) -> Result(Int, Nil)", "\"1\""),
+        ("_parse_float", "a: String) -> Result(Float, Nil)", "\"1\""),
+        ("_string_num_bytes", "a: String) -> Int", "\"1\""),
+        (
+            "_string_get_byte",
+            "a: String, i: Int) -> Result(Int, Nil)",
+            "\"1\", 0",
+        ),
+        (
+            "_int_to_utf_codepoint",
+            "a: Int) -> Result(UtfCodepoint, Nil)",
+            "1",
+        ),
+    ] {
         let error = super::compile_wasm_error(&format!(
             r#"
 @external(webassembly, "builtins", "{name}")
-fn parse(a: String) -> Result({type_}, Nil)
+fn former({signature}
 
 pub fn main() {{
-    parse("1")
+    former({call})
 }}
 "#
         ));
@@ -57,7 +73,7 @@ pub fn main() {{
                 error,
                 crate::webassembly::Error::UnknownBuiltinFunction { name: ref n, .. } if n == name
             ),
-            "{error:?}"
+            "{name}: {error:?}"
         );
     }
 }

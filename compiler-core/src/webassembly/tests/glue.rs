@@ -127,8 +127,10 @@ pub fn main() {{
 fn utf8_of_views() {
     run_ok(&format!(
         r#"{RUST}
-@external(webassembly, "builtins", "_string_get_byte")
-fn get_byte(a: String, i: Int) -> Result(Int, Nil)
+@external(webassembly, "builtins", "string_first")
+fn first(a: String) -> Result(String, Nil)
+@external(webassembly, "builtins", "string_last")
+fn last(a: String) -> Result(String, Nil)
 @external(webassembly, "builtins", "int_parse")
 fn parse_int(a: String) -> Result(Int, Nil)
 @external(webassembly, "builtins", "_inspect")
@@ -140,9 +142,8 @@ pub fn main() {{
     let s = "ABCDEFGHIJ0000000000000000000000000000000000000000000000000000000000000000000000042KLMNOPQRSTUVWXYZ"
     let number = byte_slice(s, 10, 73)
     let assert Ok(42) = parse_int(number)
-    let assert Ok(48) = get_byte(number, 0)
-    let assert Ok(50) = get_byte(number, 72)
-    let assert Error(Nil) = get_byte(number, 73)
+    let assert Ok("0") = first(number)
+    let assert Ok("2") = last(number)
     let assert True = hash(number) == hash("0000000000000000000000000000000000000000000000000000000000000000000000042")
     let s = "ABCDEFGHIJ\u{{0085}}\"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
     let view = byte_slice(s, 10, 80)
@@ -200,12 +201,15 @@ fn to_i32(a: Int) -> I32
 @external(webassembly, "builtins", "_i32_to_int")
 fn to_int(a: I32) -> Int
 
-@external(webassembly, "builtins", "_i32_is_codepoint")
-fn is_codepoint(a: I32) -> I32
+@external(webassembly, "builtins", "_heap_base")
+fn scratch() -> I32
+
+@external(webassembly, "builtins", "_i32_to_str")
+fn to_str(n: I32, ptr: I32) -> I32
 
 pub fn main() {
-  assert to_int(is_codepoint(to_i32(65))) == 1
-  assert to_int(is_codepoint(to_i32(0xD800))) == 0
+  // the length of "-42", written at the scratch memory
+  assert to_int(to_str(to_i32(-42), scratch())) == 3
 }
 "#,
     );

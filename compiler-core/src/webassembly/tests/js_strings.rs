@@ -27,8 +27,6 @@ fn byte_slice(a: String, start: Int, len: Int) -> String
 fn codeunit_slice(a: String, start: Int, len: Int) -> String
 @external(webassembly, "builtins", "_string_pop_codeunit")
 fn pop_codeunit(a: String) -> #(Int, String)
-@external(webassembly, "builtins", "_string_get_byte")
-fn get_byte(a: String, i: Int) -> Result(Int, Nil)
 @external(webassembly, "builtins", "_string_starts_with")
 fn starts_with(a: String, b: String) -> Bool
 @external(webassembly, "builtins", "_string_ends_with")
@@ -163,8 +161,6 @@ pub fn main() {{
     let assert #(0xDE00, "é") = pop_codeunit(rest)
     let assert "😀" = codeunit_slice(s, 1, 2)
     let assert "é" = codeunit_slice(s, 3, 1)
-    let assert Ok(0xF0) = get_byte(s, 1)
-    let assert Error(Nil) = get_byte(s, 7)
     let assert Ok(-42) = parse_int("-42")
     let assert "\"a😀é\\n\"" = inspect(s <> "\n")
     let assert True = hash(s) == hash("a😀" <> "é")

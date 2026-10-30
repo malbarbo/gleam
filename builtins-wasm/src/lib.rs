@@ -179,16 +179,6 @@ mod exports {
         unsafe { write_to(ptr as usize as *mut u8, s) as i32 }
     }
 
-    #[unsafe(no_mangle)]
-    pub extern "C" fn _i32_is_codepoint(ch: i32) -> bool {
-        ch.try_into().ok().and_then(char::from_u32).is_some()
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn _i64_is_codepoint(ch: i64) -> bool {
-        ch.try_into().ok().and_then(char::from_u32).is_some()
-    }
-
     //////////////
     // raw exports used by compiler builtins
 

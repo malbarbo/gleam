@@ -109,10 +109,6 @@ impl BuiltinFunction {
 pub(super) enum BuiltinFunctionExternal {
     #[strum(serialize = "_string_concat")]
     StringConcat,
-    #[strum(serialize = "_string_num_bytes")]
-    StringNumBytes,
-    #[strum(serialize = "_string_get_byte")]
-    StringGetByte,
     #[strum(serialize = "_i32_to_int")]
     I32ToInt,
     #[strum(serialize = "_int_to_i32")]
@@ -129,8 +125,6 @@ pub(super) enum BuiltinFunctionExternal {
     F64ToFloat,
     #[strum(serialize = "_float_to_f64")]
     FloatToF64,
-    #[strum(serialize = "_int_to_utf_codepoint")]
-    IntToUtfCodepoint,
     #[strum(serialize = "_repr_int")]
     IntRepr,
     #[strum(serialize = "_repr_float")]
@@ -261,8 +255,6 @@ impl BuiltinFunctionExternal {
         let ext = BuiltinType::External;
         let (params, result) = match self {
             B::StringConcat => (vec![string(), string()], string()),
-            B::StringNumBytes => (vec![string()], int()),
-            B::StringGetByte => (vec![string(), int()], result(int(), nil())),
             B::I32ToInt => return (vec![ext("I32")], int().into()),
             B::IntToI32 => return (vec![int().into()], ext("I32")),
             B::I64ToInt => return (vec![ext("I64")], int().into()),
@@ -271,7 +263,6 @@ impl BuiltinFunctionExternal {
             B::FloatToF32 => return (vec![float().into()], ext("F32")),
             B::F64ToFloat => return (vec![ext("F64")], float().into()),
             B::FloatToF64 => return (vec![float().into()], ext("F64")),
-            B::IntToUtfCodepoint => (vec![int()], result(utf_codepoint(), nil())),
             B::IntRepr => return (vec![int().into(), ext("I32")], ext("I32")),
             B::FloatRepr => return (vec![float().into(), ext("I32")], ext("I32")),
             B::UtfCodepointRepr => return (vec![utf_codepoint().into(), ext("I32")], ext("I32")),
@@ -541,57 +532,6 @@ impl<'a> Generator<'a> {
             type_::result(ok, error),
             self.variant_expect(PRELUDE_MODULE_NAME.into(), "Error".into()),
         )
-    }
-
-    pub(super) fn code_string_get_byte(&mut self) -> FunctionId {
-        let string_vt = self.string.val_type();
-        let int_vt = self.int.val_type();
-        // params
-        let s = self.wasm_local(string_vt); // String
-        let i = self.wasm_local(int_vt); // Index
-        // locals
-        let bytes = self.wasm_local(self.bytes.val_type());
-        let off = self.wasm_local(ValType::I32);
-        let len = self.wasm_local(ValType::I32);
-        // return Int
-        let result = type_::result(type_::int(), type_::nil());
-        let result_vt = self.val_type(&result);
-        let ok_index = self.ok_variant_constructor(type_::int(), type_::nil());
-        let error_index = self.error_variant_constructor(type_::int(), type_::nil());
-        let mut function = Function::new(self, "_string_get_byte", &[s, i], &[result_vt]);
-        let mut instructions = function.extend_instructions(self);
-        #[rustfmt::skip]
-        let _ = instructions
-            .string_utf8_view(s, bytes, off, len)
-            .local_get(i)
-            .local_get(len)
-            .i32_to_int()
-            .int_lt()
-            .local_get(i)
-            .int_const(&0.into())
-            .int_ge()
-            .i32_and()
-            .if_else(
-                result_vt,
-                |then_s| {
-                    let _ = then_s
-                        .local_get(bytes)
-                        .local_get(off)
-                        .local_get(i)
-                        .int_to_i32()
-                        .i32_add()
-                        .bytes_get()
-                        .i32_to_int()
-                        .call(ok_index);
-                },
-                |else_s| {
-                    let _ = else_s
-                        .nil_const()
-                        .call(error_index);
-                },
-            )
-            .end();
-        function.finish(self)
     }
 
     pub(super) fn function_eq(&mut self, type_: &Arc<Type>) -> Eq {
@@ -979,43 +919,6 @@ impl<'a> Generator<'a> {
             let _ = instructions.local_get(*param);
         }
         let _ = instructions.struct_new(struct_index).end();
-        function.finish(self)
-    }
-
-    pub(super) fn code_int_to_utf_codepoint(&mut self) -> FunctionId {
-        let int_vt = self.int.val_type();
-        // params
-        let i = self.wasm_local(int_vt); // Int
-        // return Result(UtfCodepoint, Nil)
-        let result = type_::result(type_::utf_codepoint(), type_::nil());
-        let result_vt = self.val_type(&result);
-        let is_codepoint = match self.int {
-            IntType::I32 => self.find_global_expect(I32_IS_CODEPOINT),
-            IntType::I64 => self.find_global_expect(I64_IS_CODEPOINT),
-        };
-        let ok_index = self.ok_variant_constructor(type_::utf_codepoint(), type_::nil());
-        let error_index = self.error_variant_constructor(type_::utf_codepoint(), type_::nil());
-        let mut function = Function::new(self, "_int_to_utf_codepoint", &[i], &[result_vt]);
-        #[rustfmt::skip]
-        let _ = function
-            .extend_instructions(self)
-            .local_get(i)
-            .call(is_codepoint.func_id())
-            .if_else(
-                result_vt,
-                |then_s| {
-                    let _ = then_s
-                        .local_get(i)
-                        .int_to_i32()
-                        .call(ok_index);
-                },
-                |else_s| {
-                    let _ = else_s
-                        .nil_const()
-                        .call(error_index);
-                },
-            )
-            .end();
         function.finish(self)
     }
 

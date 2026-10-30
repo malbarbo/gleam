@@ -114,10 +114,8 @@ const EXIT: &str = "_exit";
 const PRINT: &str = "_print";
 
 const I32_TO_STR: &str = "_i32_to_str";
-const I32_IS_CODEPOINT: &str = "_i32_is_codepoint";
 
 const I64_TO_STR: &str = "_i64_to_str";
-const I64_IS_CODEPOINT: &str = "_i64_is_codepoint";
 
 const F32_TO_STR: &str = "_f32_to_str";
 
@@ -6070,8 +6068,6 @@ impl<'a> Generator<'a> {
 
         let index = match builtin {
             BuiltinFunctionExternal::StringConcat => self.code_string_concat(),
-            BuiltinFunctionExternal::StringGetByte => self.code_string_get_byte(),
-            BuiltinFunctionExternal::IntToUtfCodepoint => self.code_int_to_utf_codepoint(),
             BuiltinFunctionExternal::IntRepr => self.code_int_repr(),
             BuiltinFunctionExternal::FloatRepr => self.code_float_repr(),
             BuiltinFunctionExternal::UtfCodepointRepr => self.code_utf_codepoint_repr(),
@@ -6102,8 +6098,7 @@ impl<'a> Generator<'a> {
             BuiltinFunctionExternal::BytesWriteString => self.code_bytes_write_string(),
             BuiltinFunctionExternal::BytesToMemory => self.code_bytes_to_memory(),
             BuiltinFunctionExternal::BytesFromMemory => self.code_bytes_from_memory(),
-            BuiltinFunctionExternal::StringNumBytes
-            | BuiltinFunctionExternal::StringByteSize
+            BuiltinFunctionExternal::StringByteSize
             | BuiltinFunctionExternal::StringCodeunitSize
             | BuiltinFunctionExternal::I32ToInt
             | BuiltinFunctionExternal::IntToI32

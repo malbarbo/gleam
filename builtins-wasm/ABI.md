@@ -183,8 +183,7 @@ Not callable from Gleam; the compiler calls them from generated code.
 | `_utf_codepoint_repr` | `(codepoint: i32, ptr: i32) -> i32` | writes `//utfcodepoint(c)` at `ptr`, as on JavaScript, returns the length (used by `_inspect`) |
 
 The older exports (`_print`, `_exit`, `_i32_to_str`, `_i64_to_str`, `_f32_to_str`,
-`_f64_to_str`, `_i32_is_codepoint`, `_i64_is_codepoint`, `_heap_base`) keep their
-signatures. `_print` loops on partial writes, like `io_print`, and returns the
+`_f64_to_str`, `_heap_base`) keep their signatures. `_print` loops on partial writes, like `io_print`, and returns the
 WASI errno. `_f32_to_str`/`_f64_to_str` now write the `float_to_string` text (for
 `f32` and `f64` respectively).
 
@@ -243,7 +242,6 @@ comes from, is copied; a bigger one shares the array.
 | `_string_pop_grapheme` | `fn(String) -> Result(#(String, String), Nil)` | windowed call to `_grapheme_prefix_len` (64 bytes, doubling) |
 | `_utf_codepoint_to_int` | `fn(UtfCodepoint) -> Int` | identity |
 | `_unsafe_int_to_utf_codepoint` | `fn(Int) -> UtfCodepoint` | identity |
-| `_int_to_utf_codepoint` | `fn(Int) -> Result(UtfCodepoint, Nil)` | existing |
 | `_inspect` | `fn(a) -> String` | existing |
 | `_hash` | `fn(a) -> Int` | structural hash generated for each type, consistent with `==`: string views hash like copies, `-0.0` like `0.0`, functions all hash the same |
 | `_dynamic_cast` | `fn(a) -> Dynamic` | generated for each type: ints, floats, strings, booleans, `Nil`, lists, tuples and arrays (as arrays) and dicts go to their variant of `Dynamic`, with their items cast too; a `StringTree` is a string and a `UtfCodepoint` an int, as on JavaScript; any other value is boxed in `DOther` with a table of functions generated for its type |

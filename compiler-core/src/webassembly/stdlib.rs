@@ -31,7 +31,7 @@ impl Instructions<'_, '_> {
             B::FloatToF32 => self.float_to_f32(),
             B::F64ToFloat => self.f64_to_float(),
             B::FloatToF64 => self.float_to_f64(),
-            B::StringNumBytes | B::StringByteSize => self.string_utf8_len().i32_to_int(),
+            B::StringByteSize => self.string_utf8_len().i32_to_int(),
             B::StringCodeunitSize => self.string_len().i32_to_int(),
             B::BytesNew => self.words_new(),
             B::BytesSize => self.array_len().i32_const(3).i32_shl().i32_to_int(),
@@ -48,8 +48,6 @@ impl Instructions<'_, '_> {
             B::CellGet => self.struct_get(self.repr.cell, 0).i64_to_int(),
             B::CellSet => self.struct_set(self.repr.cell, 0).i32_const(0),
             B::StringConcat
-            | B::StringGetByte
-            | B::IntToUtfCodepoint
             | B::IntRepr
             | B::FloatRepr
             | B::UtfCodepointRepr

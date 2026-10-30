@@ -356,14 +356,12 @@ pub fn main() {
     let assert False = not(True)
     let assert True = not(False)
     let assert Nil = nothing()
-    let assert Ok(a) = utf_codepoint(97)
-    let assert Ok(b) = utf_codepoint(98)
-    let assert True = next(a) == b
+    let assert True = next(utf_codepoint(97)) == utf_codepoint(98)
     let assert 0 = undefined_int()
 }
 
-@external(webassembly, "builtins", "_int_to_utf_codepoint")
-fn utf_codepoint(a: Int) -> Result(UtfCodepoint, Nil)
+@external(webassembly, "builtins", "_unsafe_int_to_utf_codepoint")
+fn utf_codepoint(a: Int) -> UtfCodepoint
 "#,
         r#"
 import { UtfCodepoint } from "../gleam.mjs";

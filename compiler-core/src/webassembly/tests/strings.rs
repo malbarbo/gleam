@@ -36,41 +36,22 @@ pub fn main() {
     assert!(tags.contains(&"abcdefghijklmnop".to_string()), "{tags:?}");
 }
 
-#[test]
-fn int_to_utf_codepoint() {
-    run_ok(
-        r#"
-@external(webassembly, "builtins", "_int_to_utf_codepoint")
-fn utf_codepoint(a: Int) -> Result(UtfCodepoint, Nil)
-
-pub fn main() {
-    // Valid codepoints
-    let assert Ok(_) = utf_codepoint(65)       // 'A'
-    let assert Ok(_) = utf_codepoint(0x10FFFF)  // max valid codepoint
-    // Invalid codepoints
-    let assert Error(_) = utf_codepoint(-1)
-    let assert Error(_) = utf_codepoint(0x110000) // first invalid
-}
-"#,
-    );
-}
-
 /// As on JavaScript.
 #[test]
 fn inspect_utf_codepoint() {
     run_ok(
         r##"
-@external(webassembly, "builtins", "_int_to_utf_codepoint")
-fn utf_codepoint(a: Int) -> Result(UtfCodepoint, Nil)
+@external(webassembly, "builtins", "_unsafe_int_to_utf_codepoint")
+fn utf_codepoint(a: Int) -> UtfCodepoint
 
 @external(webassembly, "builtins", "_inspect")
 fn inspect(value: a) -> String
 
 pub fn main() {
-    let assert Ok(a) = utf_codepoint(65)
-    let assert Ok(e) = utf_codepoint(0xE9)
-    let assert Ok(smile) = utf_codepoint(0x1F600)
-    let assert Ok(nul) = utf_codepoint(0)
+    let a = utf_codepoint(65)
+    let e = utf_codepoint(0xE9)
+    let smile = utf_codepoint(0x1F600)
+    let nul = utf_codepoint(0)
     let assert "//utfcodepoint(A)" = inspect(a)
     let assert "//utfcodepoint(é)" = inspect(e)
     let assert "//utfcodepoint(😀)" = inspect(smile)
@@ -79,29 +60,6 @@ pub fn main() {
     let assert "#(//utfcodepoint(😀), 1)" = inspect(#(smile, 1))
 }
 "##,
-    );
-}
-
-#[test]
-fn int_to_utf_codepoint_i64() {
-    run_ok_i64(
-        r#"
-@external(webassembly, "builtins", "_int_to_utf_codepoint")
-fn utf_codepoint(a: Int) -> Result(UtfCodepoint, Nil)
-
-pub fn main() {
-    // Valid codepoints
-    let assert Ok(_) = utf_codepoint(65)       // 'A'
-    let assert Ok(_) = utf_codepoint(0x10FFFF)  // max valid codepoint
-    // Invalid codepoints
-    let assert Error(_) = utf_codepoint(-1)
-    let assert Error(_) = utf_codepoint(0x110000) // first invalid
-    // Values that don't fit in i32 — must be Error
-    let assert Error(_) = utf_codepoint(0x1_0000_0000)
-    // 0x1_0000_0041 would truncate to 65 ('A') after i32_wrap_i64
-    let assert Error(_) = utf_codepoint(0x1_0000_0041)
-}
-"#,
     );
 }
 
