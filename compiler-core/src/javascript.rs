@@ -46,6 +46,24 @@ pub fn set_bigint_enabled(enabled: bool) {
     USE_BIGINT.store(enabled, Ordering::SeqCst);
 }
 
+/// The text of `echo`. With `bigint` an `Int` is always a `bigint`, so a
+/// `number` with no fraction is a `Float` and has to print with its `.0`.
+fn echo_template(bigint: bool) -> EcoString {
+    const TEMPLATE: &str = std::include_str!("../templates/echo.mjs");
+    const INT_TEST: &str = r#"t === "bigint" || globalThis.Number.isSafeInteger(v)"#;
+    if bigint {
+        TEMPLATE.replacen(INT_TEST, r#"t === "bigint""#, 1).into()
+    } else {
+        TEMPLATE.into()
+    }
+}
+
+#[test]
+fn echo_template_with_bigint_prints_every_number_as_a_float() {
+    assert!(echo_template(false).contains("isSafeInteger"));
+    assert!(!echo_template(true).contains("isSafeInteger"));
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JavaScriptCodegenTarget {
     JavaScript,
@@ -464,7 +482,7 @@ impl<'a, 'doc> Generator<'a> {
         docvec![
             arena,
             LINE_DOCUMENT,
-            std::include_str!("../templates/echo.mjs"),
+            echo_template(is_bigint_enabled()),
             LINE_DOCUMENT
         ]
     }
