@@ -1855,3 +1855,44 @@ pub fn main() {
         ]
     );
 }
+
+#[test]
+fn function_of_another_target_is_not_generated() {
+    let src = r#"
+@external(javascript, "./ffi.mjs", "answer")
+fn answer() -> Int
+
+pub fn uses_answer() -> Int {
+    answer() + 1
+}
+
+pub fn main() {
+    assert 1 + 1 == 2
+}
+"#;
+    run_ok(src);
+    let names = wasm_function_names(&compile_wasm(src, vec![]));
+    assert!(
+        !names.iter().any(|name| name.contains("answer")),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn public_function_of_another_target_is_not_generated() {
+    let src = r#"
+@external(erlang, "ffi", "answer")
+@external(javascript, "./ffi.mjs", "answer")
+pub fn answer() -> Int
+
+pub fn main() {
+    assert 1 + 1 == 2
+}
+"#;
+    run_ok(src);
+    let names = wasm_function_names(&compile_wasm(src, vec![]));
+    assert!(
+        !names.iter().any(|name| name.contains("answer")),
+        "{names:?}"
+    );
+}

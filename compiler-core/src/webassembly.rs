@@ -88,6 +88,7 @@ use crate::{
         TypedStatement,
         visit::{self, Visit},
     },
+    build::Target,
     config::{WasmFloat, WasmInt, WasmString, WebAssemblyConfig},
     parse::LiteralFloatValue,
     strings::convert_string_escape_chars,
@@ -2117,6 +2118,12 @@ impl<'a> Generator<'a> {
         for function in &self.module.definitions.functions {
             if !function.publicity.is_public() {
                 // Private functions are compiled by each use.
+                continue;
+            }
+            if !function.implementations.supports(Target::WebAssembly) {
+                // An external of another target, or a function that calls
+                // one. Without target support enforced, the analyser lets it
+                // through, and no code of this target calls it.
                 continue;
             }
             let base_name: EcoString = function_name(function).into();
