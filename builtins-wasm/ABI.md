@@ -180,6 +180,26 @@ Not callable from Gleam; the compiler calls them from generated code.
 | `_grapheme_prefix_len` | `(ptr: i32, len: i32, complete: i32) -> i32` | byte length of the first grapheme of the window; `-1` when `complete == 0` and the grapheme reaches the end of the window (it may continue past it), the window cuts a UTF-8 sequence before the first grapheme ends, or the window is empty; with `complete != 0` the window is the whole string and `""` gives `0` |
 | `_utf_codepoint_repr` | `(codepoint: i32, ptr: i32) -> i32` | writes `//utfcodepoint(c)` at `ptr`, as on JavaScript, returns the length (used by `_inspect`) |
 
+### Memory of `gleam/wasm/memory`
+
+`gleam/wasm/memory` checks that an address and a size are inside the arena
+before it calls these, and declares a result of `0` as `I32` where Gleam
+returns `Nil`.
+
+| Export | Signature | Meaning |
+|---|---|---|
+| `_arena_base` | `() -> u32` | the start of the arena, `__heap_base` aligned to 8 |
+| `_arena_alloc` | `(size: u32) -> u32` | `size` bytes aligned to 8 in the arena, or `0` when the memory does not grow |
+| `_memory_release` | `(mark: u32) -> i32` | `_arena_release` that returns `0` |
+| `_memory_load_u32` | `(address: u32) -> u32` | unaligned, little endian |
+| `_memory_load_i64` | `(address: u32) -> i64` | unaligned, little endian |
+| `_memory_store_u32` | `(address: u32, value: u32) -> i32` | returns `0` |
+| `_memory_store_i64` | `(address: u32, value: i64) -> i32` | returns `0` |
+
+The runtime has `memory_write_bits(bits: Bits, address: Int) -> Nil`, which
+copies a bit array of whole bytes to the memory, and
+`memory_read_bits(address: Int, size: Int) -> Bits`.
+
 The older exports (`_print`, `_exit`, `_i32_to_str`, `_i64_to_str`, `_f32_to_str`,
 `_f64_to_str`, `_heap_base`) keep their signatures. `_print` loops on partial writes, like `io_print`, and returns the
 WASI errno. `_f32_to_str`/`_f64_to_str` now write the `float_to_string` text (for

@@ -22,10 +22,15 @@ fn align_up(n: usize, align: usize) -> Option<usize> {
     Some(n.checked_add(align - 1)? & !(align - 1))
 }
 
+/// The start of the arena, right after the data of this crate.
+pub fn base() -> usize {
+    (&raw const __heap_base as usize).next_multiple_of(8)
+}
+
 pub fn top() -> usize {
     unsafe {
         if TOP == 0 {
-            TOP = (&raw const __heap_base as usize).next_multiple_of(8);
+            TOP = base();
         }
         TOP
     }

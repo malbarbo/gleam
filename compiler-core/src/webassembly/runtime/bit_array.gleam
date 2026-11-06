@@ -1654,6 +1654,24 @@ fn max(a: Int, b: Int) -> Int {
   }
 }
 
+// -- Linear memory ------------------------------------------------------------
+//
+// The functions of `gleam/wasm/memory`, which checks the addresses and the
+// sizes before it calls them.
+
+/// Copies the bytes of `bits`, a whole number of bytes, to `address` of the
+/// linear memory.
+pub fn memory_write_bits(bits: Bits, address: Int) -> Nil {
+  let bits = aligned(bits)
+  let size = { bits.end - bits.start } / 8
+  bytes_to_memory(bits.bytes, bits.start / 8, size, int_to_i32(address))
+}
+
+/// The `size` bytes at `address` of the linear memory.
+pub fn memory_read_bits(address: Int, size: Int) -> Bits {
+  bit_array_from_bytes(bytes_from_memory(int_to_i32(address), size), size * 8)
+}
+
 // -- Builtins -----------------------------------------------------------------
 
 /// A new array of `size` zero bytes.
@@ -1721,3 +1739,14 @@ fn float64_from_bits(high: Int, low: Int) -> Float
 /// The float of the bits of a 32 bits float.
 @external(webassembly, "builtins", "_float32_from_bits")
 fn float32_from_bits(bits: Int) -> Float
+
+type I32
+
+@external(webassembly, "builtins", "_int_to_i32")
+fn int_to_i32(value: Int) -> I32
+
+@external(webassembly, "builtins", "_bytes_to_memory")
+fn bytes_to_memory(bytes: Words, start: Int, size: Int, address: I32) -> Nil
+
+@external(webassembly, "builtins", "_bytes_from_memory")
+fn bytes_from_memory(address: I32, size: Int) -> Words

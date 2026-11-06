@@ -119,6 +119,52 @@ mod exports {
         (crate::arena::top() as u32 + 15) & !15
     }
 
+    // The memory of `gleam/wasm/memory`, which checks that an address is in
+    // the arena before it calls these. A function that gives `Nil` to Gleam
+    // returns 0, the `Nil` of the generated code.
+
+    /// The start of the arena.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn _arena_base() -> u32 {
+        crate::arena::base() as u32
+    }
+
+    /// Allocates `size` bytes aligned to 8 in the arena, or returns 0 when
+    /// the memory does not grow.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn _arena_alloc(size: u32) -> u32 {
+        crate::arena::alloc(size as usize, 8) as u32
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn _memory_load_u32(address: u32) -> u32 {
+        unsafe { ptr::read_unaligned(address as usize as *const u32) }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn _memory_load_i64(address: u32) -> i64 {
+        unsafe { ptr::read_unaligned(address as usize as *const i64) }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn _memory_store_u32(address: u32, value: u32) -> i32 {
+        unsafe { ptr::write_unaligned(address as usize as *mut u32, value) };
+        0
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn _memory_store_i64(address: u32, value: i64) -> i32 {
+        unsafe { ptr::write_unaligned(address as usize as *mut i64, value) };
+        0
+    }
+
+    /// Gives back to the arena what was taken after `mark`.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn _memory_release(mark: u32) -> i32 {
+        crate::arena::release(mark as usize);
+        0
+    }
+
     //////////////
     // older exports used directly by the code generator
 
