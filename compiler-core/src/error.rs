@@ -4820,8 +4820,9 @@ WebAssembly values, and this type is not one of them:
 
     {}
 
-A parameter can be an `Int`, a `Float`, a `Bool`, or one of the types `I32`,
-`I64`, `F32` and `F64`. A result can be any of them, or `Nil`.",
+A parameter can be an `Int`, a `Float`, a `Bool`, a `String`, or one of the
+types `I32`, `I64`, `F32` and `F64`. A result can be any of them but a
+`String`, or `Nil`.",
                 printer.print_type(type_)
             );
             Diagnostic {

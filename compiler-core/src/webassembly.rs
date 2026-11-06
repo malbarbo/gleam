@@ -142,15 +142,22 @@ impl ExternalModule {
 }
 
 /// Returns `true` if a function imported from the environment can take a
-/// value of `type_`, `false` otherwise. The value crosses as a wasm value.
+/// value of `type_`, `false` otherwise. A `String` crosses as the address
+/// and the size of a copy of its bytes, and the others as wasm values.
 pub fn is_environment_param(type_: &Type) -> bool {
-    type_.is_int() || type_.is_float() || type_.is_bool() || is_wasm_number(type_)
+    is_environment_value(type_) || type_.is_string()
 }
 
 /// Returns `true` if a function imported from the environment can return a
 /// value of `type_`, `false` otherwise. `Nil` is no result.
 pub fn is_environment_result(type_: &Type) -> bool {
-    is_environment_param(type_) || type_.is_nil()
+    is_environment_value(type_) || type_.is_nil()
+}
+
+/// Returns `true` if a value of `type_` crosses to the environment and back
+/// as a wasm value, `false` otherwise.
+fn is_environment_value(type_: &Type) -> bool {
+    type_.is_int() || type_.is_float() || type_.is_bool() || is_wasm_number(type_)
 }
 
 /// Returns `true` if `type_` is `I32`, `I64`, `F32` or `F64`, the types

@@ -226,3 +226,21 @@ pub fn main() { exit(3.0) }
         "{error:?}"
     );
 }
+
+/// A `String` is the address and the size of a copy of its bytes.
+#[test]
+fn string_is_an_address_and_a_size() {
+    let imports = environment_imports(
+        r#"
+@external(webassembly, "env", "print")
+fn print(text: String, times: Int) -> Nil
+
+pub fn main() { print("hello", 2) }
+"#,
+        WasmInt::I64,
+    );
+    assert_eq!(
+        imports,
+        vec![import("env", "print", "[I32, I32, I64]", "[]")]
+    );
+}

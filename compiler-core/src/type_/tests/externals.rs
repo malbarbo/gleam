@@ -329,3 +329,13 @@ pub fn make() -> a
 "#
     );
 }
+
+#[test]
+fn environment_import_of_a_string_result() {
+    assert_module_error!(
+        r#"@external(erlang, "one", "two")
+@external(webassembly, "env", "name")
+pub fn name() -> String
+"#
+    );
+}

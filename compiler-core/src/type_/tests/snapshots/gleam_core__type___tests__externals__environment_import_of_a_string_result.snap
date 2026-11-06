@@ -1,0 +1,25 @@
+---
+source: compiler-core/src/type_/tests/externals.rs
+expression: "@external(erlang, \"one\", \"two\")\n@external(webassembly, \"env\", \"name\")\npub fn name() -> String\n"
+---
+----- SOURCE CODE
+@external(erlang, "one", "two")
+@external(webassembly, "env", "name")
+pub fn name() -> String
+
+
+----- ERROR
+error: Unsupported type
+  ┌─ /src/one/two.gleam:3:18
+  │
+3 │ pub fn name() -> String
+  │                  ^^^^^^
+
+The function `name` is imported from the environment, so it takes and returns
+WebAssembly values, and this type is not one of them:
+
+    String
+
+A parameter can be an `Int`, a `Float`, a `Bool`, a `String`, or one of the
+types `I32`, `I64`, `F32` and `F64`. A result can be any of them but a
+`String`, or `Nil`.
