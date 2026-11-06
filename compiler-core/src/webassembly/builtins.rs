@@ -1058,8 +1058,15 @@ impl<'a> Generator<'a> {
             .position(|c| c.name == constructor.name)
             .expect("constructor in union");
         let mapping = layout.fields(variant_index).to_vec();
+        let labels = labels(constructor);
         let repr_index = self.get_function_constructor(builtin, type_, variant_index, move |s| {
-            s.code_composite_repr(&constructor_name, Some(&mapping), type_index, &types)
+            s.code_composite_repr(
+                &constructor_name,
+                &labels,
+                Some(&mapping),
+                type_index,
+                &types,
+            )
         });
         (type_index, repr_index)
     }
@@ -1581,7 +1588,7 @@ impl<'a> Generator<'a> {
             let value_vt = self.val_type_ref(type_index);
             return self.code_constant_repr(value_vt, "#()");
         }
-        self.code_composite_repr(&"#".into(), None, type_index, types)
+        self.code_composite_repr(&"#".into(), &[], None, type_index, types)
     }
 
     /// A repr that writes `text` for any value.
@@ -1603,9 +1610,12 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
+    /// The repr of a record or a tuple, `name(field, ...)`. A field with a
+    /// label in `labels` is written `label: value`, as on JavaScript.
     fn code_composite_repr(
         &mut self,
         name: &EcoString,
+        labels: &[Option<EcoString>],
         field_mapping: Option<&[Option<u32>]>,
         type_index: TypeId,
         types: &[Arc<Type>],
@@ -1632,33 +1642,33 @@ impl<'a> Generator<'a> {
             .i32_add()
             .local_set(dest);
 
-        let mut fields_iter = types.iter().zip(wasm_indices.iter());
-        if let Some((first_type, &first_idx)) = fields_iter.next() {
-            let first_repr = self.function_repr(first_type);
-            let _ = instructions
-                .write_byte(dest, b'(')
-                .local_get(value)
-                .field_get(type_index, first_idx)
-                .local_get(dest)
-                .call(first_repr)
-                .local_get(dest)
-                .i32_add()
-                .local_set(dest);
-
-            for (type_, &field_index) in fields_iter {
-                let repr = self.function_repr(type_);
+        for (position, (type_, &field_index)) in types.iter().zip(wasm_indices.iter()).enumerate() {
+            let repr = self.function_repr(type_);
+            if position == 0 {
+                let _ = instructions.write_byte(dest, b'(');
+            } else {
+                let _ = instructions.write_byte(dest, b',').write_byte(dest, b' ');
+            }
+            if let Some(Some(label)) = labels.get(position) {
+                let label_index = self.string_index(&ecow::eco_format!("{label}: "));
                 let _ = instructions
-                    .write_byte(dest, b',')
-                    .write_byte(dest, b' ')
-                    .local_get(value)
-                    .field_get(type_index, field_index)
+                    .global_as_non_null(label_index)
                     .local_get(dest)
-                    .call(repr)
+                    .call(string_to_memory)
                     .local_get(dest)
                     .i32_add()
                     .local_set(dest);
             }
-
+            let _ = instructions
+                .local_get(value)
+                .field_get(type_index, field_index)
+                .local_get(dest)
+                .call(repr)
+                .local_get(dest)
+                .i32_add()
+                .local_set(dest);
+        }
+        if !types.is_empty() {
             let _ = instructions.write_byte(dest, b')');
         }
 
@@ -1781,7 +1791,13 @@ impl<'a> Generator<'a> {
                 let constructor = constructor.clone();
                 let (type_index, types) =
                     self.mono_struct_type_index(type_, &custom_type, &constructor, args);
-                self.code_composite_repr(&constructor.name, None, type_index, &types)
+                self.code_composite_repr(
+                    &constructor.name,
+                    &labels(&constructor),
+                    None,
+                    type_index,
+                    &types,
+                )
             }
             CustomType::Union { custom_type, .. } => {
                 let custom_type = custom_type.clone();
@@ -1800,13 +1816,19 @@ impl<'a> Generator<'a> {
                     let mut text = constructor.name.clone();
                     let types = Monomorphizer::variant_constructor(&custom_type, constructor, args);
                     if !types.is_empty() {
-                        let mut values = types.iter().map(|type_| {
-                            let Some((CustomType::Enum { values }, _)) = self.custom_type(type_)
-                            else {
-                                panic!("unit type expected")
-                            };
-                            values.first().expect("unit value").clone()
-                        });
+                        let mut values =
+                            types.iter().zip(labels(constructor)).map(|(type_, label)| {
+                                let Some((CustomType::Enum { values }, _)) =
+                                    self.custom_type(type_)
+                                else {
+                                    panic!("unit type expected")
+                                };
+                                let value = values.first().expect("unit value");
+                                match label {
+                                    Some(label) => ecow::eco_format!("{label}: {value}"),
+                                    None => value.clone(),
+                                }
+                            });
                         text += "(";
                         text += values.join(", ").as_str();
                         text += ")";
@@ -2077,3 +2099,12 @@ pub(super) type PendingFunction<'a> = (
     FunctionId,
     Box<dyn FnOnce(&mut Generator<'a>) -> FunctionId + 'a>,
 );
+
+/// The label of each field of `constructor`, `None` for a field without one.
+fn labels(constructor: &TypedRecordConstructor) -> Vec<Option<EcoString>> {
+    constructor
+        .arguments
+        .iter()
+        .map(|argument| argument.label.as_ref().map(|(_, label)| label.clone()))
+        .collect()
+}

@@ -140,7 +140,7 @@ pub fn main() {{
     }}
 
     assert inspect(t) == "#(Nil, 1, Unit)"
-    assert inspect(r) == "Record(Nil, 2.0, Unit)"
+    assert inspect(r) == "Record(n: Nil, x: 2.0, u: Unit)"
     assert inspect(o) == "Other(\"4\", Nil)"
     assert inspect([Nil, Nil]) == "[Nil, Nil]"
     assert inspect(e) == "Error(Nil)"
@@ -217,7 +217,7 @@ pub fn main() {{
         }}
         Number(..) | Text(..) -> panic
     }}
-    assert inspect(three) == "[Empty(Nil, Unit), Number(Nil, 3), Text(Nil, \"t\")]"
+    assert inspect(three) == "[Empty(x: Nil, y: Unit), Number(x: Nil, n: 3), Text(x: Nil, s: \"t\")]"
     assert hash(empty) == hash(Empty(Nil, Unit))
 }}
 "##

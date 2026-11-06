@@ -1186,7 +1186,7 @@ pub fn main() {
     let assert False = hash(Some(1)) == hash(None)
     let assert False = hash(Some(1)) == hash(Some(2))
     let assert "Some(1)" = string_inspect(Some(1))
-    let assert "Full(2, \"b\")" = string_inspect(full_constant)
+    let assert "Full(value: 2, name: \"b\")" = string_inspect(full_constant)
     let full = Full(2, "b")
     let assert 2 = full.value
     let assert Full(3, "b") = Full(..full, value: 3)
@@ -1220,7 +1220,7 @@ pub fn main() {
     let assert "x" = a.name
     let assert "y" = b.name
     let assert True = a == A(1, "x")
-    let assert "A(1, \"x\")" = string_inspect(a)
+    let assert "A(1, name: \"x\")" = string_inspect(a)
 }
 
 @external(webassembly, "builtins", "_inspect")
@@ -1546,5 +1546,30 @@ pub fn square(side: Float) -> color.Shape {
         result.status.success(),
         "WASM execution failed:\n{}",
         result.stderr
+    );
+}
+
+/// As on JavaScript, a labelled field is shown with its label.
+#[test]
+fn echo_labels() {
+    assert_wasm_echo!(
+        r#"
+pub type Point {
+    Point(x: Int, y: Float)
+}
+
+pub type Shape {
+    Empty(unit: Nil)
+    Circle(Int, radius: Int)
+    Square(side: Int)
+}
+
+pub fn main() {
+    echo Point(1, 2.0)
+    echo Empty(Nil)
+    echo Circle(1, 2)
+    echo Square(3)
+}
+"#,
     );
 }

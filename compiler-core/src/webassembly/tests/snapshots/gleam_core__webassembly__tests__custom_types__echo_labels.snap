@@ -1,0 +1,33 @@
+---
+source: compiler-core/src/webassembly/tests/custom_types.rs
+expression: "\npub type Point {\n    Point(x: Int, y: Float)\n}\n\npub type Shape {\n    Empty(unit: Nil)\n    Circle(Int, radius: Int)\n    Square(side: Int)\n}\n\npub fn main() {\n    echo Point(1, 2.0)\n    echo Empty(Nil)\n    echo Circle(1, 2)\n    echo Square(3)\n}\n"
+---
+----- SOURCE CODE
+
+pub type Point {
+    Point(x: Int, y: Float)
+}
+
+pub type Shape {
+    Empty(unit: Nil)
+    Circle(Int, radius: Int)
+    Square(side: Int)
+}
+
+pub fn main() {
+    echo Point(1, 2.0)
+    echo Empty(Nil)
+    echo Circle(1, 2)
+    echo Square(3)
+}
+
+
+----- STDERR
+src/my/mod.gleam:13
+Point(x: 1, y: 2.0)
+src/my/mod.gleam:14
+Empty(unit: Nil)
+src/my/mod.gleam:15
+Circle(1, radius: 2)
+src/my/mod.gleam:16
+Square(side: 3)

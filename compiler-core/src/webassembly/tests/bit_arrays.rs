@@ -336,7 +336,7 @@ pub fn main() {
     src/my/mod.gleam:10
     <<1, 2, 3:size(2)>>
     src/my/mod.gleam:11
-    #(Box(<<97>>), [<<255>>])
+    #(Box(bits: <<97>>), [<<255>>])
     "#);
 }
 

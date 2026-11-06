@@ -15,4 +15,4 @@ pub fn main() {
 
 ----- STDERR
 src/my/mod.gleam:7
-Handler(//fn() { ... })
+Handler(on_click: //fn() { ... })

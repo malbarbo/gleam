@@ -596,7 +596,7 @@ pub fn main() {
     let assert True = Holder(a, "a") == Holder(regex.new("a+"), "a")
     let assert True = hash(a) == hash(regex.new("a+"))
     let assert "//js(/a+/)" = inspect(a)
-    let assert "Holder(//js(/a+/), \"a\")" = inspect(Holder(a, "a"))
+    let assert "Holder(regex: //js(/a+/), name: \"a\")" = inspect(Holder(a, "a"))
     let assert True = regex.matches(id(a), "a")
     let assert [True, False] = regex.all([a, regex.new("x")], "a")
     let assert True = cast(a) == cast(regex.new("a+"))

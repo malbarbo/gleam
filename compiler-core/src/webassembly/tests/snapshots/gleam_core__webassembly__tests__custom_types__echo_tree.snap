@@ -19,4 +19,4 @@ pub fn main() {
 src/my/mod.gleam:8
 Empty
 src/my/mod.gleam:9
-Node(10, Empty, Empty)
+Node(value: 10, left: Empty, right: Empty)
