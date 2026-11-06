@@ -1896,3 +1896,27 @@ pub fn main() {
         "{names:?}"
     );
 }
+
+#[test]
+fn constant_of_another_target_is_not_generated() {
+    let src = r#"
+@external(javascript, "./ffi.mjs", "answer")
+fn answer() -> Int
+
+pub const constant = answer
+
+pub fn uses_constant() -> Int {
+    constant()
+}
+
+pub fn main() {
+    assert 1 + 1 == 2
+}
+"#;
+    run_ok(src);
+    let names = wasm_function_names(&compile_wasm(src, vec![]));
+    assert!(
+        !names.iter().any(|name| name.contains("answer")),
+        "{names:?}"
+    );
+}

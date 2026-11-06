@@ -2110,6 +2110,14 @@ impl<'a> Generator<'a> {
             if is_generic_type(&module_constant.type_) {
                 continue;
             }
+            // A constant that names a function of another target, see
+            // `functions`.
+            if !module_constant
+                .implementations
+                .supports(Target::WebAssembly)
+            {
+                continue;
+            }
             let _ = self.module_constant(module_constant);
         }
     }
