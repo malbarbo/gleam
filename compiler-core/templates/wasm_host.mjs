@@ -217,17 +217,26 @@ export async function instantiate(url) {
     );
   }
   const imports = { wasi_snapshot_preview1: wasi, "gleam:js": js };
+  // A module of a plain name, like `env`, is a module of the environment,
+  // which this host does not have.
+  const environment = /^[A-Za-z_][A-Za-z0-9_]*$/;
   for (const { module: name } of WebAssembly.Module.imports(module)) {
-    if (!(name in imports)) {
+    if (!(name in imports) && !environment.test(name)) {
       // A relative path, which the compiler makes relative to the program,
-      // is resolved from the program, like on JavaScript, where a module of
-      // the runtime, like `node:process`, is not.
+      // is resolved from the program, like on JavaScript, and a path of a
+      // package, like `pkg/index.js`, from the packages of the runtime.
       const specifier = /^\.\.?\//.test(name) ? new URL(name, url).href : import.meta.resolve(name);
       // It is imported through a module that exports it as `ns`, as `import`
       // takes a module that exports a function `then` for a promise.
       const source = `export * as ns from ${JSON.stringify(specifier)};`;
       imports[name] = (await import(`data:text/javascript,${encodeURIComponent(source)}`)).ns;
     }
+  }
+  const missing = WebAssembly.Module.imports(module)
+    .filter((i) => i.kind === "function" && typeof imports[i.module]?.[i.name] !== "function")
+    .map((i) => `${i.module}.${i.name}`);
+  if (missing.length > 0) {
+    throw new Error(`This host does not provide the functions ${missing.join(", ")}`);
   }
   const instance = await WebAssembly.instantiate(module, imports);
   memory = instance.exports.memory;

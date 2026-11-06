@@ -37,7 +37,7 @@ use crate::{
     },
     uid::UniqueIdGenerator,
     warning::TypeWarningEmitter,
-    webassembly::ExternalModule,
+    webassembly::{self, ExternalModule},
 };
 use camino::Utf8PathBuf;
 use ecow::{EcoString, eco_format};
@@ -567,6 +567,15 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
         // the implementation for JS externals.
         self.assert_valid_javascript_external(&name, external_javascript.as_ref(), location);
         self.assert_valid_webassembly_external(&name, external_webassembly.as_ref());
+        self.assert_valid_environment_import(
+            &name,
+            external_webassembly.as_ref(),
+            &arguments,
+            &prereg_arguments_types,
+            return_annotation.as_ref(),
+            &prereg_return_type,
+            location,
+        );
 
         // Find the external implementation for the current target, if one has been given.
         let external = target_function_implementation(
@@ -890,6 +899,46 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
                     location: *location,
                     module: module.clone(),
                     name: function_name.clone(),
+                });
+        }
+    }
+
+    /// The parameters and the result of a function imported from the
+    /// environment have to be wasm values.
+    #[allow(clippy::too_many_arguments)]
+    fn assert_valid_environment_import(
+        &mut self,
+        function_name: &EcoString,
+        external_webassembly: Option<&(EcoString, EcoString, SrcSpan)>,
+        arguments: &[UntypedArg],
+        argument_types: &[Arc<Type>],
+        return_annotation: Option<&TypeAst>,
+        return_type: &Arc<Type>,
+        location: SrcSpan,
+    ) {
+        let Some((module, _, _)) = external_webassembly else {
+            return;
+        };
+        if ExternalModule::of(module, &self.package_config.name) != ExternalModule::Environment {
+            return;
+        }
+        for (argument, type_) in arguments.iter().zip(argument_types) {
+            if !webassembly::is_environment_param(type_) {
+                self.problems
+                    .error(Error::UnsupportedEnvironmentImportType {
+                        location: argument.location,
+                        name: function_name.clone(),
+                        type_: type_.clone(),
+                    });
+            }
+        }
+        if !webassembly::is_environment_result(return_type) {
+            self.problems
+                .error(Error::UnsupportedEnvironmentImportType {
+                    location: return_annotation
+                        .map_or(location, |annotation| annotation.location()),
+                    name: function_name.clone(),
+                    type_: return_type.clone(),
                 });
         }
     }

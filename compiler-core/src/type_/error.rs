@@ -447,6 +447,14 @@ pub enum Error {
         name: EcoString,
     },
 
+    /// A function imported from the environment takes or returns a value
+    /// that is not a wasm value.
+    UnsupportedEnvironmentImportType {
+        location: SrcSpan,
+        name: EcoString,
+        type_: Arc<Type>,
+    },
+
     /// A function's JavaScript implementation has been given but it does not
     /// have a valid function name.
     InvalidExternalJavascriptFunction {
@@ -1445,6 +1453,7 @@ impl Error {
             | Error::UnsupportedExpressionTarget { location, .. }
             | Error::InvalidExternalJavascriptModule { location, .. }
             | Error::InvalidExternalWebAssemblyModule { location, .. }
+            | Error::UnsupportedEnvironmentImportType { location, .. }
             | Error::InvalidExternalJavascriptFunction { location, .. }
             | Error::InexhaustiveCaseExpression { location, .. }
             | Error::MissingCaseBody { location }

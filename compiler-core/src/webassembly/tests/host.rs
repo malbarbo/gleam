@@ -36,20 +36,20 @@ fn import(module: &str, name: &str) -> (String, String) {
     (module.into(), name.into())
 }
 
-/// An external of a module other than "builtins" is a function of the host,
-/// which a program outside the standard library can declare.
+/// An external of a JavaScript module is a function of the host, which a
+/// program outside the standard library can declare.
 #[test]
 fn external_of_the_host() {
     let imports = host_imports(
         r#"
-@external(webassembly, "env", "add")
+@external(webassembly, "./env.mjs", "add")
 fn add(a: Int, b: Int) -> Int
 
 pub fn main() { add(1, 2) }
 "#,
         vec![],
     );
-    assert_eq!(imports, vec![import("env", "add")]);
+    assert_eq!(imports, vec![import("./env.mjs", "add")]);
 }
 
 /// A relative path is relative to the module that declares it, like the path
@@ -173,14 +173,14 @@ fn run() -> Nil
 fn external_of_the_host_used_twice() {
     let imports = host_imports(
         r#"
-@external(webassembly, "env", "tick")
+@external(webassembly, "./env.mjs", "tick")
 fn tick() -> Int
 
 pub fn main() { tick() + tick() }
 "#,
         vec![],
     );
-    assert_eq!(imports, vec![import("env", "tick")]);
+    assert_eq!(imports, vec![import("./env.mjs", "tick")]);
 }
 
 /// A generic function of the host is imported with each type it is used
@@ -189,7 +189,7 @@ pub fn main() { tick() + tick() }
 fn generic_external_of_the_host() {
     let imports = host_imports(
         r#"
-@external(webassembly, "env", "id")
+@external(webassembly, "./env.mjs", "id")
 fn id(a: a) -> a
 
 pub fn main() {
@@ -199,7 +199,10 @@ pub fn main() {
 "#,
         vec![],
     );
-    assert_eq!(imports, vec![import("env", "id"), import("env", "id")]);
+    assert_eq!(
+        imports,
+        vec![import("./env.mjs", "id"), import("./env.mjs", "id")]
+    );
 }
 
 /// A public external function is exported, like the other public functions,
@@ -209,13 +212,13 @@ fn public_external_is_exported() {
     let wasm = super::compile_wasm_in(
         "thepackage",
         r#"
-@external(webassembly, "env", "add")
+@external(webassembly, "./env.mjs", "add")
 pub fn add(a: Int, b: Int) -> Int
 
-@external(webassembly, "env", "nothing")
+@external(webassembly, "./env.mjs", "nothing")
 pub fn nothing_test() -> a
 
-@external(webassembly, "env", "id")
+@external(webassembly, "./env.mjs", "id")
 pub fn id(a: a) -> a
 "#,
         vec![],

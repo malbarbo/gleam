@@ -1,0 +1,24 @@
+---
+source: compiler-core/src/type_/tests/externals.rs
+expression: "@external(erlang, \"one\", \"two\")\n@external(webassembly, \"env\", \"sum\")\npub fn sum(numbers: List(Int)) -> Int\n"
+---
+----- SOURCE CODE
+@external(erlang, "one", "two")
+@external(webassembly, "env", "sum")
+pub fn sum(numbers: List(Int)) -> Int
+
+
+----- ERROR
+error: Unsupported type
+  ┌─ /src/one/two.gleam:3:12
+  │
+3 │ pub fn sum(numbers: List(Int)) -> Int
+  │            ^^^^^^^^^^^^^^^^^^
+
+The function `sum` is imported from the environment, so it takes and returns
+WebAssembly values, and this type is not one of them:
+
+    List(Int)
+
+A parameter can be an `Int`, a `Float`, a `Bool`, or one of the types `I32`,
+`I64`, `F32` and `F64`. A result can be any of them, or `Nil`.

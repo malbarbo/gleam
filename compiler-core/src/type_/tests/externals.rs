@@ -309,3 +309,23 @@ pub fn exit(code: Int) -> Nil
         ]
     );
 }
+
+#[test]
+fn environment_import_of_a_list() {
+    assert_module_error!(
+        r#"@external(erlang, "one", "two")
+@external(webassembly, "env", "sum")
+pub fn sum(numbers: List(Int)) -> Int
+"#
+    );
+}
+
+#[test]
+fn environment_import_of_a_generic_result() {
+    assert_module_error!(
+        r#"@external(erlang, "one", "two")
+@external(webassembly, "env", "make")
+pub fn make() -> a
+"#
+    );
+}

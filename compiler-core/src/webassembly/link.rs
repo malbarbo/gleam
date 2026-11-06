@@ -37,6 +37,9 @@ const INDEXES_SECTION: &str = "gleam:builtins";
 /// The custom sections of builtins-wasm that the generated module keeps.
 const CUSTOM_SECTIONS: &[&str] = &["producers", "target_features"];
 
+/// The name of the export of the memory.
+const MEMORY_EXPORT: &str = "memory";
+
 /// builtins-wasm, parsed once.
 static BUILTINS: LazyLock<Builtins> = LazyLock::new(|| Builtins::parse(BUILTINS_WASM));
 
@@ -387,6 +390,29 @@ impl Linker {
         self.memory
     }
 
+    /// The params and results of the function `name` of the module `module`
+    /// that builtins-wasm imports, if it imports one.
+    pub(super) fn import_type(
+        &self,
+        module: &str,
+        name: &str,
+    ) -> Option<&(Vec<ValType>, Vec<ValType>)> {
+        let builtins = &*BUILTINS;
+        builtins
+            .imports
+            .iter()
+            .find(|import| import.module == module && import.name == name)
+            .map(|import| builtins.type_(import.type_))
+    }
+
+    /// Exports the memory of `module`, which keeps it through the dead code
+    /// elimination.
+    pub(super) fn export_memory(&self, module: &mut walrus::Module) {
+        let _ = module
+            .exports
+            .add(MEMORY_EXPORT, ExportItem::Memory(self.memory));
+    }
+
     /// The exported functions of builtins-wasm: their name, stub, params and
     /// results.
     pub(super) fn exports(
@@ -444,11 +470,12 @@ impl Linker {
         reached.sort_unstable();
 
         let memory_alive = module.memories.iter().any(|m| m.id() == self.memory);
+        let exported = module.exports.get_exported_memory(self.memory).is_some();
         if reached.is_empty() {
-            if memory_alive {
+            if memory_alive && !exported {
                 let _ = module
                     .exports
-                    .add("memory", ExportItem::Memory(self.memory));
+                    .add(MEMORY_EXPORT, ExportItem::Memory(self.memory));
             }
             return Link(None);
         }
@@ -459,7 +486,11 @@ impl Linker {
                 .memories
                 .add_local(false, false, builtins.memory, None, None)
         };
-        let _ = module.exports.add("memory", ExportItem::Memory(memory));
+        if !exported {
+            let _ = module
+                .exports
+                .add(MEMORY_EXPORT, ExportItem::Memory(memory));
+        }
 
         let mut types = HashMap::new();
         let mut type_id = |module: &mut walrus::Module, index: u32| {

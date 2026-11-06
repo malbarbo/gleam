@@ -633,6 +633,7 @@ mod closures;
 mod consts;
 mod custom_types;
 mod echo;
+mod environment;
 mod errors;
 mod fail;
 mod function_fields;

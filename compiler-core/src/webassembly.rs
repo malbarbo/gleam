@@ -7,6 +7,7 @@ mod bit_array;
 mod builtins;
 mod captures;
 mod dynamic;
+mod environment;
 mod glue;
 mod hash;
 mod host;
@@ -140,6 +141,28 @@ impl ExternalModule {
     }
 }
 
+/// Returns `true` if a function imported from the environment can take a
+/// value of `type_`, `false` otherwise. The value crosses as a wasm value.
+pub fn is_environment_param(type_: &Type) -> bool {
+    type_.is_int() || type_.is_float() || type_.is_bool() || is_wasm_number(type_)
+}
+
+/// Returns `true` if a function imported from the environment can return a
+/// value of `type_`, `false` otherwise. `Nil` is no result.
+pub fn is_environment_result(type_: &Type) -> bool {
+    is_environment_param(type_) || type_.is_nil()
+}
+
+/// Returns `true` if `type_` is `I32`, `I64`, `F32` or `F64`, the types
+/// without constructors whose values are wasm numbers, `false` otherwise.
+fn is_wasm_number(type_: &Type) -> bool {
+    type_
+        .named_type_information()
+        .is_some_and(|(_, name, arguments)| {
+            arguments.is_empty() && matches!(name.as_str(), "I32" | "I64" | "F32" | "F64")
+        })
+}
+
 /// Returns `true` if `module` is a plain name, like `env` or
 /// `wasi_snapshot_preview1`, `false` otherwise.
 fn is_environment_module(module: &str) -> bool {
@@ -197,6 +220,14 @@ pub enum Error {
     UnknownExternalModule {
         location: SrcSpan,
         module: EcoString,
+    },
+    /// A function of WASI imported with another signature than the one
+    /// that builtins-wasm imports it with.
+    WrongWasiFunctionSignature {
+        location: SrcSpan,
+        name: EcoString,
+        expected: EcoString,
+        got: EcoString,
     },
     /// An external function or type outside the standard library, which
     /// alone reaches the builtins.
@@ -272,6 +303,7 @@ impl Error {
             Error::UnknownExternalType { .. }
             | Error::UnknownBuiltinFunction { .. }
             | Error::WrongBuiltinFunctionSignature { .. }
+            | Error::WrongWasiFunctionSignature { .. }
             | Error::UnknownExternalModule { .. }
             | Error::ExternalOutsideStdlib { .. }
             | Error::WrongExternalTypeArity { .. }
@@ -813,6 +845,9 @@ struct Generator<'a> {
     /// host, which is guessed from the ones it declares and checked by
     /// `compile`.
     javascript_host: bool,
+    /// Whether the program imports a function of the environment, which
+    /// reads and writes its memory, so the memory is exported.
+    imports_environment: bool,
 }
 
 impl<'a> Generator<'a> {
@@ -903,10 +938,34 @@ impl<'a> Generator<'a> {
                     .into_iter()
                     // The runtime declares the functions of the host it uses
                     .filter(|module| module.type_info.package != RUNTIME_PACKAGE)
-                    .flat_map(|module| &module.definitions.functions)
-                    .filter_map(|function| function.external_webassembly.as_ref())
-                    .any(|(module, _, _)| module != BUILTINS_MODULE),
+                    .any(|module| {
+                        module
+                            .definitions
+                            .functions
+                            .iter()
+                            .filter_map(|function| function.external_webassembly.as_ref())
+                            .any(|(external_module, _, _)| {
+                                ExternalModule::of(external_module, &module.type_info.package)
+                                    == ExternalModule::JavaScript
+                            })
+                    }),
+            imports_environment: false,
         }
+    }
+
+    /// The package of the module `module` of the program or of the runtime.
+    fn module_package(&self, module: &EcoString) -> &'a str {
+        if let Some(module) = self.all_modules.get(module) {
+            return &module.type_info.package;
+        }
+        if self
+            .runtime
+            .iter()
+            .any(|runtime| &runtime.module.name == module)
+        {
+            return RUNTIME_PACKAGE;
+        }
+        &self.module.type_info.package
     }
 
     /// The path of the source file of `module`, relative to its package.
@@ -1110,6 +1169,9 @@ impl<'a> Generator<'a> {
         self.code_panic();
         self.wasm_module.name = Some(self.module.name.to_string());
         self.wasm_module.start = Some(start);
+        if self.imports_environment {
+            self.linker.export_memory(&mut self.wasm_module);
+        }
         let link = self.linker.eliminate_dead_code(&mut self.wasm_module);
         liveness::clear_dead_locals(&mut self.wasm_module);
         Ok(Some(link::emit(&mut self.wasm_module, link)))
@@ -1118,10 +1180,9 @@ impl<'a> Generator<'a> {
     /// Whether the program imports anything other than WASI, so it runs in
     /// a JavaScript host.
     fn imports_host(&self) -> bool {
-        self.wasm_module
-            .imports
-            .iter()
-            .any(|import| import.module != WASI_MODULE)
+        self.wasm_module.imports.iter().any(|import| {
+            ExternalModule::of(&import.module, RUNTIME_PACKAGE) == ExternalModule::JavaScript
+        })
     }
 
     fn generate(&mut self) -> Result<FunctionId, Error> {
@@ -1593,16 +1654,54 @@ impl<'a> Generator<'a> {
         self.validate_externals(&available)
     }
 
+    /// A function of WASI that builtins-wasm imports too has to have the
+    /// same signature, or the host could not provide both.
+    fn validate_wasi_external(
+        &mut self,
+        function: &TypedFunction,
+        name: &EcoString,
+        location: SrcSpan,
+    ) -> Result<(), Error> {
+        let Some((params, results)) = self.linker.import_type(WASI_MODULE, name).cloned() else {
+            return Ok(());
+        };
+        let got_params = self.val_types(function.arguments.iter().map(|arg| arg.type_.clone()));
+        let got_results = if function.return_type.is_nil() {
+            vec![]
+        } else {
+            vec![self.val_type(&function.return_type)]
+        };
+        if (&got_params, &got_results) == (&params, &results) {
+            return Ok(());
+        }
+        let signature = |params: &[ValType], results: &[ValType]| -> EcoString {
+            ecow::eco_format!(
+                "({}) -> ({})",
+                params.iter().map(|p| format!("{p:?}")).join(", "),
+                results.iter().map(|r| format!("{r:?}")).join(", "),
+            )
+        };
+        Err(Error::WrongWasiFunctionSignature {
+            location,
+            name: name.clone(),
+            expected: signature(&params, &results),
+            got: signature(&got_params, &got_results),
+        })
+    }
+
     fn validate_externals(
         &mut self,
         available: &HashMap<EcoString, (Vec<ValType>, Vec<ValType>)>,
     ) -> Result<(), Error> {
         let functions: Vec<_> = self.module.definitions.functions.iter().collect();
         for function in functions {
-            if let Some((module, name, _)) = &function.external_webassembly {
+            if let Some((module, name, location)) = &function.external_webassembly {
+                if module == WASI_MODULE {
+                    self.validate_wasi_external(function, name, *location)?;
+                    continue;
+                }
                 if module != BUILTINS_MODULE {
-                    // A function of the host, imported with each type it is
-                    // used with.
+                    // A function of the host or of the environment.
                     continue;
                 }
                 if !reaches_builtins(&self.module.type_info.package) {
@@ -4130,8 +4229,17 @@ impl<'a> Generator<'a> {
             .external_webassembly
             .as_ref()
             .expect("an external function");
-        if external_module != BUILTINS_MODULE {
-            return self.function_host(external_module, fname, module, required_type);
+        match ExternalModule::of(external_module, self.module_package(module)) {
+            ExternalModule::Builtins => {}
+            ExternalModule::JavaScript => {
+                return self.function_host(external_module, fname, module, required_type);
+            }
+            ExternalModule::Environment => {
+                return self.function_environment(external_module, fname, function);
+            }
+            ExternalModule::Invalid => {
+                panic!("the analyser to reject the module {external_module}")
+            }
         }
         if let Some((runtime_module, _)) = self.runtime_function(fname) {
             return self.function_runtime(&runtime_module, fname, required_type);

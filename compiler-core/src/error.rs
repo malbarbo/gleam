@@ -2177,6 +2177,19 @@ Is your editor still running and connected to the language server?"
                         None,
                         Some(*location),
                     ),
+                    crate::webassembly::Error::WrongWasiFunctionSignature {
+                        location,
+                        name,
+                        expected,
+                        got,
+                    } => (
+                        "Wrong WASI function signature",
+                        format!(
+                            "The function \"{name}\" of WASI has another signature in the runtime of the WebAssembly target.\n\nExpected: {expected}\n     Got: {got}"
+                        ),
+                        None,
+                        Some(*location),
+                    ),
                     crate::webassembly::Error::UnknownExternalModule { location, module } => (
                         "Unknown external module",
                         format!(
@@ -4781,6 +4794,40 @@ with a plain name like `env`."
 that re-exports it."
                         .into(),
                 ),
+                level: Level::Error,
+                location: Some(Location {
+                    label: Label {
+                        text: None,
+                        span: *location,
+                    },
+                    path: path.clone(),
+                    src: src.clone(),
+                    extra_labels: vec![],
+                }),
+            }
+        }
+
+        TypeError::UnsupportedEnvironmentImportType {
+            location,
+            name,
+            type_,
+        } => {
+            let mut printer = Printer::new(names);
+            let text = format!(
+                "The function `{name}` is imported from the environment, \
+so it takes and returns
+WebAssembly values, and this type is not one of them:
+
+    {}
+
+A parameter can be an `Int`, a `Float`, a `Bool`, or one of the types `I32`,
+`I64`, `F32` and `F64`. A result can be any of them, or `Nil`.",
+                printer.print_type(type_)
+            );
+            Diagnostic {
+                title: "Unsupported type".into(),
+                text,
+                hint: None,
                 level: Level::Error,
                 location: Some(Location {
                     label: Label {
