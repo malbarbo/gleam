@@ -1,0 +1,23 @@
+---
+source: compiler-core/src/type_/tests/externals.rs
+expression: "@external(erlang, \"one\", \"two\")\n@external(webassembly, \"node:path\", \"basename\")\npub fn basename(path: String) -> String\n"
+---
+----- SOURCE CODE
+@external(erlang, "one", "two")
+@external(webassembly, "node:path", "basename")
+pub fn basename(path: String) -> String
+
+
+----- ERROR
+error: Invalid WebAssembly module
+  ┌─ /src/one/two.gleam:2:1
+  │
+2 │ @external(webassembly, "node:path", "basename")
+  │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The function `basename` has an external WebAssembly implementation in the
+module `node:path`, which is neither a JavaScript module, ending in `.mjs`
+or `.js`, nor a module of the environment, with a plain name like `env`.
+
+Hint: To use another JavaScript module, write a `.mjs` module that
+re-exports it.

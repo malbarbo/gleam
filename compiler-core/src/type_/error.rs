@@ -439,6 +439,14 @@ pub enum Error {
         name: EcoString,
     },
 
+    /// A function's WebAssembly implementation names a module that is
+    /// neither a JavaScript module nor a module of the environment.
+    InvalidExternalWebAssemblyModule {
+        location: SrcSpan,
+        module: EcoString,
+        name: EcoString,
+    },
+
     /// A function's JavaScript implementation has been given but it does not
     /// have a valid function name.
     InvalidExternalJavascriptFunction {
@@ -1436,6 +1444,7 @@ impl Error {
             | Error::NoImplementation { location, .. }
             | Error::UnsupportedExpressionTarget { location, .. }
             | Error::InvalidExternalJavascriptModule { location, .. }
+            | Error::InvalidExternalWebAssemblyModule { location, .. }
             | Error::InvalidExternalJavascriptFunction { location, .. }
             | Error::InexhaustiveCaseExpression { location, .. }
             | Error::MissingCaseBody { location }

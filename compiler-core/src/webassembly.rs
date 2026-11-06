@@ -104,6 +104,52 @@ use src_span::{LineNumbers, SrcSpan};
 const BUILTINS_WASM: &[u8] =
     include_bytes!("../../builtins-wasm/target/wasm32-unknown-unknown/release/builtins_wasm.wasm");
 
+/// What the module of an `@external(webassembly, module, name)` of a function
+/// is, which decides how the function is compiled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalModule {
+    /// `"builtins"`, the functions of the compiler and of the runtime.
+    Builtins,
+    /// A JavaScript module, whose functions receive and return the values of
+    /// the JavaScript target, see `host`.
+    JavaScript,
+    /// A module that whoever instantiates the program provides, like WASI,
+    /// whose functions receive and return wasm values.
+    Environment,
+    /// Any other name, like `./ffi.cjs` or `node:fs`.
+    Invalid,
+}
+
+impl ExternalModule {
+    /// The kind of the module `module` of an external of the package
+    /// `package`. Only the runtime reaches `gleam:js`, the JavaScript
+    /// module that `host.mjs` provides for the conversions.
+    pub fn of(module: &str, package: &str) -> ExternalModule {
+        if module == BUILTINS_MODULE {
+            ExternalModule::Builtins
+        } else if module.ends_with(".mjs")
+            || module.ends_with(".js")
+            || (module == host::GLEAM_JS && package == RUNTIME_PACKAGE)
+        {
+            ExternalModule::JavaScript
+        } else if is_environment_module(module) {
+            ExternalModule::Environment
+        } else {
+            ExternalModule::Invalid
+        }
+    }
+}
+
+/// Returns `true` if `module` is a plain name, like `env` or
+/// `wasi_snapshot_preview1`, `false` otherwise.
+fn is_environment_module(module: &str) -> bool {
+    let mut chars = module.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 const MAIN: &str = "main";
 /// The module of the imports of WASI.
 const WASI_MODULE: &str = "wasi_snapshot_preview1";

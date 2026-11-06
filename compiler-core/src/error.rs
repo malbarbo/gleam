@@ -4762,6 +4762,38 @@ implementation but the module path `{module}` is not valid."
             }
         }
 
+        TypeError::InvalidExternalWebAssemblyModule {
+            location,
+            name,
+            module,
+        } => {
+            let text = wrap_format!(
+                "The function `{name}` has an external WebAssembly \
+implementation in the module `{module}`, which is neither a JavaScript \
+module, ending in `.mjs` or `.js`, nor a module of the environment, \
+with a plain name like `env`."
+            );
+            Diagnostic {
+                title: "Invalid WebAssembly module".into(),
+                text,
+                hint: Some(
+                    "To use another JavaScript module, write a `.mjs` module \
+that re-exports it."
+                        .into(),
+                ),
+                level: Level::Error,
+                location: Some(Location {
+                    label: Label {
+                        text: None,
+                        span: *location,
+                    },
+                    path: path.clone(),
+                    src: src.clone(),
+                    extra_labels: vec![],
+                }),
+            }
+        }
+
         TypeError::InvalidExternalJavascriptFunction {
             location,
             name,

@@ -375,42 +375,6 @@ export const next = (a) => new UtfCodepoint(a.value + 1);
     );
 }
 
-/// A function of a module of the runtime, like `node:path`, is imported by
-/// its name, as on JavaScript.
-#[test]
-fn host_runtime_module() {
-    run_with_host(
-        r#"
-@external(webassembly, "node:path", "basename")
-fn basename(path: String) -> String
-
-pub fn main() {
-    let assert "c.txt" = basename("/a/b/c.txt")
-}
-"#,
-        "",
-    );
-}
-
-/// A module of a relative path is relative to the program whatever its
-/// extension, as the compiler decides by the path and not by the extension.
-#[test]
-fn host_relative_module_of_another_extension() {
-    run_with_host_files(
-        "thepackage",
-        r#"
-@external(webassembly, "./ffi.cjs", "add")
-fn add(a: Int, b: Int) -> Int
-
-pub fn main() {
-    let assert 3 = add(1, 2)
-}
-"#,
-        vec![],
-        &[("ffi.cjs", "exports.add = (a, b) => a + b;\n")],
-    );
-}
-
 #[test]
 fn host_strings() {
     run_with_host(

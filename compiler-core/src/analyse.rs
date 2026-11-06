@@ -37,6 +37,7 @@ use crate::{
     },
     uid::UniqueIdGenerator,
     warning::TypeWarningEmitter,
+    webassembly::ExternalModule,
 };
 use camino::Utf8PathBuf;
 use ecow::{EcoString, eco_format};
@@ -565,6 +566,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
         // Ensure that folks are not writing inline JavaScript expressions as
         // the implementation for JS externals.
         self.assert_valid_javascript_external(&name, external_javascript.as_ref(), location);
+        self.assert_valid_webassembly_external(&name, external_webassembly.as_ref());
 
         // Find the external implementation for the current target, if one has been given.
         let external = target_function_implementation(
@@ -869,6 +871,24 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
                 .error(Error::InvalidExternalJavascriptFunction {
                     location,
                     function: function.clone(),
+                    name: function_name.clone(),
+                });
+        }
+    }
+
+    fn assert_valid_webassembly_external(
+        &mut self,
+        function_name: &EcoString,
+        external_webassembly: Option<&(EcoString, EcoString, SrcSpan)>,
+    ) {
+        let Some((module, _, location)) = external_webassembly else {
+            return;
+        };
+        if ExternalModule::of(module, &self.package_config.name) == ExternalModule::Invalid {
+            self.problems
+                .error(Error::InvalidExternalWebAssemblyModule {
+                    location: *location,
+                    module: module.clone(),
                     name: function_name.clone(),
                 });
         }

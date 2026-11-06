@@ -1,0 +1,23 @@
+---
+source: compiler-core/src/type_/tests/externals.rs
+expression: "@external(erlang, \"one\", \"two\")\n@external(webassembly, \"./ffi.cjs\", \"add\")\npub fn add(a: Int, b: Int) -> Int\n"
+---
+----- SOURCE CODE
+@external(erlang, "one", "two")
+@external(webassembly, "./ffi.cjs", "add")
+pub fn add(a: Int, b: Int) -> Int
+
+
+----- ERROR
+error: Invalid WebAssembly module
+  ┌─ /src/one/two.gleam:2:1
+  │
+2 │ @external(webassembly, "./ffi.cjs", "add")
+  │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The function `add` has an external WebAssembly implementation in the module
+`./ffi.cjs`, which is neither a JavaScript module, ending in `.mjs` or
+`.js`, nor a module of the environment, with a plain name like `env`.
+
+Hint: To use another JavaScript module, write a `.mjs` module that
+re-exports it.

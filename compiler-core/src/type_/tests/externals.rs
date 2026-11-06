@@ -256,3 +256,56 @@ pub fn main() -> Int
         vec![("main", "fn() -> Int")]
     );
 }
+
+#[test]
+fn webassembly_external_of_a_commonjs_module() {
+    assert_module_error!(
+        r#"@external(erlang, "one", "two")
+@external(webassembly, "./ffi.cjs", "add")
+pub fn add(a: Int, b: Int) -> Int
+"#
+    );
+}
+
+#[test]
+fn webassembly_external_of_a_runtime_module_by_name() {
+    assert_module_error!(
+        r#"@external(erlang, "one", "two")
+@external(webassembly, "node:path", "basename")
+pub fn basename(path: String) -> String
+"#
+    );
+}
+
+#[test]
+fn webassembly_external_of_gleam_js_outside_the_runtime() {
+    assert_module_error!(
+        r#"@external(erlang, "one", "two")
+@external(webassembly, "gleam:js", "call")
+pub fn call(a: Int) -> Int
+"#
+    );
+}
+
+#[test]
+fn webassembly_external_of_a_javascript_or_environment_module() {
+    assert_module_infer!(
+        r#"@external(erlang, "one", "two")
+@external(webassembly, "./ffi.mjs", "add")
+pub fn add(a: Int, b: Int) -> Int
+
+@external(erlang, "one", "two")
+@external(webassembly, "../ffi.js", "sub")
+pub fn sub(a: Int, b: Int) -> Int
+
+@external(erlang, "one", "two")
+@external(webassembly, "wasi_snapshot_preview1", "proc_exit")
+pub fn exit(code: Int) -> Nil
+"#,
+        vec![
+            ("add", "fn(Int, Int) -> Int"),
+            ("exit", "fn(Int) -> Nil"),
+            ("sub", "fn(Int, Int) -> Int"),
+        ]
+    );
+}

@@ -1,0 +1,23 @@
+---
+source: compiler-core/src/type_/tests/externals.rs
+expression: "@external(erlang, \"one\", \"two\")\n@external(webassembly, \"gleam:js\", \"call\")\npub fn call(a: Int) -> Int\n"
+---
+----- SOURCE CODE
+@external(erlang, "one", "two")
+@external(webassembly, "gleam:js", "call")
+pub fn call(a: Int) -> Int
+
+
+----- ERROR
+error: Invalid WebAssembly module
+  ┌─ /src/one/two.gleam:2:1
+  │
+2 │ @external(webassembly, "gleam:js", "call")
+  │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The function `call` has an external WebAssembly implementation in the
+module `gleam:js`, which is neither a JavaScript module, ending in `.mjs`
+or `.js`, nor a module of the environment, with a plain name like `env`.
+
+Hint: To use another JavaScript module, write a `.mjs` module that
+re-exports it.
