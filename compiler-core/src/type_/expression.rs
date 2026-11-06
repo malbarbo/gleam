@@ -4651,8 +4651,9 @@ fn is_trusted_pure_module(environment: &Environment<'_>) -> bool {
         return false;
     }
 
-    // The gleam/io module has side effects
-    if environment.current_module == "gleam/io" {
+    // The gleam/io and gleam/wasm/memory modules have side effects
+    if environment.current_module == "gleam/io" || environment.current_module == "gleam/wasm/memory"
+    {
         return false;
     }
 
