@@ -50,6 +50,7 @@ pub type AnyRef
 /// `AnyRef` to `T`. Two values of the same type have tables with the same
 /// `name`. `fields` gives the fields that `decode.dict` and `decode.field`
 /// read, which only a value of the host has (see `dynamic_no_fields`).
+/// `view` opens one level of the value, see `dynamic_view`.
 pub type VTable {
   VTable(
     name: String,
@@ -58,7 +59,23 @@ pub type VTable {
     hash: fn(AnyRef) -> Int,
     inspect: fn(AnyRef) -> String,
     fields: fn(AnyRef) -> Result(Dict(Dynamic, Dynamic), Nil),
+    view: fn(AnyRef) -> Reflection,
   )
+}
+
+/// One level of a value in `DOther`. A label is `""` for a field without
+/// one.
+pub type Reflection {
+  RRecord(
+    module: String,
+    name: String,
+    constructor: String,
+    labels: Array(String),
+    fields: Array(Dynamic),
+    is_opaque: Bool,
+  )
+  RFunction(arity: Int)
+  RExternal(module: String, name: String)
 }
 
 // -- Constructors -------------------------------------------------------------
@@ -132,8 +149,34 @@ pub fn dynamic_other(
   hash: fn(AnyRef) -> Int,
   inspect: fn(AnyRef) -> String,
   fields: fn(AnyRef) -> Result(Dict(Dynamic, Dynamic), Nil),
+  view: fn(AnyRef) -> Reflection,
 ) -> Dynamic {
-  DOther(value, VTable(name:, classify:, equal:, hash:, inspect:, fields:))
+  DOther(
+    value,
+    VTable(name:, classify:, equal:, hash:, inspect:, fields:, view:),
+  )
+}
+
+/// Used by the `view` of a table for a value of a custom type.
+pub fn dynamic_record(
+  module: String,
+  name: String,
+  constructor: String,
+  labels: Array(String),
+  fields: Array(Dynamic),
+  is_opaque: Bool,
+) -> Reflection {
+  RRecord(module:, name:, constructor:, labels:, fields:, is_opaque:)
+}
+
+/// Used by the `view` of a table for a function.
+pub fn dynamic_function(arity: Int) -> Reflection {
+  RFunction(arity)
+}
+
+/// Used by the `view` of a table for a value without constructors.
+pub fn dynamic_external(module: String, name: String) -> Reflection {
+  RExternal(module, name)
 }
 
 /// The `fields` of the values that have none.
@@ -250,6 +293,59 @@ fn at(items: List(a), index: Int) -> Result(a, Nil) {
     [item, ..] if index == 0 -> Ok(item)
     [_, ..rest] if index > 0 -> at(rest, index - 1)
     _ -> Error(Nil)
+  }
+}
+
+/// Opens one level of `data`, calling the function for its kind. The
+/// standard library passes the constructors of its type, which the runtime
+/// cannot name. A list gives its first item and the rest, and a dict gives
+/// its first entry in the order of the hashes and the rest.
+pub fn dynamic_view(
+  data: Dynamic,
+  int: fn(Int) -> v,
+  float: fn(Float) -> v,
+  string: fn(String) -> v,
+  bool: fn(Bool) -> v,
+  nil: v,
+  bit_array: fn(Bits) -> v,
+  tuple: fn(List(Dynamic)) -> v,
+  empty: v,
+  cons: fn(Dynamic, Dynamic) -> v,
+  empty_dict: v,
+  entry: fn(Dynamic, Dynamic, Dynamic) -> v,
+  record: fn(String, String, String, List(String), List(Dynamic), Bool) -> v,
+  function: fn(Int) -> v,
+  external: fn(String, String) -> v,
+) -> v {
+  case data {
+    DInt(x) -> int(x)
+    DFloat(x) -> float(x)
+    DString(x) -> string(x)
+    DBool(x) -> bool(x)
+    DNil -> nil
+    DBitArray(x) -> bit_array(x)
+    DArray(items) -> tuple(array_to_list(items))
+    DList([]) -> empty
+    DList([first, ..rest]) -> cons(first, DList(rest))
+    DDict(x) ->
+      case dict.dict_first(x) {
+        Ok(#(key, value)) -> entry(key, value, DDict(dict.dict_delete(x, key)))
+        Error(Nil) -> empty_dict
+      }
+    DOther(x, vtable) ->
+      case vtable.view(x) {
+        RRecord(module:, name:, constructor:, labels:, fields:, is_opaque:) ->
+          record(
+            module,
+            name,
+            constructor,
+            array_to_list(labels),
+            array_to_list(fields),
+            is_opaque,
+          )
+        RFunction(arity) -> function(arity)
+        RExternal(module, name) -> external(module, name)
+      }
   }
 }
 

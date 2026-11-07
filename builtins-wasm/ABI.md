@@ -381,3 +381,4 @@ and `string_replace` with an empty pattern returns the input.
 | `dynamic_decode_list_items` | `fn(Dynamic) -> Result(List(Dynamic), Nil)` | lists and arrays |
 | `dynamic_decode_dict` | `fn(Dynamic) -> Result(Dict(Dynamic, Dynamic), Nil)` | |
 | `dynamic_index` | `fn(Dynamic, Dynamic) -> Result(Result(Dynamic, Nil), String)` | Erlang `index` semantics, with `Result(_, Nil)` for `Option`; constant time for arrays |
+| `dynamic_view` | `fn(Dynamic, fn(Int) -> v, ..., fn(String, String) -> v) -> v` | opens one level of the value and calls the function for its kind, see `runtime/dynamic.gleam`: a record gives its module, type, constructor, labels (`""` without one), fields and whether its type is opaque; a list gives its first item and the rest; a dict gives its first entry in the order of the hashes and the rest |

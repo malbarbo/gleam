@@ -533,6 +533,27 @@ fn entries_children(
   }
 }
 
+/// The first entry in trie order, or `Error(Nil)` when `champ` is empty.
+pub fn dict_first(champ: Dict(k, v)) -> Result(#(k, v), Nil) {
+  first_node(champ.root)
+}
+
+fn first_node(node: Node(k, v)) -> Result(#(k, v), Nil) {
+  case node {
+    Collision(entries: [Entry(key:, value:, ..), ..], ..) -> Ok(#(key, value))
+    Collision(entries: [], ..) -> Error(Nil)
+    Node(entries:, children:, ..) ->
+      case array_size(entries) > 0, array_size(children) > 0 {
+        True, _ -> {
+          let Entry(key:, value:, ..) = array_get(entries, 0)
+          Ok(#(key, value))
+        }
+        False, True -> first_node(array_get(children, 0))
+        False, False -> Error(Nil)
+      }
+  }
+}
+
 pub fn dict_to_list(champ: Dict(k, v)) -> List(#(k, v)) {
   to_list_loop(entries_of(champ), [])
 }

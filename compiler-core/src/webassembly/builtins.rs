@@ -51,6 +51,11 @@ pub(super) enum BuiltinFunction {
     DynamicEqual(TypeKey),
     DynamicHash(ValType, TypeKey),
     DynamicInspect(ValType, TypeKey),
+    /// The `view` of the table of a boxed `Dynamic` of type `T`, with the
+    /// representation of `Reflection`, and the `view` of one constructor of
+    /// `T`, with the representation of the constructor.
+    DynamicView(ValType, TypeKey),
+    ConstructorView(ValType, ValType, TypeKey),
     /// The conversion of a value of the host type `T` to JavaScript and
     /// back, with the representation of `T` (see `host.rs`).
     ToJs(ValType, TypeKey),
@@ -94,6 +99,8 @@ impl BuiltinFunction {
             BuiltinFunction::DynamicEqual(name) => format!("_dynamic_equal({name})").into(),
             BuiltinFunction::DynamicHash(_, name) => format!("_dynamic_hash({name})").into(),
             BuiltinFunction::DynamicInspect(_, name) => format!("_dynamic_inspect({name})").into(),
+            BuiltinFunction::DynamicView(_, name) => format!("_dynamic_view({name})").into(),
+            BuiltinFunction::ConstructorView(_, _, name) => format!("_view({name})").into(),
             BuiltinFunction::ToJs(_, name) => format!("_to_js({name})").into(),
             BuiltinFunction::FromJs(_, name) => format!("_from_js({name})").into(),
             BuiltinFunction::JsFields(_, name) => format!("_js_fields({name})").into(),
@@ -2201,7 +2208,7 @@ pub(super) type PendingFunction<'a> = (
 );
 
 /// The label of each field of `constructor`, `None` for a field without one.
-fn labels(constructor: &TypedRecordConstructor) -> Vec<Option<EcoString>> {
+pub(super) fn labels(constructor: &TypedRecordConstructor) -> Vec<Option<EcoString>> {
     constructor
         .arguments
         .iter()

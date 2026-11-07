@@ -7,7 +7,7 @@
 use super::{run_wasm, run_wasm_in};
 use crate::webassembly::runtime::RUNTIME_PACKAGE;
 
-const DICT: &str = r#"
+pub(super) const DICT: &str = r#"
 @external(webassembly, "builtins", "Dict")
 pub type Dict(key, value)
 

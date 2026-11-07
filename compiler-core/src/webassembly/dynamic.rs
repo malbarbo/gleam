@@ -9,8 +9,8 @@
 //! become their variant of `Dynamic`, with their items cast too. A
 //! `StringTree` is a string, as on JavaScript, and a `UtfCodepoint` an int,
 //! as on Erlang. Any other value is boxed in an `anyref`, with a table of
-//! functions generated for its type that cast it back to compare, hash and
-//! inspect it.
+//! functions generated for its type that cast it back to compare, hash,
+//! inspect and view it.
 
 use super::*;
 
@@ -69,6 +69,7 @@ enum Cast {
         hash: GlobalId,
         inspect: GlobalId,
         fields: GlobalId,
+        view: GlobalId,
         other: FunctionId,
     },
 }
@@ -204,6 +205,7 @@ impl<'a> Generator<'a> {
                 hash,
                 inspect,
                 fields,
+                view,
                 other,
             } => {
                 let _ = instructions.local_get(value);
@@ -217,6 +219,7 @@ impl<'a> Generator<'a> {
                     .global_get(hash)
                     .global_get(inspect)
                     .global_get(fields)
+                    .global_get(view)
                     .call(other)
             }
         };
@@ -407,6 +410,14 @@ impl<'a> Generator<'a> {
             )
         };
         let fields = self.closure_of(fields, &fields_type);
+        let reflection = self.runtime_named_type(DYNAMIC_MODULE, "Reflection", vec![]);
+        let builtin = BuiltinFunction::DynamicView(self.val_type(&reflection), TypeKey::new(type_));
+        let view = {
+            let type_ = type_.clone();
+            self.get_function_builtin(builtin, |s| s.code_dynamic_view(&type_))
+        };
+        let view_type = type_::fn_(vec![any_ref.clone()], reflection);
+        let view = self.closure_of(view, &view_type);
         let other = self.runtime_function_id(
             DYNAMIC_MODULE,
             "dynamic_other",
@@ -418,6 +429,7 @@ impl<'a> Generator<'a> {
                 type_::fn_(vec![any_ref.clone()], type_::int()),
                 type_::fn_(vec![any_ref], type_::string()),
                 fields_type,
+                view_type,
             ],
             dynamic.clone(),
         );
@@ -429,6 +441,7 @@ impl<'a> Generator<'a> {
             hash,
             inspect,
             fields,
+            view,
             other,
         }
     }
@@ -529,6 +542,311 @@ impl<'a> Generator<'a> {
         self.unbox_instructions(&mut instructions, type_);
         let _ = instructions.call(inspect).end();
         function.finish(self)
+    }
+
+    /// `(anyref) -> Reflection`: one level of a boxed value of type `T`, see
+    /// `dynamic_view` in the runtime.
+    fn code_dynamic_view(&mut self, type_: &Arc<Type>) -> FunctionId {
+        let reflection = self.runtime_named_type(DYNAMIC_MODULE, "Reflection", vec![]);
+        let reflection_vt = self.val_type(&reflection);
+        let value_vt = self.val_type(type_);
+        // params
+        let boxed = self.wasm_local(ANYREF);
+        // locals
+        let value = self.wasm_local(value_vt);
+        let mut function = Function::new(self, "_dynamic_view", &[boxed], &[reflection_vt]);
+        let mut instructions = function.extend_instructions(self);
+        let _ = instructions.local_get(boxed);
+        self.unbox_instructions(&mut instructions, type_);
+        let _ = instructions.local_set(value);
+        let custom_type = self.custom_type(type_).filter(|(custom_type, _)| {
+            matches!(
+                custom_type,
+                CustomType::Enum { .. } | CustomType::Struct { .. } | CustomType::Union { .. }
+            )
+        });
+        if let Some((arguments, _)) = type_.fn_types() {
+            let function = self.runtime_function_id(
+                DYNAMIC_MODULE,
+                "dynamic_function",
+                vec![type_::int()],
+                reflection.clone(),
+            );
+            let _ = instructions
+                .int_const(&arguments.len().into())
+                .call(function);
+        } else if let Some((custom_type, arguments)) = custom_type {
+            self.view_custom_type(&mut instructions, type_, value, &custom_type, &arguments);
+        } else {
+            let (module, name) = match type_.named_type_information() {
+                Some((module, name, _)) => (module, name),
+                None => (EcoString::new(), qualified_type_name(type_)),
+            };
+            let module = self.string_index(&module);
+            let name = self.string_index(&name);
+            let function = self.runtime_function_id(
+                DYNAMIC_MODULE,
+                "dynamic_external",
+                vec![type_::string(), type_::string()],
+                reflection.clone(),
+            );
+            let _ = instructions
+                .global_as_non_null(module)
+                .global_as_non_null(name)
+                .call(function);
+        }
+        let _ = instructions.end();
+        function.finish(self)
+    }
+
+    /// `[] -> [Reflection]`: the `view` of `value`, of the custom type
+    /// `type_`, which calls the `view` of its constructor.
+    fn view_custom_type(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        type_: &Arc<Type>,
+        value: LocalId,
+        custom_type: &CustomType,
+        arguments: &[Arc<Type>],
+    ) {
+        let reflection = self.runtime_named_type(DYNAMIC_MODULE, "Reflection", vec![]);
+        let reflection_vt = self.val_type(&reflection);
+        match custom_type {
+            CustomType::Enum { values } => {
+                let _ = instructions.block_(InstrSeqType::Simple(Some(reflection_vt)), |block| {
+                    let block_id = block.id();
+                    for (index, constructor) in values.iter().enumerate() {
+                        let _ = block.local_get(value).i32_const(index as i32).i32_eq().if_(
+                            InstrSeqType::Simple(None),
+                            |then_| {
+                                self.view_constant(then_, type_, constructor, &[]);
+                                let _ = then_.br(block_id);
+                            },
+                        );
+                    }
+                    let _ = block.unreachable();
+                });
+            }
+            CustomType::Struct {
+                custom_type,
+                constructor,
+            } => {
+                let (type_index, types) =
+                    self.mono_struct_type_index(type_, custom_type, constructor, arguments);
+                let fields = self.field_indices(&types);
+                let view = self.function_constructor_view(
+                    type_,
+                    type_index,
+                    0,
+                    constructor,
+                    fields,
+                    types,
+                );
+                let _ = instructions.local_get(value).call(view);
+            }
+            CustomType::Union { custom_type } => {
+                let supertype_index = self.mono_union_supertype_index(type_, custom_type);
+                let layout = self.union_layout(type_);
+                let mut views = vec![];
+                for (index, constructor) in custom_type.constructors.iter().enumerate() {
+                    let (_, type_index, types) =
+                        self.union_subtype_index(type_, custom_type, constructor, arguments);
+                    if layout.null_tag == Some(index) {
+                        let _ = instructions.local_get(value).ref_is_null().if_(
+                            InstrSeqType::Simple(None),
+                            |then_| {
+                                self.view_constant(then_, type_, &constructor.name, &types);
+                                let _ = then_.return_();
+                            },
+                        );
+                    } else {
+                        let fields = layout.fields(index).to_vec();
+                        let view = self.function_constructor_view(
+                            type_,
+                            type_index,
+                            index,
+                            constructor,
+                            fields,
+                            types,
+                        );
+                        views.push((index, type_index, view));
+                    }
+                }
+                if !layout.tagged {
+                    let (_, type_index, view) = views
+                        .into_iter()
+                        .exactly_one()
+                        .expect("one variant that is not null");
+                    let _ = instructions
+                        .local_get(value)
+                        .ref_cast_non_null(HeapType::Concrete(type_index))
+                        .call(view);
+                    return;
+                }
+                let tag = self.wasm_local(ValType::I32);
+                let _ = instructions
+                    .local_get(value)
+                    .ref_as_non_null()
+                    .struct_get(supertype_index, 0)
+                    .local_set(tag);
+                for (index, type_index, view) in views {
+                    let _ = instructions
+                        .local_get(tag)
+                        .i32_const(index as i32)
+                        .i32_eq()
+                        .if_(InstrSeqType::Simple(None), |then_| {
+                            let _ = then_
+                                .local_get(value)
+                                .ref_cast_non_null(HeapType::Concrete(type_index))
+                                .return_call(view);
+                        });
+                }
+                let _ = instructions.unreachable();
+            }
+            CustomType::External { .. } | CustomType::Runtime { .. } | CustomType::Array => {
+                panic!("a custom type with constructors")
+            }
+        }
+    }
+
+    /// `[] -> [Reflection]`: the `view` of a constructor whose fields all
+    /// have unit types, whose only value is `0`.
+    fn view_constant(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        type_: &Arc<Type>,
+        constructor: &EcoString,
+        types: &[Arc<Type>],
+    ) {
+        let casts = types
+            .iter()
+            .map(|type_| self.function_dynamic_cast(type_))
+            .collect_vec();
+        self.view_record_start(instructions, type_, constructor, &vec![None; types.len()]);
+        for cast in &casts {
+            let _ = instructions.i32_const(0).call(*cast);
+        }
+        self.view_record_end(instructions, type_, casts.len());
+    }
+
+    /// The `view` of the constructor at `index` of `type_`, whose values have
+    /// the struct `type_index`, with its fields at `fields`.
+    fn function_constructor_view(
+        &mut self,
+        type_: &Arc<Type>,
+        type_index: TypeId,
+        index: usize,
+        constructor: &TypedRecordConstructor,
+        fields: Vec<Option<u32>>,
+        types: Vec<Arc<Type>>,
+    ) -> FunctionId {
+        let reflection = self.runtime_named_type(DYNAMIC_MODULE, "Reflection", vec![]);
+        let builtin = BuiltinFunction::ConstructorView(
+            self.val_type_ref(type_index),
+            self.val_type(&reflection),
+            TypeKey::variant(type_, &constructor.name),
+        );
+        let constructor = constructor.clone();
+        let view_type = type_.clone();
+        self.get_function_constructor(builtin, type_, index, move |s| {
+            s.code_constructor_view(&view_type, type_index, &constructor, &fields, &types)
+        })
+    }
+
+    fn code_constructor_view(
+        &mut self,
+        type_: &Arc<Type>,
+        type_index: TypeId,
+        constructor: &TypedRecordConstructor,
+        fields: &[Option<u32>],
+        types: &[Arc<Type>],
+    ) -> FunctionId {
+        let reflection = self.runtime_named_type(DYNAMIC_MODULE, "Reflection", vec![]);
+        let reflection_vt = self.val_type(&reflection);
+        let value_vt = self.val_type_ref(type_index);
+        // params
+        let value = self.wasm_local(value_vt);
+        let mut function = Function::new(self, "_view", &[value], &[reflection_vt]);
+        let mut instructions = function.extend_instructions(self);
+        self.view_record_start(
+            &mut instructions,
+            type_,
+            &constructor.name,
+            &labels(constructor),
+        );
+        for (type_, field) in types.iter().zip(fields) {
+            let cast = self.function_dynamic_cast(type_);
+            let _ = instructions
+                .local_get(value)
+                .field_get(type_index, *field)
+                .call(cast);
+        }
+        self.view_record_end(&mut instructions, type_, types.len());
+        let _ = instructions.end();
+        function.finish(self)
+    }
+
+    /// `[] -> [String, String, String, Array(String)]`: the module, the
+    /// name, the constructor and the labels of a record, for
+    /// `view_record_end`.
+    fn view_record_start(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        type_: &Arc<Type>,
+        constructor: &EcoString,
+        labels: &[Option<EcoString>],
+    ) {
+        let (module, name, _) = type_
+            .named_type_information()
+            .expect("a custom type to have a name");
+        let module = self.string_index(&module);
+        let name = self.string_index(&name);
+        let constructor = self.string_index(constructor);
+        let labels = labels
+            .iter()
+            .map(|label| self.string_index(&label.clone().unwrap_or_default()))
+            .collect_vec();
+        let strings_index = self.array_type_index(&type_::string());
+        let _ = instructions
+            .global_as_non_null(module)
+            .global_as_non_null(name)
+            .global_as_non_null(constructor);
+        for label in &labels {
+            let _ = instructions.global_as_non_null(*label);
+        }
+        let _ = instructions.array_new_fixed(strings_index, labels.len() as u32);
+    }
+
+    /// `[String, String, String, Array(String), Dynamic...] -> [Reflection]`:
+    /// the record with the `size` fields on the stack.
+    fn view_record_end(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        type_: &Arc<Type>,
+        size: usize,
+    ) {
+        let dynamic = self.runtime_named_type(DYNAMIC_MODULE, "Dynamic", vec![]);
+        let reflection = self.runtime_named_type(DYNAMIC_MODULE, "Reflection", vec![]);
+        let dynamics_index = self.array_type_index(&dynamic);
+        let opaque = type_
+            .named_type_information()
+            .is_some_and(|(module, name, _)| self.opaque_types.contains(&(module, name)));
+        let array =
+            |element: Arc<Type>| self.runtime_named_type(ARRAY_MODULE, "Array", vec![element]);
+        let arguments = vec![
+            type_::string(),
+            type_::string(),
+            type_::string(),
+            array(type_::string()),
+            array(dynamic.clone()),
+            type_::bool(),
+        ];
+        let record =
+            self.runtime_function_id(DYNAMIC_MODULE, "dynamic_record", arguments, reflection);
+        let _ = instructions
+            .array_new_fixed(dynamics_index, size as u32)
+            .i32_const(i32::from(opaque))
+            .call(record);
     }
 
     /// `dynamic_from_array`, which makes a `Dynamic` of an array of `Dynamic`.

@@ -877,6 +877,8 @@ struct Generator<'a> {
     custom_type_definitions: Vec<CustomTypeDefinition>,
     types: HashMap<(EcoString, EcoString), CustomType>,
     variants: HashMap<(EcoString, EcoString), Variant>,
+    /// The module and the name of each opaque custom type, see `dynamic`.
+    opaque_types: HashSet<(EcoString, EcoString)>,
     local_functions: HashMap<SrcSpan, Rc<LocalFunction>>,
     specializations: Specializations,
     /// The closure singleton of each code function.
@@ -1003,6 +1005,7 @@ impl<'a> Generator<'a> {
             custom_type_definitions: Vec::new(),
             types: HashMap::new(),
             variants: HashMap::new(),
+            opaque_types: HashSet::new(),
             local_functions: HashMap::new(),
             specializations: Specializations::default(),
             closure_globals: HashMap::new(),
@@ -1464,6 +1467,10 @@ impl<'a> Generator<'a> {
             BuiltinFunction::DynamicEqual(_) => (vec![ANYREF, ANYREF], vec![BOOL_VALTYPE]),
             BuiltinFunction::DynamicHash(int, _) => (vec![ANYREF], vec![*int]),
             BuiltinFunction::DynamicInspect(string, _) => (vec![ANYREF], vec![*string]),
+            BuiltinFunction::DynamicView(reflection, _) => (vec![ANYREF], vec![*reflection]),
+            BuiltinFunction::ConstructorView(value, reflection, _) => {
+                (vec![*value], vec![*reflection])
+            }
             BuiltinFunction::ToJs(val_type, _) => (vec![*val_type], vec![EXTERNREF]),
             BuiltinFunction::FromJs(val_type, _) => (vec![EXTERNREF], vec![*val_type]),
             BuiltinFunction::JsFields(fields, _) => (vec![ANYREF], vec![*fields]),
@@ -2083,6 +2090,11 @@ String, String, String, Bool, Dynamic) -> b) -> b"
         types: impl IntoIterator<Item = (&'b TypedCustomType, &'b str)>,
     ) {
         for (custom_type, module_name) in types {
+            if custom_type.opaque {
+                let _ = self
+                    .opaque_types
+                    .insert((module_name.into(), custom_type.name.clone()));
+            }
             let mut is_union = false;
             let type_ = if custom_type
                 .constructors

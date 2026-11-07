@@ -667,3 +667,4 @@ mod strings;
 mod tail_calls;
 mod tuples;
 mod units;
+mod view;
