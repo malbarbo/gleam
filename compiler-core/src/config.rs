@@ -823,6 +823,10 @@ pub struct WebAssemblyConfig {
     /// `fn(Dynamic) -> String`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspect: Option<WasmFunction>,
+    /// The function that `_start` calls with `main`, instead of calling
+    /// `main`, with type `fn(fn() -> a) -> Nil`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<WasmFunction>,
     #[serde(default)]
     pub int_overflow: WasmIntOverflow,
     #[serde(default)]
@@ -849,6 +853,7 @@ impl Default for WebAssemblyConfig {
             assert: None,
             echo: None,
             inspect: None,
+            start: None,
             int_overflow: WasmIntOverflow::default(),
             stack_overflow: WasmStackOverflow::default(),
             stack_limit: default_stack_limit(),
@@ -1568,6 +1573,26 @@ inspect = { module = "my/show", function = "show" }
     );
     let config = toml::from_str::<PackageConfig>("name = \"one_two\"").unwrap();
     assert_eq!(config.webassembly.inspect, None);
+}
+
+#[test]
+fn webassembly_start() {
+    let input = r#"
+name = "one_two"
+
+[webassembly]
+start = { module = "my/run", function = "start" }
+"#;
+    let config = toml::from_str::<PackageConfig>(input).unwrap();
+    assert_eq!(
+        config.webassembly.start,
+        Some(WasmFunction {
+            module: "my/run".into(),
+            function: "start".into(),
+        })
+    );
+    let config = toml::from_str::<PackageConfig>("name = \"one_two\"").unwrap();
+    assert_eq!(config.webassembly.start, None);
 }
 
 #[test]

@@ -406,6 +406,7 @@ pub fn module(
         all_modules,
         &inspect_function_type(),
     )?;
+    let start_function = hook("start", &config.start, all_modules, &start_function_type())?;
     // The `assert`s of the package of the program, but not those of the
     // module of the function, which would call it again without end.
     let wrapped: Vec<TypedModule> = match &assert_function {
@@ -446,6 +447,7 @@ pub fn module(
         generator.runtime = runtime;
         generator.echo = echo_function.clone();
         generator.inspect = inspect_function.clone();
+        generator.start = start_function.clone();
         generator
     };
     match generator().compile()? {
@@ -479,8 +481,7 @@ fn assert_function(
     Ok(asserts::AssertFunction::new(assert, function.location))
 }
 
-/// The function of `echo = { module, function }` or of
-/// `inspect = { module, function }`.
+/// The function of `echo`, `inspect` or `start = { module, function }`.
 #[derive(Debug, Clone)]
 struct HookFunction {
     module: EcoString,
@@ -521,6 +522,16 @@ fn inspect_function_type() -> Arc<Type> {
     type_::fn_(
         vec![stdlib_type(DYNAMIC_STDLIB_MODULE, "Dynamic", vec![])],
         type_::string(),
+    )
+}
+
+/// `fn(fn() -> a) -> Nil`, the type of the function of
+/// `start = { module, function }`, where `a` is the type of the result of
+/// `main`.
+fn start_function_type() -> Arc<Type> {
+    type_::fn_(
+        vec![type_::fn_(vec![], type_::generic_var(0))],
+        type_::nil(),
     )
 }
 
@@ -567,7 +578,7 @@ fn hook_function<'a>(
         });
     };
     let type_ = function_type(function);
-    if !type_.same_as(expected) {
+    if !same_hook_type(&type_, expected) {
         return Err(Error::WrongHookFunctionSignature {
             option: option.into(),
             module: hook.module.clone(),
@@ -578,6 +589,32 @@ fn hook_function<'a>(
         });
     }
     Ok(function)
+}
+
+/// Returns `true` if `got` is `expected`, where a type variable of
+/// `expected` in a function type matches only a type variable, `false`
+/// otherwise. `same_as` would take any type for a type variable.
+fn same_hook_type(got: &Arc<Type>, expected: &Arc<Type>) -> bool {
+    let got = type_::collapse_links(got.clone());
+    let expected = type_::collapse_links(expected.clone());
+    match (&*got, &*expected) {
+        (Type::Var { .. }, Type::Var { .. }) => true,
+        (
+            Type::Fn { arguments, return_ },
+            Type::Fn {
+                arguments: expected_arguments,
+                return_: expected_return,
+            },
+        ) => {
+            arguments.len() == expected_arguments.len()
+                && arguments
+                    .iter()
+                    .zip(expected_arguments)
+                    .all(|(one, other)| same_hook_type(one, other))
+                && same_hook_type(return_, expected_return)
+        }
+        _ => got.same_as(&expected),
+    }
 }
 
 /// `module` and the modules it imports, directly or not: the modules of the
@@ -1071,6 +1108,11 @@ struct Generator<'a> {
     echo: Option<HookFunction>,
     /// The function that `string.inspect` calls, see `function_inspect_hook`.
     inspect: Option<HookFunction>,
+    /// The function that `_start` calls with `main`, see `code_command_start`.
+    start: Option<HookFunction>,
+    /// The function of `start`, used with the type of `main`, and the closure
+    /// of `main` that `_start` passes to it.
+    main_start: Option<(FunctionId, GlobalId)>,
     /// Whether the program runs in a JavaScript host, see `panic`: always
     /// with JavaScript strings, and otherwise when it calls a function of the
     /// host, which is guessed from the ones it declares and checked by
@@ -1176,6 +1218,8 @@ impl<'a> Generator<'a> {
             stack_depth: None,
             echo: None,
             inspect: None,
+            start: None,
+            main_start: None,
             javascript_host: config.string == WasmString::JsString
                 || imported_modules(module, all_modules)
                     .into_iter()
@@ -2146,12 +2190,13 @@ String, String, String, Bool, Dynamic) -> b) -> b"
             .imports
             .iter()
             .map(|i| i.module.clone())
-            // The program may not import the modules of the `echo` and
-            // `inspect` functions.
+            // The program may not import the modules of the `echo`,
+            // `inspect` and `start` functions.
             .chain(
                 self.echo
                     .iter()
                     .chain(&self.inspect)
+                    .chain(&self.start)
                     .map(|hook| hook.module.clone()),
             )
             .collect();
@@ -2576,7 +2621,8 @@ String, String, String, Bool, Dynamic) -> b) -> b"
                 let _ = self.wasm_module.exports.add(&base_name, id.func_id());
             }
             if is_main_funtion(function) {
-                self.main = Some(id.func_id())
+                self.main = Some(id.func_id());
+                self.main_start = self.main_start(id.func_id(), &type_);
             }
         }
     }
@@ -4478,6 +4524,23 @@ String, String, String, Bool, Dynamic) -> b) -> b"
                 name: reference.name.clone(),
             });
         }
+    }
+
+    /// The function of `start`, used with `main`, whose type is `type_`, and
+    /// the closure of `main`, when the config has `start`.
+    fn main_start(
+        &mut self,
+        main: FunctionId,
+        type_: &Arc<Type>,
+    ) -> Option<(FunctionId, GlobalId)> {
+        let start = self.start.clone()?;
+        let (_, result) = type_.fn_types().expect("the type of main");
+        let start_type =
+            Monomorphizer::with_variables_bound(&start.type_, &result).type_(&start.type_);
+        let function = self
+            .function_imported(&start.module, &start.name, &start_type)
+            .func_id();
+        Some((function, self.closure_of(main, type_)))
     }
 
     fn function_imported(

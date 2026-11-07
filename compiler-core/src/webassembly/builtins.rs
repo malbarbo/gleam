@@ -451,10 +451,10 @@ impl<'a> Generator<'a> {
     }
 
     /// Exports `_start`, the entry point of a WASI command, which calls
-    /// `main`. `main` is not called by the start function, so the hosts that
-    /// call `_start` or `main` after instantiating the module do not run it
-    /// twice. A failure that `main` does not catch is printed by
-    /// `_panic_exit`, see `panic`.
+    /// `main`, or the function of `start` with `main`. `main` is not called
+    /// by the start function, so the hosts that call `_start` or `main` after
+    /// instantiating the module do not run it twice. A failure that nothing
+    /// catches is printed by `_panic_exit`, see `panic`.
     fn code_command_start(&mut self) {
         let Some(main) = self.main else {
             return;
@@ -467,6 +467,13 @@ impl<'a> Generator<'a> {
             }
             _ => None,
         };
+        let main_start = self.main_start;
+        let call_main = |instructions: &mut Instructions<'_, '_>| {
+            let _ = match main_start {
+                Some((start, main)) => instructions.global_get(main).call(start).drop(),
+                None => instructions.call(main).drop(),
+            };
+        };
         let mut function = Function::new(self, "_start", &[], &[]);
         let mut instructions = function.extend_instructions(self);
         match uncaught {
@@ -477,14 +484,14 @@ impl<'a> Generator<'a> {
                         let catches = vec![walrus::ir::TryTableCatch::Catch { tag, label }];
                         let _ = caught
                             .try_table(None, catches, |body| {
-                                let _ = body.call(main).drop();
+                                call_main(body);
                             })
                             .return_();
                     })
                     .call(panic_exit);
             }
             None => {
-                let _ = instructions.call(main).drop();
+                call_main(&mut instructions);
             }
         }
         let _ = instructions.end();
