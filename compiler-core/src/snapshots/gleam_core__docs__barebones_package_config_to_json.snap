@@ -53,7 +53,9 @@ version = "1.0.0"
       "string": "UTF8",
       "opt_level": "0",
       "failure": "exit",
-      "int_overflow": "wrap"
+      "int_overflow": "wrap",
+      "stack_overflow": "trap",
+      "stack_limit": 10000
     },
     "target": "erlang",
     "internal_modules": null

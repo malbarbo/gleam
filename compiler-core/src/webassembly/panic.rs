@@ -31,7 +31,8 @@ use super::*;
 ///   expressions, `"function_call"` by a tuple of the arguments and
 ///   `"expression"` by the expression, each expression a tuple
 ///   `#(kind, value, start, end)`;
-/// - `panic`, `todo` and an `Int` overflow have none, `Nil`.
+/// - `panic`, `todo` and an overflow of an `Int` or of the stack have none,
+///   `Nil`.
 pub(super) enum Failure<'e> {
     Panic,
     Todo,
@@ -47,6 +48,8 @@ pub(super) enum Failure<'e> {
     },
     /// An `Int` operation whose result does not fit, see `overflow`.
     IntOverflow,
+    /// A call past the limit of the depth of the calls, see `stack`.
+    StackOverflow,
 }
 
 impl Failure<'_> {
@@ -58,6 +61,7 @@ impl Failure<'_> {
             Failure::LetAssert { .. } => "let_assert",
             Failure::Assert { .. } => "assert",
             Failure::IntOverflow => "int_overflow",
+            Failure::StackOverflow => "stack_overflow",
         }
     }
 
@@ -69,6 +73,7 @@ impl Failure<'_> {
             Failure::LetAssert { .. } => "Pattern match failed, no pattern matched the value.",
             Failure::Assert { .. } => "Assertion failed.",
             Failure::IntOverflow => "Int overflow.",
+            Failure::StackOverflow => "Stack overflow.",
         }
     }
 }
@@ -203,7 +208,7 @@ impl<'a> Generator<'a> {
             _ if !self.javascript_host => {
                 let _ = instructions.call(self.dynamic_nil());
             }
-            Failure::Panic | Failure::Todo | Failure::IntOverflow => {
+            Failure::Panic | Failure::Todo | Failure::IntOverflow | Failure::StackOverflow => {
                 let _ = instructions.call(self.dynamic_nil());
             }
             Failure::LetAssert {
@@ -530,8 +535,12 @@ impl<'a> Generator<'a> {
             let val_type = self.val_type(type_);
             self.wasm_local(val_type)
         });
+        // The depth of the calls goes back with the arena.
+        let stack_depth =
+            (self.stack_overflow == WasmStackOverflow::Fail).then(|| self.stack_depth().0);
         // locals
         let mark = self.wasm_local(ValType::I32);
+        let depth_mark = self.wasm_local(ValType::I32);
         let value = self.wasm_local(value_vt);
         let exception = self.wasm_local(ValType::Ref(RefType::EXNREF));
         let failure: Vec<_> = failure_vts
@@ -540,51 +549,56 @@ impl<'a> Generator<'a> {
             .collect();
         let mut function = Function::new(self, CATCH, &[run, ok, error], &[result_vt]);
         let mut instructions = function.extend_instructions(self);
-        let _ = instructions
-            .call(arena_mark)
-            .local_set(mark)
-            .block_(failure_seq, |caught| {
-                let caught_label = caught.id();
-                let _ = caught
-                    .block_(
-                        InstrSeqType::Simple(Some(ValType::Ref(RefType::EXNREF))),
-                        |other| {
-                            let catches = vec![
-                                walrus::ir::TryTableCatch::Catch {
-                                    tag,
-                                    label: caught_label,
-                                },
-                                walrus::ir::TryTableCatch::CatchAllRef { label: other.id() },
-                            ];
-                            let _ = other
-                                .try_table(InstrSeqType::Simple(Some(value_vt)), catches, |body| {
-                                    let _ = body
-                                        .local_get(run)
-                                        .local_get(run)
-                                        .struct_get(run_closure.type_index, 0)
-                                        .call_ref(run_closure.code_type_index);
-                                })
-                                .local_set(value)
-                                .local_get(ok)
-                                .local_get(value)
-                                .local_get(ok)
-                                .struct_get(ok_closure.type_index, 0)
-                                .return_call_ref(ok_closure.code_type_index);
-                        },
-                    )
-                    .local_set(exception)
-                    .local_get(mark)
-                    .call(arena_release)
-                    .local_get(exception)
-                    .throw_ref();
-            });
+        let _ = instructions.call(arena_mark).local_set(mark);
+        if let Some(depth) = stack_depth {
+            let _ = instructions.global_get(depth).local_set(depth_mark);
+        }
+        let restore_depth = |instructions: &mut Instructions<'_, '_>| {
+            if let Some(depth) = stack_depth {
+                let _ = instructions.local_get(depth_mark).global_set(depth);
+            }
+        };
+        let _ = instructions.block_(failure_seq, |caught| {
+            let caught_label = caught.id();
+            let _ = caught
+                .block_(
+                    InstrSeqType::Simple(Some(ValType::Ref(RefType::EXNREF))),
+                    |other| {
+                        let catches = vec![
+                            walrus::ir::TryTableCatch::Catch {
+                                tag,
+                                label: caught_label,
+                            },
+                            walrus::ir::TryTableCatch::CatchAllRef { label: other.id() },
+                        ];
+                        let _ = other
+                            .try_table(InstrSeqType::Simple(Some(value_vt)), catches, |body| {
+                                let _ = body
+                                    .local_get(run)
+                                    .local_get(run)
+                                    .struct_get(run_closure.type_index, 0)
+                                    .call_ref(run_closure.code_type_index);
+                            })
+                            .local_set(value)
+                            .local_get(ok)
+                            .local_get(value)
+                            .local_get(ok)
+                            .struct_get(ok_closure.type_index, 0)
+                            .return_call_ref(ok_closure.code_type_index);
+                    },
+                )
+                .local_set(exception)
+                .local_get(mark)
+                .call(arena_release);
+            restore_depth(caught);
+            let _ = caught.local_get(exception).throw_ref();
+        });
         for local in failure.iter().rev() {
             let _ = instructions.local_set(*local);
         }
-        let _ = instructions
-            .local_get(mark)
-            .call(arena_release)
-            .local_get(error);
+        let _ = instructions.local_get(mark).call(arena_release);
+        restore_depth(&mut instructions);
+        let _ = instructions.local_get(error);
         for local in &failure {
             let _ = instructions.local_get(*local);
         }

@@ -8,6 +8,9 @@ use super::*;
 pub(super) struct Function {
     fb: FunctionBuilder,
     params: Vec<LocalId>,
+    /// The depth of the calls, when the function counts itself in it, see
+    /// `stack`.
+    stack_depth: Option<GlobalId>,
 }
 
 impl Function {
@@ -26,7 +29,14 @@ impl Function {
         Function {
             fb,
             params: params.to_vec(),
+            stack_depth: None,
         }
+    }
+
+    /// Makes each tail call of the function take it out of the depth of the
+    /// calls `stack_depth`, see `stack`.
+    pub(super) fn count_stack_depth(&mut self, stack_depth: GlobalId) {
+        self.stack_depth = Some(stack_depth);
     }
 
     pub(super) fn extend_instructions<'a>(
@@ -42,6 +52,7 @@ impl Function {
                 string: generator.string,
                 cell: generator.cell,
                 memory: generator.memory,
+                stack_depth: self.stack_depth,
             },
             seq: SeqRef::Owned(self.fb.func_body()),
         }
@@ -71,6 +82,8 @@ pub(super) struct Representations {
     pub(super) cell: TypeId,
     /// The memory of builtins-wasm.
     pub(super) memory: Option<MemoryId>,
+    /// The depth of the calls, which a tail call decrements, see `stack`.
+    pub(super) stack_depth: Option<GlobalId>,
 }
 
 enum SeqRef<'a, 'b> {
@@ -148,6 +161,35 @@ impl<'a, 'b> Instructions<'a, 'b> {
     }
 
     /// Calls `function`, as a tail call when `tail`.
+    /// A tail call, which leaves the function, so it decrements the depth of
+    /// the calls first, and the function called counts itself.
+    pub(super) fn return_call(&mut self, function: FunctionId) -> &mut Self {
+        let _ = self.leave_stack_depth().seq.as_mut().return_call(function);
+        self
+    }
+
+    pub(super) fn return_call_ref(&mut self, type_index: TypeId) -> &mut Self {
+        let _ = self
+            .leave_stack_depth()
+            .seq
+            .as_mut()
+            .return_call_ref(type_index);
+        self
+    }
+
+    /// Decrements the depth of the calls, when the function counts itself in
+    /// it.
+    pub(super) fn leave_stack_depth(&mut self) -> &mut Self {
+        if let Some(depth) = self.repr.stack_depth {
+            let _ = self
+                .global_get(depth)
+                .i32_const(1)
+                .i32_sub()
+                .global_set(depth);
+        }
+        self
+    }
+
     pub(super) fn call_maybe_tail(&mut self, function: FunctionId, tail: bool) -> &mut Self {
         if tail {
             self.return_call(function)
@@ -707,8 +749,6 @@ impl<'a, 'b> Instructions<'a, 'b> {
         ref_eq(),
         call_ref(index: TypeId),
         call(index: FunctionId),
-        return_call_ref(index: TypeId),
-        return_call(index: FunctionId),
         array_new(type_index: TypeId),
         array_new_default(type_index: TypeId),
         array_new_fixed(type_index: TypeId, len: u32),

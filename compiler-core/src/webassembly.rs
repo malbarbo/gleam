@@ -23,6 +23,7 @@ mod panic;
 mod runtime;
 mod scope;
 mod specialization;
+mod stack;
 mod stdlib;
 mod string;
 #[cfg(test)]
@@ -94,7 +95,10 @@ use crate::{
         visit::{self, Visit},
     },
     build::Target,
-    config::{WasmFailure, WasmFloat, WasmInt, WasmIntOverflow, WasmString, WebAssemblyConfig},
+    config::{
+        WasmFailure, WasmFloat, WasmInt, WasmIntOverflow, WasmStackOverflow, WasmString,
+        WebAssemblyConfig,
+    },
     parse::LiteralFloatValue,
     strings::convert_string_escape_chars,
     type_::{
@@ -953,6 +957,11 @@ struct Generator<'a> {
     /// that check the operations, see `overflow`.
     int_overflow: WasmIntOverflow,
     checked_int: HashMap<IntOperation, FunctionId>,
+    /// What a call does when the stack has no room for it, and the globals
+    /// of the depth of the calls and of its limit, see `stack`.
+    stack_overflow: WasmStackOverflow,
+    stack_limit: u32,
+    stack_depth: Option<(GlobalId, GlobalId)>,
     /// Whether the program runs in a JavaScript host, see `panic`: always
     /// with JavaScript strings, and otherwise when it calls a function of the
     /// host, which is guessed from the ones it declares and checked by
@@ -1052,6 +1061,9 @@ impl<'a> Generator<'a> {
             state_global: None,
             int_overflow: config.int_overflow,
             checked_int: HashMap::new(),
+            stack_overflow: config.stack_overflow,
+            stack_limit: config.stack_limit,
+            stack_depth: None,
             javascript_host: config.string == WasmString::JsString
                 || imported_modules(module, all_modules)
                     .into_iter()
@@ -3969,12 +3981,24 @@ String, String, String, Bool, Dynamic) -> b) -> b"
         let locals = Locals::new(self, &function.arguments, &function.body);
         let param_ids = locals.param_ids();
         let mut code = Function::new(self, &name, &param_ids, &results);
+        let counts_stack_depth = self.counts_stack_depth();
+        if counts_stack_depth {
+            code.count_stack_depth(self.stack_depth().0);
+        }
         let mut instructions = code.extend_instructions(self);
         let scope = Scope::with_params(
             Scope::Global(self.globals.clone()),
             &function.arguments,
             &param_ids,
         );
+        if counts_stack_depth {
+            self.enter_stack_depth(
+                &mut instructions,
+                &locals,
+                scope.clone(),
+                function.location.start,
+            );
+        }
         self.statements(
             &mut instructions,
             scope.clone(),
@@ -3982,6 +4006,7 @@ String, String, String, Bool, Dynamic) -> b) -> b"
             &function.body,
             true,
         );
+        let _ = instructions.leave_stack_depth();
         self.record_return(&scope, index, &function.return_type, &function.body);
         self.local_functions = saved_local_functions;
         self.specialization = saved_specialization;

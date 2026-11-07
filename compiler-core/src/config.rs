@@ -797,7 +797,7 @@ pub struct JavaScriptConfig {
     pub deno: DenoConfig,
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Default, Clone)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct WebAssemblyConfig {
     #[serde(default)]
@@ -814,6 +814,46 @@ pub struct WebAssemblyConfig {
     pub assert: Option<WasmAssert>,
     #[serde(default)]
     pub int_overflow: WasmIntOverflow,
+    #[serde(default)]
+    pub stack_overflow: WasmStackOverflow,
+    /// The depth of the calls past which a call fails with
+    /// `stack_overflow = "fail"`, the initial value of the exported global
+    /// `_stack_limit`.
+    #[serde(default = "default_stack_limit")]
+    pub stack_limit: u32,
+}
+
+fn default_stack_limit() -> u32 {
+    10_000
+}
+
+impl Default for WebAssemblyConfig {
+    fn default() -> Self {
+        WebAssemblyConfig {
+            int: WasmInt::default(),
+            float: WasmFloat::default(),
+            string: WasmString::default(),
+            opt_level: WasmOptLevel::default(),
+            failure: WasmFailure::default(),
+            assert: None,
+            int_overflow: WasmIntOverflow::default(),
+            stack_overflow: WasmStackOverflow::default(),
+            stack_limit: default_stack_limit(),
+        }
+    }
+}
+
+/// What a call does when the stack has no room for it.
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy, Default)]
+pub enum WasmStackOverflow {
+    /// Traps, when the stack of the engine ends.
+    #[serde(rename = "trap")]
+    #[default]
+    Trap,
+    /// Fails like a `panic`, when the depth of the calls goes past
+    /// `stack_limit`.
+    #[serde(rename = "fail")]
+    Fail,
 }
 
 /// What an `Int` operation of the program does when its result does not fit
@@ -1489,6 +1529,23 @@ int_overflow = "fail"
     assert_eq!(config.webassembly.int_overflow, WasmIntOverflow::Fail);
     let config = toml::from_str::<PackageConfig>("name = \"one_two\"").unwrap();
     assert_eq!(config.webassembly.int_overflow, WasmIntOverflow::Wrap);
+}
+
+#[test]
+fn webassembly_stack_overflow() {
+    let input = r#"
+name = "one_two"
+
+[webassembly]
+stack_overflow = "fail"
+stack_limit = 100000
+"#;
+    let config = toml::from_str::<PackageConfig>(input).unwrap();
+    assert_eq!(config.webassembly.stack_overflow, WasmStackOverflow::Fail);
+    assert_eq!(config.webassembly.stack_limit, 100_000);
+    let config = toml::from_str::<PackageConfig>("name = \"one_two\"").unwrap();
+    assert_eq!(config.webassembly.stack_overflow, WasmStackOverflow::Trap);
+    assert_eq!(config.webassembly.stack_limit, 10_000);
 }
 
 /// The WebAssembly target has no shorthand, as the shorthands of the other

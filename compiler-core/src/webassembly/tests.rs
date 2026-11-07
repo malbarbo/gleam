@@ -660,6 +660,7 @@ mod numbers;
 mod overflow;
 mod runtime;
 mod specialization;
+mod stack;
 mod stdlib;
 mod strings;
 mod tail_calls;
