@@ -2301,25 +2301,31 @@ failure only raises an exception that can be caught with \
                         Some("Add `failure = \"exception\"` to `[webassembly]`.".into()),
                         None,
                     ),
-                    crate::webassembly::Error::UnknownAssertFunction { module, function } => (
-                        "Unknown assert function",
+                    crate::webassembly::Error::UnknownHookFunction {
+                        option,
+                        module,
+                        function,
+                    } => (
+                        "Unknown hook function",
                         wrap(&format!(
-                            "The `assert` option of the `[webassembly]` section of \
+                            "The `{option}` option of the `[webassembly]` section of \
 `gleam.toml` names the function `{module}.{function}`, but the program has no \
 public function with this name."
                         )),
                         None,
                         None,
                     ),
-                    crate::webassembly::Error::WrongAssertFunctionSignature {
+                    crate::webassembly::Error::WrongHookFunctionSignature {
+                        option,
                         module,
                         function,
                         location,
+                        expected,
                         got,
                     } => (
-                        "Wrong assert function signature",
+                        "Wrong hook function signature",
                         format!(
-                            "The function `{module}.{function}` of the `assert` option of the `[webassembly]` section of `gleam.toml` has an incorrect signature.\n\nExpected: fn(fn() -> Nil) -> Nil\n     Got: {got}"
+                            "The function `{module}.{function}` of the `{option}` option of the `[webassembly]` section of `gleam.toml` has an incorrect signature.\n\nExpected: {expected}\n     Got: {got}"
                         ),
                         None,
                         Some(*location),

@@ -810,8 +810,10 @@ pub struct WebAssemblyConfig {
     pub opt_level: WasmOptLevel,
     #[serde(default)]
     pub failure: WasmFailure,
+    /// The function that runs each `assert` of the root package, given to it
+    /// in an anonymous function, with type `fn(fn() -> Nil) -> Nil`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assert: Option<WasmAssert>,
+    pub assert: Option<WasmFunction>,
     #[serde(default)]
     pub int_overflow: WasmIntOverflow,
     #[serde(default)]
@@ -869,11 +871,11 @@ pub enum WasmIntOverflow {
     Fail,
 }
 
-/// The function that runs each `assert` of the root package, given to it in
-/// an anonymous function, with type `fn(fn() -> Nil) -> Nil`.
+/// A function of the program, by its module and name, like
+/// `{ module = "my/check", function = "run" }`.
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone)]
 #[serde(deny_unknown_fields)]
-pub struct WasmAssert {
+pub struct WasmFunction {
     pub module: EcoString,
     pub function: EcoString,
 }
@@ -1508,7 +1510,7 @@ assert = { module = "my/check", function = "run" }
     let config = toml::from_str::<PackageConfig>(input).unwrap();
     assert_eq!(
         config.webassembly.assert,
-        Some(WasmAssert {
+        Some(WasmFunction {
             module: "my/check".into(),
             function: "run".into(),
         })

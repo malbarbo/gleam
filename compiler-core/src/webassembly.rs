@@ -96,8 +96,8 @@ use crate::{
     },
     build::Target,
     config::{
-        WasmFailure, WasmFloat, WasmInt, WasmIntOverflow, WasmStackOverflow, WasmString,
-        WebAssemblyConfig,
+        WasmFailure, WasmFloat, WasmFunction, WasmInt, WasmIntOverflow, WasmStackOverflow,
+        WasmString, WebAssemblyConfig,
     },
     parse::LiteralFloatValue,
     strings::convert_string_escape_chars,
@@ -304,18 +304,21 @@ pub enum Error {
     },
     /// `assert = { module, function }` without `failure = "exception"`.
     AssertWithoutException,
-    /// `assert = { module, function }` names a function that is not public
-    /// in a module of the program.
-    UnknownAssertFunction {
+    /// The `option = { module, function }` of `[webassembly]` names a
+    /// function that is not public in a module of the program.
+    UnknownHookFunction {
+        option: EcoString,
         module: EcoString,
         function: EcoString,
     },
-    /// The function of `assert = { module, function }`, at `location` in
-    /// `module`, does not have the type `fn(fn() -> Nil) -> Nil`.
-    WrongAssertFunctionSignature {
+    /// The function of `option = { module, function }`, at `location` in
+    /// `module`, does not have the type `expected`.
+    WrongHookFunctionSignature {
+        option: EcoString,
         module: EcoString,
         function: EcoString,
         location: SrcSpan,
+        expected: EcoString,
         got: EcoString,
     },
 }
@@ -335,7 +338,7 @@ impl Error {
             }
             | Error::GenericLocalVariable { module, .. }
             | Error::CatchWithoutException { module, .. }
-            | Error::WrongAssertFunctionSignature { module, .. }
+            | Error::WrongHookFunctionSignature { module, .. }
             | Error::IntLiteralOutOfRange { module, .. }
             | Error::FloatLiteralOutOfRange { module, .. } => Some(module),
             Error::ReservedModuleName { name } => Some(name),
@@ -354,7 +357,7 @@ impl Error {
                 definition: None, ..
             }
             | Error::AssertWithoutException
-            | Error::UnknownAssertFunction { .. } => None,
+            | Error::UnknownHookFunction { .. } => None,
         }
     }
 }
@@ -441,40 +444,60 @@ pub fn module(
     }
 }
 
-/// The function of `assert = { module, function }`, which must be public and
-/// have the type `fn(fn() -> Nil) -> Nil`.
+/// The function of `assert = { module, function }`, which must have the
+/// type `fn(fn() -> Nil) -> Nil`.
 fn assert_function(
-    assert: &crate::config::WasmAssert,
+    assert: &WasmFunction,
     all_modules: &HashMap<EcoString, &TypedModule>,
     failure: WasmFailure,
 ) -> Result<asserts::AssertFunction, Error> {
     if failure != WasmFailure::Exception {
         return Err(Error::AssertWithoutException);
     }
-    let function = all_modules.get(&assert.module).and_then(|module| {
+    let function = hook_function(
+        "assert",
+        assert,
+        all_modules,
+        &asserts::assert_function_type(),
+    )?;
+    Ok(asserts::AssertFunction::new(assert, function.location))
+}
+
+/// The function of `option = { module, function }` of `[webassembly]`,
+/// which must be public and have the type `expected`.
+fn hook_function<'a>(
+    option: &str,
+    hook: &WasmFunction,
+    all_modules: &HashMap<EcoString, &'a TypedModule>,
+    expected: &Arc<Type>,
+) -> Result<&'a TypedFunction, Error> {
+    let function = all_modules.get(&hook.module).and_then(|module| {
         module
             .definitions
             .functions
             .iter()
-            .find(|f| function_name(f) == &assert.function && f.publicity.is_importable())
+            .find(|f| function_name(f) == &hook.function && f.publicity.is_importable())
             .map(|f| (module, f))
     });
     let Some((module, function)) = function else {
-        return Err(Error::UnknownAssertFunction {
-            module: assert.module.clone(),
-            function: assert.function.clone(),
+        return Err(Error::UnknownHookFunction {
+            option: option.into(),
+            module: hook.module.clone(),
+            function: hook.function.clone(),
         });
     };
     let type_ = function_type(function);
-    if !type_.same_as(&asserts::assert_function_type()) {
-        return Err(Error::WrongAssertFunctionSignature {
-            module: assert.module.clone(),
-            function: assert.function.clone(),
+    if !type_.same_as(expected) {
+        return Err(Error::WrongHookFunctionSignature {
+            option: option.into(),
+            module: hook.module.clone(),
+            function: hook.function.clone(),
             location: function.location,
+            expected: type_pretty_name(&module.names, expected),
             got: type_pretty_name(&module.names, &type_),
         });
     }
-    Ok(asserts::AssertFunction::new(assert, function.location))
+    Ok(function)
 }
 
 /// `module` and the modules it imports, directly or not: the modules of the

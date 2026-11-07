@@ -17,7 +17,7 @@ use crate::{
         CallArg, FunctionLiteralKind, Import, Module, Statement, TypedAssert, TypedDefinitions,
         TypedExpr, TypedModule, TypedStatement,
     },
-    config::WasmAssert,
+    config::WasmFunction,
     type_::{self, ModuleValueConstructor, Type, expression::Purity},
 };
 
@@ -30,7 +30,7 @@ pub(super) struct AssertFunction {
 }
 
 impl AssertFunction {
-    pub(super) fn new(assert: &WasmAssert, location: SrcSpan) -> Self {
+    pub(super) fn new(assert: &WasmFunction, location: SrcSpan) -> Self {
         AssertFunction {
             module: assert.module.clone(),
             name: assert.function.clone(),

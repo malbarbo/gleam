@@ -4,13 +4,13 @@
 //! `assert = { module, function }`, see `asserts`.
 
 use super::{TEST_PACKAGE, WasmOutput, codegen_in, run_wasm_in};
-use crate::config::{WasmAssert, WasmFailure, WebAssemblyConfig};
+use crate::config::{WasmFailure, WasmFunction, WebAssemblyConfig};
 use crate::webassembly::Error;
 
 fn config() -> WebAssemblyConfig {
     WebAssemblyConfig {
         failure: WasmFailure::Exception,
-        assert: Some(WasmAssert {
+        assert: Some(WasmFunction {
             module: "my/check".into(),
             function: "run".into(),
         }),
@@ -217,7 +217,7 @@ fn unknown_assert_function() {
         "fn run(assertion: fn() -> Nil) -> Nil { assertion() }",
     );
     assert!(
-        matches!(error, Error::UnknownAssertFunction { .. }),
+        matches!(error, Error::UnknownHookFunction { .. }),
         "got {error:?}"
     );
 }
@@ -226,7 +226,7 @@ fn unknown_assert_function() {
 fn wrong_assert_function_signature() {
     let error = codegen_error(config(), "pub fn run(assertion: fn() -> Nil) -> Int { 1 }");
     assert!(
-        matches!(error, Error::WrongAssertFunctionSignature { .. }),
+        matches!(error, Error::WrongHookFunctionSignature { .. }),
         "got {error:?}"
     );
 }
