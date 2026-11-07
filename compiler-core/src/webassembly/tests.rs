@@ -652,6 +652,7 @@ mod functions;
 mod global;
 mod glue;
 mod host;
+mod inspect_hook;
 mod js_strings;
 mod link;
 mod lists;

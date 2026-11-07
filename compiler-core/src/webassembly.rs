@@ -217,8 +217,8 @@ const ERROR_GENERIC_ID: u64 = u64::MAX - 1;
 /// The module of `Option`, in the type of the `echo` function.
 const OPTION_MODULE: &str = "gleam/option";
 
-/// The module of `Dynamic` in the standard library, in the type of the
-/// `echo` function.
+/// The module of `Dynamic` in the standard library, in the types of the
+/// `echo` and `inspect` functions.
 const DYNAMIC_STDLIB_MODULE: &str = "gleam/dynamic";
 
 const LIST_ITEM_GENERIC_ID: u64 = u64::MAX - 2;
@@ -400,6 +400,12 @@ pub fn module(
         None => None,
     };
     let echo_function = hook("echo", &config.echo, all_modules, &echo_function_type())?;
+    let inspect_function = hook(
+        "inspect",
+        &config.inspect,
+        all_modules,
+        &inspect_function_type(),
+    )?;
     // The `assert`s of the package of the program, but not those of the
     // module of the function, which would call it again without end.
     let wrapped: Vec<TypedModule> = match &assert_function {
@@ -439,6 +445,7 @@ pub fn module(
         );
         generator.runtime = runtime;
         generator.echo = echo_function.clone();
+        generator.inspect = inspect_function.clone();
         generator
     };
     match generator().compile()? {
@@ -472,7 +479,8 @@ fn assert_function(
     Ok(asserts::AssertFunction::new(assert, function.location))
 }
 
-/// The function of `echo = { module, function }`, which each `echo` calls.
+/// The function of `echo = { module, function }` or of
+/// `inspect = { module, function }`.
 #[derive(Debug, Clone)]
 struct HookFunction {
     module: EcoString,
@@ -504,6 +512,15 @@ fn echo_function_type() -> Arc<Type> {
             stdlib_type(DYNAMIC_STDLIB_MODULE, "Dynamic", vec![]),
         ],
         type_::nil(),
+    )
+}
+
+/// `fn(Dynamic) -> String`, the type of the function of
+/// `inspect = { module, function }`.
+fn inspect_function_type() -> Arc<Type> {
+    type_::fn_(
+        vec![stdlib_type(DYNAMIC_STDLIB_MODULE, "Dynamic", vec![])],
+        type_::string(),
     )
 }
 
@@ -1052,6 +1069,8 @@ struct Generator<'a> {
     stack_depth: Option<(GlobalId, GlobalId)>,
     /// The function that each `echo` calls, see `expression_echo_hook`.
     echo: Option<HookFunction>,
+    /// The function that `string.inspect` calls, see `function_inspect_hook`.
+    inspect: Option<HookFunction>,
     /// Whether the program runs in a JavaScript host, see `panic`: always
     /// with JavaScript strings, and otherwise when it calls a function of the
     /// host, which is guessed from the ones it declares and checked by
@@ -1156,6 +1175,7 @@ impl<'a> Generator<'a> {
             stack_limit: config.stack_limit,
             stack_depth: None,
             echo: None,
+            inspect: None,
             javascript_host: config.string == WasmString::JsString
                 || imported_modules(module, all_modules)
                     .into_iter()
@@ -1540,7 +1560,7 @@ impl<'a> Generator<'a> {
             BuiltinFunction::VariantConstructor(params, return_, _) => {
                 (params.clone(), vec![*return_])
             }
-            BuiltinFunction::Inspect(val_type, _) => {
+            BuiltinFunction::Inspect(val_type, _) | BuiltinFunction::InspectHook(val_type, _) => {
                 (vec![*val_type], vec![self.string.val_type()])
             }
             BuiltinFunction::Hash(val_type, _) => (vec![*val_type], vec![ValType::I32]),
@@ -2126,8 +2146,14 @@ String, String, String, Bool, Dynamic) -> b) -> b"
             .imports
             .iter()
             .map(|i| i.module.clone())
-            // The program may not import the module of the `echo` function.
-            .chain(self.echo.iter().map(|echo| echo.module.clone()))
+            // The program may not import the modules of the `echo` and
+            // `inspect` functions.
+            .chain(
+                self.echo
+                    .iter()
+                    .chain(&self.inspect)
+                    .map(|hook| hook.module.clone()),
+            )
             .collect();
 
         while let Some(name) = queue.pop() {
@@ -4507,6 +4533,13 @@ String, String, String, Bool, Dynamic) -> b) -> b"
             return self.function_rust(fname, &function_type(function));
         }
         if fname == INSPECT {
+            // The runtime shows a value with its own text, see `inspect` of
+            // `dynamic`.
+            if let Some(hook) = self.inspect.clone()
+                && self.module_package(module) != RUNTIME_PACKAGE
+            {
+                return self.function_inspect_hook(required_type, hook);
+            }
             return self.function_inspect(required_type);
         }
         if fname == HASH {

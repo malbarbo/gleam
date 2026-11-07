@@ -819,6 +819,10 @@ pub struct WebAssemblyConfig {
     /// and the line of the `echo`, its message and its value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub echo: Option<WasmFunction>,
+    /// The function that `string.inspect` calls, with type
+    /// `fn(Dynamic) -> String`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspect: Option<WasmFunction>,
     #[serde(default)]
     pub int_overflow: WasmIntOverflow,
     #[serde(default)]
@@ -844,6 +848,7 @@ impl Default for WebAssemblyConfig {
             failure: WasmFailure::default(),
             assert: None,
             echo: None,
+            inspect: None,
             int_overflow: WasmIntOverflow::default(),
             stack_overflow: WasmStackOverflow::default(),
             stack_limit: default_stack_limit(),
@@ -1543,6 +1548,26 @@ echo = { module = "my/debug", function = "print" }
     );
     let config = toml::from_str::<PackageConfig>("name = \"one_two\"").unwrap();
     assert_eq!(config.webassembly.echo, None);
+}
+
+#[test]
+fn webassembly_inspect() {
+    let input = r#"
+name = "one_two"
+
+[webassembly]
+inspect = { module = "my/show", function = "show" }
+"#;
+    let config = toml::from_str::<PackageConfig>(input).unwrap();
+    assert_eq!(
+        config.webassembly.inspect,
+        Some(WasmFunction {
+            module: "my/show".into(),
+            function: "show".into(),
+        })
+    );
+    let config = toml::from_str::<PackageConfig>("name = \"one_two\"").unwrap();
+    assert_eq!(config.webassembly.inspect, None);
 }
 
 #[test]

@@ -38,6 +38,7 @@ pub(super) enum BuiltinFunction {
     CustomTypeRepr(ValType, TypeKey),
     VariantConstructor(Vec<ValType>, ValType, TypeKey),
     Inspect(ValType, TypeKey),
+    InspectHook(ValType, TypeKey),
     Hash(ValType, TypeKey),
     HashInto(ValType, TypeKey),
     HashExternal(ValType, TypeKey),
@@ -90,6 +91,7 @@ impl BuiltinFunction {
             BuiltinFunction::CustomTypeRepr(_, name) => format!("_repr({name})").into(),
             BuiltinFunction::VariantConstructor(_, _, name) => format!("_create({name})").into(),
             BuiltinFunction::Inspect(_, name) => format!("_inspect({name})").into(),
+            BuiltinFunction::InspectHook(_, name) => format!("_inspect_hook({name})").into(),
             BuiltinFunction::Hash(_, name) => format!("_hash({name})").into(),
             BuiltinFunction::HashInto(_, name) => format!("_hash_into({name})").into(),
             BuiltinFunction::HashExternal(_, name) => format!("_hash_int({name})").into(),
@@ -1039,6 +1041,38 @@ impl<'a> Generator<'a> {
         let builtin = BuiltinFunction::Inspect(self.val_type(&arg_type), TypeKey::new(&arg_type));
         let name = builtin.name();
         let index = self.get_function_builtin(builtin, |s| s.code_inspect(&arg_type));
+        let _ = self.add_function_to_globals(name.clone(), index);
+        Id::func(name, index)
+    }
+
+    /// `string.inspect` with `inspect = { module, function }`, the call of
+    /// the function with the value as `Dynamic`.
+    pub(super) fn function_inspect_hook(&mut self, fn_type: &Arc<Type>, hook: HookFunction) -> Id {
+        let (params, _) = fn_type.fn_types().expect("inspect must be a function type");
+        let arg_type = params
+            .into_iter()
+            .next()
+            .expect("inspect takes one argument");
+        let builtin =
+            BuiltinFunction::InspectHook(self.val_type(&arg_type), TypeKey::new(&arg_type));
+        let name = builtin.name();
+        let index = self.get_function_builtin(builtin, |s| {
+            let cast = s.function_dynamic_cast(&arg_type);
+            let function = s
+                .function_imported(&hook.module, &hook.name, &hook.type_)
+                .func_id();
+            let arg_vt = s.val_type(&arg_type);
+            let value = s.wasm_local(arg_vt);
+            let string_vt = s.string.val_type();
+            let mut code = Function::new(s, "_inspect", &[value], &[string_vt]);
+            let _ = code
+                .extend_instructions(s)
+                .local_get(value)
+                .call(cast)
+                .call(function)
+                .end();
+            code.finish(s)
+        });
         let _ = self.add_function_to_globals(name.clone(), index);
         Id::func(name, index)
     }
