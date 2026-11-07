@@ -645,6 +645,7 @@ mod environment;
 mod errors;
 mod fail;
 mod failure;
+mod fixed_width;
 mod function_fields;
 mod functions;
 mod global;

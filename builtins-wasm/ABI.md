@@ -230,6 +230,20 @@ Generated wasm, no linear memory. `Int` and `Float` follow the configured width.
 | `_int_bitwise_shift_right` | `fn(Int, Int) -> Int` | arithmetic; shift ≥ width gives 0 or -1; negative shift is a left shift |
 | `_int_to_float` | `fn(Int) -> Float` | `convert_s` |
 
+**I32 and I64**
+
+The operations of the wasm numbers, which wrap at their width with any
+`Int` and with `int_overflow = "fail"`. `iN` is `i32` or `i64`, and `IN` its
+type.
+
+| Name | Gleam type | Semantics |
+|---|---|---|
+| `_iN_add` / `_sub` / `_mul` | `fn(IN, IN) -> IN` | one instruction, modulo 2^N |
+| `_iN_and` / `_or` / `_xor` | `fn(IN, IN) -> IN` | one instruction |
+| `_iN_shift_left` | `fn(IN, Int) -> IN` | `shl`; the amount is modulo N |
+| `_iN_shift_right` | `fn(IN, Int) -> IN` | `shr_s`; the amount is modulo N |
+| `_iN_shift_right_unsigned` | `fn(IN, Int) -> IN` | `shr_u`; the amount is modulo N |
+
 **Float**
 
 | Name | Gleam type | Semantics |

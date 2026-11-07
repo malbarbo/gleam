@@ -129,6 +129,42 @@ pub(super) enum BuiltinFunctionExternal {
     F64ToFloat,
     #[strum(serialize = "_float_to_f64")]
     FloatToF64,
+    #[strum(serialize = "_i32_add")]
+    I32Add,
+    #[strum(serialize = "_i32_sub")]
+    I32Sub,
+    #[strum(serialize = "_i32_mul")]
+    I32Mul,
+    #[strum(serialize = "_i32_and")]
+    I32And,
+    #[strum(serialize = "_i32_or")]
+    I32Or,
+    #[strum(serialize = "_i32_xor")]
+    I32Xor,
+    #[strum(serialize = "_i32_shift_left")]
+    I32ShiftLeft,
+    #[strum(serialize = "_i32_shift_right")]
+    I32ShiftRight,
+    #[strum(serialize = "_i32_shift_right_unsigned")]
+    I32ShiftRightUnsigned,
+    #[strum(serialize = "_i64_add")]
+    I64Add,
+    #[strum(serialize = "_i64_sub")]
+    I64Sub,
+    #[strum(serialize = "_i64_mul")]
+    I64Mul,
+    #[strum(serialize = "_i64_and")]
+    I64And,
+    #[strum(serialize = "_i64_or")]
+    I64Or,
+    #[strum(serialize = "_i64_xor")]
+    I64Xor,
+    #[strum(serialize = "_i64_shift_left")]
+    I64ShiftLeft,
+    #[strum(serialize = "_i64_shift_right")]
+    I64ShiftRight,
+    #[strum(serialize = "_i64_shift_right_unsigned")]
+    I64ShiftRightUnsigned,
     #[strum(serialize = "_repr_int")]
     IntRepr,
     #[strum(serialize = "_repr_float")]
@@ -286,6 +322,18 @@ impl BuiltinFunctionExternal {
             B::FloatToF32 => return (vec![float().into()], ext("F32")),
             B::F64ToFloat => return (vec![ext("F64")], float().into()),
             B::FloatToF64 => return (vec![float().into()], ext("F64")),
+            B::I32Add | B::I32Sub | B::I32Mul | B::I32And | B::I32Or | B::I32Xor => {
+                return (vec![ext("I32"), ext("I32")], ext("I32"));
+            }
+            B::I32ShiftLeft | B::I32ShiftRight | B::I32ShiftRightUnsigned => {
+                return (vec![ext("I32"), int().into()], ext("I32"));
+            }
+            B::I64Add | B::I64Sub | B::I64Mul | B::I64And | B::I64Or | B::I64Xor => {
+                return (vec![ext("I64"), ext("I64")], ext("I64"));
+            }
+            B::I64ShiftLeft | B::I64ShiftRight | B::I64ShiftRightUnsigned => {
+                return (vec![ext("I64"), int().into()], ext("I64"));
+            }
             B::IntRepr => return (vec![int().into(), ext("I32")], ext("I32")),
             B::FloatRepr => return (vec![float().into(), ext("I32")], ext("I32")),
             B::UtfCodepointRepr => return (vec![utf_codepoint().into(), ext("I32")], ext("I32")),

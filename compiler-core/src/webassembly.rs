@@ -6477,6 +6477,24 @@ String, String, String, Bool, Dynamic) -> b) -> b"
             | BuiltinFunctionExternal::FloatToF32
             | BuiltinFunctionExternal::F64ToFloat
             | BuiltinFunctionExternal::FloatToF64
+            | BuiltinFunctionExternal::I32Add
+            | BuiltinFunctionExternal::I32Sub
+            | BuiltinFunctionExternal::I32Mul
+            | BuiltinFunctionExternal::I32And
+            | BuiltinFunctionExternal::I32Or
+            | BuiltinFunctionExternal::I32Xor
+            | BuiltinFunctionExternal::I32ShiftLeft
+            | BuiltinFunctionExternal::I32ShiftRight
+            | BuiltinFunctionExternal::I32ShiftRightUnsigned
+            | BuiltinFunctionExternal::I64Add
+            | BuiltinFunctionExternal::I64Sub
+            | BuiltinFunctionExternal::I64Mul
+            | BuiltinFunctionExternal::I64And
+            | BuiltinFunctionExternal::I64Or
+            | BuiltinFunctionExternal::I64Xor
+            | BuiltinFunctionExternal::I64ShiftLeft
+            | BuiltinFunctionExternal::I64ShiftRight
+            | BuiltinFunctionExternal::I64ShiftRightUnsigned
             | BuiltinFunctionExternal::IntBitwiseAnd
             | BuiltinFunctionExternal::IntBitwiseOr
             | BuiltinFunctionExternal::IntBitwiseExclusiveOr

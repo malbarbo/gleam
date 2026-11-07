@@ -788,12 +788,14 @@ impl<'a, 'b> Instructions<'a, 'b> {
     binop!(i32_and, I32And);
     binop!(i32_or, I32Or);
     binop!(i32_shl, I32Shl);
+    binop!(i32_shr_s, I32ShrS);
     binop!(i32_shr_u, I32ShrU);
     binop!(i32_xor, I32Xor);
     binop!(i32_div_s, I32DivS);
     binop!(i64_ne, I64Ne);
     binop!(i64_add, I64Add);
     binop!(i64_sub, I64Sub);
+    binop!(i64_mul, I64Mul);
     binop!(i64_xor, I64Xor);
     binop!(i64_le_s, I64LeS);
     binop!(i64_shr_s, I64ShrS);
