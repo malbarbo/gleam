@@ -318,6 +318,14 @@ that can be changed, `(struct (field (mut i64)))`, only for the runtime)
 | `_cell_get` | `fn(Cell) -> Int` | `struct.get` |
 | `_cell_set` | `fn(Cell, Int) -> Nil` | `struct.set` |
 
+**Global** (one mutable global of the program, a nullable `Dynamic`, where
+`gleam/wasm/global` keeps its state)
+
+| Name | Gleam type | Semantics |
+|---|---|---|
+| `_global_get` | `fn() -> Dynamic` | the value of the global, or `Nil` before the first `_global_set` |
+| `_global_set` | `fn(Dynamic) -> Nil` | sets the global |
+
 ## Runtime in Gleam
 
 The types that wasm does not have are written in Gleam, in

@@ -291,7 +291,7 @@ impl<'a> Generator<'a> {
         let _ = instructions.array_new_fixed(array, size).call(from_array);
     }
 
-    fn dynamic_nil(&mut self) -> FunctionId {
+    pub(super) fn dynamic_nil(&mut self) -> FunctionId {
         let dynamic = self.runtime_named_type(DYNAMIC_MODULE, "Dynamic", vec![]);
         self.runtime_function_id(DYNAMIC_MODULE, "dynamic_nil", vec![], dynamic)
     }

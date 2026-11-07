@@ -196,3 +196,29 @@ pub fn main() {
         "got {error:?}"
     );
 }
+
+/// The global keeps what `run` set before it failed.
+#[test]
+fn catch_keeps_the_global() {
+    run_exception_ok(
+        r#"
+@external(webassembly, "builtins", "_global_get")
+fn global_get() -> Dynamic
+@external(webassembly, "builtins", "_global_set")
+fn global_set(value: Dynamic) -> Nil
+@external(webassembly, "builtins", "dynamic_int")
+fn int(value: Int) -> Dynamic
+@external(webassembly, "builtins", "dynamic_decode_int")
+fn decode_int(data: Dynamic) -> Result(Int, Int)
+
+pub fn main() {
+  let _ =
+    catch(fn() {
+      global_set(int(1))
+      panic
+    })
+  assert decode_int(global_get()) == Ok(1)
+}
+"#,
+    );
+}

@@ -8,6 +8,7 @@ mod builtins;
 mod captures;
 mod dynamic;
 mod environment;
+mod global;
 mod glue;
 mod hash;
 mod host;
@@ -860,6 +861,8 @@ struct Generator<'a> {
     /// it and exits, with `failure = "exception"`, see `panic`.
     failure_tag: Option<walrus::TagId>,
     panic_exit: Option<FunctionId>,
+    /// The global of `_global_get` and `_global_set`, see `global`.
+    state_global: Option<GlobalId>,
     /// Whether the program runs in a JavaScript host, see `panic`: always
     /// with JavaScript strings, and otherwise when it calls a function of the
     /// host, which is guessed from the ones it declares and checked by
@@ -956,6 +959,7 @@ impl<'a> Generator<'a> {
             failure: config.failure,
             failure_tag: None,
             panic_exit: None,
+            state_global: None,
             javascript_host: config.string == WasmString::JsString
                 || imported_modules(module, all_modules)
                     .into_iter()
@@ -6305,6 +6309,8 @@ String, String, String, Bool, Dynamic) -> b) -> b"
             BuiltinFunctionExternal::BytesWriteString => self.code_bytes_write_string(),
             BuiltinFunctionExternal::BytesToMemory => self.code_bytes_to_memory(),
             BuiltinFunctionExternal::BytesFromMemory => self.code_bytes_from_memory(),
+            BuiltinFunctionExternal::GlobalGet => self.code_global_get(),
+            BuiltinFunctionExternal::GlobalSet => self.code_global_set(),
             BuiltinFunctionExternal::StringByteSize
             | BuiltinFunctionExternal::StringCodeunitSize
             | BuiltinFunctionExternal::I32ToInt

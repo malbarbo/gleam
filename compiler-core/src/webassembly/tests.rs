@@ -646,6 +646,7 @@ mod fail;
 mod failure;
 mod function_fields;
 mod functions;
+mod global;
 mod glue;
 mod host;
 mod js_strings;

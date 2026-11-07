@@ -77,7 +77,9 @@ impl Instructions<'_, '_> {
             | B::StringLessThan
             | B::StringConcatList
             | B::StringJoin
-            | B::StringPopGrapheme => return false,
+            | B::StringPopGrapheme
+            | B::GlobalGet
+            | B::GlobalSet => return false,
         };
         true
     }

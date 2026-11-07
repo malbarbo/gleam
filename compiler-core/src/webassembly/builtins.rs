@@ -233,6 +233,10 @@ pub(super) enum BuiltinFunctionExternal {
     CellGet,
     #[strum(serialize = "_cell_set")]
     CellSet,
+    #[strum(serialize = "_global_get")]
+    GlobalGet,
+    #[strum(serialize = "_global_set")]
+    GlobalSet,
 }
 
 pub fn builtin_function_names() -> Vec<EcoString> {
@@ -262,6 +266,16 @@ impl BuiltinFunctionExternal {
         use BuiltinFunctionExternal as B;
         use type_::{bit_array, bool, float, int, list, nil, result, string, tuple, utf_codepoint};
         let ext = BuiltinType::External;
+        let dynamic = || {
+            Arc::new(Type::Named {
+                publicity: Publicity::Public,
+                package: RUNTIME_PACKAGE.into(),
+                module: DYNAMIC_MODULE.into(),
+                name: "Dynamic".into(),
+                arguments: vec![],
+                inferred_variant: None,
+            })
+        };
         let (params, result) = match self {
             B::StringConcat => (vec![string(), string()], string()),
             B::I32ToInt => return (vec![ext("I32")], int().into()),
@@ -351,6 +365,8 @@ impl BuiltinFunctionExternal {
             B::CellNew => return (vec![int().into()], ext("Cell")),
             B::CellGet => return (vec![ext("Cell")], int().into()),
             B::CellSet => return (vec![ext("Cell"), int().into()], nil().into()),
+            B::GlobalGet => (vec![], dynamic()),
+            B::GlobalSet => (vec![dynamic()], nil()),
         };
         (params.into_iter().map(Into::into).collect(), result.into())
     }
