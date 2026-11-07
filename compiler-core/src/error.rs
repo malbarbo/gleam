@@ -2280,6 +2280,16 @@ but it is not declared for the WebAssembly target with \
                         None,
                         definition.as_ref().map(|(_, location)| *location),
                     ),
+                    crate::webassembly::Error::CatchWithoutException { location, .. } => (
+                        "Catch without exceptions",
+                        wrap(
+                            "This program catches a failure, but a failure only \
+raises an exception that can be caught with `failure = \"exception\"` in the \
+`[webassembly]` section of `gleam.toml`.",
+                        ),
+                        Some("Add `failure = \"exception\"` to `[webassembly]`.".into()),
+                        Some(*location),
+                    ),
                     crate::webassembly::Error::GenericLocalVariable { name, location, .. } => (
                         "Local variable used with different types",
                         format!(

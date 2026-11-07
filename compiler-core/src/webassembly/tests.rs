@@ -422,7 +422,14 @@ pub fn run_wasm_in(
     let tmp = std::env::temp_dir().join(format!("{}.wasm", unique_name("gleam_wasm_test")));
     std::fs::write(&tmp, &wasm_bytes).expect("failed to write temp wasm file");
     let output = std::process::Command::new("wasmtime")
-        .args(["-W", "function-references=y", "-W", "gc=y"])
+        .args([
+            "-W",
+            "function-references=y",
+            "-W",
+            "gc=y",
+            "-W",
+            "exceptions=y",
+        ])
         .arg(&tmp)
         .output()
         .expect("wasmtime not found — install it to run WASM tests");
@@ -636,6 +643,7 @@ mod echo;
 mod environment;
 mod errors;
 mod fail;
+mod failure;
 mod function_fields;
 mod functions;
 mod glue;

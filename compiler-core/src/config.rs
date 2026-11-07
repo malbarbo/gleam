@@ -808,6 +808,24 @@ pub struct WebAssemblyConfig {
     pub string: WasmString,
     #[serde(default)]
     pub opt_level: WasmOptLevel,
+    #[serde(default)]
+    pub failure: WasmFailure,
+}
+
+/// What a `panic`, a `todo`, a `let assert` that does not match or a false
+/// `assert` does.
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy, Default)]
+pub enum WasmFailure {
+    /// Prints the error and exits, or in a JavaScript host throws the
+    /// `Error` of the JavaScript target.
+    #[serde(rename = "exit")]
+    #[default]
+    Exit,
+    /// Throws a WebAssembly exception, which `gleam/wasm/failure.catch`
+    /// catches. The `_start` of the program prints the error and exits when
+    /// nothing catches it.
+    #[serde(rename = "exception")]
+    Exception,
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy, Default)]
@@ -1397,6 +1415,20 @@ target = "webassembly"
 "#;
     let config = toml::from_str::<PackageConfig>(input).unwrap();
     assert_eq!(config.target, Target::WebAssembly);
+}
+
+#[test]
+fn webassembly_failure() {
+    let input = r#"
+name = "one_two"
+
+[webassembly]
+failure = "exception"
+"#;
+    let config = toml::from_str::<PackageConfig>(input).unwrap();
+    assert_eq!(config.webassembly.failure, WasmFailure::Exception);
+    let config = toml::from_str::<PackageConfig>("name = \"one_two\"").unwrap();
+    assert_eq!(config.webassembly.failure, WasmFailure::Exit);
 }
 
 /// The WebAssembly target has no shorthand, as the shorthands of the other

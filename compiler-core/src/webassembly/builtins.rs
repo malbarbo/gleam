@@ -63,6 +63,9 @@ pub(super) enum BuiltinFunction {
     /// function, with their params and result (see `host.rs`).
     JsTrampoline(Vec<ValType>, ValType, TypeKey),
     JsCall(Vec<ValType>, ValType, TypeKey),
+    /// `_catch` for the function type `T`, with its params and result (see
+    /// `panic`).
+    Catch(Vec<ValType>, ValType, TypeKey),
     /// A function of `Array`, with its params, result and element type.
     Array {
         function: ArrayFunction,
@@ -96,6 +99,7 @@ impl BuiltinFunction {
             BuiltinFunction::JsFields(_, name) => format!("_js_fields({name})").into(),
             BuiltinFunction::JsTrampoline(_, _, name) => format!("_js_trampoline({name})").into(),
             BuiltinFunction::JsCall(_, _, name) => format!("_js_call({name})").into(),
+            BuiltinFunction::Catch(_, _, name) => format!("_catch({name})").into(),
             BuiltinFunction::Array {
                 function, element, ..
             } => format!("{}({element})", function.name()).into(),
@@ -234,7 +238,12 @@ pub(super) enum BuiltinFunctionExternal {
 pub fn builtin_function_names() -> Vec<EcoString> {
     BuiltinFunctionExternal::iter()
         .map(|b| b.name().into())
-        .chain([INSPECT.into(), HASH.into(), DYNAMIC_CAST.into()])
+        .chain([
+            INSPECT.into(),
+            HASH.into(),
+            DYNAMIC_CAST.into(),
+            CATCH.into(),
+        ])
         .chain(ArrayFunction::all().iter().map(|f| f.name().into()))
         .collect()
 }
@@ -371,14 +380,41 @@ impl<'a> Generator<'a> {
     /// Exports `_start`, the entry point of a WASI command, which calls
     /// `main`. `main` is not called by the start function, so the hosts that
     /// call `_start` or `main` after instantiating the module do not run it
-    /// twice.
+    /// twice. A failure that `main` does not catch is printed by
+    /// `_panic_exit`, see `panic`.
     fn code_command_start(&mut self) {
         let Some(main) = self.main else {
             return;
         };
+        let uncaught = match (self.panic_exit, self.failure_tag) {
+            (Some(panic_exit), Some(tag)) => {
+                let params = self.panic_params();
+                let failure = InstrSeqType::new(&mut self.wasm_module.types, &[], &params);
+                Some((panic_exit, tag, failure))
+            }
+            _ => None,
+        };
         let mut function = Function::new(self, "_start", &[], &[]);
         let mut instructions = function.extend_instructions(self);
-        let _ = instructions.call(main).drop().end();
+        match uncaught {
+            Some((panic_exit, tag, failure)) => {
+                let _ = instructions
+                    .block_(failure, |caught| {
+                        let label = caught.id();
+                        let catches = vec![walrus::ir::TryTableCatch::Catch { tag, label }];
+                        let _ = caught
+                            .try_table(None, catches, |body| {
+                                let _ = body.call(main).drop();
+                            })
+                            .return_();
+                    })
+                    .call(panic_exit);
+            }
+            None => {
+                let _ = instructions.call(main).drop();
+            }
+        }
+        let _ = instructions.end();
         let start = function.finish(self);
         let _ = self.wasm_module.exports.add("_start", start);
     }

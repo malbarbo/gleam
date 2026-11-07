@@ -36,7 +36,7 @@ use hash::*;
 use instructions::*;
 use js_string::*;
 use monomorphize::*;
-use panic::{AssertKind, Asserted, AssertedValue, Failure};
+use panic::{AssertKind, Asserted, AssertedValue, CATCH, Failure, is_catch_signature};
 use runtime::{Hooks, RUNTIME_PACKAGE};
 pub use runtime::{RuntimeModule, modules as runtime_modules};
 
@@ -90,7 +90,7 @@ use crate::{
         visit::{self, Visit},
     },
     build::Target,
-    config::{WasmFloat, WasmInt, WasmString, WebAssemblyConfig},
+    config::{WasmFailure, WasmFloat, WasmInt, WasmString, WebAssemblyConfig},
     parse::LiteralFloatValue,
     strings::convert_string_escape_chars,
     type_::{
@@ -280,6 +280,12 @@ pub enum Error {
         type_: EcoString,
         definition: Option<(EcoString, SrcSpan)>,
     },
+    /// A use of `_catch`, declared at `location` in `module`, in a program
+    /// without `failure = "exception"`.
+    CatchWithoutException {
+        module: EcoString,
+        location: SrcSpan,
+    },
     /// A local variable used with different types, see
     /// `Monomorphizer::conflicting_reference`. `location` is a reference in
     /// `module`.
@@ -304,6 +310,7 @@ impl Error {
                 ..
             }
             | Error::GenericLocalVariable { module, .. }
+            | Error::CatchWithoutException { module, .. }
             | Error::IntLiteralOutOfRange { module, .. }
             | Error::FloatLiteralOutOfRange { module, .. } => Some(module),
             Error::ReservedModuleName { name } => Some(name),
@@ -847,6 +854,12 @@ struct Generator<'a> {
     current_function_name: EcoString,
     /// `_panic`, when it is called, see `panic`.
     panic: Option<FunctionId>,
+    /// What a failure does, see `panic`.
+    failure: WasmFailure,
+    /// The tag of the exception of a failure, and the function that prints
+    /// it and exits, with `failure = "exception"`, see `panic`.
+    failure_tag: Option<walrus::TagId>,
+    panic_exit: Option<FunctionId>,
     /// Whether the program runs in a JavaScript host, see `panic`: always
     /// with JavaScript strings, and otherwise when it calls a function of the
     /// host, which is guessed from the ones it declares and checked by
@@ -940,6 +953,9 @@ impl<'a> Generator<'a> {
             current_module_name: module.name.clone(),
             current_function_name: EcoString::new(),
             panic: None,
+            failure: config.failure,
+            failure_tag: None,
+            panic_exit: None,
             javascript_host: config.string == WasmString::JsString
                 || imported_modules(module, all_modules)
                     .into_iter()
@@ -1344,7 +1360,8 @@ impl<'a> Generator<'a> {
             BuiltinFunction::FromJs(val_type, _) => (vec![EXTERNREF], vec![*val_type]),
             BuiltinFunction::JsFields(fields, _) => (vec![ANYREF], vec![*fields]),
             BuiltinFunction::JsTrampoline(params, result, _)
-            | BuiltinFunction::JsCall(params, result, _) => (params.clone(), vec![*result]),
+            | BuiltinFunction::JsCall(params, result, _)
+            | BuiltinFunction::Catch(params, result, _) => (params.clone(), vec![*result]),
             BuiltinFunction::Array { params, result, .. } => (params.clone(), vec![*result]),
         }
     }
@@ -1782,6 +1799,17 @@ impl<'a> Generator<'a> {
                             location: function.location,
                             name: name.clone(),
                             expected: "fn(a) -> Dynamic".into(),
+                            got: self.type_pretty_name(&function_type(function)),
+                        });
+                    }
+                } else if name == CATCH {
+                    if !is_catch_signature(function) {
+                        return Err(Error::WrongBuiltinFunctionSignature {
+                            location: function.location,
+                            name: name.clone(),
+                            expected: "fn(fn() -> a, fn(a) -> b, fn(String, String, String, \
+String, String, String, Bool, Dynamic) -> b) -> b"
+                                .into(),
                             got: self.type_pretty_name(&function_type(function)),
                         });
                     }
@@ -4262,6 +4290,9 @@ impl<'a> Generator<'a> {
         }
         if fname == DYNAMIC_CAST {
             return self.function_dynamic_cast_external(required_type);
+        }
+        if fname == CATCH {
+            return self.function_catch_external(function, module, required_type);
         }
         if let Some(array_function) = ArrayFunction::by_name(fname) {
             return self.function_array_external(array_function, required_type);

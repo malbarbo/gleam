@@ -308,6 +308,23 @@ impl<'a, 'b> Instructions<'a, 'b> {
         self
     }
 
+    /// A `try_table` of type `ty` with `catches` around the code of
+    /// `make_body`.
+    pub(super) fn try_table(
+        &mut self,
+        ty: impl Into<InstrSeqType>,
+        catches: Vec<walrus::ir::TryTableCatch>,
+        make_body: impl FnOnce(&mut Instructions<'_, '_>),
+    ) -> &mut Self {
+        let repr = self.repr;
+        let seq = self.seq.as_mut();
+        let mut body = seq.dangling_instr_seq(ty);
+        sub_seq(repr, &mut body, make_body);
+        let body = body.id();
+        let _ = seq.instr(walrus::ir::TryTable { seq: body, catches });
+        self
+    }
+
     pub(super) fn loop_(
         &mut self,
         ty: impl Into<InstrSeqType>,
@@ -711,6 +728,8 @@ impl<'a, 'b> Instructions<'a, 'b> {
         i64_const(x: i64),
         f32_const(x: f32),
         f64_const(x: f64),
+        throw(tag: walrus::TagId),
+        throw_ref(),
     }
 
     binop!(i32_eq, I32Eq);

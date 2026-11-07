@@ -487,6 +487,7 @@ impl<'a> WebAssembly<'a> {
                 "--enable-gc",
                 "--enable-reference-types",
                 "--enable-tail-call",
+                "--enable-exception-handling",
                 "-o",
             ])
             .arg(path.as_str())
