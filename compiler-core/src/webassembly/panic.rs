@@ -31,7 +31,7 @@ use super::*;
 ///   expressions, `"function_call"` by a tuple of the arguments and
 ///   `"expression"` by the expression, each expression a tuple
 ///   `#(kind, value, start, end)`;
-/// - `panic` and `todo` have none, `Nil`.
+/// - `panic`, `todo` and an `Int` overflow have none, `Nil`.
 pub(super) enum Failure<'e> {
     Panic,
     Todo,
@@ -45,6 +45,8 @@ pub(super) enum Failure<'e> {
         value: &'e TypedExpr,
         kind: AssertKind<'e>,
     },
+    /// An `Int` operation whose result does not fit, see `overflow`.
+    IntOverflow,
 }
 
 impl Failure<'_> {
@@ -55,6 +57,7 @@ impl Failure<'_> {
             Failure::Todo => "todo",
             Failure::LetAssert { .. } => "let_assert",
             Failure::Assert { .. } => "assert",
+            Failure::IntOverflow => "int_overflow",
         }
     }
 
@@ -65,6 +68,7 @@ impl Failure<'_> {
             Failure::Todo => "`todo` expression evaluated. This code has not yet been implemented.",
             Failure::LetAssert { .. } => "Pattern match failed, no pattern matched the value.",
             Failure::Assert { .. } => "Assertion failed.",
+            Failure::IntOverflow => "Int overflow.",
         }
     }
 }
@@ -129,20 +133,9 @@ impl<'a> Generator<'a> {
         start: u32,
         message: Option<&TypedExpr>,
     ) {
-        let (module, line) = self.source_location(start);
-        let file = self.source_file(&module);
-        let function = self.current_function_name.clone();
-        let strings = [
-            error.name().into(),
-            file,
-            module,
-            function,
-            line.to_string().into(),
-        ];
-        for string in strings {
-            let index = self.string_index(&string);
-            let _ = instructions.global_as_non_null(index);
-        }
+        let index = self.string_index(&error.name().into());
+        let _ = instructions.global_as_non_null(index);
+        self.push_failure_location(instructions, start);
         match message {
             Some(message) => {
                 assert!(message.type_().is_string());
@@ -155,6 +148,44 @@ impl<'a> Generator<'a> {
         }
         let _ = instructions.bool_const(message.is_some());
         self.panic_details(instructions, locals, &scope, start, error);
+        let panic = self.function_panic();
+        let _ = instructions.call(panic).unreachable();
+    }
+
+    /// Pushes the file, the module, the function and the line of a failure
+    /// at `start`, the params of `_panic` after the kind.
+    pub(super) fn push_failure_location(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        start: u32,
+    ) {
+        let (module, line) = self.source_location(start);
+        let file = self.source_file(&module);
+        let function = self.current_function_name.clone();
+        for string in [file, module, function, line.to_string().into()] {
+            let index = self.string_index(&string);
+            let _ = instructions.global_as_non_null(index);
+        }
+    }
+
+    /// Calls `_panic` for an `Int` overflow at `location`, the locals of the
+    /// file, the module, the function and the line.
+    pub(super) fn int_overflow_failure(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        location: &[LocalId],
+    ) {
+        let error = Failure::IntOverflow;
+        let kind = self.string_index(&error.name().into());
+        let _ = instructions.global_as_non_null(kind);
+        for local in location {
+            let _ = instructions.local_get(*local);
+        }
+        let message = self.string_index(&error.default_message().into());
+        let _ = instructions
+            .global_as_non_null(message)
+            .bool_const(false)
+            .call(self.dynamic_nil());
         let panic = self.function_panic();
         let _ = instructions.call(panic).unreachable();
     }
@@ -172,7 +203,7 @@ impl<'a> Generator<'a> {
             _ if !self.javascript_host => {
                 let _ = instructions.call(self.dynamic_nil());
             }
-            Failure::Panic | Failure::Todo => {
+            Failure::Panic | Failure::Todo | Failure::IntOverflow => {
                 let _ = instructions.call(self.dynamic_nil());
             }
             Failure::LetAssert {

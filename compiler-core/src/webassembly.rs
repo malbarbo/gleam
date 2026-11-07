@@ -18,6 +18,7 @@ mod js_string;
 mod link;
 mod liveness;
 mod monomorphize;
+mod overflow;
 mod panic;
 mod runtime;
 mod scope;
@@ -38,6 +39,7 @@ use hash::*;
 use instructions::*;
 use js_string::*;
 use monomorphize::*;
+use overflow::IntOperation;
 use panic::{AssertKind, Asserted, AssertedValue, CATCH, Failure, is_catch_signature};
 use runtime::{Hooks, RUNTIME_PACKAGE};
 pub use runtime::{RuntimeModule, modules as runtime_modules};
@@ -92,7 +94,7 @@ use crate::{
         visit::{self, Visit},
     },
     build::Target,
-    config::{WasmFailure, WasmFloat, WasmInt, WasmString, WebAssemblyConfig},
+    config::{WasmFailure, WasmFloat, WasmInt, WasmIntOverflow, WasmString, WebAssemblyConfig},
     parse::LiteralFloatValue,
     strings::convert_string_escape_chars,
     type_::{
@@ -947,6 +949,10 @@ struct Generator<'a> {
     panic_exit: Option<FunctionId>,
     /// The global of `_global_get` and `_global_set`, see `global`.
     state_global: Option<GlobalId>,
+    /// What an `Int` operation does when it overflows, and the functions
+    /// that check the operations, see `overflow`.
+    int_overflow: WasmIntOverflow,
+    checked_int: HashMap<IntOperation, FunctionId>,
     /// Whether the program runs in a JavaScript host, see `panic`: always
     /// with JavaScript strings, and otherwise when it calls a function of the
     /// host, which is guessed from the ones it declares and checked by
@@ -1044,6 +1050,8 @@ impl<'a> Generator<'a> {
             failure_tag: None,
             panic_exit: None,
             state_global: None,
+            int_overflow: config.int_overflow,
+            checked_int: HashMap::new(),
             javascript_host: config.string == WasmString::JsString
                 || imported_modules(module, all_modules)
                     .into_iter()
@@ -4910,18 +4918,33 @@ String, String, String, Bool, Dynamic) -> b) -> b"
                     );
             }
             TypedExpr::BinOp {
+                location,
                 operator,
                 left,
                 right,
                 ..
+            } => match self.checked_int_bin_op(operator, right) {
+                Some(operation) => {
+                    let _ = instructions
+                        .expression(self, locals, scope.clone(), left)
+                        .expression(self, locals, scope, right);
+                    self.checked_int_operation(instructions, operation, location.start);
+                }
+                None => {
+                    self.expression_bin_op(locals, scope, instructions, operator, left, right);
+                }
+            },
+            TypedExpr::NegateInt {
+                location, value, ..
             } => {
-                self.expression_bin_op(locals, scope, instructions, operator, left, right);
-            }
-            TypedExpr::NegateInt { value, .. } => {
                 let _ = instructions
                     .int_const(&0.into())
-                    .expression(self, locals, scope, value)
-                    .int_sub();
+                    .expression(self, locals, scope, value);
+                if self.checks_int_overflow() {
+                    self.checked_int_operation(instructions, IntOperation::Sub, location.start);
+                } else {
+                    let _ = instructions.int_sub();
+                }
             }
             TypedExpr::NegateBool { value, .. } => {
                 let _ = instructions
@@ -6155,19 +6178,37 @@ String, String, String, Bool, Dynamic) -> b) -> b"
                         );
                 }
                 BinOp::AddInt => {
-                    let _ = instructions
-                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                        .int_add();
+                    let _ = instructions.clause_guards(
+                        self,
+                        locals,
+                        scope,
+                        [left.as_ref(), right.as_ref()],
+                    );
+                    self.guard_int_operation(instructions, IntOperation::Add, guard, |i| {
+                        let _ = i.int_add();
+                    });
                 }
                 BinOp::SubInt => {
-                    let _ = instructions
-                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                        .int_sub();
+                    let _ = instructions.clause_guards(
+                        self,
+                        locals,
+                        scope,
+                        [left.as_ref(), right.as_ref()],
+                    );
+                    self.guard_int_operation(instructions, IntOperation::Sub, guard, |i| {
+                        let _ = i.int_sub();
+                    });
                 }
                 BinOp::MultInt => {
-                    let _ = instructions
-                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                        .int_mul();
+                    let _ = instructions.clause_guards(
+                        self,
+                        locals,
+                        scope,
+                        [left.as_ref(), right.as_ref()],
+                    );
+                    self.guard_int_operation(instructions, IntOperation::Mul, guard, |i| {
+                        let _ = i.int_mul();
+                    });
                 }
                 BinOp::RemainderInt => {
                     let (a, b) = locals.for_guard_div(scope, left, right);
@@ -6177,9 +6218,15 @@ String, String, String, Bool, Dynamic) -> b) -> b"
                 }
                 BinOp::DivInt => {
                     let (a, b) = locals.for_guard_div(scope, left, right);
-                    let _ = instructions
-                        .clause_guards(self, locals, scope, [left.as_ref(), right.as_ref()])
-                        .int_div(a, b);
+                    let _ = instructions.clause_guards(
+                        self,
+                        locals,
+                        scope,
+                        [left.as_ref(), right.as_ref()],
+                    );
+                    self.guard_int_operation(instructions, IntOperation::Div, guard, |i| {
+                        let _ = i.int_div(a, b);
+                    });
                 }
                 BinOp::GtInt => {
                     let _ = instructions
@@ -6482,6 +6529,57 @@ fn replace_function_body(module: &mut walrus::Module, dest: FunctionId, src: Fun
 /// Whether `divisor` is a literal for which the wasm instruction of
 /// `operator` gives the Gleam result: not 0, which gives 0 instead of
 /// trapping (or an infinity), nor -1 for `/`, as `MIN / -1` wraps.
+impl Generator<'_> {
+    /// The checked operation of `operator` with the divisor `right`, or
+    /// `None` when it does not overflow or the module does not check.
+    fn checked_int_bin_op(&self, operator: &BinOp, right: &TypedExpr) -> Option<IntOperation> {
+        if !self.checks_int_overflow() {
+            return None;
+        }
+        match operator {
+            BinOp::AddInt => Some(IntOperation::Add),
+            BinOp::SubInt => Some(IntOperation::Sub),
+            BinOp::MultInt => Some(IntOperation::Mul),
+            BinOp::DivInt if !divisor_is_safe(operator, right) => Some(IntOperation::Div),
+            BinOp::DivInt
+            | BinOp::RemainderInt
+            | BinOp::And
+            | BinOp::Or
+            | BinOp::Eq
+            | BinOp::NotEq
+            | BinOp::LtInt
+            | BinOp::LtEqInt
+            | BinOp::GtInt
+            | BinOp::GtEqInt
+            | BinOp::AddFloat
+            | BinOp::SubFloat
+            | BinOp::MultFloat
+            | BinOp::DivFloat
+            | BinOp::LtFloat
+            | BinOp::LtEqFloat
+            | BinOp::GtFloat
+            | BinOp::GtEqFloat
+            | BinOp::Concatenate => None,
+        }
+    }
+
+    /// `[Int Int] -> [Int]`: `operation` of a guard, checked at the guard
+    /// when the module checks, and `modular` otherwise.
+    fn guard_int_operation(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        operation: IntOperation,
+        guard: &TypedClauseGuard,
+        modular: impl FnOnce(&mut Instructions<'_, '_>),
+    ) {
+        if self.checks_int_overflow() {
+            self.checked_int_operation(instructions, operation, guard.location().start);
+        } else {
+            modular(instructions);
+        }
+    }
+}
+
 fn divisor_is_safe(operator: &BinOp, divisor: &TypedExpr) -> bool {
     match (operator, divisor) {
         (BinOp::DivInt, TypedExpr::Int { int_value, .. }) => {

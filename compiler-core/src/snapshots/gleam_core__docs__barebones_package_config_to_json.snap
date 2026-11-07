@@ -52,7 +52,8 @@ version = "1.0.0"
       "float": "F64",
       "string": "UTF8",
       "opt_level": "0",
-      "failure": "exit"
+      "failure": "exit",
+      "int_overflow": "wrap"
     },
     "target": "erlang",
     "internal_modules": null

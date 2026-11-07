@@ -657,6 +657,7 @@ mod liveness;
 mod local_closures;
 mod memory;
 mod numbers;
+mod overflow;
 mod runtime;
 mod specialization;
 mod stdlib;

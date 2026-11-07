@@ -812,6 +812,21 @@ pub struct WebAssemblyConfig {
     pub failure: WasmFailure,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assert: Option<WasmAssert>,
+    #[serde(default)]
+    pub int_overflow: WasmIntOverflow,
+}
+
+/// What an `Int` operation of the program does when its result does not fit
+/// in the `Int`.
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy, Default)]
+pub enum WasmIntOverflow {
+    /// Gives the result modulo the size of the `Int`.
+    #[serde(rename = "wrap")]
+    #[default]
+    Wrap,
+    /// Fails at the operation, like a `panic`.
+    #[serde(rename = "fail")]
+    Fail,
 }
 
 /// The function that runs each `assert` of the root package, given to it in
@@ -1460,6 +1475,20 @@ assert = { module = "my/check", function = "run" }
     );
     let config = toml::from_str::<PackageConfig>("name = \"one_two\"").unwrap();
     assert_eq!(config.webassembly.assert, None);
+}
+
+#[test]
+fn webassembly_int_overflow() {
+    let input = r#"
+name = "one_two"
+
+[webassembly]
+int_overflow = "fail"
+"#;
+    let config = toml::from_str::<PackageConfig>(input).unwrap();
+    assert_eq!(config.webassembly.int_overflow, WasmIntOverflow::Fail);
+    let config = toml::from_str::<PackageConfig>("name = \"one_two\"").unwrap();
+    assert_eq!(config.webassembly.int_overflow, WasmIntOverflow::Wrap);
 }
 
 /// The WebAssembly target has no shorthand, as the shorthands of the other
