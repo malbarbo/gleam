@@ -814,6 +814,11 @@ pub struct WebAssemblyConfig {
     /// in an anonymous function, with type `fn(fn() -> Nil) -> Nil`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assert: Option<WasmFunction>,
+    /// The function that each `echo` calls instead of printing, with type
+    /// `fn(String, Int, Option(String), Dynamic) -> Nil`. It takes the file
+    /// and the line of the `echo`, its message and its value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub echo: Option<WasmFunction>,
     #[serde(default)]
     pub int_overflow: WasmIntOverflow,
     #[serde(default)]
@@ -838,6 +843,7 @@ impl Default for WebAssemblyConfig {
             opt_level: WasmOptLevel::default(),
             failure: WasmFailure::default(),
             assert: None,
+            echo: None,
             int_overflow: WasmIntOverflow::default(),
             stack_overflow: WasmStackOverflow::default(),
             stack_limit: default_stack_limit(),
@@ -1517,6 +1523,26 @@ assert = { module = "my/check", function = "run" }
     );
     let config = toml::from_str::<PackageConfig>("name = \"one_two\"").unwrap();
     assert_eq!(config.webassembly.assert, None);
+}
+
+#[test]
+fn webassembly_echo() {
+    let input = r#"
+name = "one_two"
+
+[webassembly]
+echo = { module = "my/debug", function = "print" }
+"#;
+    let config = toml::from_str::<PackageConfig>(input).unwrap();
+    assert_eq!(
+        config.webassembly.echo,
+        Some(WasmFunction {
+            module: "my/debug".into(),
+            function: "print".into(),
+        })
+    );
+    let config = toml::from_str::<PackageConfig>("name = \"one_two\"").unwrap();
+    assert_eq!(config.webassembly.echo, None);
 }
 
 #[test]

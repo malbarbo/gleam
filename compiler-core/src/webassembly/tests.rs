@@ -641,6 +641,7 @@ mod closures;
 mod consts;
 mod custom_types;
 mod echo;
+mod echo_hook;
 mod environment;
 mod errors;
 mod fail;

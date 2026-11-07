@@ -214,6 +214,13 @@ const BOOL_VALTYPE: ValType = ValType::I32;
 
 const OK_GENERIC_ID: u64 = u64::MAX;
 const ERROR_GENERIC_ID: u64 = u64::MAX - 1;
+/// The module of `Option`, in the type of the `echo` function.
+const OPTION_MODULE: &str = "gleam/option";
+
+/// The module of `Dynamic` in the standard library, in the type of the
+/// `echo` function.
+const DYNAMIC_STDLIB_MODULE: &str = "gleam/dynamic";
+
 const LIST_ITEM_GENERIC_ID: u64 = u64::MAX - 2;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -392,6 +399,7 @@ pub fn module(
         Some(assert) => Some(assert_function(assert, all_modules, config.failure)?),
         None => None,
     };
+    let echo_function = hook("echo", &config.echo, all_modules, &echo_function_type())?;
     // The `assert`s of the package of the program, but not those of the
     // module of the function, which would call it again without end.
     let wrapped: Vec<TypedModule> = match &assert_function {
@@ -430,6 +438,7 @@ pub fn module(
             config.clone(),
         );
         generator.runtime = runtime;
+        generator.echo = echo_function.clone();
         generator
     };
     match generator().compile()? {
@@ -461,6 +470,60 @@ fn assert_function(
         &asserts::assert_function_type(),
     )?;
     Ok(asserts::AssertFunction::new(assert, function.location))
+}
+
+/// The function of `echo = { module, function }`, which each `echo` calls.
+#[derive(Debug, Clone)]
+struct HookFunction {
+    module: EcoString,
+    name: EcoString,
+    type_: Arc<Type>,
+}
+
+/// The type `name` of the module `module` of the standard library.
+fn stdlib_type(module: &str, name: &str, arguments: Vec<Arc<Type>>) -> Arc<Type> {
+    Arc::new(Type::Named {
+        publicity: Publicity::Public,
+        package: STDLIB_PACKAGE_NAME.into(),
+        module: module.into(),
+        name: name.into(),
+        arguments,
+        inferred_variant: None,
+    })
+}
+
+/// `fn(String, Int, Option(String), Dynamic) -> Nil`, the type of the
+/// function of `echo = { module, function }`. It takes the file and the line
+/// of the `echo`, its message and its value.
+fn echo_function_type() -> Arc<Type> {
+    type_::fn_(
+        vec![
+            type_::string(),
+            type_::int(),
+            stdlib_type(OPTION_MODULE, "Option", vec![type_::string()]),
+            stdlib_type(DYNAMIC_STDLIB_MODULE, "Dynamic", vec![]),
+        ],
+        type_::nil(),
+    )
+}
+
+/// The function of `option` of `[webassembly]`, when it has one, with its
+/// type checked against `expected`.
+fn hook(
+    option: &str,
+    hook: &Option<WasmFunction>,
+    all_modules: &HashMap<EcoString, &TypedModule>,
+    expected: &Arc<Type>,
+) -> Result<Option<HookFunction>, Error> {
+    let Some(hook) = hook else {
+        return Ok(None);
+    };
+    let function = hook_function(option, hook, all_modules, expected)?;
+    Ok(Some(HookFunction {
+        module: hook.module.clone(),
+        name: hook.function.clone(),
+        type_: function_type(function),
+    }))
 }
 
 /// The function of `option = { module, function }` of `[webassembly]`,
@@ -987,6 +1050,8 @@ struct Generator<'a> {
     stack_overflow: WasmStackOverflow,
     stack_limit: u32,
     stack_depth: Option<(GlobalId, GlobalId)>,
+    /// The function that each `echo` calls, see `expression_echo_hook`.
+    echo: Option<HookFunction>,
     /// Whether the program runs in a JavaScript host, see `panic`: always
     /// with JavaScript strings, and otherwise when it calls a function of the
     /// host, which is guessed from the ones it declares and checked by
@@ -1090,6 +1155,7 @@ impl<'a> Generator<'a> {
             stack_overflow: config.stack_overflow,
             stack_limit: config.stack_limit,
             stack_depth: None,
+            echo: None,
             javascript_host: config.string == WasmString::JsString
                 || imported_modules(module, all_modules)
                     .into_iter()
@@ -2060,6 +2126,8 @@ String, String, String, Bool, Dynamic) -> b) -> b"
             .imports
             .iter()
             .map(|i| i.module.clone())
+            // The program may not import the module of the `echo` function.
+            .chain(self.echo.iter().map(|echo| echo.module.clone()))
             .collect();
 
         while let Some(name) = queue.pop() {
@@ -5623,6 +5691,21 @@ String, String, String, Bool, Dynamic) -> b) -> b"
         expression: &Option<Box<TypedExpr>>,
         message: &Option<Box<TypedExpr>>,
     ) {
+        // An `echo` in the module of the function would call it again
+        // without end.
+        if let Some(hook) = self.echo.clone()
+            && hook.module != self.current_module_name
+        {
+            return self.expression_echo_hook(
+                locals,
+                scope,
+                instructions,
+                echo,
+                expression,
+                message,
+                &hook,
+            );
+        }
         let print = self.find_global_expect(PRINT).func_id();
         let heap_base = self.find_global_expect(HEAP_BASE).func_id();
         let string_to_memory =
@@ -5705,6 +5788,76 @@ String, String, String, Bool, Dynamic) -> b) -> b"
             .call(print)
             .drop()
             // recover expression value
+            .local_get(expr);
+    }
+
+    /// `echo` with `echo = { module, function }`, the call of the function
+    /// with the file, the line, the message and the value as `Dynamic`. The
+    /// value of the `echo` is the value of its expression.
+    #[allow(clippy::too_many_arguments)]
+    fn expression_echo_hook(
+        &mut self,
+        locals: &Locals,
+        scope: &Scope,
+        instructions: &mut Instructions<'_, '_>,
+        echo: &TypedExpr,
+        expression: &Option<Box<TypedExpr>>,
+        message: &Option<Box<TypedExpr>>,
+        hook: &HookFunction,
+    ) {
+        let (module, line) = self.source_location(echo.location().start);
+        let file = self.string_index(&self.source_file(&module));
+        let type_ = echo.type_();
+        let expr = match locals.for_echo(echo).1 {
+            Ok(expr) => expr,
+            Err(name) => self.var_id(scope, name, &type_).local_id(),
+        };
+        if let Some(expression) = expression {
+            let _ = instructions.expression(self, locals, scope.clone(), expression);
+        } else {
+            let previous = scope
+                .find_local(&PIPE_VARIABLE.into())
+                .expect("echo with no previous step in a pipe");
+            let _ = instructions.local_get(previous);
+        }
+        let _ = instructions
+            .local_set(expr)
+            .global_as_non_null(file)
+            .int_const(&BigInt::from(line));
+        let (params, _) = hook.type_.fn_types().expect("echo function type");
+        let option = params
+            .get(2)
+            .cloned()
+            .expect("the message of the echo function");
+        match message {
+            Some(message) => {
+                let some = self.variant_constructor(
+                    vec![type_::string()],
+                    option,
+                    self.variant_expect(OPTION_MODULE.into(), "Some".into()),
+                );
+                let _ = instructions
+                    .expression(self, locals, scope.clone(), message)
+                    .call(some);
+            }
+            None => {
+                let none = self.variant_constructor(
+                    vec![],
+                    option,
+                    self.variant_expect(OPTION_MODULE.into(), "None".into()),
+                );
+                let _ = instructions.call(none);
+            }
+        }
+        let cast = self.function_dynamic_cast(&type_);
+        let function = self
+            .function_imported(&hook.module, &hook.name, &hook.type_)
+            .func_id();
+        let _ = instructions
+            .local_get(expr)
+            .call(cast)
+            .call(function)
+            .drop()
             .local_get(expr);
     }
 
