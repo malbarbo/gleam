@@ -3,6 +3,7 @@
 
 #![allow(clippy::todo)]
 mod array;
+mod asserts;
 mod bit_array;
 mod builtins;
 mod captures;
@@ -295,6 +296,22 @@ pub enum Error {
         location: SrcSpan,
         name: EcoString,
     },
+    /// `assert = { module, function }` without `failure = "exception"`.
+    AssertWithoutException,
+    /// `assert = { module, function }` names a function that is not public
+    /// in a module of the program.
+    UnknownAssertFunction {
+        module: EcoString,
+        function: EcoString,
+    },
+    /// The function of `assert = { module, function }`, at `location` in
+    /// `module`, does not have the type `fn(fn() -> Nil) -> Nil`.
+    WrongAssertFunctionSignature {
+        module: EcoString,
+        function: EcoString,
+        location: SrcSpan,
+        got: EcoString,
+    },
 }
 
 impl Error {
@@ -312,6 +329,7 @@ impl Error {
             }
             | Error::GenericLocalVariable { module, .. }
             | Error::CatchWithoutException { module, .. }
+            | Error::WrongAssertFunctionSignature { module, .. }
             | Error::IntLiteralOutOfRange { module, .. }
             | Error::FloatLiteralOutOfRange { module, .. } => Some(module),
             Error::ReservedModuleName { name } => Some(name),
@@ -328,7 +346,9 @@ impl Error {
             }
             | Error::ExternalTypeWithoutRepresentation {
                 definition: None, ..
-            } => None,
+            }
+            | Error::AssertWithoutException
+            | Error::UnknownAssertFunction { .. } => None,
         }
     }
 }
@@ -357,9 +377,32 @@ pub fn module(
     all_modules: &HashMap<EcoString, &TypedModule>,
     all_line_numbers: &HashMap<EcoString, LineNumbers>,
     runtime: &[RuntimeModule],
-    config: WebAssemblyConfig,
+    config: &WebAssemblyConfig,
 ) -> Result<Vec<u8>, Error> {
-    let mut all_modules = all_modules.clone();
+    let assert_function = match &config.assert {
+        Some(assert) => Some(assert_function(assert, all_modules, config.failure)?),
+        None => None,
+    };
+    // The `assert`s of the package of the program, but not those of the
+    // module of the function, which would call it again without end.
+    let wrapped: Vec<TypedModule> = match &assert_function {
+        Some(function) => imported_modules(module, all_modules)
+            .into_iter()
+            .filter(|m| {
+                m.type_info.package == module.type_info.package && m.name != *function.module()
+            })
+            .filter_map(|m| {
+                let mut m = asserts::clone_module(m);
+                asserts::wrap_asserts(&mut m, function).then_some(m)
+            })
+            .collect(),
+        None => vec![],
+    };
+    let mut all_modules: HashMap<EcoString, &TypedModule> = all_modules.clone();
+    for wrapped_module in &wrapped {
+        let _ = all_modules.insert(wrapped_module.name.clone(), wrapped_module);
+    }
+    let module = all_modules.get(&module.name).copied().unwrap_or(module);
     for runtime_module in runtime {
         let name = &runtime_module.module.name;
         if all_modules
@@ -370,8 +413,13 @@ pub fn module(
         }
     }
     let generator = || {
-        let mut generator =
-            Generator::new(module, line_numbers, &all_modules, all_line_numbers, config);
+        let mut generator = Generator::new(
+            module,
+            line_numbers,
+            &all_modules,
+            all_line_numbers,
+            config.clone(),
+        );
         generator.runtime = runtime;
         generator
     };
@@ -385,6 +433,42 @@ pub fn module(
             Ok(generator.compile()?.expect("a program without the host"))
         }
     }
+}
+
+/// The function of `assert = { module, function }`, which must be public and
+/// have the type `fn(fn() -> Nil) -> Nil`.
+fn assert_function(
+    assert: &crate::config::WasmAssert,
+    all_modules: &HashMap<EcoString, &TypedModule>,
+    failure: WasmFailure,
+) -> Result<asserts::AssertFunction, Error> {
+    if failure != WasmFailure::Exception {
+        return Err(Error::AssertWithoutException);
+    }
+    let function = all_modules.get(&assert.module).and_then(|module| {
+        module
+            .definitions
+            .functions
+            .iter()
+            .find(|f| function_name(f) == &assert.function && f.publicity.is_importable())
+            .map(|f| (module, f))
+    });
+    let Some((module, function)) = function else {
+        return Err(Error::UnknownAssertFunction {
+            module: assert.module.clone(),
+            function: assert.function.clone(),
+        });
+    };
+    let type_ = function_type(function);
+    if !type_.same_as(&asserts::assert_function_type()) {
+        return Err(Error::WrongAssertFunctionSignature {
+            module: assert.module.clone(),
+            function: assert.function.clone(),
+            location: function.location,
+            got: type_pretty_name(&module.names, &type_),
+        });
+    }
+    Ok(asserts::AssertFunction::new(assert, function.location))
 }
 
 /// `module` and the modules it imports, directly or not: the modules of the

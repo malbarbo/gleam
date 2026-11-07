@@ -67,7 +67,7 @@ impl TestHarness {
                 prelude_location: Utf8PathBuf::from("../prelude.mjs"),
             },
             Target::WebAssembly => TargetCodegenConfiguration::WebAssembly {
-                config: config.webassembly,
+                config: config.webassembly.clone(),
                 programs: true,
             },
         };

@@ -68,7 +68,7 @@ pub fn command(options: CompilePackage) -> Result<()> {
                 .ok_or_else(|| Error::JavaScriptPreludeRequired)?,
         },
         Target::WebAssembly => TargetCodegenConfiguration::WebAssembly {
-            config: config.webassembly,
+            config: config.webassembly.clone(),
             // Only the metadata of the other packages is loaded, not the
             // modules that a program contains, so the package is compiled
             // as a dependency is.

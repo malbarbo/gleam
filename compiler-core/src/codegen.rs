@@ -455,7 +455,7 @@ impl<'a> WebAssembly<'a> {
             all_modules,
             all_line_numbers,
             runtime,
-            self.config,
+            &self.config,
         )
         .map_err(|error| {
             // The location of the error may be in another module.

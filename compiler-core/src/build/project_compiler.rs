@@ -259,7 +259,12 @@ where
             self.target(),
             &module.ast.type_info.package,
         );
-        crate::codegen::WebAssembly::new(&out, self.config.webassembly).programs(
+        // The `assert`s of a dependency are not tests of the root package.
+        let config = crate::config::WebAssemblyConfig {
+            assert: None,
+            ..self.config.webassembly.clone()
+        };
+        crate::codegen::WebAssembly::new(&out, config).programs(
             &self.io,
             std::slice::from_ref(module),
             &self.webassembly_dependencies,
@@ -652,7 +657,7 @@ where
                 prelude_location: Utf8PathBuf::from("../prelude.mjs"),
             },
             Target::WebAssembly => super::TargetCodegenConfiguration::WebAssembly {
-                config: self.config.webassembly,
+                config: self.config.webassembly.clone(),
                 programs: is_root,
             },
         };

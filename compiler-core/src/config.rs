@@ -797,7 +797,7 @@ pub struct JavaScriptConfig {
     pub deno: DenoConfig,
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Default, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Default, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct WebAssemblyConfig {
     #[serde(default)]
@@ -810,6 +810,17 @@ pub struct WebAssemblyConfig {
     pub opt_level: WasmOptLevel,
     #[serde(default)]
     pub failure: WasmFailure,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assert: Option<WasmAssert>,
+}
+
+/// The function that runs each `assert` of the root package, given to it in
+/// an anonymous function, with type `fn(fn() -> Nil) -> Nil`.
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct WasmAssert {
+    pub module: EcoString,
+    pub function: EcoString,
 }
 
 /// What a `panic`, a `todo`, a `let assert` that does not match or a false
@@ -1429,6 +1440,26 @@ failure = "exception"
     assert_eq!(config.webassembly.failure, WasmFailure::Exception);
     let config = toml::from_str::<PackageConfig>("name = \"one_two\"").unwrap();
     assert_eq!(config.webassembly.failure, WasmFailure::Exit);
+}
+
+#[test]
+fn webassembly_assert() {
+    let input = r#"
+name = "one_two"
+
+[webassembly]
+assert = { module = "my/check", function = "run" }
+"#;
+    let config = toml::from_str::<PackageConfig>(input).unwrap();
+    assert_eq!(
+        config.webassembly.assert,
+        Some(WasmAssert {
+            module: "my/check".into(),
+            function: "run".into(),
+        })
+    );
+    let config = toml::from_str::<PackageConfig>("name = \"one_two\"").unwrap();
+    assert_eq!(config.webassembly.assert, None);
 }
 
 /// The WebAssembly target has no shorthand, as the shorthands of the other

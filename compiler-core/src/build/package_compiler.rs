@@ -366,7 +366,7 @@ where
                 )
             }
             TargetCodegenConfiguration::WebAssembly { config, programs } => {
-                self.perform_webassembly_codegen(modules, *config, *programs)
+                self.perform_webassembly_codegen(modules, config.clone(), *programs)
             }
         }
     }

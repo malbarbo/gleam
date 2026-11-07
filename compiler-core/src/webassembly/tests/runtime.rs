@@ -688,7 +688,7 @@ fn module_with_the_name_of_a_runtime_module() {
         &all_modules,
         &std::collections::HashMap::new(),
         &crate::webassembly::runtime_modules(),
-        super::wasm_config(crate::config::WasmInt::I32, crate::config::WasmFloat::F64),
+        &super::wasm_config(crate::config::WasmInt::I32, crate::config::WasmFloat::F64),
     )
     .expect_err("a reserved module name");
     assert_eq!(

@@ -2290,6 +2290,40 @@ raises an exception that can be caught with `failure = \"exception\"` in the \
                         Some("Add `failure = \"exception\"` to `[webassembly]`.".into()),
                         Some(*location),
                     ),
+                    crate::webassembly::Error::AssertWithoutException => (
+                        "Assert without exceptions",
+                        wrap(
+                            "The `assert` option of the `[webassembly]` section of \
+`gleam.toml` calls a function that catches the failure of each `assert`, and a \
+failure only raises an exception that can be caught with \
+`failure = \"exception\"`.",
+                        ),
+                        Some("Add `failure = \"exception\"` to `[webassembly]`.".into()),
+                        None,
+                    ),
+                    crate::webassembly::Error::UnknownAssertFunction { module, function } => (
+                        "Unknown assert function",
+                        wrap(&format!(
+                            "The `assert` option of the `[webassembly]` section of \
+`gleam.toml` names the function `{module}.{function}`, but the program has no \
+public function with this name."
+                        )),
+                        None,
+                        None,
+                    ),
+                    crate::webassembly::Error::WrongAssertFunctionSignature {
+                        module,
+                        function,
+                        location,
+                        got,
+                    } => (
+                        "Wrong assert function signature",
+                        format!(
+                            "The function `{module}.{function}` of the `assert` option of the `[webassembly]` section of `gleam.toml` has an incorrect signature.\n\nExpected: fn(fn() -> Nil) -> Nil\n     Got: {got}"
+                        ),
+                        None,
+                        Some(*location),
+                    ),
                     crate::webassembly::Error::GenericLocalVariable { name, location, .. } => (
                         "Local variable used with different types",
                         format!(

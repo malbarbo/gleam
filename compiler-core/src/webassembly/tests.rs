@@ -168,7 +168,7 @@ fn codegen_in(
         &all_modules,
         &all_line_numbers,
         &crate::webassembly::runtime_modules(),
-        config,
+        &config,
     )
 }
 
@@ -632,6 +632,7 @@ macro_rules! assert_wasm_validate_error {
 }
 
 mod arrays;
+mod asserts;
 mod bit_arrays;
 mod bools;
 mod captures;
