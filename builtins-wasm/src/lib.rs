@@ -316,6 +316,31 @@ mod exports {
         num::exponential(x)
     }
 
+    #[unsafe(no_mangle)]
+    pub extern "C" fn float_sqrt(x: f64) -> f64 {
+        num::square_root(x)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn float_sin(x: f64) -> f64 {
+        num::sine(x)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn float_cos(x: f64) -> f64 {
+        num::cosine(x)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn float_atan2(y: f64, x: f64) -> f64 {
+        num::arc_tangent2(y, x)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn float_hypot(a: f64, b: f64) -> f64 {
+        num::hypotenuse(a, b)
+    }
+
     static mut RNG: Option<Xoshiro256> = None;
 
     #[unsafe(no_mangle)]

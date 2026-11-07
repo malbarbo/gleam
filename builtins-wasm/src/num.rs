@@ -229,6 +229,26 @@ pub fn exponential(x: f64) -> f64 {
     libm::exp(x)
 }
 
+pub fn square_root(x: f64) -> f64 {
+    libm::sqrt(x)
+}
+
+pub fn sine(x: f64) -> f64 {
+    libm::sin(x)
+}
+
+pub fn cosine(x: f64) -> f64 {
+    libm::cos(x)
+}
+
+pub fn arc_tangent2(y: f64, x: f64) -> f64 {
+    libm::atan2(y, x)
+}
+
+pub fn hypotenuse(a: f64, b: f64) -> f64 {
+    libm::hypot(a, b)
+}
+
 //////////////
 // random
 
