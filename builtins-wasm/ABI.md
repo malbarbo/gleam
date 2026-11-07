@@ -276,7 +276,7 @@ comes from, is copied; a bigger one shares the array.
 | `_unsafe_int_to_utf_codepoint` | `fn(Int) -> UtfCodepoint` | identity |
 | `_inspect` | `fn(a) -> String` | existing |
 | `_hash` | `fn(a) -> Int` | structural hash generated for each type, consistent with `==`: string views hash like copies, `-0.0` like `0.0`, functions all hash the same |
-| `_dynamic_cast` | `fn(a) -> Dynamic` | generated for each type: ints, floats, strings, booleans, `Nil`, lists, tuples and arrays (as arrays) and dicts go to their variant of `Dynamic`, with their items cast too; a `StringTree` is a string and a `UtfCodepoint` an int, as on JavaScript; any other value is boxed in `DOther` with a table of functions generated for its type |
+| `_dynamic_cast` | `fn(a) -> Dynamic` | generated for each type: ints, floats, strings, booleans, `Nil`, codepoints, lists, tuples and arrays (as arrays) and dicts go to their variant of `Dynamic`, with their items cast too; a `StringTree` is a string, as on JavaScript; a codepoint is an int for `decode`, `==` and `hash`, as on Erlang; any other value is boxed in `DOther` with a table of functions generated for its type |
 
 **Array** (`@external(webassembly, "builtins", "Array") type Array(a)`, a wasm
 GC array of the representation of `a`)
@@ -355,7 +355,7 @@ function once the external types are replaced by their representation.
 | `Dict(k, v)` | `builtins/dict` | a CHAMP (hash trie) with `Array` nodes, with the hash of `_hash` |
 | `StringTree` | `builtins/string_tree` | a rope that stores the size of each node |
 | `BitArray` (of the prelude) | `builtins/bit_array` | `Bits(bytes, start, end, written)`: the bits of a `Words` from `start` to `end` (not included), shared by slices and with the strings they come from, and a `Cell` with the end of the bits written to the bytes, shared by the bit arrays of the same bytes; `<<bits:bits, ...>>` writes after `bits` in the same bytes when `bits` ends there and they have room; literals are computed when compiling and created by the start function |
-| `Dynamic` | `builtins/dynamic` | a closed sum: `DInt`, `DFloat`, `DString`, `DBool`, `DNil`, `DBitArray`, `DList`, `DArray` (an `Array(Dynamic)`), `DDict` and `DOther(AnyRef, VTable)` |
+| `Dynamic` | `builtins/dynamic` | a closed sum: `DInt`, `DFloat`, `DString`, `DBool`, `DNil`, `DBitArray`, `DUtfCodepoint`, `DList`, `DArray` (an `Array(Dynamic)`), `DDict` and `DOther(AnyRef, VTable)` |
 
 Their functions are named after the type: `dict_*`, `string_tree_*`,
 `bit_array_*` and `dynamic_*` (see the modules). The equality, the hash and

@@ -4,9 +4,9 @@
 ////
 //// WebAssembly has no runtime type information that generic code could use
 //// to inspect any value, so `Dynamic` is a closed sum. Ints, floats, strings,
-//// booleans, `Nil`, bit arrays, lists, tuples (as arrays) and dicts have
-//// their own variants; any other value is boxed in `DOther`, together with a table of
-//// functions generated for its type.
+//// booleans, `Nil`, bit arrays, codepoints, lists, tuples (as arrays) and
+//// dicts have their own variants; any other value is boxed in `DOther`,
+//// together with a table of functions generated for its type.
 ////
 //// `_dynamic_cast`, which turns a value of any type into a `Dynamic`, needs
 //// the static type of the value, so the compiler generates it for each type,
@@ -33,6 +33,9 @@ pub type Dynamic {
   DBool(Bool)
   DNil
   DBitArray(Bits)
+  /// A codepoint, which is an `Int` for `decode`, `==` and `hash`, as on
+  /// Erlang.
+  DUtfCodepoint(UtfCodepoint)
   DList(List(Dynamic))
   /// A tuple, an `Array`, or a list made with `dynamic.array`.
   DArray(Array(Dynamic))
@@ -102,6 +105,10 @@ pub fn dynamic_nil() -> Dynamic {
 
 pub fn dynamic_bit_array(value: Bits) -> Dynamic {
   DBitArray(value)
+}
+
+pub fn dynamic_utf_codepoint(value: UtfCodepoint) -> Dynamic {
+  DUtfCodepoint(value)
 }
 
 pub fn dynamic_list(value: List(Dynamic)) -> Dynamic {
@@ -196,6 +203,7 @@ pub fn dynamic_classify(data: Dynamic) -> String {
     DBool(_) -> "Bool"
     DNil -> "Nil"
     DBitArray(_) -> "BitArray"
+    DUtfCodepoint(_) -> "Int"
     DList(_) -> "List"
     DArray(_) -> "Array"
     DDict(_) -> "Dict"
@@ -213,6 +221,7 @@ pub fn dynamic_is_null(data: Dynamic) -> Bool {
 pub fn dynamic_decode_int(data: Dynamic) -> Result(Int, Int) {
   case data {
     DInt(value) -> Ok(value)
+    DUtfCodepoint(value) -> Ok(utf_codepoint_to_int(value))
     _ -> Error(0)
   }
 }
@@ -308,6 +317,7 @@ pub fn dynamic_view(
   bool: fn(Bool) -> v,
   nil: v,
   bit_array: fn(Bits) -> v,
+  utf_codepoint: fn(UtfCodepoint) -> v,
   tuple: fn(List(Dynamic)) -> v,
   empty: v,
   cons: fn(Dynamic, Dynamic) -> v,
@@ -324,6 +334,7 @@ pub fn dynamic_view(
     DBool(x) -> bool(x)
     DNil -> nil
     DBitArray(x) -> bit_array(x)
+    DUtfCodepoint(x) -> utf_codepoint(x)
     DArray(items) -> tuple(array_to_list(items))
     DList([]) -> empty
     DList([first, ..rest]) -> cons(first, DList(rest))
@@ -362,6 +373,9 @@ pub fn dynamic_equal(a: Dynamic, b: Dynamic) -> Bool {
     DBool(x), DBool(y) -> x == y
     DNil, DNil -> True
     DBitArray(x), DBitArray(y) -> x == y
+    DUtfCodepoint(x), DUtfCodepoint(y) -> x == y
+    DUtfCodepoint(x), DInt(y) | DInt(y), DUtfCodepoint(x) ->
+      utf_codepoint_to_int(x) == y
     DList(xs), DList(ys) -> xs == ys
     DArray(xs), DArray(ys) -> xs == ys
     DDict(x), DDict(y) -> x == y
@@ -380,6 +394,7 @@ pub fn dynamic_hash(value: Dynamic) -> Int {
     DBool(x) -> mix(4, hash(x))
     DNil -> 5
     DBitArray(x) -> mix(10, hash(x))
+    DUtfCodepoint(x) -> mix(1, hash(utf_codepoint_to_int(x)))
     DList(xs) -> mix(6, hash(xs))
     DArray(xs) -> mix(7, hash(xs))
     DDict(x) -> mix(8, hash(x))
@@ -405,12 +420,17 @@ pub fn dynamic_inspect(value: Dynamic) -> String {
     DBool(x) -> inspect(x)
     DNil -> "Nil"
     DBitArray(x) -> inspect(x)
+    DUtfCodepoint(x) -> inspect(x)
     DList(xs) -> inspect(xs)
     DArray(xs) -> inspect(xs)
     DDict(x) -> inspect(x)
     DOther(x, vtable) -> vtable.inspect(x)
   }
 }
+
+@external(erlang, "gleam_stdlib", "identity")
+@external(webassembly, "builtins", "_utf_codepoint_to_int")
+fn utf_codepoint_to_int(value: UtfCodepoint) -> Int
 
 // -- Lists --------------------------------------------------------------------
 

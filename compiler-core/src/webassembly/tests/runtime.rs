@@ -249,6 +249,30 @@ pub fn main() {
     );
 }
 
+/// A codepoint is an `Int` for `decode`, `==` and `hash`, as on Erlang.
+#[test]
+fn dynamic_cast_of_a_codepoint() {
+    let _ = run_dynamic(
+        r#"
+import dict
+import dynamic
+
+@external(webassembly, "builtins", "_unsafe_int_to_utf_codepoint")
+fn codepoint(n: Int) -> UtfCodepoint
+
+pub fn main() {
+  let a = dynamic.cast(codepoint(97))
+  let assert "Int" = dynamic.classify(a)
+  let assert Ok(97) = dynamic.int(a)
+  let assert True = a == dynamic.cast(97)
+  let assert True = dynamic.cast(97) == a
+  let assert False = a == dynamic.cast(98)
+  let assert Ok(1) = dict.get(dict.from_list([#(dynamic.cast(97), 1)]), a)
+}
+"#,
+    );
+}
+
 /// Only a dict whose keys and values are both `Dynamic` is a dict of
 /// dynamics as it is, the others have their keys and values cast.
 #[test]

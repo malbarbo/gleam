@@ -1035,6 +1035,32 @@ export const identity = (a) => a;
     );
 }
 
+/// A `Dynamic` of a codepoint crosses as a `UtfCodepoint`, as on
+/// JavaScript.
+#[test]
+fn dynamic_codepoint_to_host() {
+    run_with_host(
+        r#"
+@external(webassembly, "builtins", "Dynamic")
+pub type Dynamic
+@external(webassembly, "builtins", "_dynamic_cast")
+fn cast(a: a) -> Dynamic
+@external(webassembly, "builtins", "_unsafe_int_to_utf_codepoint")
+fn codepoint(n: Int) -> UtfCodepoint
+@external(webassembly, "./ffi.mjs", "is_a")
+fn is_a(a: Dynamic) -> Bool
+
+pub fn main() {
+    let assert True = is_a(cast(codepoint(97)))
+}
+"#,
+        r#"
+import { UtfCodepoint } from "../gleam.mjs";
+export const is_a = (a) => a instanceof UtfCodepoint && a.value === 97;
+"#,
+    );
+}
+
 /// A value of a custom type that crosses back as a `Dynamic` is a value of the
 /// host, though its structure is the one of a `Dynamic`, and a `Dynamic`
 /// crosses back as itself.

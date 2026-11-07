@@ -25,6 +25,7 @@ fn view(
   bool: fn(Bool) -> v,
   nil: v,
   bit_array: fn(BitArray) -> v,
+  utf_codepoint: fn(UtfCodepoint) -> v,
   tuple: fn(List(Dynamic)) -> v,
   empty: v,
   cons: fn(Dynamic, Dynamic) -> v,
@@ -44,6 +45,7 @@ pub fn show(data: Dynamic) -> String {
     fn(_) { "bool " <> inspect(data) },
     "nil",
     fn(_) { "bit_array " <> inspect(data) },
+    fn(_) { "utf_codepoint " <> inspect(data) },
     fn(items) { "#(" <> join(items, []) <> ")" },
     "[]",
     fn(first, rest) { show(first) <> " :: " <> show(rest) },
@@ -104,6 +106,9 @@ fn view_of_the_values_with_variants() {
         r#"
 import view.{cast, show}
 
+@external(webassembly, "builtins", "_unsafe_int_to_utf_codepoint")
+fn codepoint(n: Int) -> UtfCodepoint
+
 pub fn main() {
   assert show(cast(1)) == "int 1"
   assert show(cast(1.5)) == "float 1.5"
@@ -111,6 +116,7 @@ pub fn main() {
   assert show(cast(True)) == "bool True"
   assert show(cast(Nil)) == "nil"
   assert show(cast(<<1>>)) == "bit_array <<1>>"
+  assert show(cast(codepoint(97))) == "utf_codepoint //utfcodepoint(a)"
 }
 "#,
     );

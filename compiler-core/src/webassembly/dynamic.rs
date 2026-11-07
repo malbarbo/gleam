@@ -5,12 +5,11 @@
 //! runtime (`runtime/dynamic.gleam`), which the standard library declares as
 //! `@external(webassembly, "builtins", "_dynamic_cast") fn cast(a: t) -> Dynamic`.
 //!
-//! Ints, floats, strings, booleans, `Nil`, lists, tuples, arrays and dicts
-//! become their variant of `Dynamic`, with their items cast too. A
-//! `StringTree` is a string, as on JavaScript, and a `UtfCodepoint` an int,
-//! as on Erlang. Any other value is boxed in an `anyref`, with a table of
-//! functions generated for its type that cast it back to compare, hash,
-//! inspect and view it.
+//! Ints, floats, strings, booleans, `Nil`, codepoints, lists, tuples, arrays
+//! and dicts become their variant of `Dynamic`, with their items cast too. A
+//! `StringTree` is a string, as on JavaScript. Any other value is boxed in an
+//! `anyref`, with a table of functions generated for its type that cast it
+//! back to compare, hash, inspect and view it.
 
 use super::*;
 
@@ -31,12 +30,8 @@ pub(super) const ANYREF: ValType = ValType::Ref(RefType {
 enum Cast {
     /// `T` is `Dynamic`.
     Same,
-    /// Calls these functions, one after the other, after converting the
-    /// value from `i32` to `Int` when `from_i32`.
-    Calls {
-        from_i32: bool,
-        calls: Vec<FunctionId>,
-    },
+    /// Calls these functions, one after the other.
+    Calls(Vec<FunctionId>),
     /// Calls this function without the value, for `Nil`.
     Constant(FunctionId),
     /// Calls `function` with the value and the closures that cast the items.
@@ -111,11 +106,8 @@ impl<'a> Generator<'a> {
         let mut instructions = function.extend_instructions(self);
         let _ = match cast {
             Cast::Same => instructions.local_get(value),
-            Cast::Calls { from_i32, calls } => {
+            Cast::Calls(calls) => {
                 let _ = instructions.local_get(value);
-                if from_i32 {
-                    let _ = instructions.i32_to_int();
-                }
                 for call in calls {
                     let _ = instructions.call(call);
                 }
@@ -234,30 +226,19 @@ impl<'a> Generator<'a> {
         if type_.same_as(dynamic) {
             Cast::Same
         } else if type_.is_int() {
-            Cast::Calls {
-                from_i32: false,
-                calls: vec![to_dynamic(self, "dynamic_int", type_.clone())],
-            }
+            Cast::Calls(vec![to_dynamic(self, "dynamic_int", type_.clone())])
         } else if type_.is_utf_codepoint() {
-            Cast::Calls {
-                from_i32: true,
-                calls: vec![to_dynamic(self, "dynamic_int", type_::int())],
-            }
+            Cast::Calls(vec![to_dynamic(
+                self,
+                "dynamic_utf_codepoint",
+                type_.clone(),
+            )])
         } else if type_.is_float() {
-            Cast::Calls {
-                from_i32: false,
-                calls: vec![to_dynamic(self, "dynamic_float", type_.clone())],
-            }
+            Cast::Calls(vec![to_dynamic(self, "dynamic_float", type_.clone())])
         } else if type_.is_string() {
-            Cast::Calls {
-                from_i32: false,
-                calls: vec![to_dynamic(self, "dynamic_string", type_.clone())],
-            }
+            Cast::Calls(vec![to_dynamic(self, "dynamic_string", type_.clone())])
         } else if type_.is_bool() {
-            Cast::Calls {
-                from_i32: false,
-                calls: vec![to_dynamic(self, "dynamic_bool", type_.clone())],
-            }
+            Cast::Calls(vec![to_dynamic(self, "dynamic_bool", type_.clone())])
         } else if type_.is_nil() {
             Cast::Constant(self.runtime_function_id(
                 DYNAMIC_MODULE,
@@ -270,16 +251,10 @@ impl<'a> Generator<'a> {
             .as_ref()
             .map(|(module, name, _)| (module.as_str(), name.as_str()))
         {
-            Cast::Calls {
-                from_i32: false,
-                calls: vec![to_dynamic(self, "dynamic_bit_array", type_.clone())],
-            }
+            Cast::Calls(vec![to_dynamic(self, "dynamic_bit_array", type_.clone())])
         } else if let Some(item) = type_.list_type() {
             if item.same_as(dynamic) {
-                Cast::Calls {
-                    from_i32: false,
-                    calls: vec![to_dynamic(self, "dynamic_list", type_.clone())],
-                }
+                Cast::Calls(vec![to_dynamic(self, "dynamic_list", type_.clone())])
             } else {
                 let closure = self.dynamic_cast_closure(&item, dynamic);
                 let function = self.runtime_function_id(
@@ -320,10 +295,7 @@ impl<'a> Generator<'a> {
             .map(|(module, name, arguments)| (module.as_str(), name.as_str(), arguments.as_slice()))
         {
             if key.same_as(dynamic) && value.same_as(dynamic) {
-                Cast::Calls {
-                    from_i32: false,
-                    calls: vec![to_dynamic(self, "dynamic_dict", type_.clone())],
-                }
+                Cast::Calls(vec![to_dynamic(self, "dynamic_dict", type_.clone())])
             } else {
                 let closures = vec![
                     self.dynamic_cast_closure(key, dynamic),
@@ -352,13 +324,10 @@ impl<'a> Generator<'a> {
                 vec![type_.clone()],
                 type_::string(),
             );
-            Cast::Calls {
-                from_i32: false,
-                calls: vec![
-                    to_string,
-                    to_dynamic(self, "dynamic_string", type_::string()),
-                ],
-            }
+            Cast::Calls(vec![
+                to_string,
+                to_dynamic(self, "dynamic_string", type_::string()),
+            ])
         } else {
             self.dynamic_cast_other(type_, dynamic)
         }

@@ -21,8 +21,9 @@ import builtins/bit_array.{type Bits, type Cell, type Words, Bits}
 import builtins/dict.{type Dict, dict_fold, dict_insert, dict_new}
 import builtins/dynamic.{
   type Dynamic, DArray, DBitArray, DBool, DDict, DFloat, DInt, DList, DNil,
-  DString, dynamic_array, dynamic_bit_array, dynamic_bool, dynamic_dict,
-  dynamic_float, dynamic_int, dynamic_list, dynamic_nil, dynamic_string,
+  DString, DUtfCodepoint, dynamic_array, dynamic_bit_array, dynamic_bool,
+  dynamic_dict, dynamic_float, dynamic_int, dynamic_list, dynamic_nil,
+  dynamic_string,
 }
 
 /// A value of the host, an `externref`.
@@ -290,6 +291,7 @@ pub fn js_dynamic_with(
     DBool(value) -> js_bool(value)
     DNil -> undefined()
     DBitArray(value) -> js_bit_array(value)
+    DUtfCodepoint(value) -> js_utf_codepoint(value)
     DList(items) -> js_list_with(items, item)
     DArray(items) -> {
       let array = js_array_new()
