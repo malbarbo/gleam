@@ -259,10 +259,23 @@ where
             self.target(),
             &module.ast.type_info.package,
         );
-        // The `assert`s of a dependency are not tests of the root package.
+        // The program of a dependency has only the dependencies, so it
+        // cannot call a function of the root package.
+        let in_program = |function: &Option<crate::config::WasmFunction>| {
+            function.clone().filter(|function| {
+                self.webassembly_dependencies
+                    .iter()
+                    .any(|dependency| dependency.name == function.module)
+            })
+        };
+        let webassembly = &self.config.webassembly;
         let config = crate::config::WebAssemblyConfig {
+            // The `assert`s of a dependency are not tests of the root package.
             assert: None,
-            ..self.config.webassembly.clone()
+            echo: in_program(&webassembly.echo),
+            inspect: in_program(&webassembly.inspect),
+            start: in_program(&webassembly.start),
+            ..webassembly.clone()
         };
         crate::codegen::WebAssembly::new(&out, config).programs(
             &self.io,
