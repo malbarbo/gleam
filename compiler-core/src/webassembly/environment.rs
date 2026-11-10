@@ -15,25 +15,28 @@ use glue::{ARENA_MARK, ARENA_RELEASE};
 
 impl<'a> Generator<'a> {
     /// The function `name` of the module `module` of the environment,
-    /// declared by `function`. It is imported once, with the wasm types of
-    /// the Gleam types of `function`, and called through a function that
-    /// makes the result a Gleam value when the result is a `Bool` or `Nil`.
+    /// declared by `function`. It is imported once for each type that an
+    /// external gives it, with the wasm types of the Gleam types of
+    /// `function`, and called through a function that makes the result a
+    /// Gleam value when the result is a `Bool` or `Nil`.
     pub(super) fn function_environment(
         &mut self,
         module: &EcoString,
         name: &EcoString,
         function: &TypedFunction,
     ) -> Id {
+        let (params, return_) = function_type(function)
+            .fn_types()
+            .expect("an external function");
         // A function of a Gleam module is `module.name`, see
-        // `imported_base_name`.
-        let global_name = ecow::eco_format!("{module}#{name}");
+        // `imported_base_name`. Two externals may give the function
+        // different types.
+        let type_ = qualified_function_type_name(&params, &return_);
+        let global_name = ecow::eco_format!("{module}#{name}:{type_}");
         if let Some(id) = self.find_global(&global_name) {
             return id;
         }
         self.imports_environment = true;
-        let (params, return_) = function_type(function)
-            .fn_types()
-            .expect("an external function");
         let import_params: Vec<_> = params
             .iter()
             .flat_map(|param| {

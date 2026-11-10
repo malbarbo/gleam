@@ -269,3 +269,34 @@ pub fn main() { #(tick(), env.tick("a")) }
     );
     validate(&wasm);
 }
+
+/// Two externals may give a function of the environment different types.
+#[test]
+fn function_with_two_types() {
+    let wasm = super::compile_wasm_in(
+        "thepackage",
+        r#"
+@external(webassembly, "env", "f")
+fn f1(x: Int) -> Int
+
+@external(webassembly, "env", "f")
+fn f2(x: Float) -> Float
+
+pub fn main() { #(f1(1), f2(2.0)) }
+"#,
+        vec![],
+        super::wasm_config(WasmInt::I64, WasmFloat::F64),
+    );
+    validate(&wasm);
+    let imports: Vec<_> = imports(&wasm)
+        .into_iter()
+        .filter(|(module, ..)| module == "env")
+        .collect();
+    assert_eq!(
+        imports,
+        vec![
+            import("env", "f", "[I64]", "[I64]"),
+            import("env", "f", "[F64]", "[F64]"),
+        ]
+    );
+}
