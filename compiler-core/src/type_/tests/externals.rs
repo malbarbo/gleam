@@ -321,6 +321,20 @@ pub fn sum(numbers: List(Int)) -> Int
 }
 
 #[test]
+fn environment_import_of_a_record_named_as_a_wasm_number() {
+    assert_module_error!(
+        r#"pub type I32 {
+  I32(String)
+}
+
+@external(erlang, "one", "two")
+@external(webassembly, "env", "next")
+pub fn next(code: I32) -> I32
+"#
+    );
+}
+
+#[test]
 fn environment_import_of_a_generic_result() {
     assert_module_error!(
         r#"@external(erlang, "one", "two")

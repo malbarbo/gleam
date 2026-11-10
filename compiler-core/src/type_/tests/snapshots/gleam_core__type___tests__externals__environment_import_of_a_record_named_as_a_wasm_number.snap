@@ -1,0 +1,44 @@
+---
+source: compiler-core/src/type_/tests/externals.rs
+expression: "pub type I32 {\n  I32(String)\n}\n\n@external(erlang, \"one\", \"two\")\n@external(webassembly, \"env\", \"next\")\npub fn next(code: I32) -> I32\n"
+---
+----- SOURCE CODE
+pub type I32 {
+  I32(String)
+}
+
+@external(erlang, "one", "two")
+@external(webassembly, "env", "next")
+pub fn next(code: I32) -> I32
+
+
+----- ERROR
+error: Unsupported type
+  ┌─ /src/one/two.gleam:7:13
+  │
+7 │ pub fn next(code: I32) -> I32
+  │             ^^^^^^^^^
+
+The function `next` is imported from the environment, so it takes and returns
+WebAssembly values, and this type is not one of them:
+
+    I32
+
+A parameter can be an `Int`, a `Float`, a `Bool`, a `String`, or one of the
+types `I32`, `I64`, `F32` and `F64`. A result can be any of them but a
+`String`, or `Nil`.
+
+error: Unsupported type
+  ┌─ /src/one/two.gleam:7:27
+  │
+7 │ pub fn next(code: I32) -> I32
+  │                           ^^^
+
+The function `next` is imported from the environment, so it takes and returns
+WebAssembly values, and this type is not one of them:
+
+    I32
+
+A parameter can be an `Int`, a `Float`, a `Bool`, a `String`, or one of the
+types `I32`, `I64`, `F32` and `F64`. A result can be any of them but a
+`String`, or `Nil`.

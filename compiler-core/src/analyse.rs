@@ -575,6 +575,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
             return_annotation.as_ref(),
             &prereg_return_type,
             location,
+            environment,
         );
 
         // Find the external implementation for the current target, if one has been given.
@@ -915,6 +916,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
         return_annotation: Option<&TypeAst>,
         return_type: &Arc<Type>,
         location: SrcSpan,
+        environment: &Environment<'_>,
     ) {
         let Some((module, _, _)) = external_webassembly else {
             return;
@@ -922,8 +924,18 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
         if ExternalModule::of(module, &self.package_config.name) != ExternalModule::Environment {
             return;
         }
+        // `I32` is a wasm number only as a type without constructors.
+        let has_constructors = |type_: &Type| {
+            webassembly::is_wasm_number(type_)
+                && type_
+                    .named_type_information()
+                    .and_then(|(module, name, _)| {
+                        environment.get_constructors_for_type(&module, &name).ok()
+                    })
+                    .is_some_and(|constructors| !constructors.variants.is_empty())
+        };
         for (argument, type_) in arguments.iter().zip(argument_types) {
-            if !webassembly::is_environment_param(type_) {
+            if !webassembly::is_environment_param(type_) || has_constructors(type_) {
                 self.problems
                     .error(Error::UnsupportedEnvironmentImportType {
                         location: argument.location,
@@ -932,7 +944,7 @@ impl<'a, A> ModuleAnalyzer<'a, A> {
                     });
             }
         }
-        if !webassembly::is_environment_result(return_type) {
+        if !webassembly::is_environment_result(return_type) || has_constructors(return_type) {
             self.problems
                 .error(Error::UnsupportedEnvironmentImportType {
                     location: return_annotation

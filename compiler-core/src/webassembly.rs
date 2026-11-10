@@ -151,7 +151,9 @@ impl ExternalModule {
 
 /// Returns `true` if a function imported from the environment can take a
 /// value of `type_`, `false` otherwise. A `String` crosses as the address
-/// and the size of a copy of its bytes, and the others as wasm values.
+/// and the size of a copy of its bytes, and the others as wasm values. A
+/// type named as a wasm number also has to be without constructors, which
+/// the caller checks.
 pub fn is_environment_param(type_: &Type) -> bool {
     is_environment_value(type_) || type_.is_string()
 }
@@ -170,7 +172,8 @@ fn is_environment_value(type_: &Type) -> bool {
 
 /// Returns `true` if `type_` is `I32`, `I64`, `F32` or `F64`, the types
 /// without constructors whose values are wasm numbers, `false` otherwise.
-fn is_wasm_number(type_: &Type) -> bool {
+/// It looks only at the name of the type.
+pub fn is_wasm_number(type_: &Type) -> bool {
     type_
         .named_type_information()
         .is_some_and(|(_, name, arguments)| {
