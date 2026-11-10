@@ -173,6 +173,16 @@ pub fn main() {{
     );
 }
 
+/// A limit that does not fit in the `i32` of the depth is the largest
+/// `i32`.
+#[test]
+fn limit_larger_than_the_depth() {
+    runs(
+        &format!("{SUM}\npub fn main() {{ assert sum(10) == 55 }}"),
+        fail(u32::MAX),
+    );
+}
+
 /// Without the option, the stack of the engine ends in a trap.
 #[test]
 fn traps_by_default() {

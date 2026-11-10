@@ -47,7 +47,10 @@ impl Generator<'_> {
             ValType::I32,
             true,
             false,
-            ConstExpr::Value(Value::I32(self.stack_limit as i32)),
+            // The depth is an `i32`, which a larger limit does not fit.
+            ConstExpr::Value(Value::I32(
+                i32::try_from(self.stack_limit).unwrap_or(i32::MAX),
+            )),
         );
         self.wasm_module.globals.get_mut(limit).name = Some(STACK_LIMIT.into());
         let _ = self.wasm_module.exports.add(STACK_LIMIT, limit);
