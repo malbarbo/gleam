@@ -228,3 +228,41 @@ fn float_to_int_saturates_by_default() {
         |int| wasm_config(int, WasmFloat::F64),
     );
 }
+
+/// The size of a segment times its unit, and the operations in the size.
+#[test]
+fn bit_array_segment_size() {
+    overflows_at(
+        "pub fn main() {\n  let n = max() / 2 + 1\n  <<1:size(n)-unit(4)>>\n}",
+        3,
+    );
+    overflows_at(
+        "pub fn main() {
+  let n = max()
+  case <<1>> {
+    <<_:size(n)-unit(2), _:bits>> -> 1
+    _ -> 0
+  }
+}",
+        4,
+    );
+    overflows_at(
+        "pub fn main() {
+  let n = max()
+  case <<1>> {
+    <<_:size(n + 1), _:bits>> -> 1
+    _ -> 0
+  }
+}",
+        4,
+    );
+    runs(
+        "pub fn main() {
+  let n = 2
+  assert <<1:size(n)-unit(4)>> == <<1>>
+  let assert <<a:size(n * 2)-unit(2)>> = <<7>>
+  assert a == 7
+}",
+        fail,
+    );
+}

@@ -1366,7 +1366,8 @@ impl Generator<'_> {
                     let local = self.wasm_local(self.int.val_type());
                     evaluate(self, instructions, size);
                     if unit != BigInt::from(1) {
-                        let _ = instructions.int_const(&unit).int_mul();
+                        let _ = instructions.int_const(&unit);
+                        self.size_operation(instructions, IntOperation::Mul, segment.location);
                     }
                     let _ = instructions.local_set(local);
                     Some(SizeOption::Local(local))
@@ -1854,7 +1855,8 @@ impl Generator<'_> {
         let local = self.wasm_local(self.int.val_type());
         self.bit_array_size(scope, instructions, size);
         if unit != 1 {
-            let _ = instructions.int_const(&unit.into()).int_mul();
+            let _ = instructions.int_const(&unit.into());
+            self.size_operation(instructions, IntOperation::Mul, size.location());
         }
         let _ = instructions
             .local_tee(local)
@@ -1862,6 +1864,26 @@ impl Generator<'_> {
             .int_lt()
             .br_if(matching.fail_target);
         SegmentSize::Local(local)
+    }
+
+    /// `[Int Int] -> [Int]`: `operation` in the size of a segment at
+    /// `location`, checked there when the module checks.
+    fn size_operation(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        operation: IntOperation,
+        location: SrcSpan,
+    ) {
+        if self.checks_int_overflow() {
+            self.checked_int_operation(instructions, operation, location.start);
+        } else {
+            let _ = match operation {
+                IntOperation::Add => instructions.int_add(),
+                IntOperation::Sub => instructions.int_sub(),
+                IntOperation::Mul => instructions.int_mul(),
+                IntOperation::Div => unreachable!("a division in a size is not checked"),
+            };
+        }
     }
 
     /// The value of `size`, with the operators of `Int`.
@@ -1896,14 +1918,23 @@ impl Generator<'_> {
                 operator,
                 left,
                 right,
-                ..
+                location,
             } => {
                 self.bit_array_size(scope, instructions, left);
                 self.bit_array_size(scope, instructions, right);
                 let _ = match operator {
-                    IntOperator::Add => instructions.int_add(),
-                    IntOperator::Subtract => instructions.int_sub(),
-                    IntOperator::Multiply => instructions.int_mul(),
+                    IntOperator::Add => {
+                        self.size_operation(instructions, IntOperation::Add, *location);
+                        instructions
+                    }
+                    IntOperator::Subtract => {
+                        self.size_operation(instructions, IntOperation::Sub, *location);
+                        instructions
+                    }
+                    IntOperator::Multiply => {
+                        self.size_operation(instructions, IntOperation::Mul, *location);
+                        instructions
+                    }
                     IntOperator::Divide | IntOperator::Remainder => {
                         let dividend = self.wasm_local(self.int.val_type());
                         let divisor = self.wasm_local(self.int.val_type());
