@@ -6881,9 +6881,6 @@ fn replace_function_body(module: &mut walrus::Module, dest: FunctionId, src: Fun
     module.funcs.delete(src);
 }
 
-/// Whether `divisor` is a literal for which the wasm instruction of
-/// `operator` gives the Gleam result: not 0, which gives 0 instead of
-/// trapping (or an infinity), nor -1 for `/`, as `MIN / -1` wraps.
 impl Generator<'_> {
     /// The checked operation of `operator` with the divisor `right`, or
     /// `None` when it does not overflow or the module does not check.
@@ -6935,6 +6932,9 @@ impl Generator<'_> {
     }
 }
 
+/// Whether `divisor` is a literal for which the wasm instruction of
+/// `operator` gives the Gleam result: not 0, which gives 0 instead of
+/// trapping (or an infinity), nor -1 for `/`, as `MIN / -1` wraps.
 fn divisor_is_safe(operator: &BinOp, divisor: &TypedExpr) -> bool {
     match (operator, divisor) {
         (BinOp::DivInt, TypedExpr::Int { int_value, .. }) => {
