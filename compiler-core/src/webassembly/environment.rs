@@ -24,7 +24,9 @@ impl<'a> Generator<'a> {
         name: &EcoString,
         function: &TypedFunction,
     ) -> Id {
-        let global_name = ecow::eco_format!("{module}.{name}");
+        // A function of a Gleam module is `module.name`, see
+        // `imported_base_name`.
+        let global_name = ecow::eco_format!("{module}#{name}");
         if let Some(id) = self.find_global(&global_name) {
             return id;
         }

@@ -37,6 +37,12 @@ fn imports(wasm: &[u8]) -> Vec<(String, String, String, String)> {
     imports
 }
 
+fn validate(wasm: &[u8]) {
+    let _ = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(wasm)
+        .expect("a valid module");
+}
+
 fn environment_imports(src: &str, int: WasmInt) -> Vec<(String, String, String, String)> {
     let wasm = super::compile_wasm_in(
         "thepackage",
@@ -243,4 +249,23 @@ pub fn main() { print("hello", 2) }
         imports,
         vec![import("env", "print", "[I32, I32, I64]", "[]")]
     );
+}
+
+/// A Gleam module may have the name of a module of the environment.
+#[test]
+fn gleam_module_named_as_the_environment() {
+    let wasm = super::compile_wasm_in(
+        "thepackage",
+        r#"
+import env
+
+@external(webassembly, "env", "tick")
+fn tick() -> Int
+
+pub fn main() { #(tick(), env.tick("a")) }
+"#,
+        vec![("thepackage", "env", "pub fn tick(x: String) { x }")],
+        super::wasm_config(WasmInt::I64, WasmFloat::F64),
+    );
+    validate(&wasm);
 }
