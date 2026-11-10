@@ -136,7 +136,7 @@ pub fn main() {
     );
 }
 
-/// A dict gives its entries in the order of the hashes, one at a time.
+/// A dict gives its entries one at a time.
 #[test]
 fn view_of_dicts() {
     assert_views(

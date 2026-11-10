@@ -308,7 +308,7 @@ fn at(items: List(a), index: Int) -> Result(a, Nil) {
 /// Opens one level of `data`, calling the function for its kind. The
 /// standard library passes the constructors of its type, which the runtime
 /// cannot name. A list gives its first item and the rest, and a dict gives
-/// its first entry in the order of the hashes and the rest.
+/// its first entry in the order of `dict_first` and the rest.
 pub fn dynamic_view(
   data: Dynamic,
   int: fn(Int) -> v,

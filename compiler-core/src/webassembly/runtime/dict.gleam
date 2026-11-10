@@ -533,7 +533,9 @@ fn entries_children(
   }
 }
 
-/// The first entry in trie order, or `Error(Nil)` when `champ` is empty.
+/// The first entry in trie order, or `Error(Nil)` when `champ` is empty. A
+/// node gives its entries before the entries of its children, so the order
+/// is not the order of the hashes.
 pub fn dict_first(champ: Dict(k, v)) -> Result(#(k, v), Nil) {
   first_node(champ.root)
 }
