@@ -838,8 +838,10 @@ pub struct WebAssemblyConfig {
     pub stack_limit: u32,
 }
 
+/// Node, which runs the program in `gleam run`, ends its stack between
+/// 8000 and 9000 calls of a function with one argument.
 fn default_stack_limit() -> u32 {
-    10_000
+    5000
 }
 
 impl Default for WebAssemblyConfig {
@@ -1623,7 +1625,7 @@ stack_limit = 100000
     assert_eq!(config.webassembly.stack_limit, 100_000);
     let config = toml::from_str::<PackageConfig>("name = \"one_two\"").unwrap();
     assert_eq!(config.webassembly.stack_overflow, WasmStackOverflow::Trap);
-    assert_eq!(config.webassembly.stack_limit, 10_000);
+    assert_eq!(config.webassembly.stack_limit, 5000);
 }
 
 /// The WebAssembly target has no shorthand, as the shorthands of the other

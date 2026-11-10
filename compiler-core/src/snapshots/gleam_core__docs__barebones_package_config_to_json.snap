@@ -55,7 +55,7 @@ version = "1.0.0"
       "failure": "exit",
       "int_overflow": "wrap",
       "stack_overflow": "trap",
-      "stack_limit": 10000
+      "stack_limit": 5000
     },
     "target": "erlang",
     "internal_modules": null

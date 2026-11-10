@@ -12,7 +12,9 @@
 //!
 //! The limit is the exported mutable global `_stack_limit`, which the host
 //! can change before it runs the program, as the stack of the engine
-//! depends on the engine and the host.
+//! depends on the engine and the host. The limit counts calls and the
+//! engine counts bytes, so a function with many locals can still end the
+//! stack of the engine before the limit.
 
 use super::*;
 

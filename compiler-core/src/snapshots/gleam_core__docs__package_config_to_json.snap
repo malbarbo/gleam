@@ -128,7 +128,7 @@ allow_read = ["./database.sqlite"]
       "failure": "exit",
       "int_overflow": "wrap",
       "stack_overflow": "trap",
-      "stack_limit": 10000
+      "stack_limit": 5000
     },
     "target": "erlang",
     "internal_modules": [
