@@ -155,6 +155,26 @@ pub fn main() {
     );
 }
 
+/// `delete` does not find a key that is not equal to itself, and the view
+/// still gives each entry once.
+#[test]
+fn view_of_a_dict_with_nan_keys() {
+    assert_views(
+        r#"
+import dict
+import view.{cast, show}
+
+pub fn main() {
+  let infinity = 1.0e308 *. 10.0
+  let nan = infinity -. infinity
+  let shown = show(cast(dict.from_list([#(nan, 1), #(nan, 2)])))
+  assert shown == "float NaN.0 => int 1; float NaN.0 => int 2; {}"
+    || shown == "float NaN.0 => int 2; float NaN.0 => int 1; {}"
+}
+"#,
+    );
+}
+
 #[test]
 fn view_of_records() {
     assert_views(

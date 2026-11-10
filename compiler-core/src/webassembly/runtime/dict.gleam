@@ -554,6 +554,28 @@ fn first_node(node: Node(k, v)) -> Result(#(k, v), Nil) {
   }
 }
 
+/// The first entry of `champ` and `champ` without it, or `Error(Nil)` when
+/// `champ` is empty.
+pub fn dict_pop_first(champ: Dict(k, v)) -> Result(#(k, v, Dict(k, v)), Nil) {
+  case dict_first(champ) {
+    Error(Nil) -> Error(Nil)
+    Ok(#(key, value)) -> {
+      let rest = dict_delete(champ, key)
+      case rest.size < champ.size {
+        True -> Ok(#(key, value, rest))
+        // `delete` does not find a key that is not equal to itself, like a
+        // NaN, so the rest is made of the other entries.
+        False ->
+          case dict_to_list(champ) {
+            [#(key, value), ..entries] ->
+              Ok(#(key, value, dict_from_list(entries)))
+            [] -> Error(Nil)
+          }
+      }
+    }
+  }
+}
+
 pub fn dict_to_list(champ: Dict(k, v)) -> List(#(k, v)) {
   to_list_loop(entries_of(champ), [])
 }

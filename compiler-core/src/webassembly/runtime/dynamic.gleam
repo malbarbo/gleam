@@ -339,8 +339,8 @@ pub fn dynamic_view(
     DList([]) -> empty
     DList([first, ..rest]) -> cons(first, DList(rest))
     DDict(x) ->
-      case dict.dict_first(x) {
-        Ok(#(key, value)) -> entry(key, value, DDict(dict.dict_delete(x, key)))
+      case dict.dict_pop_first(x) {
+        Ok(#(key, value, rest)) -> entry(key, value, DDict(rest))
         Error(Nil) -> empty_dict
       }
     DOther(x, vtable) ->
