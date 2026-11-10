@@ -4257,6 +4257,7 @@ String, String, String, Bool, Dynamic) -> b) -> b"
     fn _function_local(
         &mut self,
         name: EcoString,
+        location: SrcSpan,
         type_: &Arc<Type>,
         arguments: &[TypedArg],
         body: &[TypedStatement],
@@ -4298,6 +4299,10 @@ String, String, String, Bool, Dynamic) -> b) -> b"
             .chain(param_ids.iter().copied())
             .collect_vec();
         let mut code = Function::new(self, &name, &all_param_ids, &results);
+        let counts_stack_depth = self.counts_stack_depth();
+        if counts_stack_depth {
+            code.count_stack_depth(self.stack_depth().0);
+        }
         let mut instructions = code.extend_instructions(self);
         if let (Some(closure), Some(closure_local)) = (closure, closure_local) {
             // Copy the captures from the environment to their locals
@@ -4313,7 +4318,11 @@ String, String, String, Bool, Dynamic) -> b) -> b"
             self.wasm_module.locals.get_mut(local).name = Some(capture.name.to_string());
         }
         let scope = Scope::with_params(scope, arguments, &param_ids);
+        if counts_stack_depth {
+            self.enter_stack_depth(&mut instructions, &locals, scope.clone(), location.start);
+        }
         self.statements(&mut instructions, scope.clone(), &locals, body, true);
+        let _ = instructions.leave_stack_depth();
         self.record_return(&scope, index, &return_, body);
         let _ = instructions.end();
 
@@ -4328,6 +4337,7 @@ String, String, String, Bool, Dynamic) -> b) -> b"
     fn function_local(
         &mut self,
         name: EcoString,
+        location: SrcSpan,
         type_: &Arc<Type>,
         arguments: &[TypedArg],
         body: &[TypedStatement],
@@ -4337,7 +4347,7 @@ String, String, String, Bool, Dynamic) -> b) -> b"
         if let Some(id) = self.find_global(&name) {
             return id;
         }
-        self._function_local(name, type_, arguments, body, closure, captures)
+        self._function_local(name, location, type_, arguments, body, closure, captures)
     }
 
     /// The name of the code of the function literal at `location`.
@@ -4475,7 +4485,7 @@ String, String, String, Bool, Dynamic) -> b) -> b"
         };
         let name = self.function_literal_name(*location, type_) + "@direct";
         let captures = self.function_literal_captures(*location, parameters, body);
-        let id = self.function_local(name, type_, parameters, body, None, &captures);
+        let id = self.function_local(name, *location, type_, parameters, body, None, &captures);
         for local in self.captures_locals(&scope, &captures) {
             let _ = instructions.local_get(local);
         }
@@ -4497,7 +4507,7 @@ String, String, String, Bool, Dynamic) -> b) -> b"
         let captures = self.local_function_captures(info);
         let nested_locations: Vec<_> = nested.keys().copied().collect();
         self.local_functions.extend(nested);
-        let id = self._function_local(name, &type_, &args, &body, None, &captures);
+        let id = self._function_local(name, info.location, &type_, &args, &body, None, &captures);
         for location in nested_locations {
             let _ = self.local_functions.remove(&location);
         }
@@ -5240,8 +5250,15 @@ String, String, String, Bool, Dynamic) -> b) -> b"
                 let captures = self.function_literal_captures(*location, arguments, body);
                 let (params, return_) = type_.fn_types().expect("function type");
                 let closure = self.closure_type(params, return_);
-                let id =
-                    self.function_local(name, type_, arguments, body, Some(closure), &captures);
+                let id = self.function_local(
+                    name,
+                    *location,
+                    type_,
+                    arguments,
+                    body,
+                    Some(closure),
+                    &captures,
+                );
                 if captures.is_empty() {
                     let closure = self.closure_global(id.func_id(), &closure);
                     let _ = instructions.global_get(closure);

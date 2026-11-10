@@ -108,6 +108,36 @@ pub fn main() {{
     );
 }
 
+/// An anonymous function counts, so a recursion that goes only through
+/// anonymous functions fails at the limit.
+#[test]
+fn anonymous_function() {
+    let result = run(
+        r#"
+type F {
+  F(run: fn(F, Int) -> Int)
+}
+
+pub fn main() {
+  let f =
+    F(fn(self: F, n: Int) -> Int {
+      case n {
+        0 -> 0
+        _ -> 1 + self.run(self, n - 1)
+      }
+    })
+  f.run(f, 1_000_000)
+}
+"#,
+        fail(1000),
+    );
+    assert!(
+        result.stderr.contains(".gleam:8\n  Stack overflow."),
+        "{}",
+        result.stderr
+    );
+}
+
 /// With `failure = "exception"`, `catch` catches an overflow, and the depth
 /// goes back to where it was.
 #[test]

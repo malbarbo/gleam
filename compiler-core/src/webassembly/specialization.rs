@@ -285,7 +285,15 @@ impl<'a> Generator<'a> {
                 let (params, return_) = type_.fn_types().expect("function type");
                 let closure = self.closure_type(params, return_);
                 let id = self
-                    .function_local(name, &type_, arguments, body, Some(closure), &captures)
+                    .function_local(
+                        name,
+                        *location,
+                        &type_,
+                        arguments,
+                        body,
+                        Some(closure),
+                        &captures,
+                    )
                     .func_id();
                 let _ = self.specializations.created.insert(id);
                 Some(Known::Code(id))
