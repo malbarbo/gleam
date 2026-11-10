@@ -179,3 +179,52 @@ pub fn main() {
         ..fail(int)
     });
 }
+
+const FLOAT_TO_INT: &str = r#"
+@external(webassembly, "builtins", "_float_truncate")
+fn truncate(x: Float) -> Int
+
+@external(webassembly, "builtins", "_float_round")
+fn round(x: Float) -> Int
+
+fn apply(f: fn(Float) -> Int, x: Float) -> Int {
+  f(x)
+}
+"#;
+
+/// A `Float` that is too large for the `Int` fails at the declaration of
+/// the function that converts it, also when the function is a value.
+#[test]
+fn float_to_int() {
+    let main = |body: &str| format!("{FLOAT_TO_INT}\npub fn main() {{ {body} }}");
+    overflows_at(&main("truncate(1.0e30)"), 3);
+    overflows_at(&main("truncate(-1.0e30)"), 3);
+    overflows_at(&main("round(1.0e30)"), 6);
+    overflows_at(&main("round(-1.0e30)"), 6);
+    overflows_at(&main("apply(truncate, 1.0e30)"), 3);
+    runs(
+        &main(
+            "assert truncate(2147483647.9) == 2147483647
+  assert truncate(-2147483648.9) == -2147483648
+  assert round(2147483647.4) == 2147483647
+  assert round(-2147483648.4) == -2147483648
+  assert apply(round, -2.5) == -3",
+        ),
+        fail,
+    );
+    let result = run(&main("round(2147483647.5)"), fail(WasmInt::I32));
+    assert!(
+        result.stderr.contains(".gleam:6\n  Int overflow."),
+        "{}",
+        result.stderr
+    );
+}
+
+/// Without the option, the conversion gives the nearest `Int`.
+#[test]
+fn float_to_int_saturates_by_default() {
+    runs(
+        &format!("{FLOAT_TO_INT}\npub fn main() {{ assert truncate(1.0e30) == max() }}"),
+        |int| wasm_config(int, WasmFloat::F64),
+    );
+}

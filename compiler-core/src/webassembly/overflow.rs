@@ -4,8 +4,10 @@
 //! `int_overflow = "fail"`: an `Int` operation of the program whose result
 //! does not fit in the `Int` is a failure at the operation, like a `panic`.
 //! Each operation calls a function that checks its result, and that is
-//! given the location of the operation for the failure. The modules of the
-//! runtime keep the modular operations, as their hashes wrap.
+//! given the location of the operation for the failure. `float.truncate`
+//! and `float.round` fail at their declaration, as they also are values.
+//! The modules of the runtime keep the modular operations, as their hashes
+//! wrap.
 
 use super::*;
 
@@ -52,6 +54,49 @@ impl Generator<'_> {
         self.push_failure_location(instructions, start);
         let function = self.function_checked_int(operation);
         let _ = instructions.call(function);
+    }
+
+    /// The function of `builtin`, which is `float.truncate` or
+    /// `float.round`, that `function` of `module` declares. It fails at the
+    /// declaration when the result does not fit in the `Int`. NaN is 0, as
+    /// in the conversion without the check.
+    pub(super) fn function_checked_float_to_int(
+        &mut self,
+        builtin: BuiltinFunctionExternal,
+        function: &TypedFunction,
+        module: &EcoString,
+    ) -> Id {
+        let name = ecow::eco_format!("{}_checked@{module}", builtin.name());
+        if let Some(id) = self.find_global(&name) {
+            return id;
+        }
+        let int_vt = self.int.val_type();
+        let float_vt = self.float.val_type();
+        let x = self.wasm_local(float_vt);
+        let result = self.wasm_local(float_vt);
+        let mut code = Function::new(self, &name, &[x], &[int_vt]);
+        let mut instructions = code.extend_instructions(self);
+        if builtin == BuiltinFunctionExternal::FloatRound {
+            self.float_rounded(&mut instructions, x);
+        } else {
+            let _ = instructions.local_get(x).float_trunc();
+        }
+        // The limits are powers of 2, which a float has exactly.
+        let limit = BigInt::from(1) << (instructions.int_bits() - 1);
+        let _ = instructions
+            .local_tee(result)
+            .float_const(&format!("{limit}.0"))
+            .float_ge()
+            .local_get(result)
+            .float_const(&format!("-{limit}.0"))
+            .float_lt()
+            .i32_or()
+            .if_(InstrSeqType::Simple(None), |then_| {
+                self.int_overflow_failure_at(then_, function, module);
+            });
+        let _ = instructions.local_get(result).float_to_int_sat().end();
+        let index = code.finish(self);
+        self.add_function_to_globals(name, index)
     }
 
     /// `name(a, b, file, module, function, line)`.

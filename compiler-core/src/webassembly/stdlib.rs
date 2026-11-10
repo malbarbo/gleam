@@ -258,21 +258,26 @@ impl<'a> Generator<'a> {
         function.finish(self)
     }
 
-    /// Rounds half away from zero. `floor(x + 0.5)` would be wrong for
-    /// `0.49999999999999994` (the sum rounds up to 1.0) and `nearest` rounds
-    /// half to even, so the fraction is compared instead.
     pub(super) fn code_float_round(&mut self) -> FunctionId {
         let int_vt = self.int.val_type();
-        let float_vt = self.float.val_type();
-        // params
-        let x = self.wasm_local(float_vt); // Float
-        // locals
-        let abs = self.wasm_local(float_vt); // Float
-        let t = self.wasm_local(float_vt); // Float
+        let x = self.wasm_local(self.float.val_type());
         let mut function = Function::new(self, "_float_round", &[x], &[int_vt]);
+        let mut instructions = function.extend_instructions(self);
+        self.float_rounded(&mut instructions, x);
+        let _ = instructions.float_to_int_sat().end();
+        function.finish(self)
+    }
+
+    /// `[] -> [Float]`: `x` rounded half away from zero. `floor(x + 0.5)`
+    /// would be wrong for `0.49999999999999994` (the sum rounds up to 1.0)
+    /// and `nearest` rounds half to even, so the fraction is compared
+    /// instead.
+    pub(super) fn float_rounded(&mut self, instructions: &mut Instructions<'_, '_>, x: LocalId) {
+        let float_vt = self.float.val_type();
+        let abs = self.wasm_local(float_vt);
+        let t = self.wasm_local(float_vt);
         #[rustfmt::skip]
-        let _ = function
-            .extend_instructions(self)
+        let _ = instructions
             // t = trunc(|x|)
             .local_get(x)
             .float_abs()
@@ -297,9 +302,6 @@ impl<'a> Generator<'a> {
             .float_add()
             // restore the sign
             .local_get(x)
-            .float_copysign()
-            .float_to_int_sat()
-            .end();
-        function.finish(self)
+            .float_copysign();
     }
 }

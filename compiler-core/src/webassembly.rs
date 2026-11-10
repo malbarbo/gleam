@@ -4628,6 +4628,14 @@ String, String, String, Bool, Dynamic) -> b) -> b"
             return self.function_array_external(array_function, required_type);
         }
         if let Some(builtin) = BuiltinFunctionExternal::by_name(fname) {
+            if matches!(
+                builtin,
+                BuiltinFunctionExternal::FloatTruncate | BuiltinFunctionExternal::FloatRound
+            ) && self.int_overflow == WasmIntOverflow::Fail
+                && self.module_package(module) != RUNTIME_PACKAGE
+            {
+                return self.function_checked_float_to_int(builtin, function, module);
+            }
             // Created on first use, also for externals declared in
             // imported modules.
             let index = self.get_function_builtin_external(builtin);

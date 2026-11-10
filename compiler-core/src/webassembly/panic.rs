@@ -180,12 +180,50 @@ impl<'a> Generator<'a> {
         instructions: &mut Instructions<'_, '_>,
         location: &[LocalId],
     ) {
+        self.int_overflow_failure_with(instructions, |_, instructions| {
+            for local in location {
+                let _ = instructions.local_get(*local);
+            }
+        });
+    }
+
+    /// Calls `_panic` for an `Int` overflow at the declaration of
+    /// `function` in `module`.
+    pub(super) fn int_overflow_failure_at(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        function: &TypedFunction,
+        module: &EcoString,
+    ) {
+        let line = self
+            .all_line_numbers
+            .get(module)
+            .map_or(0, |lines| lines.line_number(function.location.start));
+        let location = [
+            self.source_file(module),
+            module.clone(),
+            function_name(function).clone(),
+            line.to_string().into(),
+        ];
+        self.int_overflow_failure_with(instructions, |generator, instructions| {
+            for string in &location {
+                let index = generator.string_index(string);
+                let _ = instructions.global_as_non_null(index);
+            }
+        });
+    }
+
+    /// Calls `_panic` for an `Int` overflow at the file, the module, the
+    /// function and the line that `push_location` pushes.
+    fn int_overflow_failure_with(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        push_location: impl FnOnce(&mut Self, &mut Instructions<'_, '_>),
+    ) {
         let error = Failure::IntOverflow;
         let kind = self.string_index(&error.name().into());
         let _ = instructions.global_as_non_null(kind);
-        for local in location {
-            let _ = instructions.local_get(*local);
-        }
+        push_location(self, instructions);
         let message = self.string_index(&error.default_message().into());
         let _ = instructions
             .global_as_non_null(message)
