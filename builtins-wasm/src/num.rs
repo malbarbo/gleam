@@ -59,13 +59,15 @@ pub const FLOAT_BUF_LEN: usize = 32;
 /// Formats `x` like `float_to_string` in `gleam_stdlib.mjs`: the shortest
 /// round-trip digits laid out as ECMAScript `Number#toString` does, with `.0`
 /// added when there is no fractional part and without the `+` of the exponent.
-/// `-0.0` gives `"-0.0"` (JavaScript gives `"0.0"`).
+/// `-0.0` gives `"0.0"`, as in JavaScript.
 pub fn format_float(x: f64, f32mode: bool, buf: &mut [u8; FLOAT_BUF_LEN]) -> &str {
     let mut w = Writer { buf, len: 0 };
     if x.is_nan() {
         w.push_str("NaN.0");
     } else if x.is_infinite() {
         w.push_str(if x < 0.0 { "-Infinity.0" } else { "Infinity.0" });
+    } else if x == 0.0 {
+        w.push_str("0.0");
     } else {
         let mut ryu = ryu::Buffer::new();
         let repr = if f32mode {
@@ -376,7 +378,7 @@ mod tests {
     fn float_to_string_cases() {
         let cases: &[(f64, &str)] = &[
             (0.0, "0.0"),
-            (-0.0, "-0.0"),
+            (-0.0, "0.0"),
             (1.0, "1.0"),
             (-1.0, "-1.0"),
             (0.1, "0.1"),
@@ -418,7 +420,7 @@ mod tests {
             float_to_string(3.4028235e38f32 as f64, true),
             "3.4028235e38"
         );
-        assert_eq!(float_to_string(-0.0, true), "-0.0");
+        assert_eq!(float_to_string(-0.0, true), "0.0");
     }
 
     #[test]

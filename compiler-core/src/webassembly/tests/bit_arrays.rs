@@ -1240,7 +1240,7 @@ fn sized(b: BitArray, n: Int) -> String {
 pub fn main() {
   let assert "lit 1.5" = floats(<<1.5:float>>)
   let assert "lit 0.0" = floats(<<0.0:float>>)
-  let assert "f64 -0.0" = floats(<<-0.0:float>>)
+  let assert "f64 0.0" = floats(<<-0.0:float>>)
   let assert "f64 2.5" = floats(<<2.5:float>>)
   let assert "f16 first 1.0" = floats(<<0x3C00:16, 1:3>>)
   let assert "other" = floats(<<0x7FF0:16, 0:48>>)
