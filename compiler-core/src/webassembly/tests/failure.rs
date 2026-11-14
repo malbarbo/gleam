@@ -222,3 +222,54 @@ pub fn main() {
 "#,
     );
 }
+
+/// `_catch` gives the details of the error of the JavaScript target in any
+/// host, like the value that did not match and the sides of an `assert`.
+#[test]
+fn catch_gives_the_details() {
+    let src = format!(
+        "{CATCH}{}",
+        r#"
+fn details(run: fn() -> a) -> Dynamic {
+  catch_with(run, fn(_) { panic }, fn(_, _, _, _, _, _, _, details) { details })
+}
+
+pub fn main() {
+  echo details(fn() {
+    let assert Ok(n) = Error("boom")
+    n
+  })
+  echo details(fn() { assert 1 + 2 == 4 })
+  echo details(fn() { panic })
+}
+"#
+    );
+    let at = |code: &str| src.find(code).expect("in the source");
+    let end = |code: &str| at(code) + code.len();
+    let let_assert = format!(
+        "#(Error(\"boom\"), {}, {}, {}, {})",
+        at("let assert"),
+        end("Error(\"boom\")"),
+        at("Ok(n)"),
+        end("Ok(n)"),
+    );
+    let assert = format!(
+        "#({}, {}, {}, \"binary_operator\", \"==\", #(\"expression\", 3, {}, {}), \
+         #(\"literal\", 4, {}, {}))",
+        at("assert 1"),
+        end("1 + 2 == 4"),
+        at("1 + 2"),
+        at("1 + 2"),
+        end("1 + 2"),
+        end("1 + 2 == 4") - 1,
+        end("1 + 2 == 4"),
+    );
+    let lines: Vec<_> = run_exception(&src)
+        .stderr
+        .lines()
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(lines, [let_assert, assert, "Nil".into()]);
+}

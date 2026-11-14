@@ -8,14 +8,15 @@
 //! runs in a JavaScript host, one that imports anything other than WASI,
 //! `_panic` throws the `Error` of the JavaScript target, which the host can
 //! catch, like on JavaScript. Otherwise it prints the error and exits,
-//! without the details, which are only made when the program can run in a
-//! JavaScript host: it uses JavaScript strings or a module declares a
-//! function of the host.
+//! without the details. Without `failure = "exception"`, only a program
+//! that can run in a JavaScript host makes them: it uses JavaScript strings
+//! or a module declares a function of the host.
 //!
 //! With `failure = "exception"`, `_panic` throws instead an exception of the
 //! tag of a failure, whose values are its params, and `_panic_exit` does
 //! what `_panic` does otherwise. `_catch` catches the exception, and `_start`
-//! calls `_panic_exit` with an exception that nothing caught.
+//! calls `_panic_exit` with an exception that nothing caught. The program
+//! makes the details in any host, so `_catch` gives them to Gleam code.
 
 use super::dynamic::DYNAMIC_MODULE;
 use super::glue::{ARENA_MARK, ARENA_RELEASE};
@@ -243,7 +244,7 @@ impl<'a> Generator<'a> {
         error: Failure<'_>,
     ) {
         match error {
-            _ if !self.javascript_host => {
+            _ if !self.javascript_host && self.failure != WasmFailure::Exception => {
                 let _ = instructions.call(self.dynamic_nil());
             }
             Failure::Panic | Failure::Todo | Failure::IntOverflow | Failure::StackOverflow => {
