@@ -53,6 +53,7 @@ impl Function {
                 cell: generator.cell,
                 memory: generator.memory,
                 stack_depth: self.stack_depth,
+                call_lines: generator.call_lines(),
             },
             seq: SeqRef::Owned(self.fb.func_body()),
         }
@@ -71,7 +72,7 @@ pub(super) struct Instructions<'a, 'b> {
 
 /// How the values are represented in the module, fixed before its functions
 /// are generated.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct Representations {
     pub(super) int: IntType,
     pub(super) float: FloatType,
@@ -84,6 +85,8 @@ pub(super) struct Representations {
     pub(super) memory: Option<MemoryId>,
     /// The depth of the calls, which a tail call decrements, see `stack`.
     pub(super) stack_depth: Option<GlobalId>,
+    /// The lines of the calls, when the function records them, see `lines`.
+    pub(super) call_lines: Option<Rc<lines::CallLines>>,
 }
 
 enum SeqRef<'a, 'b> {
@@ -186,6 +189,26 @@ impl<'a, 'b> Instructions<'a, 'b> {
                 .i32_const(1)
                 .i32_sub()
                 .global_set(depth);
+        }
+        self
+    }
+
+    pub(super) fn call(&mut self, function: FunctionId) -> &mut Self {
+        let _ = self.seq.as_mut().call(function);
+        self.record_call_line()
+    }
+
+    pub(super) fn call_ref(&mut self, type_index: TypeId) -> &mut Self {
+        let _ = self.seq.as_mut().call_ref(type_index);
+        self.record_call_line()
+    }
+
+    /// Gives the call that was just added its line, see `lines`.
+    fn record_call_line(&mut self) -> &mut Self {
+        if let Some(id) = self.repr.call_lines.as_ref().and_then(|lines| lines.call())
+            && let Some(last) = self.seq.as_mut().instrs_mut().last_mut()
+        {
+            last.1 = id;
         }
         self
     }
@@ -328,11 +351,12 @@ impl<'a, 'b> Instructions<'a, 'b> {
         then: impl FnOnce(&mut Instructions<'_, '_>),
         else_: impl FnOnce(&mut Instructions<'_, '_>),
     ) -> &mut Self {
-        let repr = self.repr;
+        let repr = self.repr.clone();
+        let else_repr = self.repr.clone();
         let _ = self.seq.as_mut().if_else(
             ty,
             |seq| sub_seq(repr, seq, then),
-            |seq| sub_seq(repr, seq, else_),
+            |seq| sub_seq(else_repr, seq, else_),
         );
         self
     }
@@ -342,7 +366,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
         ty: impl Into<InstrSeqType>,
         make_block: impl FnOnce(&mut Instructions<'_, '_>),
     ) -> &mut Self {
-        let repr = self.repr;
+        let repr = self.repr.clone();
         let _ = self
             .seq
             .as_mut()
@@ -358,7 +382,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
         catches: Vec<walrus::ir::TryTableCatch>,
         make_body: impl FnOnce(&mut Instructions<'_, '_>),
     ) -> &mut Self {
-        let repr = self.repr;
+        let repr = self.repr.clone();
         let seq = self.seq.as_mut();
         let mut body = seq.dangling_instr_seq(ty);
         sub_seq(repr, &mut body, make_body);
@@ -372,7 +396,7 @@ impl<'a, 'b> Instructions<'a, 'b> {
         ty: impl Into<InstrSeqType>,
         make_loop: impl FnOnce(&mut Instructions<'_, '_>),
     ) -> &mut Self {
-        let repr = self.repr;
+        let repr = self.repr.clone();
         let _ = self
             .seq
             .as_mut()
@@ -747,8 +771,6 @@ impl<'a, 'b> Instructions<'a, 'b> {
         ref_is_null(),
         ref_as_non_null(),
         ref_eq(),
-        call_ref(index: TypeId),
-        call(index: FunctionId),
         array_new(type_index: TypeId),
         array_new_default(type_index: TypeId),
         array_new_fixed(type_index: TypeId, len: u32),

@@ -15,6 +15,7 @@ mod hash;
 mod host;
 mod instructions;
 mod js_string;
+mod lines;
 mod link;
 mod liveness;
 mod monomorphize;
@@ -26,6 +27,8 @@ mod specialization;
 mod stack;
 mod stdlib;
 mod string;
+
+pub use lines::{Lines, LinesFunction};
 #[cfg(test)]
 mod tests;
 
@@ -1107,6 +1110,10 @@ struct Generator<'a> {
     stack_overflow: WasmStackOverflow,
     stack_limit: u32,
     stack_depth: Option<(GlobalId, GlobalId)>,
+    /// The lines of the calls, and the name and the file of each function
+    /// that has them, with `call_lines`, see `lines`.
+    call_lines: Option<Rc<lines::CallLines>>,
+    call_lines_functions: HashMap<FunctionId, (EcoString, EcoString)>,
     /// The function that each `echo` calls, see `expression_echo_hook`.
     echo: Option<HookFunction>,
     /// The function that `string.inspect` calls, see `function_inspect_hook`.
@@ -1134,7 +1141,10 @@ impl<'a> Generator<'a> {
         all_line_numbers: &'a HashMap<EcoString, LineNumbers>,
         config: WebAssemblyConfig,
     ) -> Self {
-        let mut wasm_module = walrus::Module::default();
+        let call_lines = config.call_lines && !config.opt_level.is_enabled();
+        let mut module_config = walrus::ModuleConfig::default();
+        let _ = module_config.preserve_code_transform(call_lines);
+        let mut wasm_module = walrus::Module::with_config(module_config);
         let linker = link::Linker::new(&mut wasm_module);
         let memory = Some(linker.memory());
         let bytes = BytesType::new(&mut wasm_module);
@@ -1219,6 +1229,8 @@ impl<'a> Generator<'a> {
             stack_overflow: config.stack_overflow,
             stack_limit: config.stack_limit,
             stack_depth: None,
+            call_lines: call_lines.then(Rc::default),
+            call_lines_functions: HashMap::new(),
             echo: None,
             inspect: None,
             start: None,
@@ -1462,6 +1474,7 @@ impl<'a> Generator<'a> {
         if self.imports_environment {
             self.linker.export_memory(&mut self.wasm_module);
         }
+        self.add_lines_section();
         let link = self.linker.eliminate_dead_code(&mut self.wasm_module);
         liveness::clear_dead_locals(&mut self.wasm_module);
         Ok(Some(link::emit(&mut self.wasm_module, link)))
@@ -4169,6 +4182,7 @@ String, String, String, Bool, Dynamic) -> b) -> b"
             &function.arguments,
             &param_ids,
         );
+        let line = self.set_call_line(None);
         if counts_stack_depth {
             self.enter_stack_depth(
                 &mut instructions,
@@ -4184,6 +4198,7 @@ String, String, String, Bool, Dynamic) -> b) -> b"
             &function.body,
             true,
         );
+        self.restore_call_line(line);
         let _ = instructions.leave_stack_depth();
         self.record_return(&scope, index, &function.return_type, &function.body);
         self.local_functions = saved_local_functions;
@@ -4197,6 +4212,7 @@ String, String, String, Bool, Dynamic) -> b) -> b"
         }
         let real_id = code.finish(self);
         replace_function_body(&mut self.wasm_module, index, real_id);
+        self.record_call_lines_function(index, function_name(&function).clone());
         if export {
             let _ = self.wasm_module.exports.add(&name, index);
         }
@@ -4321,10 +4337,12 @@ String, String, String, Bool, Dynamic) -> b) -> b"
             self.wasm_module.locals.get_mut(local).name = Some(capture.name.to_string());
         }
         let scope = Scope::with_params(scope, arguments, &param_ids);
+        let line = self.set_call_line(None);
         if counts_stack_depth {
             self.enter_stack_depth(&mut instructions, &locals, scope.clone(), location.start);
         }
         self.statements(&mut instructions, scope.clone(), &locals, body, true);
+        self.restore_call_line(line);
         let _ = instructions.leave_stack_depth();
         self.record_return(&scope, index, &return_, body);
         let _ = instructions.end();
@@ -4334,6 +4352,7 @@ String, String, String, Bool, Dynamic) -> b) -> b"
         }
         let real_id = code.finish(self);
         replace_function_body(&mut self.wasm_module, index, real_id);
+        self.record_call_lines_function(index, "<anonymous>".into());
         id
     }
 
@@ -4720,8 +4739,10 @@ String, String, String, Bool, Dynamic) -> b) -> b"
         statements: &[TypedStatement],
         tail: bool,
     ) {
+        let line = self.set_call_line(None);
         let mut remaining = statements;
         while let Some((statement, rest)) = remaining.split_first() {
+            let _ = self.set_call_line(Some(statement.location().start));
             match statement {
                 Statement::Assignment(assignment)
                     if let Some(info) = self.local_function_definition(assignment) =>
@@ -4754,7 +4775,7 @@ String, String, String, Bool, Dynamic) -> b) -> b"
                         || self.pattern_can_fail(&assignment.pattern) =>
                 {
                     self.assignment_assert(locals, scope, instructions, assignment, rest, tail);
-                    return;
+                    break;
                 }
                 Statement::Assignment(assignment) => {
                     scope =
@@ -4770,6 +4791,7 @@ String, String, String, Bool, Dynamic) -> b) -> b"
             }
             remaining = rest;
         }
+        self.restore_call_line(line);
     }
 
     fn statement(
@@ -5003,6 +5025,19 @@ String, String, String, Bool, Dynamic) -> b) -> b"
     }
 
     fn _expression(
+        &mut self,
+        locals: &Locals,
+        scope: Scope,
+        instructions: &mut Instructions<'_, '_>,
+        expression: &TypedExpr,
+        tail: bool,
+    ) {
+        let line = self.set_call_line(Some(expression.location().start));
+        self.expression_code(locals, scope, instructions, expression, tail);
+        self.restore_call_line(line);
+    }
+
+    fn expression_code(
         &mut self,
         locals: &Locals,
         scope: Scope,

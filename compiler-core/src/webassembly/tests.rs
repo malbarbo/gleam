@@ -654,6 +654,7 @@ mod glue;
 mod host;
 mod inspect_hook;
 mod js_strings;
+mod lines;
 mod link;
 mod lists;
 mod liveness;

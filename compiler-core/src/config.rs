@@ -836,6 +836,10 @@ pub struct WebAssemblyConfig {
     /// `_stack_limit`.
     #[serde(default = "default_stack_limit")]
     pub stack_limit: u32,
+    /// Whether the module has the section `gleam.lines`, with the line of
+    /// each call. It has none with `opt_level`, which moves the code.
+    #[serde(default)]
+    pub call_lines: bool,
 }
 
 /// Node, which runs the program in `gleam run`, ends its stack between
@@ -859,6 +863,7 @@ impl Default for WebAssemblyConfig {
             int_overflow: WasmIntOverflow::default(),
             stack_overflow: WasmStackOverflow::default(),
             stack_limit: default_stack_limit(),
+            call_lines: false,
         }
     }
 }
