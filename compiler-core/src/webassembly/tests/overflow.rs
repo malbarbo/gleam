@@ -266,3 +266,67 @@ fn bit_array_segment_size() {
         fail,
     );
 }
+
+/// An `Int` segment that a pattern reads fails when its integer does not
+/// fit in the `Int`. A literal or a discard does not fail.
+#[test]
+fn bit_array_read() {
+    for (int, bits) in [(WasmInt::I32, 32), (WasmInt::I64, 64)] {
+        let bytes = |byte: &str, count: usize| vec![byte; count].join(", ");
+        let ones = bytes("255", bits / 8);
+        let max = bytes("255", bits / 8 - 1);
+        let wide = bits + 8;
+        for read in [
+            format!("let assert <<x:{bits}>> = <<{ones}>>"),
+            format!("let assert <<x:{bits}-little>> = <<{ones}>>"),
+            format!("let assert <<x:{wide}>> = <<1, {}>>", bytes("0", bits / 8)),
+            format!(
+                "let assert <<x:{wide}-signed>> = <<0, 128, {}>>",
+                bytes("0", bits / 8 - 1)
+            ),
+            format!("let assert <<x:{wide}-little-signed>> = <<{max}, 127, 255>>"),
+            format!("let n = {bits}\n  let assert <<x:size(n)>> = <<{ones}>>"),
+            format!("let assert <<_, x:{bits}>> = <<0, {ones}>>"),
+        ] {
+            let src = format!("pub fn main() {{\n  {read}\n  x\n}}");
+            let line = 2 + read.lines().count() - 1;
+            let result = run(&src, fail(int));
+            let expected = format!(".gleam:{line}\n  Int overflow.");
+            assert!(
+                result.stderr.contains(&expected),
+                "{int:?} {read}: expected {expected:?} in:\n{}",
+                result.stderr
+            );
+        }
+        let src = format!(
+            "pub fn main() {{
+  let assert <<x:{bits}-signed>> = <<{ones}>>
+  assert x == -1
+  let assert <<x:{wide}-signed>> = <<255, {ones}>>
+  assert x == -1
+  let assert <<x:{wide}>> = <<0, 127, {max}>>
+  assert x > 0
+  let assert <<y:{wide}-little>> = <<{max}, 127, 0>>
+  assert x == y
+  let assert <<_:{bits}>> = <<{ones}>>
+  let assert Error(Nil) = case <<{ones}>> {{
+    <<1:{bits}>> -> Ok(Nil)
+    _ -> Error(Nil)
+  }}
+  let n = {}
+  let assert <<x:size(n)>> = <<127, {max}>>
+  assert x > 0
+}}",
+            bits
+        );
+        let result = run(&src, fail(int));
+        assert!(result.status.success(), "{int:?}:\n{}", result.stderr);
+        let result = run(
+            &format!(
+                "pub fn main() {{\n  let assert <<x:{bits}>> = <<{ones}>>\n  assert x == -1\n}}"
+            ),
+            wasm_config(int, WasmFloat::F64),
+        );
+        assert!(result.status.success(), "{int:?} wraps:\n{}", result.stderr);
+    }
+}

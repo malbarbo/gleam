@@ -641,6 +641,76 @@ pub fn bit_array_read_int(
   }
 }
 
+/// Returns `True` if the integer that `bit_array_read_int` reads with the
+/// same arguments fits in an integer of `width + 1` bits, `False` otherwise.
+/// It fits when its bits from `width` up are all equal to its sign, which is
+/// 0 when it is not `signed`.
+pub fn bit_array_int_fits(
+  bits: Bits,
+  at: Int,
+  size: Int,
+  little: Bool,
+  signed: Bool,
+  width: Int,
+) -> Bool {
+  let position = bits.start + at
+  let sign = case signed {
+    True -> int_bit(bits.bytes, position, size, little, size - 1)
+    False -> 0
+  }
+  high_bits_equal(bits.bytes, position, size, little, width, sign)
+}
+
+/// Returns `True` if the bits from `k` to `size - 1` of the integer of the
+/// `size` bits of `bytes` at `position` are all `bit`, `False` otherwise.
+fn high_bits_equal(
+  bytes: Words,
+  position: Int,
+  size: Int,
+  little: Bool,
+  k: Int,
+  bit: Int,
+) -> Bool {
+  case k >= size {
+    True -> True
+    False ->
+      case int_bit(bytes, position, size, little, k) == bit {
+        True -> high_bits_equal(bytes, position, size, little, k + 1, bit)
+        False -> False
+      }
+  }
+}
+
+/// The bit `k`, counted from the least significant, of the integer of the
+/// `size` bits of `bytes` at `position`.
+fn int_bit(
+  bytes: Words,
+  position: Int,
+  size: Int,
+  little: Bool,
+  k: Int,
+) -> Int {
+  let whole = size - bitwise_and(size, 7)
+  let offset = case little && k < whole {
+    True -> k - bitwise_and(k, 7) + 7 - bitwise_and(k, 7)
+    // The bits after the whole bytes of a little endian integer are its
+    // most significant ones, in big endian order.
+    False ->
+      case little {
+        True -> size - 1 - k + whole
+        False -> size - 1 - k
+      }
+  }
+  let p = position + offset
+  bitwise_and(
+    bitwise_shift_right(
+      bytes_get(bytes, bitwise_shift_right(p, 3)),
+      7 - bitwise_and(p, 7),
+    ),
+    1,
+  )
+}
+
 /// The unsigned integer of the `size` bits of `bytes` at `position`.
 fn read_int(bytes: Words, position: Int, size: Int, little: Bool) -> Int {
   case bitwise_and(position, 7), little {

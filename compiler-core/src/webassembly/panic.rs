@@ -214,6 +214,18 @@ impl<'a> Generator<'a> {
         });
     }
 
+    /// Calls `_panic` for an `Int` overflow at `start` in the source of the
+    /// current function.
+    pub(super) fn int_overflow_failure_at_start(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        start: u32,
+    ) {
+        self.int_overflow_failure_with(instructions, |generator, instructions| {
+            generator.push_failure_location(instructions, start);
+        });
+    }
+
     /// Calls `_panic` for an `Int` overflow at the file, the module, the
     /// function and the line that `push_location` pushes.
     fn int_overflow_failure_with(

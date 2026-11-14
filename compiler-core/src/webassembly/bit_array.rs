@@ -1721,6 +1721,11 @@ impl Generator<'_> {
             } else {
                 panic!("invalid bit array segment type {type_:?}")
             };
+            if type_.is_int()
+                && self.read_can_overflow(instructions.int_bits(), value, &size, segment.signed())
+            {
+                self.check_int_fits(instructions, matching, &size, little, segment);
+            }
             self.push_read_arguments(instructions, matching, &size);
             let mut arguments = arguments;
             for flag in flags {
@@ -1971,6 +1976,63 @@ impl Generator<'_> {
             instructions.int_lt()
         };
         let _ = instructions.br_if(matching.fail_target);
+    }
+
+    /// Returns `true` if the module checks `Int` overflow and the integer of
+    /// `size` bits that `value` binds may not fit in an `Int` of `int_bits`,
+    /// `false` otherwise. A literal that is read does not match when it does
+    /// not fit.
+    fn read_can_overflow(
+        &self,
+        int_bits: i32,
+        value: &TypedPattern,
+        size: &SegmentSize,
+        signed: bool,
+    ) -> bool {
+        let int_bits = int_bits as u64;
+        self.checks_int_overflow()
+            && !matches!(value, Pattern::Int { .. })
+            && match size {
+                SegmentSize::Constant(size) if signed => *size > int_bits,
+                SegmentSize::Constant(size) => *size >= int_bits,
+                SegmentSize::Local(_) => true,
+            }
+    }
+
+    /// Fails with an `Int` overflow at `segment` when the integer of its
+    /// `size` bits does not fit in the `Int`.
+    fn check_int_fits(
+        &mut self,
+        instructions: &mut Instructions<'_, '_>,
+        matching: &Matching,
+        size: &SegmentSize,
+        little: bool,
+        segment: &TypedPatternBitArraySegment,
+    ) {
+        let fits = self.runtime_function_id(
+            BIT_ARRAY_MODULE,
+            "bit_array_int_fits",
+            vec![
+                type_::bit_array(),
+                type_::int(),
+                type_::int(),
+                type_::bool(),
+                type_::bool(),
+                type_::int(),
+            ],
+            type_::bool(),
+        );
+        self.push_read_arguments(instructions, matching, size);
+        let width = instructions.int_bits() - 1;
+        let _ = instructions
+            .bool_const(little)
+            .bool_const(segment.signed())
+            .int_const(&width.into())
+            .call(fits)
+            .bool_not()
+            .if_(InstrSeqType::Simple(None), |then_| {
+                self.int_overflow_failure_at_start(then_, segment.location.start);
+            });
     }
 
     /// Pushes the arguments of a `bit_array_read_*` function: the bit array,
