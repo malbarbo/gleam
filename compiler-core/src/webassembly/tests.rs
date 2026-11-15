@@ -669,6 +669,7 @@ mod start_hook;
 mod stdlib;
 mod strings;
 mod tail_calls;
+mod try_;
 mod tuples;
 mod units;
 mod view;

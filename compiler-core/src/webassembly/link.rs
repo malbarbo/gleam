@@ -359,6 +359,9 @@ pub(super) struct Linker {
     memory: MemoryId,
     /// The stubs and the index of their function in builtins-wasm.
     stubs: Vec<(u32, FunctionId)>,
+    /// The function that sets the stack pointer to its initial value, see
+    /// `reset_stack_pointer`.
+    reset_stack_pointer: Option<FunctionId>,
 }
 
 impl Linker {
@@ -383,7 +386,22 @@ impl Linker {
             .filter(|(_, function)| function.export.is_some())
             .map(|(index, function)| (imports + index as u32, stub(module, function)))
             .collect();
-        Linker { memory, stubs }
+        Linker {
+            memory,
+            stubs,
+            reset_stack_pointer: None,
+        }
+    }
+
+    /// A function that sets the stack pointer of builtins-wasm to its
+    /// initial value. A trap can leave it lower, and nothing else moves it
+    /// back. The function is empty when no builtin uses the stack pointer.
+    pub(super) fn reset_stack_pointer(&mut self, module: &mut walrus::Module) -> FunctionId {
+        *self.reset_stack_pointer.get_or_insert_with(|| {
+            let mut builder = FunctionBuilder::new(&mut module.types, &[], &[]);
+            let _ = builder.name("_reset_stack_pointer".into());
+            builder.finish(vec![], &mut module.funcs)
+        })
     }
 
     pub(super) fn memory(&self) -> MemoryId {
@@ -530,6 +548,19 @@ impl Linker {
                 ConstExpr::Value(Value::I32(builtins.global)),
             )
         });
+        if let (Some(global), Some(reset)) = (global, self.reset_stack_pointer)
+            && alive.contains(&reset)
+        {
+            let _ = module
+                .funcs
+                .get_mut(reset)
+                .kind
+                .unwrap_local_mut()
+                .builder_mut()
+                .func_body()
+                .i32_const(builtins.global)
+                .global_set(global);
+        }
         let table = indirect.then(|| {
             let table = module.tables.add_local(
                 false,

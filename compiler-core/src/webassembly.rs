@@ -44,7 +44,9 @@ use instructions::*;
 use js_string::*;
 use monomorphize::*;
 use overflow::IntOperation;
-use panic::{AssertKind, Asserted, AssertedValue, CATCH, Failure, is_catch_signature};
+use panic::{
+    AssertKind, Asserted, AssertedValue, CATCH, Failure, TRY, is_catch_signature, is_try_signature,
+};
 use runtime::{Hooks, RUNTIME_PACKAGE};
 pub use runtime::{RuntimeModule, modules as runtime_modules};
 
@@ -1645,7 +1647,8 @@ impl<'a> Generator<'a> {
             BuiltinFunction::JsFields(fields, _) => (vec![ANYREF], vec![*fields]),
             BuiltinFunction::JsTrampoline(params, result, _)
             | BuiltinFunction::JsCall(params, result, _)
-            | BuiltinFunction::Catch(params, result, _) => (params.clone(), vec![*result]),
+            | BuiltinFunction::Catch(params, result, _)
+            | BuiltinFunction::Try(params, result, _) => (params.clone(), vec![*result]),
             BuiltinFunction::Array { params, result, .. } => (params.clone(), vec![*result]),
         }
     }
@@ -2094,6 +2097,15 @@ impl<'a> Generator<'a> {
                             expected: "fn(fn() -> a, fn(a) -> b, fn(String, String, String, \
 String, String, String, Bool, Dynamic) -> b) -> b"
                                 .into(),
+                            got: self.type_pretty_name(&function_type(function)),
+                        });
+                    }
+                } else if name == TRY {
+                    if !is_try_signature(function) {
+                        return Err(Error::WrongBuiltinFunctionSignature {
+                            location: function.location,
+                            name: name.clone(),
+                            expected: "fn(fn() -> a, fn(a) -> b, fn() -> b) -> b".into(),
                             got: self.type_pretty_name(&function_type(function)),
                         });
                     }
@@ -4645,6 +4657,9 @@ String, String, String, Bool, Dynamic) -> b) -> b"
         }
         if fname == CATCH {
             return self.function_catch_external(function, module, required_type);
+        }
+        if fname == TRY {
+            return self.function_try_external(required_type);
         }
         if let Some(array_function) = ArrayFunction::by_name(fname) {
             return self.function_array_external(array_function, required_type);

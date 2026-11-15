@@ -1334,7 +1334,7 @@ fn js_function_capture(generator: &Generator<'_>) -> Capture {
 pub(super) const GLEAM_JS: &str = "gleam:js";
 
 /// The representation of a JavaScript function that calls a wasm function.
-const FUNCREF: ValType = ValType::Ref(RefType {
+pub(super) const FUNCREF: ValType = ValType::Ref(RefType {
     nullable: true,
     heap_type: HeapType::Abstract(walrus::AbstractHeapType::Func),
 });

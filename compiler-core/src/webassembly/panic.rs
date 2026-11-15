@@ -18,9 +18,9 @@
 //! calls `_panic_exit` with an exception that nothing caught. The program
 //! makes the details in any host, so `_catch` gives them to Gleam code.
 
-use super::dynamic::DYNAMIC_MODULE;
+use super::dynamic::{ANYREF, DYNAMIC_MODULE};
 use super::glue::{ARENA_MARK, ARENA_RELEASE};
-use super::host::{Direction, GLEAM_JS};
+use super::host::{Direction, FUNCREF, GLEAM_JS};
 use super::*;
 
 /// The failure of an error, with the details that the host makes the fields of the error of
@@ -122,6 +122,28 @@ pub(super) fn is_catch_signature(function: &TypedFunction) -> bool {
         .map(|argument| argument.type_.fn_types().map(|(params, _)| params.len()))
         .collect();
     arities == [Some(0), Some(1), Some(8)] && is_generic_type(&function.return_type)
+}
+
+/// `_try(run, ok, overflow)`, which calls `run` through the host import
+/// `env.wasm_try`, and then `ok` with its result, or `overflow` when the host
+/// caught a stack overflow in `run`. A trap ends the code it hits, and only
+/// the host can catch it, so the import calls `run` and returns 1 when a
+/// stack overflow ended it.
+pub(super) const TRY: &str = "_try";
+
+/// The module and the name of the import that `_try` calls with a function
+/// of the module and its argument.
+const WASM_TRY: (&str, &str) = ("env", "wasm_try");
+
+/// Returns `true` if `function` has the shape of the type of `_try`, `false`
+/// otherwise.
+pub(super) fn is_try_signature(function: &TypedFunction) -> bool {
+    let arities: Vec<_> = function
+        .arguments
+        .iter()
+        .map(|argument| argument.type_.fn_types().map(|(params, _)| params.len()))
+        .collect();
+    arities == [Some(0), Some(1), Some(0)] && is_generic_type(&function.return_type)
 }
 
 /// The strings that `_panic` prints between its params.
@@ -657,6 +679,151 @@ impl<'a> Generator<'a> {
             .local_get(error)
             .struct_get(error_closure.type_index, 0)
             .return_call_ref(error_closure.code_type_index)
+            .end();
+        function.finish(self)
+    }
+
+    /// `_try` for its type `type_`.
+    pub(super) fn function_try_external(&mut self, type_: &Arc<Type>) -> Id {
+        let (params, return_) = type_.fn_types().expect("try must be a function type");
+        let param_vts = self.val_types(params.iter().cloned());
+        let result_vt = self.val_type(&return_);
+        let builtin = BuiltinFunction::Try(param_vts, result_vt, TypeKey::new(type_));
+        let index = self.get_function_builtin(builtin, |s| s.code_try(&params, &return_));
+        Id::func(TRY.into(), index)
+    }
+
+    /// The code of `_try`. The import calls a function of the module with a
+    /// cell that has `run`, and the function puts the result of `run` in the
+    /// cell. After a stack overflow, the arena, the stack pointer of
+    /// builtins-wasm and the depth of the calls go back to where they were,
+    /// since the trap ended the calls that would restore them.
+    fn code_try(&mut self, params: &[Arc<Type>], return_: &Arc<Type>) -> FunctionId {
+        let [run_type, ok_type, overflow_type] = params else {
+            panic!("the three params of `_try`")
+        };
+        let (_, value_type) = run_type.fn_types().expect("a function to run");
+        let run_closure = self.closure_type([], value_type.clone());
+        let ok_closure = self.closure_type([value_type.clone()], return_.clone());
+        let overflow_closure = self.closure_type([], return_.clone());
+        let run_vt = self.val_type(run_type);
+        let value_vt = self.val_type(&value_type);
+        // The cell has no value until `run` returns, so a reference is null
+        // and a number is 0 until then.
+        let (field_vt, non_null) = match value_vt {
+            ValType::Ref(ref_type) => (
+                ValType::Ref(RefType {
+                    nullable: true,
+                    ..ref_type
+                }),
+                !ref_type.nullable,
+            ),
+            ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64 | ValType::V128 => {
+                (value_vt, false)
+            }
+        };
+        let cell = self.wasm_module.types.add_struct(vec![
+            FieldType {
+                element_type: StorageType::Val(run_vt),
+                mutable: false,
+            },
+            FieldType {
+                element_type: StorageType::Val(field_vt),
+                mutable: true,
+            },
+        ]);
+        self.wasm_module.types.get_mut(cell).name = Some("_try::cell".into());
+        let run_cell = self.code_try_run(cell, run_vt, &run_closure);
+        let (module, name) = WASM_TRY;
+        let wasm_try = self.host_import(module, name, &[FUNCREF, ANYREF], &[ValType::I32]);
+        let arena_mark = self.rust_function(ARENA_MARK);
+        let arena_release = self.rust_function(ARENA_RELEASE);
+        let reset_stack_pointer = self.linker.reset_stack_pointer(&mut self.wasm_module);
+        let stack_depth =
+            (self.stack_overflow == WasmStackOverflow::Fail).then(|| self.stack_depth().0);
+        let result_vt = self.val_type(return_);
+        // params
+        let [run, ok, overflow] = [run_type, ok_type, overflow_type].map(|type_| {
+            let val_type = self.val_type(type_);
+            self.wasm_local(val_type)
+        });
+        // locals
+        let mark = self.wasm_local(ValType::I32);
+        let depth_mark = self.wasm_local(ValType::I32);
+        let cell_local = self.wasm_local(self.val_type_ref(cell));
+        let mut function = Function::new(self, TRY, &[run, ok, overflow], &[result_vt]);
+        let mut instructions = function.extend_instructions(self);
+        let _ = instructions.call(arena_mark).local_set(mark);
+        if let Some(depth) = stack_depth {
+            let _ = instructions.global_get(depth).local_set(depth_mark);
+        }
+        let _ = instructions.ref_func(run_cell).local_get(run);
+        let _ = match field_vt {
+            ValType::Ref(ref_type) => instructions.ref_null(ref_type.heap_type),
+            ValType::I32 => instructions.i32_const(0),
+            ValType::I64 => instructions.i64_const(0),
+            ValType::F32 => instructions.f32_const(0.0),
+            ValType::F64 => instructions.f64_const(0.0),
+            ValType::V128 => unreachable!("no Gleam value is a V128"),
+        };
+        let _ = instructions
+            .struct_new(cell)
+            .local_tee(cell_local)
+            .call(wasm_try)
+            .if_(InstrSeqType::Simple(None), |overflowed| {
+                let _ = overflowed
+                    .local_get(mark)
+                    .call(arena_release)
+                    .call(reset_stack_pointer);
+                if let Some(depth) = stack_depth {
+                    let _ = overflowed.local_get(depth_mark).global_set(depth);
+                }
+                let _ = overflowed
+                    .local_get(overflow)
+                    .local_get(overflow)
+                    .struct_get(overflow_closure.type_index, 0)
+                    .return_call_ref(overflow_closure.code_type_index);
+            })
+            .local_get(ok)
+            .local_get(cell_local)
+            .struct_get(cell, 1);
+        if non_null {
+            let _ = instructions.ref_as_non_null();
+        }
+        let _ = instructions
+            .local_get(ok)
+            .struct_get(ok_closure.type_index, 0)
+            .return_call_ref(ok_closure.code_type_index)
+            .end();
+        function.finish(self)
+    }
+
+    /// The function that `env.wasm_try` calls with a cell of `_try`. It
+    /// calls the closure of the cell and puts its result in the cell.
+    fn code_try_run(
+        &mut self,
+        cell: TypeId,
+        run_vt: ValType,
+        run_closure: &ClosureType,
+    ) -> FunctionId {
+        // params
+        let value = self.wasm_local(ANYREF);
+        // locals
+        let cell_local = self.wasm_local(self.val_type_ref(cell));
+        let run = self.wasm_local(run_vt);
+        let mut function = Function::new(self, "_try_run", &[value], &[]);
+        let _ = function
+            .extend_instructions(self)
+            .local_get(value)
+            .ref_cast_non_null(HeapType::Concrete(cell))
+            .local_tee(cell_local)
+            .local_get(cell_local)
+            .struct_get(cell, 0)
+            .local_tee(run)
+            .local_get(run)
+            .struct_get(run_closure.type_index, 0)
+            .call_ref(run_closure.code_type_index)
+            .struct_set(cell, 1)
             .end();
         function.finish(self)
     }

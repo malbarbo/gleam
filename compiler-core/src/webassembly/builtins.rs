@@ -72,6 +72,9 @@ pub(super) enum BuiltinFunction {
     /// `_catch` for the function type `T`, with its params and result (see
     /// `panic`).
     Catch(Vec<ValType>, ValType, TypeKey),
+    /// `_try` for the function type `T`, with its params and result (see
+    /// `panic`).
+    Try(Vec<ValType>, ValType, TypeKey),
     /// A function of `Array`, with its params, result and element type.
     Array {
         function: ArrayFunction,
@@ -109,6 +112,7 @@ impl BuiltinFunction {
             BuiltinFunction::JsTrampoline(_, _, name) => format!("_js_trampoline({name})").into(),
             BuiltinFunction::JsCall(_, _, name) => format!("_js_call({name})").into(),
             BuiltinFunction::Catch(_, _, name) => format!("_catch({name})").into(),
+            BuiltinFunction::Try(_, _, name) => format!("_try({name})").into(),
             BuiltinFunction::Array {
                 function, element, ..
             } => format!("{}({element})", function.name()).into(),
