@@ -424,8 +424,9 @@ pub fn module(
                 m.type_info.package == module.type_info.package && m.name != *function.module()
             })
             .filter_map(|m| {
-                let mut m = asserts::clone_module(m);
-                asserts::wrap_asserts(&mut m, function).then_some(m)
+                let lines = all_line_numbers.get(&m.name)?;
+                let mut wrapped = asserts::clone_module(m);
+                asserts::wrap_asserts(&mut wrapped, function, lines).then_some(wrapped)
             })
             .collect(),
         None => vec![],
@@ -471,7 +472,7 @@ pub fn module(
 }
 
 /// The function of `assert = { module, function }`, which must have the
-/// type `fn(fn() -> Nil) -> Nil`.
+/// type `fn(String, String, Int, fn() -> Nil) -> Nil`.
 fn assert_function(
     assert: &WasmFunction,
     all_modules: &HashMap<EcoString, &TypedModule>,

@@ -19,7 +19,9 @@ fn config() -> WebAssemblyConfig {
 }
 
 /// `run` counts in the global the `assert`s that pass, by 1, and the ones
-/// that fail, by 100, and keeps the line of the last failure.
+/// that fail, by 100, and keeps the line of the last failure. A false
+/// `assert` somewhere else than the location that `run` takes counts by
+/// 10000.
 const CHECK: &str = r#"
 @external(webassembly, "builtins", "Dynamic")
 pub type Dynamic
@@ -46,10 +48,16 @@ fn items(data: Dynamic) -> Result(List(Dynamic), Nil)
 fn decode_int(data: Dynamic) -> Result(Int, Int)
 @external(webassembly, "builtins", "dynamic_decode_string")
 fn decode_string(data: Dynamic) -> Result(String, String)
+@external(webassembly, "builtins", "int_parse")
+fn parse_int(s: String) -> Result(Int, Nil)
 
-pub fn run(assertion: fn() -> Nil) -> Nil {
-  catch_with(assertion, fn(_) { add(1, "") }, fn(_, _, _, function, line, _, _, _) {
-    add(100, function <> ":" <> line)
+pub fn run(file: String, name: String, at: Int, assertion: fn() -> Nil) -> Nil {
+  catch_with(assertion, fn(_) { add(1, "") }, fn(kind, file_, _, function, line, _, _, _) {
+    let elsewhere = file_ != file || function != name || parse_int(line) != Ok(at)
+    case kind == "assert" && elsewhere {
+      False -> add(100, function <> ":" <> line)
+      True -> add(10_000, "")
+    }
   })
 }
 
@@ -120,7 +128,8 @@ pub fn main() {
 }
 
 /// The `assert`s inside a block, an anonymous function and a `case` are
-/// wrapped too, and the failure has the line and the function of the source.
+/// wrapped too, and the failure has the line and the function of the source,
+/// which `run` takes too.
 #[test]
 fn nested_asserts_keep_their_location() {
     run_ok(
@@ -214,7 +223,7 @@ fn assert_without_exception() {
 fn unknown_assert_function() {
     let error = codegen_error(
         config(),
-        "fn run(assertion: fn() -> Nil) -> Nil { assertion() }",
+        "fn run(_: String, _: String, _: Int, assertion: fn() -> Nil) -> Nil { assertion() }",
     );
     assert!(
         matches!(error, Error::UnknownHookFunction { .. }),
@@ -224,7 +233,10 @@ fn unknown_assert_function() {
 
 #[test]
 fn wrong_assert_function_signature() {
-    let error = codegen_error(config(), "pub fn run(assertion: fn() -> Nil) -> Int { 1 }");
+    let error = codegen_error(
+        config(),
+        "pub fn run(assertion: fn() -> Nil) -> Nil { assertion() }",
+    );
     assert!(
         matches!(error, Error::WrongHookFunctionSignature { .. }),
         "got {error:?}"

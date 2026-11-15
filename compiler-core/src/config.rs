@@ -811,7 +811,9 @@ pub struct WebAssemblyConfig {
     #[serde(default)]
     pub failure: WasmFailure,
     /// The function that runs each `assert` of the root package, given to it
-    /// in an anonymous function, with type `fn(fn() -> Nil) -> Nil`.
+    /// in an anonymous function, with type
+    /// `fn(String, String, Int, fn() -> Nil) -> Nil`. It takes the file, the
+    /// function and the line of the `assert` first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assert: Option<WasmFunction>,
     /// The function that each `echo` calls instead of printing, with type
